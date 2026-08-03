@@ -1,0 +1,13 @@
+{
+    "DockerRun.DisableDockerrc": true,
+    "DockerRun.Containers": [
+        "9af0a854f6a8"
+    ],
+    "python-envs.pythonProjects": [
+        {
+            "path": "tokenizers",
+            "envManager": "ms-python.python:venv",
+            "packageManager": "ms-python.python:pip"
+        }
+    ]
+}

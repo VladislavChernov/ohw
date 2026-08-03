@@ -1,0 +1,17 @@
+{
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "llm_dev",
+  "workspaceFolder": "/app",
+  "remoteUser": "root",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance"
+      ]
+    }
+  },
+  "forwardPorts": [8000],
+  "shutdownAction": "stopCompose"
+}
+
