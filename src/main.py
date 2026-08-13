@@ -1,40 +1,155 @@
+"""Основная точка входа приложения LLM. Оркестрирует проверку среды, обучение и генерацию текста."""
 import torch
 import os
+import sys 
+# Импортируем остальные компоненты для использования в main()
+from src.core import utils 
+from config import * # Импорт всех констант из конфига
 
 def main():
     """
-    Основная функция приложения. Проверяет доступность PyTorch,
-    CUDA и GPU для инициации LLM-рабочего процесса.
+    Главная функция запуска всего рабочего процесса LLM:
+    1. Проверка среды (Environment Check)
+    2. Обучение модели (Training) - Если указан режим 'train'
+    3. Генерация текста (Inference/Generation) - Если указан режим 'generate' с промптом.
     """
-    print("=============================================")
-    print("Старт системы разработки локальной LLM (Bionic Mode)")
+    # --- 1. Проверка среды и получение устройства ---
+    device, is_ready = utils.check_environment()
 
-    # --- 1. Тест совместимости с CUDA/GPU ---
-    if torch.cuda.is_available():
-        device = "cuda"
-        gpu_count = torch.cuda.device_count()
-        print(f"\n✅ Успех! Обнаружен GPU. Доступно устройств: {gpu_count}")
-        print(f"🚀 Используется устройство CUDA: {torch.cuda.get_device_name(0)}")
-    else:
-        device = "cpu"
-        print("\n⚠️ Внимание! PyTorch не обнаружил доступный GPU (CUDA).")
-        print("   Принудительно переключаемся на использование CPU. Обучение будет медленным.")
+    if not is_ready:
+        print("\n🛑 Невозможно продолжить рабочий процесс из-за ошибок в среде.")
+        return
 
-    # --- 2. Тест базовой функциональности LLM ---
+    # --- Обработка аргументов командной строки для выбора режима работы ---
+    if len(sys.argv) < 2:
+        print("\n[Использование]: python src/main.py [train | generate] [--prompt \"Ваш текст\"]")
+        print("Выберите режим ('train') или 'generate' с указанием промпта для генерации.")
+        return
+
+    mode = sys.argv[1].lower()
+    
+    # Поиск аргумента --prompt
+    prompt_arg = None
+    if len(sys.argv) > 2:
+        for i in range(2, len(sys.argv)):
+            if sys.argv[i] == "--prompt" and i + 1 < len(sys.argv):
+                prompt_arg = sys.argv[i+1]
+                break
+
+    if mode == "train":
+        run_training(device)
+    elif mode == "generate":
+        # Запуск генерации с промптом, если он задан
+        if prompt_arg:
+            print(f"\n🤖 Генерация текста по запросу (Промпт): '{prompt_arg}'")
+            generate_text_from_prompt(device, prompt_arg)
+        else:
+            print("\n[Ошибка]: В режиме 'generate' необходимо указать стартовый промптом через аргумент --prompt \"Ваш текст\".")
+
+def run_training(device):
+    """Функция, управляющая полным циклом обучения."""
+    # 1. Инициализация токенизатора и данных
+    print("\n[ℹ️]: Начинаем подготовку данных...")
+
+    with open("data/story.txt", "r", encoding="utf-8") as f:
+        text = f.read()
+            
+    from src.tokenizer import CharacterTokenizer
+    # Используем константу из config.py для инициализации токенизатора
+    tokenizer = CharacterTokenizer(vocab_size=MAX_VOCAB_SIZE) 
+    
+    # 2. Создание DataLoader с параметрами из config.py
+    dataloader = get_data_loader(
+        text=text, 
+        tokenizer=tokenizer, 
+        seq_len=SEQ_LEN,
+        batch_size=BATCH_SIZE
+    )
+    
+    # 3. Инициализация модели
+    model = TransformerModel(
+        vocab_size=tokenizer.get_vocab_size(), 
+        embed_dim=EMBEDDING_DIM, 
+        num_heads=NUM_HEADS
+    ).to(device) # Перемещаем модель на устройство
+
+    # --- 4. Настройка и запуск тренера ---
+    trainer = LLMTrainer(model=model, data_loader=dataloader)
+
+    # Вызываем обучение и получаем обученную модель обратно
+    trained_model = trainer.train(num_epochs=TRAINING_EPOCHS, log_dir=LOG_DIR)
+    
+    print("\n✨ Фаза ОБУЧЕНИЯ завершена. Модель готова к использованию.")
+    # Сохранение чекпоинта (ВАЖНО!)
+    checkpoint_path = "model_checkpoint.pt"
+    torch.save({
+        'model_state_dict': trained_model.state_dict(),
+        'vocab_size': tokenizer.get_vocab_size(),
+        'embed_dim': EMBEDDING_DIM,
+        'num_heads': NUM_HEADS,
+    }, checkpoint_path)
+    print(f"\n💾 Чекпоинт модели сохранен в: {checkpoint_path}")
+
+
+def generate_text_from_prompt(device, prompt_text):
+    """Запускает генерацию текста на основе предоставленного пользователем промпта."""
+    # Временные переменные для загрузки метаданных из checkpoint.pt
+    loaded_config = {'vocab_size': 256, 'embed_dim': EMBEDDING_DIM, 'num_heads': NUM_HEADS}
+
     try:
-        # Проверка, что библиотека transformers может быть инициализирована
-        import transformers
-        print(f"✅ Библиотека 'transformers' успешно импортирована.")
-    except ImportError:
-        print("❌ Ошибка: Не удалось импортировать библиотеку 'transformers'.")
+        print("\n[ℹ️]: Загрузка сохраненной модели для инференса...")
+        
+        model = TransformerModel(
+            vocab_size=loaded_config['vocab_size'], 
+            embed_dim=loaded_config['embed_dim'], 
+            num_heads=loaded_config['num_heads']
+        )
 
-    # --- 3. Симуляция запуска LLM ---
-    print("\n=============================================")
-    if device == "cuda":
-        print("✅ ВСЕ КОМПОНЕНТЫ ГОТОВЫ.")
-        print("Система готова к загрузке модели и началу обучения LLM на GPU!")
-    else:
-        print("❌ Предупреждение! Запуск только в режиме CPU. Требуется проверка настройки Docker/NVIDIA.")
+        # Пытаемся загрузить состояние, предполагая, что checkpoint.pt содержит все необходимые метаданные
+        model.load_state_dict(torch.load("model_checkpoint.pt", map_location=device))
+        model.to(device)
+
+        # Токенизатор должен быть инициализирован с тем же словарем, что и при обучении
+        tokenizer = CharacterTokenizer(vocab_size=MAX_VOCAB_SIZE) 
+
+    except Exception as e:
+        print(f"\n🛑 Не удалось загрузить модель или токенизатор. Убедитесь, что вы сначала запустили 'python src/main.py train' и была создана папка training_logs.")
+        print(f"Ошибка загрузки: {e}")
+        return
+
+    # 3. Подготовка seed из промпта (Промпт -> Идентификаторы)
+    seed_ids = tokenizer.encode_text(prompt_text)
+
+    # 4. Вызов генерации
+    generated_text = generator.generate_text(model, tokenizer=tokenizer, start_seed=seed_ids, max_length=GENERATION_MAX_TOKENS)
+    
+    if generated_text:
+        print("\n🌟 Сгенерированный текст (≈ 40 токенов):")
+        print("-" * 50)
+        print(generated_text)
+        print("-" * 50)
+
 
 if __name__ == "__main__":
-    main()
+    # Вызываем утилиту проверки среды и затем сам главный процесс
+    utils.check_environment()() 
+
+    # --- Обработка аргументов ---
+    import sys # Обязательный импорт здесь для корректной работы в if __name__ == "__main__"
+
+    mode = sys.argv[1].lower()
+    
+    if mode == "train":
+        run_training(device)
+    elif mode == "generate":
+        # Проверка наличия аргумента --prompt
+        prompt_arg = None
+        for i in range(2, len(sys.argv)):
+            if sys.argv[i] == "--prompt" and i + 1 < len(sys.argv):
+                prompt_arg = sys.argv[i+1]
+                break
+
+        if prompt_arg:
+            generate_text_from_prompt(device, prompt_arg)
+        else:
+            print("\n[Ошибка]: В режиме 'generate' необходимо указать стартовый промптом через аргумент --prompt \"Ваш текст\".")

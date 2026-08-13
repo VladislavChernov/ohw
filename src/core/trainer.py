@@ -1,12 +1,17 @@
 """Модуль тренера: Содержит цикл обучения и всю логику оптимизации."""
 import torch
 from torch import nn
-# Убедитесь, что импорты корректны, так как это основа всей ML-логики.
+import os
+from datetime import datetime
+from config import TRAINING_EPOCHS, LEARNING_RATE 
+
+# Импорт констант из config.py
 from src.model import TransformerModel 
 from src.data import DataLoader # Импортируем наш класс для работы с данными
 
+
 class LLMTrainer:
-    def __init__(self, model: TransformerModel, data_loader: DataLoader, learning_rate: float = 1e-4):
+    def __init__(self, model: TransformerModel, data_loader: DataLoader, learning_rate: float = LEARNING_RATE):
         """Инициализирует тренера и оптимизатор."""
         print("⚙️ Инициализация Trainer: Настройка Оптимизатора.")
         self.model = model
@@ -15,44 +20,53 @@ class LLMTrainer:
         # CrossEntropyLoss — стандартная функция потерь для задач классификации токенов (LLM).
         self.loss_fn = nn.CrossEntropyLoss() 
 
-    def train(self, num_epochs: int):
-        """Основной цикл обучения."""
+    def train(self, num_epochs: int, log_dir: str):
+        """Основной цикл обучения с логированием результатов. Возвращает обученную модель."""
         print("\n" + "="*60)
         print("🚀 СТАРТ ЦИКЛА ОБУЧЕНИЯ LLM")
         print("="*60)
         
-        for epoch in range(num_epochs):
+        # Установка модели в режим обучения (важно для Dropout/BatchNorm)
+        self.model.train() 
+
+        # Создание директории логов, если она не существует
+        os.makedirs(log_dir, exist_ok=True)
+        log_filepath = os.path.join(log_dir, "training_loss.csv")
+
+        for epoch in range(1, num_epochs + 1):
             total_loss = 0
             batch_count = 0
+            min_epoch_loss = float('inf')
             
-            # --- Итерация по данным (Главный цикл обучения) ---
-            # В реальном коде мы бы использовали DataLoader с worker'ами.
-            for batch_index in range(1, 11): # Итерируем 10 раз, как задано в __len__
-                self.model.train() # Переводим модель в режим обучения (важно для Dropout/BatchNorm)
+            print(f"\n--- Эпоха {epoch}/{num_epochs} ---")
 
-                # 1. Получение батча данных
-                batch = self.data_loader[batch_index - 1]
-                
-                # 2. Обнуление градиентов
+            # Итерация по батчам данных из DataLoader (вместо прямого обращения)
+            for i, (inputs, targets) in enumerate(self.data_loader):
+                # 1. Обнуление градиентов
                 self.optimizer.zero_grad() 
                 
-                # 3. Forward Pass (Прямой проход)
-                output = self.model(batch) # Вызываем модель с данными
+                # 2. Forward Pass (Прямой проход)
+                logits = self.model(inputs) # (batch_size, seq_len-1, vocab_size)
                 
-                # 4. Расчет потерь (Loss Calculation)
-                # TODO: Здесь нужна логика расчета потери на основе сравнения output и истинных меток (target).
-                loss = torch.rand(1) * 0.5 
-                total_loss += loss
+                # 3. Расчет потерь (Loss Calculation)
+                predicted_logits = logits[:, -1:, :] 
+                loss = self.loss_fn(predicted_logits, targets) 
+
+                total_loss += loss.item()
                 batch_count += 1
 
             avg_loss = total_loss / batch_count if batch_count > 0 else 0
-            print(f"\n[ЭПОХА {epoch+1}/{num_epochs}]...")
+            print(f"Loss on this epoch: {avg_loss:.4f}")
             
-            # 5. Backward Pass и Обновление весов
-            print(f"Loss calculated: {avg_loss:.4f}. Начинается оптимизация...")
-            torch.cuda.empty_cache() # Очистка памяти GPU перед шагом оптимизатора
+            # 4. Backward Pass и Обновление весов (Оптимизация)
             self.optimizer.step() 
+            torch.cuda.empty_cache() # Очистка памяти GPU
 
+            # Логирование результата эпохи
+            with open(log_filepath, "a") as f:
+                f.write(f"{epoch},{avg_loss:.6f}\n")
+        
         print("\n=============================================")
-        print(f"✅ ОБУЧЕНИЕ ЗАВЕРШЕНО. Средний Loss: {avg_loss:.4f}")
-
+        print(f"✅ ОБУЧЕНИЕ ЗАВЕРШЕНО.")
+        print(f"Лог-файлы сохранены в папку: {log_dir}")
+        return self.model # ВОЗВРАЩАЕМ обученную модель!
