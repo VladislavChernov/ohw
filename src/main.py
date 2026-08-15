@@ -3,7 +3,7 @@ import torch
 import os
 import sys 
 # Импортируем остальные компоненты для использования в main()
-from src.core import utils 
+from core import utils
 from config import * # Импорт всех констант из конфига
 
 def main():
