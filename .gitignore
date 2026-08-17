@@ -8,9 +8,9 @@ venv/
 .coverage
 
 # Артефакты обучения
-model_checkpoint.pt
-training_logs/
 *.pt
+!model_checkpoint.pt
+training_logs/
 
 # Логи и временные файлы
 *.log
