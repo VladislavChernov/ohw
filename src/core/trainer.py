@@ -94,9 +94,6 @@ class LLMTrainer:
                 # В лог-файл пишем только значение loss
                 log_file.write(f"Эпоха {epoch}/{num_epochs} | Loss: {loss:.4f}\n")
 
-                # Сохраняем прогресс каждую эпоху
-                self.save_model(f"model_epoch_{epoch}.pt", log_dir=log_dir)
-
         print(f"\nОбучение завершено. Средняя потеря: {sum(losses_history) / len(losses_history):.4f}")
         print(f"Лог loss по эпохам сохранен в: {log_path}")
         return losses_history
