@@ -1,10 +1,12 @@
 """Модуль слоев Transformer. Определяет строительные блоки LLM."""
-import torch.nn as nn
 import torch
-from config import EMBEDDING_DIM, DROPOUT_RATE # Импорт констант
+import torch.nn as nn
+from config import EMBEDDING_DIM, DROPOUT_RATE  # Импорт констант
+
 
 class EmbeddingLayer(nn.Module):
-    # Контракт для класса, который будет использовать nn.Embedding(...)
+    """Слой эмбеддинга: преобразует индексы токенов в плотные векторы."""
+
     def __init__(self, vocab_size: int, embed_dim: int):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embed_dim)
@@ -15,45 +17,63 @@ class EmbeddingLayer(nn.Module):
 
 class SelfAttention(nn.Module):
     """
-    Реализация механизма самовнимания (Self-Attention).
-    Это упрощенная версия Multi-Head Attention для учебных целей (Single Head).
+    Реализация механизма самовнимания (Self-Attention) с нуля.
 
-    Внимание позволяет каждому токену вычислить свой контекст, взвешенно
-    суммируя значения всех остальных токенов в последовательности.
+    Каждый токен вычисляет свой контекст, взвешенно суммируя значения
+    всех остальных токенов в последовательности (в пределах каузальной маски).
+
+    Структура (Multi-Head):
+        1. Линейные проекции Q, K, V и разделение на num_heads голов
+        2. Scaled dot-product attention: Softmax(Q @ K^T / sqrt(d_head)) @ V
+        3. Объединение голов и выходная линейная проекция
     """
-    def __init__(self, d_model: int, dropout_rate: float = DROPOUT_RATE):
+
+    def __init__(self, d_model: int, num_heads: int = 8, dropout_rate: float = DROPOUT_RATE):
         super().__init__()
-        # Инициализация линейных слоев для Query (Q), Key (K) и Value (V)
+        assert d_model % num_heads == 0, "d_model должен делиться на num_heads"
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+
+        # Линейные слои для Query (Q), Key (K) и Value (V)
         self.query = nn.Linear(d_model, d_model)
         self.key = nn.Linear(d_model, d_model)
         self.value = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(p=DROPOUT_RATE)
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.dropout = nn.Dropout(p=dropout_rate)
 
-    def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         """
-        Вычисляет механизму внимания.
-        
+        Вычисляет механизм внимания.
+
         Args:
             x: Входной тензор (B, L, D).
-            mask: Маска для пропуска токенов (например, каузальная маска).
+            mask: Каузальная маска (L, L) или (B, L, L), True = разрешено смотреть.
+                  Если None, строится каузальная маска (нижний треугольник).
+
         Returns:
             Тензор выходных данных после Self-Attention (B, L, D).
         """
-        # 1. Линейные преобразования для Q, K, V
-        Q = self.query(x)
-        K = self.key(x)
-        V = self.value(x)
-        
-        # 2. Расчет внимания: Softmax((Q * K^T / sqrt(d_k)) * V)
-        # (B, L, D) @ (B, D, L) -> (B, L, L)
-        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / (torch.sqrt(torch.tensor(Q.size(-1), dtype=torch.float32)))
+        batch, seq_len, _ = x.shape
 
-        # 3. Применение маски (если есть)
-        if mask is not None:
-            attention_scores = attention_scores.masked_fill(mask == 0, float('-inf'))
+        # 1. Линейные преобразования и разделение на головы
+        Q = self.query(x).view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        K = self.key(x).view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        V = self.value(x).view(batch, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # 4. Softmax и взвешенная сумма
+        # 2. Scaled dot-product attention: (B, H, L, L)
+        attention_scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)
+
+        # 3. Каузальная маска: токен на позиции i видит только позиции <= i
+        if mask is None:
+            mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool, device=x.device))
+        attention_scores = attention_scores.masked_fill(~mask, float("-inf"))
+
+        # 4. Softmax и взвешенная сумма значений
         attention_weights = torch.softmax(attention_scores, dim=-1)
-        output = self.dropout(torch.matmul(attention_weights, V))
-        
-        return output
+        attention_weights = self.dropout(attention_weights)
+        context = torch.matmul(attention_weights, V)  # (B, H, L, d_head)
+
+        # 5. Объединение голов и выходная проекция
+        context = context.transpose(1, 2).contiguous().view(batch, seq_len, self.d_model)
+        return self.out_proj(context)

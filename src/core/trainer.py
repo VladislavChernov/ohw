@@ -1,20 +1,19 @@
 """Модуль тренера: Содержит цикл обучения и всю логику оптимизации."""
 
+import os
+
 import torch
 from torch import nn
-import os
-from datetime import datetime
-from config import (
-    TRAINING_EPOCHS, LEARNING_RATE, DATA_DIR, LOG_DIR
-)
+from torch.utils.data import DataLoader
+from config import TRAINING_EPOCHS, LEARNING_RATE, LOG_DIR
 from src.model import TransformerModel
-from src.data import DataLoader
 
 
 class LLMTrainer:
     """Класс тренера для обучения модели LLM."""
 
-    def __init__(self, model: TransformerModel, data_loader: DataLoader, learning_rate: float = LEARNING_RATE):
+    def __init__(self, model: TransformerModel, data_loader: DataLoader,
+                 learning_rate: float = LEARNING_RATE, device: str | None = None):
         """
         Инициализирует тренера и оптимизатор.
 
@@ -22,12 +21,13 @@ class LLMTrainer:
             model: Обучаемая модель TransformerModel
             data_loader: DataLoader с датасетом
             learning_rate: Скорость обучения (по умолчанию из config.py)
+            device: Устройство ('cuda'/'cpu'). Если None - определяется автоматически.
         """
-        print("⚙️ Инициализация Trainer: Настройка Оптимизатора.")
-        self.model = model
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = model.to(self.device)
         # Используем Adam - самый распространенный алгоритм оптимизации
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        # CrossEntropyLoss — стандартная функция потерь для задач классификации токенов (LLM).
+        # CrossEntropyLoss - стандартная функция потерь для задач классификации токенов (LLM).
         self.loss_fn = nn.CrossEntropyLoss()
         self.data_loader = data_loader
         self.epochs = TRAINING_EPOCHS
@@ -37,27 +37,23 @@ class LLMTrainer:
         """
         Один epoch обучения.
 
-        Возвращает:
-            Средняя потеря за epoch (loss)
+        Returns:
+            Средняя потеря (loss) за epoch.
         """
         self.model.train()  # Включаем режим обучения
         total_loss = 0.0
         num_batches = 0
 
         for batch_idx, (inputs, targets) in enumerate(self.data_loader):
-            inputs, targets = inputs.to(torch.device("cuda" if torch.cuda.is_available() else "cpu")), \
-                             targets.to(torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+            inputs = inputs.to(self.device)
+            targets = targets.to(self.device)
 
-            # Прямой проход
-            logits = self.model(inputs)  # (batch_size, seq_len, vocab_size)
+            # Прямой проход: (batch_size, seq_len, vocab_size)
+            logits = self.model(inputs)
 
-            # Подготовка целевых значений для CrossEntropyLoss
-            # Берём последний токен из последовательности: (batch_size, seq_len-1) -> (batch_size,)
-            targets_flat = targets[:, -inputs.shape[1] - 1:] if inputs.shape[1] > 0 else targets
-            targets_flat = targets_flat.view(-1)
-
-            # Вычисляем потерю
-            loss = self.loss_fn(logits.view(-1, self.model.vocab_size), targets_flat)
+            # CrossEntropyLoss ожидает (N, C) логиты и (N) таргеты.
+            # target_seq - это input_seq, сдвинутый на 1 токен (teacher-forcing).
+            loss = self.loss_fn(logits.view(-1, self.model.vocab_size), targets.view(-1))
 
             # Обратный проход
             self.optimizer.zero_grad()
@@ -67,48 +63,57 @@ class LLMTrainer:
             total_loss += loss.item()
             num_batches += 1
 
-        avg_loss = total_loss / num_batches
-        print(f"   Epoch завершён. Средний loss за epoch: {avg_loss:.4f}")
+        avg_loss = total_loss / max(num_batches, 1)
         return avg_loss
 
-    def train(self):
+    def train(self, num_epochs: int | None = None, log_dir: str | None = None):
         """
         Запускает полный цикл обучения.
 
-        Возвращает:
-            История потерь по эпохам
+        Аргументы:
+            num_epochs: Количество эпох (по умолчанию из config.py).
+            log_dir: Директория для сохранения чекпоинтов (по умолчанию из config.py).
+
+        Returns:
+            История потерь по эпохам.
         """
-        print(f"\n📚 Начало обучения: {self.epochs} epoch")
+        num_epochs = num_epochs or self.epochs
+        log_dir = log_dir or self.log_dir
+
+        print(f"\nНачало обучения: {num_epochs} epochs (device: {self.device})")
         losses_history = []
 
-        for epoch in range(1, self.epochs + 1):
+        for epoch in range(1, num_epochs + 1):
             loss = self.train_epoch()
             losses_history.append(loss)
-            # Сохраняем прогресс каждую эпоху (опционально)
-            if epoch % 1 == 0:
-                self.save_model(f"model_epoch_{epoch}.pt")
+            print(f"   Эпоха {epoch:2d}/{num_epochs} | Loss: {loss:.4f}")
 
-        print(f"\n✅ Обучение завершено. Средняя потеря: {sum(losses_history)/len(losses_history):.4f}")
+            # Сохраняем прогресс каждую эпоху
+            self.save_model(f"model_epoch_{epoch}.pt", log_dir=log_dir)
+
+        print(f"\nОбучение завершено. Средняя потеря: {sum(losses_history) / len(losses_history):.4f}")
         return losses_history
 
-    def save_model(self, filename: str = "model.pt"):
+    def save_model(self, filename: str = "model.pt", log_dir: str | None = None):
         """
         Сохраняет модель в файл.
 
         Аргументы:
             filename: Имя файла для сохранения (опционально)
+            log_dir: Директория сохранения (по умолчанию из config.py)
         """
-        if not os.path.exists(self.log_dir):
-            os.makedirs(self.log_dir)
+        log_dir = log_dir or self.log_dir
+        os.makedirs(log_dir, exist_ok=True)
 
-        filepath = os.path.join(self.log_dir, filename)
+        filepath = os.path.join(log_dir, filename)
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'epoch': self.epochs,
-            'loss_fn': self.loss_fn,
+            'vocab_size': self.model.vocab_size,
+            'embed_dim': self.model.embed_dim,
+            'num_heads': self.model.num_heads,
         }, filepath)
-        print(f"   💾 Модель сохранена в: {filepath}")
+        print(f"   Модель сохранена в: {filepath}")
 
     def load_model(self, filepath: str):
         """
@@ -117,35 +122,22 @@ class LLMTrainer:
         Аргументы:
             filepath: Путь к файлу с сохранённой моделью
         """
-        checkpoint = torch.load(filepath)
+        checkpoint = torch.load(filepath, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.loss_fn = checkpoint.get('loss_fn', nn.CrossEntropyLoss())
-        print(f"   ✅ Модель загружена из: {filepath}")
+        print(f"   Модель загружена из: {filepath}")
 
 
-def train(model: TransformerModel, data_loader: DataLoader):
+def train(model: TransformerModel, data_loader: DataLoader, num_epochs: int = TRAINING_EPOCHS):
     """
     Функция-обёртка для запуска обучения.
 
     Аргументы:
         model: Обучаемая модель
         data_loader: DataLoader с датасетом
+        num_epochs: Количество эпох
 
-    Возвращает:
-        История потерь по эпохам
+    Returns:
+        История потерь по эпохам.
     """
     trainer = LLMTrainer(model=model, data_loader=data_loader)
-    return trainer.train()
-
-
-if __name__ == "__main__":
-    # Тестовый запуск обучения (можно запустить отдельно от main_app.py)
-    from src.data import DataLoader
-    from config import VOCAB_SIZE
-
-    print("🧪 Тест Trainer...")
-    model = TransformerModel(vocab_size=VOCAB_SIZE, seq_len=SEQ_LEN)
-    data_loader = DataLoader(TRAINING_FILE)  # Из config.py
-
-    losses = train(model, data_loader)
-    print("\n✅ Тест Trainer прошёл успешно!")
+    return trainer.train(num_epochs=num_epochs)
