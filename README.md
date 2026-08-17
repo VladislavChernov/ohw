@@ -25,7 +25,7 @@
 *   **`src/layers/embedding.py`**: Слой `EmbeddingLayer` (токены -> плотные векторы).
 *   **`src/layers/self_attention.py`**: Слой `SelfAttention` (Multi-Head, с каузальной маской).
 *   **`src/model/transformer.py`**: Модель `TransformerModel` (Embedding + Self-Attention -> Dense).
-*   **`src/core/trainer.py`**: `LLMTrainer` — цикл обучения (CrossEntropyLoss + Adam).
+*   **`src/core/trainer.py`**: `LLMTrainer` — цикл обучения (CrossEntropyLoss + Adam), запись `loss` по эпохам в `training_logs/loss_per_epoch.txt`.
 *   **`src/core/inference.py`**: Авторегрессионная генерация текста.
 *   **`src/main.py`**: Главный оркестратор: проверка среды -> обучение -> генерация.
 *   **`src/train.py`**: Альтернативная точка входа для обучения (`python src/train.py`).
@@ -51,7 +51,7 @@ pip install -r requirements.txt
     # или
     python src/train.py
     ```
-    При запуске: сканируется `data/` по всем поддерживаемым расширениям, вызывается правильный обработчик для каждого файла, текст конкатенируется в единый корпус. Затем модель обучается **15 эпох** (CrossEntropyLoss, Adam), на каждой эпохе выводится `loss`. После обучения создается чекпоинт `model_checkpoint.pt`.
+    При запуске: сканируется `data/` по всем поддерживаемым расширениям, вызывается правильный обработчик для каждого файла, текст конкатенируется в единый корпус. Затем модель обучается **15 эпох** (CrossEntropyLoss, Adam), на каждой эпохе выводится `loss` (также записывается в `training_logs/loss_per_epoch.txt`). После обучения создается чекпоинт `model_checkpoint.pt`.
 
 *   **Генерация (инференс):** требуется указать промпт. Важно: сначала нужно обучить модель.
     ```bash
