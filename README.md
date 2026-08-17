@@ -55,7 +55,7 @@ pip install -r requirements.txt
 
 *   **Генерация (инференс):** требуется указать промпт. Важно: сначала нужно обучить модель.
     ```bash
-    python src/main.py generate --prompt "Вчера было солнечно"
+    python src/main.py generate --prompt "ания ускол"
     ```
     Модель использует промпт как стартовый сид и генерирует **40 новых токенов**.
 
@@ -65,7 +65,7 @@ pip install -r requirements.txt
 
 ```bash
 python src/main.py train
-python src/main.py generate --prompt "Вчера было солнечно"
+python src/main.py generate --prompt "ания ускол"
 ```
 
 ## Лицензия и Данные
