@@ -7,11 +7,6 @@ venv/
 .pytest_cache/
 .coverage
 
-# Артефакты обучения
-*.pt
-!model_checkpoint.pt
-training_logs/
-
 # Логи и временные файлы
 *.log
 .DS_Store
