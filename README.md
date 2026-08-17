@@ -13,7 +13,7 @@
 **Ключевые особенности:**
 1.  **Единый Источник Данных:** Система не привязана к одному файлу. Она рекурсивно сканирует директорию `DATA_DIR` по расширениям `.txt`, `.pdf`, `.docx`.
 2.  **Паттерн Фабрики (Factory Pattern):** Логика загрузки данных вынесена в `src/data/dataloader.py`. Модуль использует **Dispatcher**, который вызывает соответствующий обработчик (`text_processor`, `pdf_processor`, `docx_processor`) на основе расширения файла. Обработчики `.pdf`/`.docx` — заглушки (примеры того, как можно расширить проект), реальный парсинг реализован только для `.txt`.
-3.  **Собственная реализация Self-Attention:** в `src/layers/__init__.py` (Multi-Head, с каузальной маской), без использования `nn.MultiHeadAttention`.
+3.  **Собственная реализация Self-Attention:** в `src/layers/self_attention.py` (Multi-Head, с каузальной маской), без использования `nn.MultiHeadAttention`.
 
 ### Структура модулей:
 *   **`config.py`**: Все константы и пути (включая `DATA_DIR`, `SUPPORTED_EXTENSIONS`).
@@ -21,13 +21,15 @@
 *   **`src/utils/env_check.py`**: Проверка среды (GPU/CPU, зависимости).
 *   **`src/data/processors/*_processor.py`**: Логика парсинга для каждого типа файла.
 *   **`src/data/dataloader.py`**: Фабричный механизм: сканирует файлы, объединяет их в корпус, строит словарь и создает `DataLoader`.
-*   **`src/tokenizer/__init__.py`**: `CharacterTokenizer` (построение словаря, encode/decode).
-*   **`src/layers/__init__.py`**: Строительные блоки (`EmbeddingLayer`, `SelfAttention`).
+*   **`src/tokenizer/character_tokenizer.py`**: `CharacterTokenizer` (построение словаря, encode/decode).
+*   **`src/layers/embedding.py`**: Слой `EmbeddingLayer` (токены -> плотные векторы).
+*   **`src/layers/self_attention.py`**: Слой `SelfAttention` (Multi-Head, с каузальной маской).
 *   **`src/model/transformer.py`**: Модель `TransformerModel` (Embedding + Self-Attention -> Dense).
 *   **`src/core/trainer.py`**: `LLMTrainer` — цикл обучения (CrossEntropyLoss + Adam).
 *   **`src/core/inference.py`**: Авторегрессионная генерация текста.
 *   **`src/main.py`**: Главный оркестратор: проверка среды -> обучение -> генерация.
 *   **`src/train.py`**: Альтернативная точка входа для обучения (`python src/train.py`).
+*   **`ruff.toml`**: Конфигурация стиля кода (линтер ruff, `line-length = 100`).
 
 ## Запуск проекта (Workflow)
 

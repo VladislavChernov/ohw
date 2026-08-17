@@ -3,7 +3,7 @@ import torch
 from src.tokenizer import CharacterTokenizer
 
 
-def generate_text(model, tokenizer: CharacterTokenizer, start_seed: list[int], max_length: int = 40) -> str | None:
+def generate_text(model, tokenizer: CharacterTokenizer, start_seed: list[int], max_length: int = 40) -> str:
     """
     Генерирует текст авторегрессионным методом на основе заданной начальной последовательности.
 
@@ -14,7 +14,7 @@ def generate_text(model, tokenizer: CharacterTokenizer, start_seed: list[int], m
         max_length: Сколько новых токенов сгенерировать (по умолчанию 40).
 
     Returns:
-        Сгенерированная строка текста (сид + max_length новых токенов) или None в случае ошибки.
+        Сгенерированная строка текста (сид + max_length новых токенов).
     """
     print("\nНачинаем авторегрессионную генерацию...")
     model.eval()  # Переводим модель в режим оценки (отключает Dropout)
@@ -27,7 +27,7 @@ def generate_text(model, tokenizer: CharacterTokenizer, start_seed: list[int], m
     print(f"   Начальная последовательность (Seed): {tokenizer.decode_ids(start_seed)!r}")
 
     with torch.no_grad():
-        for step in range(max_length):
+        for _ in range(max_length):
             # 1. Forward Pass: прогноз следующего токена.
             #    Каузальная маска строится автоматически внутри SelfAttention.
             logits = model(current_sequence_ids)  # (1, L, V)

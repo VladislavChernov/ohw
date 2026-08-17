@@ -1,5 +1,5 @@
 """Модуль данных (DataLoader): точка входа для всех компонентов работы с данными."""
 
-# В будущем здесь будут импортированы и экспортированы ключевые классы
-# из sub-модулей: get_data_loader, DataLoader.
+from src.data.dataloader import get_data_loader
+
 __all__ = ["get_data_loader"]

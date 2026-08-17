@@ -26,7 +26,7 @@ class LLMTrainer:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         # Используем Adam - самый распространенный алгоритм оптимизации
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=learning_rate)
         # CrossEntropyLoss - стандартная функция потерь для задач классификации токенов (LLM).
         self.loss_fn = nn.CrossEntropyLoss()
         self.data_loader = data_loader
@@ -44,7 +44,7 @@ class LLMTrainer:
         total_loss = 0.0
         num_batches = 0
 
-        for batch_idx, (inputs, targets) in enumerate(self.data_loader):
+        for inputs, targets in self.data_loader:
             inputs = inputs.to(self.device)
             targets = targets.to(self.device)
 
@@ -125,19 +125,3 @@ class LLMTrainer:
         checkpoint = torch.load(filepath, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         print(f"   Модель загружена из: {filepath}")
-
-
-def train(model: TransformerModel, data_loader: DataLoader, num_epochs: int = TRAINING_EPOCHS):
-    """
-    Функция-обёртка для запуска обучения.
-
-    Аргументы:
-        model: Обучаемая модель
-        data_loader: DataLoader с датасетом
-        num_epochs: Количество эпох
-
-    Returns:
-        История потерь по эпохам.
-    """
-    trainer = LLMTrainer(model=model, data_loader=data_loader)
-    return trainer.train(num_epochs=num_epochs)

@@ -24,7 +24,9 @@ from src.model import TransformerModel
 from src.core.trainer import LLMTrainer
 
 
-def train_model(epochs: int = TRAINING_EPOCHS, batch_size: int = BATCH_SIZE, seq_len: int = SEQ_LEN):
+def train_model(epochs: int = TRAINING_EPOCHS,
+                batch_size: int = BATCH_SIZE,
+                seq_len: int = SEQ_LEN):
     """
     Обучает модель на корпусе из DATA_DIR.
 
@@ -38,7 +40,7 @@ def train_model(epochs: int = TRAINING_EPOCHS, batch_size: int = BATCH_SIZE, seq
     """
     print("=" * 60)
     print("НАЧАЛО ОБУЧЕНИЯ LLM")
-    print(f"   Модель: TransformerModel (Embedding + Self-Attention -> Dense)")
+    print("   Модель: TransformerModel (Embedding + Self-Attention -> Dense)")
     print(f"   Seq len: {seq_len} | Batch size: {batch_size} | Epochs: {epochs}")
     print("=" * 60)
 

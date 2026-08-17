@@ -7,14 +7,12 @@
 Замечание: обработчики .pdf и .docx являются заглушками (примерами того,
 как может быть расширен проект) и возвращают placeholder-текст.
 """
-import os
-
 import torch
 from torch.utils.data import Dataset, DataLoader
 from config import SEQ_LEN, BATCH_SIZE, DATA_DIR, SUPPORTED_EXTENSIONS
 
 # Импорт всех необходимых модулей и сканера:
-from src.utils.file_scanner import scan_directory  # <-- Главный импорт сканирования
+from src.utils.file_scanner import scan_directory
 from src.data.processors.text_processor import process_all_files as _process_txt
 from src.data.processors.pdf_processor import process_all_files as _process_pdf
 from src.data.processors.docx_processor import process_all_files as _process_docx
@@ -51,7 +49,10 @@ class StoryDataset(Dataset):
             raise ValueError("Текст слишком короткий для создания примеров с заданным seq_len.")
 
         print(f"Датасет создан из {len(self.data)} примеров")
-        print(f"   Каждая пара: input={self.seq_len} токенов -> target={self.seq_len} токенов (со сдвигом на 1)")
+        print(
+            f"   Каждая пара: input={self.seq_len} токенов "
+            f"-> target={self.seq_len} токенов (со сдвигом на 1)"
+        )
 
     def __len__(self) -> int:
         return len(self.data)

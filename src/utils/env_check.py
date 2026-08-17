@@ -1,9 +1,10 @@
 """Утилиты для проверки и подготовки среды LLM."""
+import importlib.util
+
 import torch
-from typing import Tuple
 
 
-def check_environment() -> Tuple[str, bool]:
+def check_environment() -> tuple[str, bool]:
     """
     Проверяет доступность GPU (CUDA) и основных зависимостей.
 
@@ -25,11 +26,13 @@ def check_environment() -> Tuple[str, bool]:
         print("Используется CPU. Обучение будет медленным, но проект работоспособен.")
 
     # 2. Проверка базовых зависимостей (необязательные библиотеки - не блокируют запуск)
-    try:
-        import transformers
-        print(f"OK! Библиотека 'transformers' доступна.")
-    except ImportError:
-        print("Предупреждение: библиотека 'transformers' не установлена (не обязательна для работы).")
+    if importlib.util.find_spec("transformers"):
+        print("OK! Библиотека 'transformers' доступна.")
+    else:
+        print(
+            "Предупреждение: библиотека 'transformers' не установлена "
+            "(не обязательна для работы)."
+        )
 
     # 3. Определение готовности: проект работает и на GPU, и на CPU
     is_ready = True

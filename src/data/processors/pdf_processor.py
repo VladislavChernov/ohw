@@ -5,7 +5,7 @@ import os
 def process_single_file(file_path: str) -> tuple[str, str]:
     """
     Извлекает текст из одного PDF файла.
-    
+
     Args:
         file_path (str): Полный путь к файлу.
 
@@ -23,12 +23,12 @@ def process_single_file(file_path: str) -> tuple[str, str]:
 def process_all_files(data_dir: str, file_paths: list[str], ext: str):
     """Сканирует список путей и возвращает список (текст, имя файла)."""
     processed_data = []
-    print(f"\n🔎 Начинается сканирование PDF файлов...")
+    print("\nНачинается сканирование PDF файлов...")
 
     for file_path in file_paths:
         try:
             # Вызываем конкретный обработчик для каждого пути
-            text, filename = process_single_file(file_path) 
+            text, filename = process_single_file(file_path)
             processed_data.append((text, filename))
         except Exception as e:
             print(f"⚠️ Пропуск файла {file_path} из-за ошибки при обработке: {e}")

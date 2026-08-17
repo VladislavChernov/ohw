@@ -1,10 +1,9 @@
 """Основная точка входа приложения LLM. Оркестрирует проверку среды, обучение и генерацию текста."""
-import os
 import sys
 
 import torch
 from config import (
-    DATA_DIR, LOG_DIR,
+    LOG_DIR,
     TRAINING_EPOCHS, BATCH_SIZE, SEQ_LEN,
     MAX_VOCAB_SIZE, EMBEDDING_DIM, NUM_HEADS,
     GENERATION_MAX_TOKENS, SEED_LENGTH,
@@ -14,6 +13,7 @@ from src.tokenizer import CharacterTokenizer
 from src.data.dataloader import get_data_loader
 from src.model import TransformerModel
 from src.core.trainer import LLMTrainer
+from src.core.inference import generate_text
 
 
 def parse_prompt_arg(argv: list[str]) -> str | None:
@@ -53,7 +53,10 @@ def main():
         if prompt_arg:
             generate_text_from_prompt(device, prompt_arg)
         else:
-            print('\n[Ошибка]: В режиме "generate" необходимо указать промпт через аргумент --prompt "Ваш текст".')
+            print(
+                '\n[Ошибка]: В режиме "generate" необходимо указать промпт '
+                'через аргумент --prompt "Ваш текст".'
+            )
     else:
         print(f"\n[Ошибка]: Неизвестный режим '{mode}'. Доступно: train, generate.")
 
@@ -131,8 +134,7 @@ def generate_text_from_prompt(device, prompt_text):
     print(f"\n[INFO]: Сид ({len(seed_ids)} токенов): {tokenizer.decode_ids(seed_ids)!r}")
 
     # 2. Вызов генерации
-    from src.core import inference as gen_inference
-    generated_text = gen_inference.generate_text(
+    generated_text = generate_text(
         model, tokenizer=tokenizer, start_seed=seed_ids, max_length=GENERATION_MAX_TOKENS
     )
 

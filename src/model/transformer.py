@@ -3,7 +3,7 @@
 
 Архитектура простого LLM без позиционных эмбеддингов и FFN слоев:
 
-  Token IDs > Embedding > [QKV] > Scaled Dot-Product Attention (Softmax) > Dense > Logits(vocab_size)
+  Token IDs > Embedding > QKV Attention (Softmax) > Dense > Logits(vocab_size)
 
 Здесь:
   - Embedding: преобразует токены в векторы фиксированной размерности
@@ -38,7 +38,8 @@ class TransformerModel(nn.Module):
         Dense layer > (batch_size, seq_len, vocab_size) - логиты для каждого токена
     """
 
-    def __init__(self, vocab_size: int, embed_dim: int = 64, num_heads: int = 8, dropout: float = DROPOUT_RATE):
+    def __init__(self, vocab_size: int, embed_dim: int = 64, num_heads: int = 8,
+                 dropout: float = DROPOUT_RATE):
         """
         Инициализация модели.
 
