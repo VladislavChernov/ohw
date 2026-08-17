@@ -82,16 +82,23 @@ class LLMTrainer:
 
         print(f"\nНачало обучения: {num_epochs} epochs (device: {self.device})")
         losses_history = []
+        log_path = os.path.join(log_dir, "loss_per_epoch.txt")
+        os.makedirs(log_dir, exist_ok=True)
 
-        for epoch in range(1, num_epochs + 1):
-            loss = self.train_epoch()
-            losses_history.append(loss)
-            print(f"   Эпоха {epoch:2d}/{num_epochs} | Loss: {loss:.4f}")
+        with open(log_path, "w", encoding="utf-8") as log_file:
+            for epoch in range(1, num_epochs + 1):
+                loss = self.train_epoch()
+                losses_history.append(loss)
+                print(f"   Эпоха {epoch:2d}/{num_epochs} | Loss: {loss:.4f}")
 
-            # Сохраняем прогресс каждую эпоху
-            self.save_model(f"model_epoch_{epoch}.pt", log_dir=log_dir)
+                # В лог-файл пишем только значение loss
+                log_file.write(f"Эпоха {epoch}/{num_epochs} | Loss: {loss:.4f}\n")
+
+                # Сохраняем прогресс каждую эпоху
+                self.save_model(f"model_epoch_{epoch}.pt", log_dir=log_dir)
 
         print(f"\nОбучение завершено. Средняя потеря: {sum(losses_history) / len(losses_history):.4f}")
+        print(f"Лог loss по эпохам сохранен в: {log_path}")
         return losses_history
 
     def save_model(self, filename: str = "model.pt", log_dir: str | None = None):
