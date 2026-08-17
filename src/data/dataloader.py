@@ -13,9 +13,9 @@ from config import SEQ_LEN, BATCH_SIZE, DATA_DIR, SUPPORTED_EXTENSIONS
 
 # Импорт всех необходимых модулей и сканера:
 from src.utils.file_scanner import scan_directory
-from src.data.processors.text_processor import process_all_files as _process_txt
-from src.data.processors.pdf_processor import process_all_files as _process_pdf
-from src.data.processors.docx_processor import process_all_files as _process_docx
+from src.data.processors.text_processor import process_single_file as _process_txt
+from src.data.processors.pdf_processor import process_single_file as _process_pdf
+from src.data.processors.docx_processor import process_single_file as _process_docx
 
 
 class StoryDataset(Dataset):
@@ -89,12 +89,12 @@ def load_corpus_text() -> str:
     for ext in SUPPORTED_EXTENSIONS:
         # Проверяем, существует ли в нашей map обработчик для данного расширения.
         if ext in processor_map:
-            try:
-                # Вызываем конкретный обработчик, передавая ему все найденные пути
-                file_results = processor_map[ext](DATA_DIR, file_map[ext], ext)
-                all_processed_data.extend(file_results)
-            except Exception as e:
-                print(f"Критическая ошибка при вызове обработчика {ext}: {e}")
+            # Вызываем обработчик для каждого файла; файлы с ошибками пропускаем
+            for file_path in file_map[ext]:
+                try:
+                    all_processed_data.append(processor_map[ext](file_path))
+                except Exception as e:
+                    print(f"Пропуск файла {file_path} из-за ошибки при обработке: {e}")
 
     if not all_processed_data:
         raise FileNotFoundError(
