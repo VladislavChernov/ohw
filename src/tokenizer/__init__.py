@@ -1,19 +1,8 @@
-"""Модуль токенизатора: Абстрагирует сложную логику работы со словарями и токенами."""
+"""Модуль токенизатора: Абстрагирует сложную логику работы со словарями и токенами.
 
-import torch
-import torch.nn as nn
-# В реальной жизни здесь также будет импорт из transformers
-class Tokenizer:
-    def __init__(self, vocab_size: int, special_tokens: list = None):
-        """Инициализирует токенизатор с предопределенным словарем."""
-        print(f"🌐 Токенизатор инициализирован. Размер словаря: {vocab_size}")
+Реэкспорт публичных классов из подмодулей:
+    - CharacterTokenizer (src/tokenizer/character_tokenizer.py)
+"""
+from src.tokenizer.character_tokenizer import CharacterTokenizer
 
-    def encode_text(self, text: str) -> list[int]:
-        """Преобразует сырой текст в список числовых токенов (ID)."""
-        # Это имитация сложной логики токенизации
-        print(f"--- [Tokenizer] Токенизируется текст: '{text[:20]}...'")
-        return list(range(1, 5)) # Заглушка: Возвращает простые токены [1, 2, 3, 4]
-
-    def decode_ids(self, ids: list[int]) -> str:
-        """Восстанавливает текст из списка токенов (для отладки)."""
-        return "..." # Заглушка для возвращаемого текста
+__all__ = ["CharacterTokenizer"]

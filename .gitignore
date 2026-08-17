@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+
+# Артефакты обучения
+model_checkpoint.pt
+training_logs/
+*.pt
+
+# Логи и временные файлы
+*.log
+.DS_Store
+
+# Инструменты
+.kilo/
+node_modules/
+.idea/
