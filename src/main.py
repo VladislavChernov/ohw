@@ -1,34 +1,31 @@
-"""РћСЃРЅРѕРІРЅР°СЏ С‚РѕС‡РєР° РІС…РѕРґР° РїСЂРёР»РѕР¶РµРЅРёСЏ LLM. РћСЂРєРµСЃС‚СЂРёСЂСѓРµС‚ РїСЂРѕРІРµСЂРєСѓ СЃСЂРµРґС‹, РѕР±СѓС‡РµРЅРёРµ Рё РіРµРЅРµСЂР°С†РёСЋ С‚РµРєСЃС‚Р°."""
+"""Основная точка входа приложения LLM. Оркестрирует проверку среды, обучение и генерацию текста."""
 import torch
 import os
-import sys 
-# РРјРїРѕСЂС‚РёСЂСѓРµРј РѕСЃС‚Р°Р»СЊРЅС‹Рµ РєРѕРјРїРѕРЅРµРЅС‚С‹ РґР»СЏ РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЏ РІ main()
-from core import utils
-from config import * # РРјРїРѕСЂС‚ РІСЃРµС… РєРѕРЅСЃС‚Р°РЅС‚ РёР· РєРѕРЅС„РёРіР°
+import sys
+from src.utils import env_check
+from config import *
+from src.utils.file_scanner import scan_directory
+from src.data.dataloader import get_data_loader
+
 
 def main():
     """
-    Р“Р»Р°РІРЅР°СЏ С„СѓРЅРєС†РёСЏ Р·Р°РїСѓСЃРєР° РІСЃРµРіРѕ СЂР°Р±РѕС‡РµРіРѕ РїСЂРѕС†РµСЃСЃР° LLM:
-    1. РџСЂРѕРІРµСЂРєР° СЃСЂРµРґС‹ (Environment Check)
-    2. РћР±СѓС‡РµРЅРёРµ РјРѕРґРµР»Рё (Training) - Р•СЃР»Рё СѓРєР°Р·Р°РЅ СЂРµР¶РёРј 'train'
-    3. Р“РµРЅРµСЂР°С†РёСЏ С‚РµРєСЃС‚Р° (Inference/Generation) - Р•СЃР»Рё СѓРєР°Р·Р°РЅ СЂРµР¶РёРј 'generate' СЃ РїСЂРѕРјРїС‚РѕРј.
+    Главная функция запуска всего рабочего процесса LLM:
+    1. Проверка среды (Environment Check)
+    2. Обучение модели (Training) - Если указан режим 'train'
+    3. Генерация текста (Inference/Generation) - Если указан режим 'generate' с промптом.
     """
-    # --- 1. РџСЂРѕРІРµСЂРєР° СЃСЂРµРґС‹ Рё РїРѕР»СѓС‡РµРЅРёРµ СѓСЃС‚СЂРѕР№СЃС‚РІР° ---
-    device, is_ready = utils.check_environment()
+    # --- 1. Проверка среды и получение устройства ---
+    device, is_ready = env_check.check_environment()
 
     if not is_ready:
-        print("\nрџ›‘ РќРµРІРѕР·РјРѕР¶РЅРѕ РїСЂРѕРґРѕР»Р¶РёС‚СЊ СЂР°Р±РѕС‡РёР№ РїСЂРѕС†РµСЃСЃ РёР·-Р·Р° РѕС€РёР±РѕРє РІ СЃСЂРµРґРµ.")
+        print("\n?? Невозможно продолжить рабочий процесс из-за ошибок в среде.")
         return
 
-    # --- РћР±СЂР°Р±РѕС‚РєР° Р°СЂРіСѓРјРµРЅС‚РѕРІ РєРѕРјР°РЅРґРЅРѕР№ СЃС‚СЂРѕРєРё РґР»СЏ РІС‹Р±РѕСЂР° СЂРµР¶РёРјР° СЂР°Р±РѕС‚С‹ ---
-    if len(sys.argv) < 2:
-        print("\n[РСЃРїРѕР»СЊР·РѕРІР°РЅРёРµ]: python src/main.py [train | generate] [--prompt \"Р’Р°С€ С‚РµРєСЃС‚\"]")
-        print("Р’С‹Р±РµСЂРёС‚Рµ СЂРµР¶РёРј ('train') РёР»Рё 'generate' СЃ СѓРєР°Р·Р°РЅРёРµРј РїСЂРѕРјРїС‚Р° РґР»СЏ РіРµРЅРµСЂР°С†РёРё.")
-        return
-
+    # --- Обработка аргументов командной строки для выбора режима работы ---
     mode = sys.argv[1].lower()
     
-    # РџРѕРёСЃРє Р°СЂРіСѓРјРµРЅС‚Р° --prompt
+    # Поиск аргумента --prompt
     prompt_arg = None
     if len(sys.argv) > 2:
         for i in range(2, len(sys.argv)):
@@ -39,48 +36,47 @@ def main():
     if mode == "train":
         run_training(device)
     elif mode == "generate":
-        # Р—Р°РїСѓСЃРє РіРµРЅРµСЂР°С†РёРё СЃ РїСЂРѕРјРїС‚РѕРј, РµСЃР»Рё РѕРЅ Р·Р°РґР°РЅ
+        # Запуск генерации с промптом, если он задан
         if prompt_arg:
-            print(f"\nрџ¤– Р“РµРЅРµСЂР°С†РёСЏ С‚РµРєСЃС‚Р° РїРѕ Р·Р°РїСЂРѕСЃСѓ (РџСЂРѕРјРїС‚): '{prompt_arg}'")
+            print(f"\n?? Генерация текста по запросу (Промпт): '{prompt_arg}'")
             generate_text_from_prompt(device, prompt_arg)
         else:
-            print("\n[РћС€РёР±РєР°]: Р’ СЂРµР¶РёРјРµ 'generate' РЅРµРѕР±С…РѕРґРёРјРѕ СѓРєР°Р·Р°С‚СЊ СЃС‚Р°СЂС‚РѕРІС‹Р№ РїСЂРѕРјРїС‚РѕРј С‡РµСЂРµР· Р°СЂРіСѓРјРµРЅС‚ --prompt \"Р’Р°С€ С‚РµРєСЃС‚\".")
+            print("\n[Ошибка]: В режиме 'generate' необходимо указать стартовый промптом через аргумент --prompt \"Ваш текст\".")
+
 
 def run_training(device):
-    """Р¤СѓРЅРєС†РёСЏ, СѓРїСЂР°РІР»СЏСЋС‰Р°СЏ РїРѕР»РЅС‹Рј С†РёРєР»РѕРј РѕР±СѓС‡РµРЅРёСЏ."""
-    # 1. РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ С‚РѕРєРµРЅРёР·Р°С‚РѕСЂР° Рё РґР°РЅРЅС‹С…
-    print("\n[в„№пёЏ]: РќР°С‡РёРЅР°РµРј РїРѕРґРіРѕС‚РѕРІРєСѓ РґР°РЅРЅС‹С…...")
+    """Функция, управляющая полным циклом обучения."""
+    # 1. Инициализация токенизатора и данных
+    print("\n[??]: Начинаем подготовку данных...")
 
-    with open("data/story.txt", "r", encoding="utf-8") as f:
-        text = f.read()
-            
-    from src.tokenizer import CharacterTokenizer
-    # РСЃРїРѕР»СЊР·СѓРµРј РєРѕРЅСЃС‚Р°РЅС‚Сѓ РёР· config.py РґР»СЏ РёРЅРёС†РёР°Р»РёР·Р°С†РёРё С‚РѕРєРµРЅРёР·Р°С‚РѕСЂР°
-    tokenizer = CharacterTokenizer(vocab_size=MAX_VOCAB_SIZE) 
-    
-    # 2. РЎРѕР·РґР°РЅРёРµ DataLoader СЃ РїР°СЂР°РјРµС‚СЂР°РјРё РёР· config.py
+    print("\n[??]: Запуск сканирования и агрегации данных...")
+
+    # 1. Сканируем все поддерживаемые файлы в DATA_DIR для получения путей
+    all_files = scan_directory(DATA_DIR, SUPPORTED_EXTENSIONS)
+
+    # 2. Создаем DataLoader, который сам обработает список файлов и создаст датасет
     dataloader = get_data_loader(
-        text=text, 
-        tokenizer=tokenizer, 
+        file_paths=all_files, # Передаем путь к файлам вместо текста
+        tokenizer=CharacterTokenizer(vocab_size=MAX_VOCAB_SIZE), 
         seq_len=SEQ_LEN,
         batch_size=BATCH_SIZE
     )
-    
-    # 3. РРЅРёС†РёР°Р»РёР·Р°С†РёСЏ РјРѕРґРµР»Рё
+        
+    # 3. Инициализация модели
     model = TransformerModel(
         vocab_size=tokenizer.get_vocab_size(), 
         embed_dim=EMBEDDING_DIM, 
         num_heads=NUM_HEADS
-    ).to(device) # РџРµСЂРµРјРµС‰Р°РµРј РјРѕРґРµР»СЊ РЅР° СѓСЃС‚СЂРѕР№СЃС‚РІРѕ
+    ).to(device) # Перемещаем модель на устройство
 
-    # --- 4. РќР°СЃС‚СЂРѕР№РєР° Рё Р·Р°РїСѓСЃРє С‚СЂРµРЅРµСЂР° ---
+    # --- 4. Настройка и запуск тренера ---
     trainer = LLMTrainer(model=model, data_loader=dataloader)
 
-    # Р’С‹Р·С‹РІР°РµРј РѕР±СѓС‡РµРЅРёРµ Рё РїРѕР»СѓС‡Р°РµРј РѕР±СѓС‡РµРЅРЅСѓСЋ РјРѕРґРµР»СЊ РѕР±СЂР°С‚РЅРѕ
+    # Вызываем обучение и получаем обученную модель обратно
     trained_model = trainer.train(num_epochs=TRAINING_EPOCHS, log_dir=LOG_DIR)
     
-    print("\nвњЁ Р¤Р°Р·Р° РћР‘РЈР§Р•РќРРЇ Р·Р°РІРµСЂС€РµРЅР°. РњРѕРґРµР»СЊ РіРѕС‚РѕРІР° Рє РёСЃРїРѕР»СЊР·РѕРІР°РЅРёСЋ.")
-    # РЎРѕС…СЂР°РЅРµРЅРёРµ С‡РµРєРїРѕРёРЅС‚Р° (Р’РђР–РќРћ!)
+    print("\n? Фаза ОБУЧЕНИЯ завершена. Модель готова к использованию.")
+    # Сохранение чекпоинта (ВАЖНО!)
     checkpoint_path = "model_checkpoint.pt"
     torch.save({
         'model_state_dict': trained_model.state_dict(),
@@ -88,16 +84,16 @@ def run_training(device):
         'embed_dim': EMBEDDING_DIM,
         'num_heads': NUM_HEADS,
     }, checkpoint_path)
-    print(f"\nрџ’ѕ Р§РµРєРїРѕРёРЅС‚ РјРѕРґРµР»Рё СЃРѕС…СЂР°РЅРµРЅ РІ: {checkpoint_path}")
+    print(f"\n?? Чекпоинт модели сохранен в: {checkpoint_path}")
 
 
 def generate_text_from_prompt(device, prompt_text):
-    """Р—Р°РїСѓСЃРєР°РµС‚ РіРµРЅРµСЂР°С†РёСЋ С‚РµРєСЃС‚Р° РЅР° РѕСЃРЅРѕРІРµ РїСЂРµРґРѕСЃС‚Р°РІР»РµРЅРЅРѕРіРѕ РїРѕР»СЊР·РѕРІР°С‚РµР»РµРј РїСЂРѕРјРїС‚Р°."""
-    # Р’СЂРµРјРµРЅРЅС‹Рµ РїРµСЂРµРјРµРЅРЅС‹Рµ РґР»СЏ Р·Р°РіСЂСѓР·РєРё РјРµС‚Р°РґР°РЅРЅС‹С… РёР· checkpoint.pt
+    """Запускает генерацию текста на основе предоставленного пользователем промпта."""
+    # Временные переменные для загрузки метаданных из checkpoint.pt
     loaded_config = {'vocab_size': 256, 'embed_dim': EMBEDDING_DIM, 'num_heads': NUM_HEADS}
 
     try:
-        print("\n[в„№пёЏ]: Р—Р°РіСЂСѓР·РєР° СЃРѕС…СЂР°РЅРµРЅРЅРѕР№ РјРѕРґРµР»Рё РґР»СЏ РёРЅС„РµСЂРµРЅСЃР°...")
+        print("\n[??]: Загрузка сохраненной модели для инференса...")
         
         model = TransformerModel(
             vocab_size=loaded_config['vocab_size'], 
@@ -105,44 +101,43 @@ def generate_text_from_prompt(device, prompt_text):
             num_heads=loaded_config['num_heads']
         )
 
-        # РџС‹С‚Р°РµРјСЃСЏ Р·Р°РіСЂСѓР·РёС‚СЊ СЃРѕСЃС‚РѕСЏРЅРёРµ, РїСЂРµРґРїРѕР»Р°РіР°СЏ, С‡С‚Рѕ checkpoint.pt СЃРѕРґРµСЂР¶РёС‚ РІСЃРµ РЅРµРѕР±С…РѕРґРёРјС‹Рµ РјРµС‚Р°РґР°РЅРЅС‹Рµ
+        # Пытаемся загрузить состояние, предполагая, что checkpoint.pt содержит все необходимые метаданные
         model.load_state_dict(torch.load("model_checkpoint.pt", map_location=device))
         model.to(device)
 
-        # РўРѕРєРµРЅРёР·Р°С‚РѕСЂ РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РёРЅРёС†РёР°Р»РёР·РёСЂРѕРІР°РЅ СЃ С‚РµРј Р¶Рµ СЃР»РѕРІР°СЂРµРј, С‡С‚Рѕ Рё РїСЂРё РѕР±СѓС‡РµРЅРёРё
+        # Токенизатор должен быть инициализирован с тем же словарем, что и при обучении
         tokenizer = CharacterTokenizer(vocab_size=MAX_VOCAB_SIZE) 
 
     except Exception as e:
-        print(f"\nрџ›‘ РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РјРѕРґРµР»СЊ РёР»Рё С‚РѕРєРµРЅРёР·Р°С‚РѕСЂ. РЈР±РµРґРёС‚РµСЃСЊ, С‡С‚Рѕ РІС‹ СЃРЅР°С‡Р°Р»Р° Р·Р°РїСѓСЃС‚РёР»Рё 'python src/main.py train' Рё Р±С‹Р»Р° СЃРѕР·РґР°РЅР° РїР°РїРєР° training_logs.")
-        print(f"РћС€РёР±РєР° Р·Р°РіСЂСѓР·РєРё: {e}")
+        print(f"\n?? Не удалось загрузить модель или токенизатор. Убедитесь, что вы сначала запустили 'python src/main.py train' и была создана папка training_logs.")
+        print(f"Ошибка загрузки: {e}")
         return
 
-    # 3. РџРѕРґРіРѕС‚РѕРІРєР° seed РёР· РїСЂРѕРјРїС‚Р° (РџСЂРѕРјРїС‚ -> РРґРµРЅС‚РёС„РёРєР°С‚РѕСЂС‹)
+    # 3. Подготовка seed из промпта (Промпт -> Идентификаторы)
     seed_ids = tokenizer.encode_text(prompt_text)
 
-    # 4. Р’С‹Р·РѕРІ РіРµРЅРµСЂР°С†РёРё
-    generated_text = generator.generate_text(model, tokenizer=tokenizer, start_seed=seed_ids, max_length=GENERATION_MAX_TOKENS)
+    # 4. Вызов генерации
+    from src.core import inference as gen_inference
+    generated_text = gen_inference.generate_text(model, tokenizer=tokenizer, start_seed=seed_ids, max_length=GENERATION_MAX_TOKENS)
     
     if generated_text:
-        print("\nрџЊџ РЎРіРµРЅРµСЂРёСЂРѕРІР°РЅРЅС‹Р№ С‚РµРєСЃС‚ (в‰€ 40 С‚РѕРєРµРЅРѕРІ):")
+        print("\n?? Сгенерированный текст (? 40 токенов):")
         print("-" * 50)
         print(generated_text)
         print("-" * 50)
 
 
 if __name__ == "__main__":
-    # Р’С‹Р·С‹РІР°РµРј СѓС‚РёР»РёС‚Сѓ РїСЂРѕРІРµСЂРєРё СЃСЂРµРґС‹ Рё Р·Р°С‚РµРј СЃР°Рј РіР»Р°РІРЅС‹Р№ РїСЂРѕС†РµСЃСЃ
-    utils.check_environment()() 
+    # Вызываем утилиту проверки среды и затем сам главный процесс
+    env_check.check_environment()
 
-    # --- РћР±СЂР°Р±РѕС‚РєР° Р°СЂРіСѓРјРµРЅС‚РѕРІ ---
-    import sys # РћР±СЏР·Р°С‚РµР»СЊРЅС‹Р№ РёРјРїРѕСЂС‚ Р·РґРµСЃСЊ РґР»СЏ РєРѕСЂСЂРµРєС‚РЅРѕР№ СЂР°Р±РѕС‚С‹ РІ if __name__ == "__main__"
-
+    # --- Обработка аргументов ---
     mode = sys.argv[1].lower()
     
     if mode == "train":
         run_training(device)
     elif mode == "generate":
-        # РџСЂРѕРІРµСЂРєР° РЅР°Р»РёС‡РёСЏ Р°СЂРіСѓРјРµРЅС‚Р° --prompt
+        # Проверка наличия аргумента --prompt
         prompt_arg = None
         for i in range(2, len(sys.argv)):
             if sys.argv[i] == "--prompt" and i + 1 < len(sys.argv):
@@ -152,4 +147,4 @@ if __name__ == "__main__":
         if prompt_arg:
             generate_text_from_prompt(device, prompt_arg)
         else:
-            print("\n[РћС€РёР±РєР°]: Р’ СЂРµР¶РёРјРµ 'generate' РЅРµРѕР±С…РѕРґРёРјРѕ СѓРєР°Р·Р°С‚СЊ СЃС‚Р°СЂС‚РѕРІС‹Р№ РїСЂРѕРјРїС‚РѕРј С‡РµСЂРµР· Р°СЂРіСѓРјРµРЅС‚ --prompt \"Р’Р°С€ С‚РµРєСЃС‚\".")
+            print("\n[Ошибка]: В режиме 'generate' необходимо указать стартовым промптом через аргумент --prompt \"Ваш текст\".")

@@ -2,10 +2,9 @@
 
 import os
 
-# --- Пути к данным и логам ---
-DATA_DIR = "data"
-TRAINING_FILE = os.path.join(DATA_DIR, "story.txt")  # Абсолютный путь для чтения
-LOG_DIR = "training_logs"  # Директория для сохранения логов
+# --- Пути к данным и логам (Унифицировано) ---
+DATA_DIR = "data"           # Основная директория с данными (story.txt, pdfs, docx)
+LOG_DIR = "training_logs"   # Директория для сохранения всех логов обучения
 
 # --- Гиперпараметры обучения (Training Hyperparameters) ---
 TRAINING_EPOCHS: int = 15
@@ -27,9 +26,9 @@ VOCAB_SIZE: int = MAX_VOCAB_SIZE # Для совместимости с main_app
 PAD_TOKEN_ID = 0  # Предполагаем, что токен с индексом 0 - это PAD/UNK
 
 __all__ = [
-    'DATA_DIR', 'TRAINING_FILE', 'LOG_DIR',
+    'DATA_DIR', 'LOG_DIR',
     'TRAINING_EPOCHS', 'BATCH_SIZE', 'SEQ_LEN', 'LEARNING_RATE',
     'MAX_VOCAB_SIZE', 'EMBEDDING_DIM', 'NUM_HEADS',
     'GENERATION_MAX_TOKENS', 'SEED_LENGTH', 'PAD_TOKEN_ID',
-    'VOCAB_SIZE'  # Для совместимости с main_app.py
+    'VOCAB_SIZE' 
 ]

@@ -1,17 +1,22 @@
-"""
-Модуль данных: Подготовка датасета из Story.txt и DataLoader.
+"""Модуль данных: Подготовка датасета из Story.txt и DataLoader.
 
 Функциональность обновлена для сканирования ВСЕХ текстовых файлов в заданной директории (DATA_DIR) 
-и конкатенации их содержимого для создания единого обучающего корпуса.
+и конкатенации их содержимого, используя паттерн Фабрики обработчиков (Dispatcher).
 """
 import torch
 from torch.utils.data import Dataset, DataLoader
-from config import SEQ_LEN, BATCH_SIZE, DATA_DIR # Импорт констант
+import os
+from config import SEQ_LEN, BATCH_SIZE, DATA_DIR, SUPPORTED_EXTENSIONS
+
+# Импорт всех необходимых модулей и сканера:
+from src.utils.file_scanner import scan_directory # <-- Главный импорт сканирования
+from src.data.processors.text_processor import process_all_files as _process_txt 
+from src.data.processors.pdf_processor import process_all_files as _process_pdf
+from src.data.processors.docx_processor import process_all_files as _process_docx
 
 class StoryDataset(Dataset):
     """
-    Датасет на основе объединенного текста из всех TXT файлов в DATA_DIR.
-    ... (описание остается прежним) ...
+    Датасет на основе объединенного текста из всех TXT, PDF и DOCX файлов в DATA_DIR.
     """
 
     def __init__(self, text: str, tokenizer, seq_len: int):
@@ -31,51 +36,53 @@ class StoryDataset(Dataset):
         print(f"✅ Датасет создан из {len(self.data)} примеров")
         print(f"   Каждая последовательность: input={self.seq_len-1} токенов → target=1 токен")
 
-    def __getitem__(self, idx):
-        """Возвращает пару (input_sequence, target_token)."""
-        return self.data[idx]
-
-    def __len__(self):
-        """Возвращает количество примеров в датасете."""
-        return len(self.data)
-
 
 def get_data_loader(tokenizer, seq_len: int, batch_size: int):
     """
-    Функция-фабрика для создания DataLoader из всех файлов в DATA_DIR.
-    
-    Args:
-        tokenizer: Объект токенизатора (он знает, как обрабатывать текст).
-        seq_len: Длина последовательности.
-        batch_size: Размер батча.
+    Фабричный метод загрузчик данных. Сканирует всю директорию DATA_DIR 
+    и собирает данные из всех поддерживаемых файлов, используя Фабрику обработчиков.
     """
+    all_processed_data = []
+
+    print("--- Начинается фаза сканирования и парсинга источников данных ---")
+
+    # 1. СКАНИРОВАНИЕ: Вызываем центральный сканер для получения всех путей.
+    try:
+        file_map = scan_directory(DATA_DIR, SUPPORTED_EXTENSIONS)
+    except FileNotFoundError as e:
+        raise e # Перебрасываем ошибку файловой системы
+
+    # 2. Диспетчеризация: Используем маппинг для вызова нужного обработчика.
+    processor_map = {
+        ".txt": _process_txt,
+        ".pdf": _process_pdf,
+        ".docx": _process_docx
+    }
+
+    for ext in SUPPORTED_EXTENSIONS:
+        # Проверяем, существует ли в нашей map обработчик для данного расширения.
+        if ext in processor_map:
+            processor_func = processor_map[ext]
+            try:
+                # Вызываем конкретный обработчик, передавая ему все найденные пути
+                file_results = processor_func(DATA_DIR, file_map[ext], ext) 
+                all_processed_data.extend(file_results)
+            except Exception as e:
+                 print(f"⚠️ Критическая ошибка при вызове обработчика {ext}: {e}")
+
+
+    if not all_processed_data:
+        raise FileNotFoundError("❌ Критическая ошибка: Не удалось загрузить текст из ни одного поддерживаемого источника.")
+
+    # 3. Конкатенация данных (Объединение всего текста)
     full_text = ""
-    data_files = []
+    print("\n[💡]: Обнаружено источников: " + "; ".join([os.path.basename(d) for _, d in all_processed_data]))
 
-    # 1. Поиск всех TXT файлов в DATA_DIR
-    import glob
-    search_path = os.path.join(DATA_DIR, "*.txt")
-    data_files = glob.glob(search_path)
-    
-    if not data_files:
-        raise FileNotFoundError(f"❌ Критическая ошибка: Не найдено ни одного TXT файла в директории '{DATA_DIR}'. Проверьте путь и файлы.")
+    for text, name in all_processed_data:
+        # Добавляем разделитель и конкатенируем текст из всех файлов
+        full_text += text + "\n\n--- END OF SOURCE FILE: " + name + " ---\n\n"
 
-    print(f"\n🔎 Найдено {len(data_files)} файлов для чтения...")
-    
-    # 2. Конкатенация (Объединение) данных
-    for file_path in data_files:
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                text = f.read()
-                full_text += text + "\n" # Добавляем разделитель между файлами
-        except Exception as e:
-            print(f"⚠️ Предупреждение: Не удалось прочитать файл {file_path}. Ошибка: {e}")
-
-    if not full_text.strip():
-        raise ValueError("❌ Критическая ошибка: Все найденные файлы были пустыми.")
-
-
-    # 3. Токенизация и создание Dataset
+    # 4. Токенизация и создание Dataset
     dataset = StoryDataset(full_text, tokenizer, seq_len=seq_len)
     
     dataloader = DataLoader(
