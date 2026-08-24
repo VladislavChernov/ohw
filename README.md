@@ -132,7 +132,7 @@ docker run --rm \
 и интернет при первом запуске.
 
 ```bash
-git clone <repo> && cd dz2
+git clone https://github.com/VladislavChernov/ohw_dz2.git && cd ohw_dz2
 docker compose up
 # → ollama поднимется, при первом запуске сама скачает модель из .env (~4.7 GB),
 # → приложение сгенерирует тест-кейсы: ./input/*.md|txt → ./output/*.md
