@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "CLI: generate from examples/input",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "ai_testgen",
+      "args": ["-n", "10", "--input-dir", "examples/input", "--output-dir", "output"],
+      "env": {
+        "OLLAMA_MODEL": "${env:OLLAMA_MODEL}",
+        "OLLAMA_BASE_URL": "${env:OLLAMA_BASE_URL}"
+      },
+      "justMyCode": false
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+[ollama]
+base_url = "http://localhost:11434"
+model = "qwen2.5:7b-instruct"
+timeout = 180.0
+
+[paths]
+input_dir = "input"
+output_dir = "output"
+
+[generation]
+temperature = 0.7
+max_retries = 3
