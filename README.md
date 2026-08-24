@@ -57,9 +57,9 @@ BR-2, …), каждый тест-кейс получает ссылку на п
 
 ## Быстрый старт (локально)
 
-```powershell
+```bash
 # установка uv, если ещё нет:
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
 uv sync --dev
 uv run ai-testgen -n 10
@@ -70,7 +70,7 @@ uv run ai-testgen -n 10
 в `./input` — отчёты появятся в `./output`. Можно переопределить
 ключами:
 
-```powershell
+```bash
 uv run ai-testgen -n 10 --input-dir my-requirements --output-dir reports
 ```
 
@@ -78,15 +78,15 @@ uv run ai-testgen -n 10 --input-dir my-requirements --output-dir reports
 для авторизации и корзины) — это демонстрация формата, не рабочий
 материал:
 
-```powershell
+```bash
 uv run ai-testgen -n 5 --input-dir examples/input --output-dir output
 ```
 
 Модель и адрес ollama берутся из `ai-testgen.toml` в корне репозитория;
 при необходимости переопределите их переменными окружения или CLI-аргументами:
 
-```powershell
-$env:OLLAMA_MODEL = "llama3.1:8b"   # вместо модели из конфига
+```bash
+export OLLAMA_MODEL=llama3.1:8b   # вместо модели из конфига
 ```
 
 ## Без uv: системный Python + свой контейнер ollama
@@ -94,7 +94,7 @@ $env:OLLAMA_MODEL = "llama3.1:8b"   # вместо модели из конфи�
 Если на машине уже стоит Python 3.13+, uv не обязателен — поднимите ollama
 вручную и установите пакет через pip:
 
-```powershell
+```bash
 # контейнер ollama с моделью (--gpus all можно опустить — тогда CPU)
 docker run -d --name ollama --gpus all -p 11434:11434 \
   -v ollama_models:/root/.ollama ollama/ollama
