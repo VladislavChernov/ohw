@@ -82,6 +82,11 @@ uv run ai-testgen -n 10 --input-dir my-requirements --output-dir reports
 uv run ai-testgen -n 5 --input-dir examples/input --output-dir output
 ```
 
+Готовые ответы модели для этих же запросов лежат рядом —
+`examples/output/response_auth.md` и `response_cart.md`
+(сгенерированы `qwen2.5:7b-instruct`, `-n 5`). Их можно посмотреть
+без запуска LLM; при повторной генерации ответы будут отличаться.
+
 Модель и адрес ollama берутся из `ai-testgen.toml` в корне репозитория;
 при необходимости переопределите их переменными окружения или CLI-аргументами:
 
