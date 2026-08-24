@@ -38,3 +38,21 @@
   `OLLAMA_MODEL=smollm2:360m`) → модель скачалась автоматически за ~40 c.
 - Отказ от отдельного init-сервиса: его успешный exit 0 ронял стек через
   `--abort-on-container-exit`; pull встроен в entrypoint ollama.
+
+## Дополнение: платформенные профили GPU
+
+Изначальная резервация `driver: nvidia` в базовом compose ломала запуск
+везде, где CUDA недоступен (macOS не пробрасывает GPU в контейнеры
+принципиально; AMD в Docker живёт только на Linux через ROCm). Схема
+пересобрана: базовый `compose.yaml` универсален (CPU), GPU подключается
+override-файлами:
+
+- `compose.gpu.yaml` — NVIDIA/CUDA (резервация всех устройств);
+- `compose.amd.yaml` — AMD/ROCm: образ `ollama/ollama:rocm`, устройства
+  `/dev/kfd` и `/dev/dri`, группы `video`/`render`;
+- без override — CPU, работает на любой машине.
+
+Проверено на машине автора: рендер всех трёх комбинаций (`compose config`);
+CPU-стек поднимается и отвечает (`library=cpu`, короткий чат qwen);
+после возврата на GPU — `library=CUDA`, полная генерация по всем шести
+BR-входам; volume моделей пересоздан с корректными метками проекта.

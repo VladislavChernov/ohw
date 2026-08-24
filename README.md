@@ -128,15 +128,37 @@ docker run --rm \
 
 ## Запуск через Docker Compose
 
-Проект самодостаточен: на машине нужны только Docker (с поддержкой NVIDIA GPU)
-и интернет при первом запуске.
+Проект самодостаточен: на машине нужен только Docker и интернет при
+первом запуске. Выбор конфигурации зависит от железа:
+
+| Платформа | Команда | Инференс |
+|---|---|---|
+| NVIDIA GPU (Linux/Windows) | `docker compose -f compose.yaml -f compose.gpu.yaml up` | CUDA |
+| AMD GPU (только Linux) | `docker compose -f compose.yaml -f compose.amd.yaml up` | ROCm |
+| macOS, Intel GPU, без дискретной карты | `docker compose up` | CPU |
 
 ```bash
 git clone https://github.com/VladislavChernov/ohw_dz2.git && cd ohw_dz2
-docker compose up
+# пример для NVIDIA; на других платформах см. таблицу выше
+docker compose -f compose.yaml -f compose.gpu.yaml up
 # → ollama поднимется, при первом запуске сама скачает модель из .env (~4.7 GB),
 # → приложение сгенерирует тест-кейсы: ./input/*.md|txt → ./output/*.md
 ```
+
+- Базовый `compose.yaml` не требует GPU и работает везде — на macOS
+  контейнеры в принципе не получают доступ к видеокарте, поэтому там
+  инференс идёт на CPU. Для заметного ускорения на Mac поставьте родную
+  сборку [Ollama](https://ollama.com/download) (Metal) и запускайте
+  программу локально через uv/pip.
+- Вариант для NVIDIA (`compose.gpu.yaml`) добавляет резервацию всех GPU;
+  без него ollama молча считает на процессоре.
+- Вариант для AMD (`compose.amd.yaml`) использует образ `ollama/ollama:rocm`
+  и проброс устройств `/dev/kfd`, `/dev/dri`; работает только на Linux.
+  Если карта не определяется, см. переменную `HSA_OVERRIDE_GFX_VERSION`
+  в [документации ollama](https://github.com/ollama/ollama/blob/main/docs/gpu.md).
+- CPU-инференс рабочий, но медленный (qwen2.5:7b ≈ 2–4 токена/с): при
+  полной генерации поднимите `timeout` в секции `[ollama]` файла
+  `ai-testgen.toml` (например, до 600 секунд).
 
 Полезные варианты:
 

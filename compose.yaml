@@ -28,13 +28,6 @@ services:
       timeout: 3s
       retries: 60
       start_period: 15s
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
   app:
     build: .
