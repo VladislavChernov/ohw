@@ -6,7 +6,7 @@
 
 ## Позитивные сценарии
 
-### TC-01. Catalog displays only programming courses
+### TC-01. Проверка отображения курсов только по направлению программирование
 
 **Тип:** позитивный
 
@@ -14,17 +14,18 @@
 
 **Предусловия:**
 
-- User opens the site in a web browser
+- Перейти по URL https://otus.ru/catalog/courses?categories=programming
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=programming |
+| 1 | Открыть страницу https://otus.ru/catalog/courses?categories=programming |
+| 2 | Проверить наличие курсов в категории программирование |
 
-**Ожидаемый результат:** Only courses under the 'Программирование' category are displayed
+**Ожидаемый результат:** Только курсы направления программирование отображаются на странице
 
-### TC-02. Course card displays required information
+### TC-02. Проверка карточки курса
 
 **Тип:** позитивный
 
@@ -32,18 +33,18 @@
 
 **Предусловия:**
 
-- User opens the site in a web browser
+- Перейти на страницу https://otus.ru/catalog/courses?categories=programming
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=programming |
-| 2 | Select a course card from the list |
+| 1 | Выбрать карточку курса |
+| 2 | Проверить наличие названия, стоимости и кнопки действия |
 
-**Ожидаемый результат:** Course title, duration or start date, cost, and action button are displayed
+**Ожидаемый результат:** Карточка курса содержит название, стоимость и кнопку действия
 
-### TC-03. Clicking on a course card opens the course page
+### TC-03. Проверка открытия страницы курса
 
 **Тип:** позитивный
 
@@ -51,18 +52,18 @@
 
 **Предусловия:**
 
-- User opens the site in a web browser
+- Перейти на страницу https://otus.ru/catalog/courses?categories=programming
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=programming |
-| 2 | Click on a course card |
+| 1 | Выбрать карточку курса |
+| 2 | Кликнуть на карточку |
 
-**Ожидаемый результат:** The course page is opened without errors
+**Ожидаемый результат:** Открыта страница курса без ошибок
 
-### TC-04. Filters change the course list and resetting returns the original list
+### TC-04. Проверка работы фильтров
 
 **Тип:** позитивный
 
@@ -70,19 +71,19 @@
 
 **Предусловия:**
 
-- User opens the site in a web browser
+- Перейти на страницу https://otus.ru/catalog/courses?categories=programming
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=programming |
-| 2 | Apply a filter |
-| 3 | Clear the filter |
+| 1 | Выбрать фильтр по длительности |
+| 2 | Проверить изменения в выдаче курсов |
+| 3 | Сбросить фильтр |
 
-**Ожидаемый результат:** The course list returns to the original state
+**Ожидаемый результат:** Список курсов изменяется в соответствии с выбранным фильтром, сброс фильтра возвращает исходную выдачу
 
-### TC-05. Selected filter is visible in the URL
+### TC-05. Проверка отображения фильтра в адресной строке
 
 **Тип:** позитивный
 
@@ -90,18 +91,18 @@
 
 **Предусловия:**
 
-- User opens the site in a web browser
+- Перейти на страницу https://otus.ru/catalog/courses?categories=programming
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=programming |
-| 2 | Apply a filter |
+| 1 | Выбрать фильтр |
+| 2 | Проверить адресную строку |
 
-**Ожидаемый результат:** The applied filter is visible in the URL
+**Ожидаемый результат:** В адресной строке отображается выбранный фильтр
 
-### TC-06. Pagination works correctly and pages do not repeat courses
+### TC-06. Проверка пагинации
 
 **Тип:** позитивный
 
@@ -109,20 +110,21 @@
 
 **Предусловия:**
 
-- User opens the site in a web browser
+- Перейти на страницу https://otus.ru/catalog/courses?categories=programming
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=programming |
-| 2 | Navigate to the next page |
+| 1 | Перейти на следующую страницу |
+| 2 | Проверить отсутствие дублирования курсов между страницами |
+| 3 | Проверить наличие номера страницы в адресной строке |
 
-**Ожидаемый результат:** Courses are displayed on the next page and no duplicates are shown
+**Ожидаемый результат:** Курсы не дублируются между страницами, номер страницы виден в адресной строке
 
 ## Негативные сценарии
 
-### TC-07. Invalid category in URL does not break the page
+### TC-07. Проверка некорректного значения параметра categories
 
 **Тип:** негативный
 
@@ -130,17 +132,17 @@
 
 **Предусловия:**
 
-- User opens the site in a web browser
+- Перейти по URL https://otus.ru/catalog/courses?categories=invalid
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=invalid |
+| 1 | Перейти по URL |
 
-**Ожидаемый результат:** The page is displayed without errors, but only programming courses are shown
+**Ожидаемый результат:** Страница отображается без ошибок
 
-### TC-08. Non-existent page number in URL does not break the page
+### TC-08. Проверка номера страницы за пределами списка
 
 **Тип:** негативный
 
@@ -148,17 +150,17 @@
 
 **Предусловия:**
 
-- User opens the site in a web browser
+- Перейти по URL https://otus.ru/catalog/courses?categories=programming&page=999
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=programming&page=999 |
+| 1 | Перейти по URL |
 
-**Ожидаемый результат:** The page is displayed without errors, but only the available courses are shown
+**Ожидаемый результат:** Страница отображается без ошибок
 
-### TC-09. Empty result after applying filters
+### TC-09. Проверка пустой выдачи после применения фильтра
 
 **Тип:** негативный
 
@@ -166,32 +168,31 @@
 
 **Предусловия:**
 
-- User opens the site in a web browser
+- Перейти на страницу https://otus.ru/catalog/courses?categories=programming
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=programming |
-| 2 | Apply filters that result in no courses |
+| 1 | Применить фильтр, который не соответствует ни одному курсу |
 
-**Ожидаемый результат:** The course list is empty and a message is displayed indicating no results
+**Ожидаемый результат:** Выдача курсов пустая, но страница отображается без ошибок
 
-### TC-10. Clearing filters resets the URL
+### TC-10. Проверка сброса фильтров
 
 **Тип:** негативный
 
-**Проверяет требование:** BR-5
+**Проверяет требование:** BR-7
 
 **Предусловия:**
 
-- User opens the site in a web browser with filters applied
+- Перейти на страницу https://otus.ru/catalog/courses?categories=programming
 
 **Шаги:**
 
 | № | Действие |
 |---|----------|
-| 1 | Open https://otus.ru/catalog/courses?categories=programming&filter=example |
-| 2 | Clear the filter |
+| 1 | Применить фильтр |
+| 2 | Сбросить фильтр |
 
-**Ожидаемый результат:** The URL returns to the original state without any filters
+**Ожидаемый результат:** Список курсов возвращается в исходное состояние

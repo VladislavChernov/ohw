@@ -25,9 +25,9 @@ def build_system_prompt() -> str:
         "either 'positive' or 'negative'. Each 'steps' must contain at least one concrete "
         "action. Each 'expected' must describe the verifiable result. Each 'requirement' "
         "must reference the business requirement id (e.g. BR-1) from the requirements text "
-        "that this case verifies. Write titles, "
-        "preconditions, steps and expected results in the same language as the user's "
-        "requirements text."
+        "that this case verifies. Write ALL titles, "
+        "preconditions, steps and expected results in Russian. Keep product names, "
+        "UI element labels and URLs in their original language."
     )
 
 
@@ -75,7 +75,8 @@ TESTPLAN_SECTIONS: tuple[str, ...] = (
 def build_doc_system_prompt() -> str:
     return (
         "You are a senior QA engineer. You write documents as clean GitHub-flavored "
-        "Markdown in the same language as the user's requirements text. Respond with "
+        "Markdown in Russian. Keep product names, UI element labels and URLs in "
+        "their original language. Respond with "
         "the document text only: no code fences, no JSON, no commentary before or "
         "after. Structure the document with '## ' section headings exactly as "
         "required by the task."
