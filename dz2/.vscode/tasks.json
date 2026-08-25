@@ -1,0 +1,30 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "tests: unit",
+      "type": "shell",
+      "command": "uv run pytest -m 'not integration' -q",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "tests: integration",
+      "type": "shell",
+      "command": "uv run pytest -m integration -q",
+      "problemMatcher": []
+    },
+    {
+      "label": "lint: ruff + mypy",
+      "type": "shell",
+      "command": "uv run ruff check . && uv run mypy src tests",
+      "problemMatcher": []
+    },
+    {
+      "label": "run: generate examples",
+      "type": "shell",
+      "command": "uv run ai-testgen -n 10 --input-dir examples/input --output-dir output",
+      "problemMatcher": []
+    }
+  ]
+}
