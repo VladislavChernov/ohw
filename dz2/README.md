@@ -143,7 +143,7 @@ docker run --rm \
 | macOS, Intel GPU, без дискретной карты | `docker compose up` | CPU |
 
 ```bash
-git clone https://github.com/VladislavChernov/ohw_dz2.git && cd ohw_dz2
+git clone https://github.com/VladislavChernov/ohw.git && cd ohw/dz2
 # пример для NVIDIA; на других платформах см. таблицу выше
 docker compose -f compose.yaml -f compose.gpu.yaml up
 # → ollama поднимется, при первом запуске сама скачает модель из .env (~4.7 GB),
