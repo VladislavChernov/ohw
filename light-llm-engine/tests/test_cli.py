@@ -59,6 +59,25 @@ def test_success_writes_output(configured, monkeypatch) -> None:
     assert "plain reply" in (out / "a.md").read_text(encoding="utf-8")
 
 
+def test_cli_flag_overrides_env(configured, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("OLLAMA_MODEL", "env-model")
+
+    def fake_chat(self, user, system="", temperature=0.7):
+        return f"model-developed: {self.model}"
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+    out = configured.parent / "out"
+    rc = main(
+        ["--model", "cli-model",
+         "--input-dir", str(configured),
+         "--output-dir", str(out)]
+    )
+    assert rc == EXIT_OK
+    content = (out / "a.md").read_text(encoding="utf-8")
+    assert "cli-model" in content
+    assert "env-model" not in content
+
+
 def test_empty_reply_after_retries_returns_4(configured, monkeypatch) -> None:
     def empty_chat(self, user, system="", temperature=0.7):
         return "   "

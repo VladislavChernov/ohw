@@ -45,8 +45,8 @@ def _resolve_settings(args: argparse.Namespace) -> Config:
     if not 0.0 <= temperature <= 2.0:
         raise ConfigError(f"--temperature must be within [0.0, 2.0], got {temperature}")
     return Config(
-        base_url=os.environ.get("OLLAMA_BASE_URL") or args.base_url or config.base_url,
-        model=os.environ.get("OLLAMA_MODEL") or args.model or config.model,
+        base_url=args.base_url or os.environ.get("OLLAMA_BASE_URL") or config.base_url,
+        model=args.model or os.environ.get("OLLAMA_MODEL") or config.model,
         timeout=config.timeout,
         system=args.system if args.system is not None else config.system,
         input_dir=args.input_dir if args.input_dir is not None else config.input_dir,
