@@ -42,10 +42,13 @@
 
 ## 7. Docker
 
-- [ ] `Dockerfile` (мульти-стейдж, непривилегированный `app`).
-- [ ] `compose.yaml` (сервисы `ollama` + `app`, volume, healthcheck),
+- [x] `Dockerfile` (мульти-стейдж, непривилегированный `app`).
+- [x] `compose.yaml` (сервисы `ollama` + `app`, volume, healthcheck),
       `compose.gpu.yaml`, `.env`, `.dockerignore`.
-- [ ] Проверка: `docker compose up --build` обрабатывает пример из `input/`.
+- [x] Проверка: `docker compose up --build` обрабатывает пример из `input/`.
+      E2E пройден: ollama 0.32.15 + `qwen2.5:0.5b`, файл `input/smoke.txt`
+      → `output/smoke.md`, `app-1 exited with code 0`. Негативные смоук-тесты
+      образа: без модели → exit 2, недоступный ollama → exit 3.
 
 ## 8. Dev Container
 
