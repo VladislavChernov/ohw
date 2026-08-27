@@ -1,0 +1,17 @@
+# Нормализация переводов строк для кроссплатформенной работы (Windows/Linux/CI).
+# Файлы текстовых форматов фиксируются как LF; binратные — без нормализации.
+* text=auto
+
+*.py     text eol=lf
+*.md     text eol=lf
+*.toml   text eol=lf
+*.json   text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.sh     text eol=lf
+Dockerfile text eol=lf
+
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.ico    binary
