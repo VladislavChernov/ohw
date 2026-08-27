@@ -35,11 +35,18 @@ uv run python -m llm_engine --input-dir custom --output-dir out --model qwen2.5:
 ### В Docker Compose
 
 ```bash
-docker compose up --build
+docker compose up --build --abort-on-container-exit
 ```
 
-Движок и ollama поднимаются вместе: модель скачивается один раз, приложение
-стартует после готовности модели, файлы монтируются из `./input` и `./output`.
+Движок и ollama поднимаются вместе: модель скачивается один раз (volume
+`ollama_models`), приложение стартует только после готовности модели
+(healthcheck), файлы монтируются из `./input` и `./output`. Флаг
+`--abort-on-container-exit` гасит compose, когда приложение закончило работу.
+
+Сменить модель — правьте `OLLAMA_MODEL` в `.env` (или переопределите при
+запуске: `$env:OLLAMA_MODEL="llama3.2:3b"; docker compose up`).
+
+GPU (NVIDIA): `docker compose -f compose.yaml -f compose.gpu.yaml up --build`.
 
 ## Конфигурация
 
