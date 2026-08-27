@@ -2,8 +2,8 @@
   "name": "ai-testcase-generator",
   "image": "mcr.microsoft.com/devcontainers/python:3.13-bookworm",
   "features": {
-    "ghcr.io/astral-sh/devcontainer-features/uv:1": {},
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+    "./features/uv": {},
+    "./features/docker-outside-of-docker": {}
   },
   "postCreateCommand": "uv sync --dev",
   "remoteEnv": {
