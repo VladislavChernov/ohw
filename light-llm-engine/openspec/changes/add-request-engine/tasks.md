@@ -53,7 +53,13 @@
 ## 8. Dev Container
 
 - [x] `.devcontainer/` (Python 3.13, uv, доступ к Docker).
-- [ ] Проверка: «Reopen in Container» + `uv sync --dev`.
+- [x] Проверка окружения dev-контейнера (CLI, без VS Code): базовый образ
+      `devcontainers/python:3.13-bookworm`, установка uv, `uv sync --dev`,
+      env `OLLAMA_*` (remoteEnv), docker socket изнутри, `pytest` 27 passed,
+      `ruff`/`mypy` — чисто. Попутно: `EXE002` выключен в конфиге ruff
+      (false-positive на Windows-маунте) и `UV_LINK_MODE=copy` в
+      `containerEnv`. Финальный клик «Reopen in Container» в VS Code —
+      за автором проекта.
 
 ## 9. README и финальная проверка
 
