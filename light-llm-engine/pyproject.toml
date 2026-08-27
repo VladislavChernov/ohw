@@ -1,0 +1,32 @@
+[project]
+name = "light-llm-engine"
+version = "0.1.0"
+description = "Send request files to a local LLM (ollama in Docker) and write model replies as markdown"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28",
+]
+
+[project.scripts]
+light-engine = "llm_engine.cli:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "pytest-mock>=3.14",
+    "ruff>=0.9",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "llm_engine"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires live ollama service",
+]
