@@ -6,6 +6,10 @@
     "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
   },
   "postCreateCommand": "uv sync --dev",
+  "containerEnv": {
+    "UV_LINK_MODE": "copy",
+    "UV_PROJECT_ENVIRONMENT": "/home/vscode/.venv"
+  },
   "remoteEnv": {
     "OLLAMA_BASE_URL": "http://host.docker.internal:11434",
     "OLLAMA_MODEL": "qwen2.5:7b-instruct"

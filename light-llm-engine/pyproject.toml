@@ -26,6 +26,12 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "llm_engine"
 
+[tool.ruff.lint]
+# Files checked out on Windows carry the executable bit when mounted into
+# Linux containers (devcontainer), which false-positives EXE002
+# ("executable but no shebang").
+ignore = ["EXE002"]
+
 [tool.pytest.ini_options]
 markers = [
     "integration: requires live ollama service",
