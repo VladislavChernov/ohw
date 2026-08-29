@@ -1,55 +1,24 @@
-services:
-  ollama:
-    profiles: ["standalone"]
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    ports:
-      - "11434:11434"
-    environment:
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
-    volumes:
-      - ollama_models:/root/.ollama
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        ollama serve &
-        server=$$!
-        until ollama ls >/dev/null 2>&1; do sleep 1; done
-        if ollama ls | awk '{print $$1}' | grep -Fxq "$$OLLAMA_MODEL"; then
-          echo "model ready: $$OLLAMA_MODEL"
-        else
-          echo "pulling '$$OLLAMA_MODEL' (one-time download)..."
-          until ollama pull "$$OLLAMA_MODEL"; do
-            echo "pull failed, retrying in 5s..."
-            sleep 5
-          done
-        fi
-        wait $$server
-    healthcheck:
-      test: ["CMD-SHELL", "ollama show \"$$OLLAMA_MODEL\" >/dev/null 2>&1"]
-      interval: 5s
-      timeout: 3s
-      retries: 60
-      start_period: 15s
+# Project compose: only the app. Shared components (ollama) come from the
+# infra catalog (../infra/). Start them first:
+#   .\infra\up.ps1 -Project D:\Otus\Dz2
+# or:  docker compose -f ../infra/compose.yaml --profile ollama up -d
+# The app joins the shared network `ohw_net` and reaches ollama as `ohw-ollama`.
 
+services:
   app:
     build: .
     restart: "no"
     command: ["--count", "10"]
     environment:
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ohw-ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
     volumes:
       - ./input:/data/input
       - ./output:/data/output
-    depends_on:
-      ollama:
-        condition: service_healthy
-        required: false
+    networks:
+      - ohw-net
 
-volumes:
-  ollama_models:
+networks:
+  ohw-net:
     external: true
-    name: ohw_ollama_models
-
+    name: ohw_net

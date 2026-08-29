@@ -1,0 +1,6 @@
+# Components of the shared infrastructure this project needs.
+# See infra/up.ps1 and infra/README.md (component catalog).
+#
+#   .\infra\up.ps1 -Project D:\Otus\Dz2
+components:
+  - ollama

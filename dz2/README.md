@@ -114,9 +114,9 @@ ai-testgen -n 10 --input-dir examples/input --output-dir output
 Ни env-переменных, ни правки конфига не требуется: `ai-testgen.toml`
 в корне репозитория уже указывает на `http://localhost:11434`, порт
 контейнера проброшен наружу. Если репозиторий склонирован, первые две
-команды заменяются одним `docker compose --profile standalone up -d ollama` —
-контейнер и модель поднимутся автоматически (не забудьте остановить общий
-`ohw-ollama`, если он запущен: `docker compose -f ../infra/compose.yaml stop`).
+команды заменяются подъёмом общей инфраструктуры
+(`.\infra\up.ps1 -Project D:\Otus\Dz2`) — контейнер и модель поднимутся
+автоматически.
 
 ## Запуск в Docker
 
@@ -135,17 +135,21 @@ docker run --rm \
 
 ## Запуск через Docker Compose
 
-Проект использует **общий ollama монорепо** из [`infra/`](../infra/README.md):
-модель скачивается один раз и переиспользуется всеми проектами, поэтому
-`docker compose up` в каталоге проекта поднимает **только приложение**.
+Проект использует **общую инфраструктуру** из каталога
+[`infra/`](../infra/README.md): компоненты (сейчас — `ollama`) описываются
+один раз в [`infra/compose.yaml`](../infra/compose.yaml) и поднимаются по мере
+надобности. Объявление проекта лежит в [`infra.yaml`](infra.yaml):
+`components: [ollama]`. `docker compose up` в каталоге проекта поднимает
+**только приложение**.
 
-```bash
-# один раз — стартуем общий сервис (порт 11434, volume ohw_ollama_models)
-cd d:/Otus/ohw
-docker compose -f infra/compose.yaml up -d
+```powershell
+# 1. один раз — поднимаем нужные компоненты (читает этот проект's infra.yaml)
+cd d:/Otus/infra
+.\up.ps1 -Project D:\Otus\Dz2
+#    эквивалент: docker compose -f infra/compose.yaml --profile ollama up -d
 
-# в каталоге dz2 — только приложение (ollama уже запущен)
-cd d:/Otus/ohw/dz2
+# 2. в каталоге dz2 — только приложение (ollama уже поднят в общей сети ohw_net)
+cd d:/Otus/Dz2
 docker compose up --build --abort-on-container-exit
 # → приложение сгенерирует тест-кейсы: ./input/*.md|txt → ./output/*.md
 ```
@@ -153,24 +157,17 @@ docker compose up --build --abort-on-container-exit
 Приложение ждёт готовности модели (healthcheck); `./input` и `./output`
 монтируются как volume; `--abort-on-container-exit` гасит compose, когда
 работа завершена. Сменить модель — `OLLAMA_MODEL=` в `infra/.env` +
-`docker compose -f infra/compose.yaml restart ollama`.
+`.\infra\up.ps1 -Project D:\Otus\Dz2` (или `docker compose -f infra/compose.yaml restart ollama`).
 
-**Автономный вариант (самодостаточен, для проверки/сдачи).** Поднимает
-`ollama` вместе с приложением в общем volume `ohw_ollama_models`. Требует
-остановки `ohw-ollama`, иначе конфликт порта `11434`:
+Compose-сервис `app` подключается к общей сети `ohw_net` и обращается к
+`ollama` по имени контейнера `ohw-ollama` (см. `.env` проекта).
 
-```bash
-docker compose -f infra/compose.yaml stop          # освободить порт
-docker compose --profile standalone up --build
-```
+GPU-ускорение общего ollama (NVIDIA/AMD) — оверлеи задаются при запуске инфры:
 
-GPU (NVIDIA): добавьте `compose.gpu.yaml` поверх `compose.yaml` и включите
-профиль standalone. Вариант для AMD (`compose.amd.yaml`) — через тот же
-профиль:
-
-```bash
-docker compose -f infra/compose.yaml stop
-docker compose --profile standalone -f compose.yaml -f compose.gpu.yaml up --build
+```powershell
+cd d:/Otus/infra
+.\up.ps1 -Project D:\Otus\Dz2 -Gpu    # NVIDIA CUDA
+.\up.ps1 -Project D:\Otus\Dz2 -Amd    # AMD ROCm
 ```
 
 Без GPU инференс идёт на CPU (медленно, qwen2.5:7b ≈ 2–4 токена/с) — при
@@ -182,17 +179,15 @@ docker compose --profile standalone -f compose.yaml -f compose.gpu.yaml up --bui
 Полезные варианты:
 
 ```bash
-docker compose --profile standalone up -d ollama   # LLM-сервис фоном (порт 11434)
-docker compose run --rm app -n 5                   # разовая генерация с другим количеством
+docker compose -f infra/compose.yaml ps     # статус общего ollama
+docker compose run --rm app -n 5            # разовая генерация с другим количеством
 ```
 
 - Модель хранится в общем volume `ohw_ollama_models` и переживает перезапуски;
-  скачивается один раз для всех проектов монорепо.
-- Имя модели для общего запуска задаётся в `infra/.env` (строка
-  `OLLAMA_MODEL=...`); для автономного (standalone) — в `.env` проекта.
-- Приложение ходит на общий ollama через `OLLAMA_BASE_URL`
-  (`http://host.docker.internal:11434` по умолчанию из `.env`). В автономном
-  режиме ollama публикует тот же порт `11434` на хост, поэтому адрес не меняется.
+  скачивается один раз для всех проектов.
+- Имя модели задаётся в `infra/.env` (`OLLAMA_MODEL=...`).
+- Адрес службы: хост `http://localhost:11434`, devcontainer
+  `http://host.docker.internal:11434`, compose (сеть `ohw_net`) — `http://ohw-ollama:11434`.
 
 ## Конфигурация
 
@@ -222,7 +217,7 @@ max_retries = 3
 
 | Переменная | По умолчанию | Описание |
 |---|---|---|
-| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | адрес сервиса ollama |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` (хост, из `ai-testgen.toml`) | адрес сервиса ollama; для devcontainer `http://host.docker.internal:11434`, для compose-сервиса `http://ohw-ollama:11434` |
 | `OLLAMA_MODEL` | — (или `model` в конфиге) | имя установленной модели |
 
 ### Аргументы CLI
