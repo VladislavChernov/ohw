@@ -10,7 +10,7 @@ from pathlib import Path
 from api_testgen.config import Config
 from api_testgen.extractor import extract_code, save_code
 from api_testgen.ollama import generate_code
-from api_testgen.prompt import build_prompt
+from api_testgen.prompt import build_prompt, load_prompt_template
 from api_testgen.runner import format_report, run_pytest
 from api_testgen.swagger import fetch_swagger_spec, parse_endpoints
 
@@ -31,6 +31,11 @@ def main() -> None:
     parser.add_argument(
         "--max-retries", type=int, default=None, help="Max LLM retry attempts (overrides env)"
     )
+    parser.add_argument(
+        "--input-dir",
+        default="./input",
+        help="Directory containing the prompt template (input/prompt.txt)",
+    )
     parser.add_argument("--no-run", action="store_true", help="Generate code but don't run pytest")
     parser.add_argument(
         "--save-prompt", action="store_true", help="Save prompt to file for debugging"
@@ -50,7 +55,8 @@ def main() -> None:
     print(f"  Found {len(endpoints)} endpoints")
 
     print("[2/5] Building prompt...")
-    prompt = build_prompt(endpoints, config.target_url)
+    template = load_prompt_template(Path(args.input_dir))
+    prompt = build_prompt(template, endpoints, config.target_url)
 
     if args.save_prompt:
         prompt_path = Path(config.output_dir) / "prompt.txt"
