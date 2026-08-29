@@ -1,0 +1,18 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# uv
+.venv/
+uv.lock
+
+# tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# output
+output/
