@@ -32,14 +32,13 @@ def run_pytest(test_file: Path) -> dict:
     }
 
 
-def format_report(results: dict, endpoint_count: int) -> str:
+def format_report(results: dict) -> str:
     """Format a human-readable report."""
     lines = [
         "=" * 60,
         "  API Test Generation Report",
         "=" * 60,
         "",
-        f"  Endpoints parsed:   {endpoint_count}",
         f"  Tests generated:    {results['total']}",
         f"  Passed:             {results['passed']}",
         f"  Failed:             {results['failed']}",
