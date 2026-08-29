@@ -1,0 +1,16 @@
+{
+  "id": "uv",
+  "version": "1.0.0",
+  "name": "uv (vendored local copy)",
+  "description": "Installs the uv package manager from the official standalone GitHub release. Local vendored equivalent of the former ghcr.io/astral-sh/devcontainer-features/uv:1 feature (the astral-sh/devcontainer-features repo is gone and ghcr.io anonymous pulls are denied in this environment).",
+  "documentationURL": "https://github.com/astral-sh/uv",
+  "licenseURL": "https://github.com/astral-sh/uv/blob/main/LICENSE",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "latest",
+      "description": "uv release tag to install (e.g. 0.8.15) or 'latest'"
+    }
+  },
+  "installsAfter": ["ghcr.io/devcontainers/features/common-utils"]
+}
