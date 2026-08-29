@@ -62,7 +62,13 @@ def main() -> None:
         f"[2/4] Sending prompt to Ollama ({config.ollama_model}, max {config.max_retries} attempts)..."
     )
     code = asyncio.run(
-        generate_code(config.ollama_base_url, config.ollama_model, prompt, config.max_retries)
+        generate_code(
+            config.ollama_base_url,
+            config.ollama_model,
+            prompt,
+            config.max_retries,
+            config.timeout,
+        )
     )
 
     print("[3/4] Extracting and saving code...")
