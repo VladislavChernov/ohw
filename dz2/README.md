@@ -53,7 +53,8 @@ BR-2, …), каждый тест-кейс получает ссылку на п
 - Локальный запуск: [uv](https://docs.astral.sh/uv/) (сам установит Python 3.13
   при первом запуске) **или** уже установленный Python 3.13+ с pip,
   плюс доступный сервис ollama с моделью
-- Запуск через Compose: Docker с поддержкой NVIDIA GPU; остальное настроится само
+- Запуск через Compose: Docker (для общего ollama — любой; для автономного
+  GPU-режима — NVIDIA CUDA или AMD ROCm, см. «Запуск через Docker Compose»)
 
 ## Быстрый старт (локально)
 
@@ -113,8 +114,9 @@ ai-testgen -n 10 --input-dir examples/input --output-dir output
 Ни env-переменных, ни правки конфига не требуется: `ai-testgen.toml`
 в корне репозитория уже указывает на `http://localhost:11434`, порт
 контейнера проброшен наружу. Если репозиторий склонирован, первые две
-команды заменяются одним `docker compose up -d ollama` — контейнер и
-модель поднимутся автоматически.
+команды заменяются одним `docker compose --profile standalone up -d ollama` —
+контейнер и модель поднимутся автоматически (не забудьте остановить общий
+`ohw-ollama`, если он запущен: `docker compose -f ../infra/compose.yaml stop`).
 
 ## Запуск в Docker
 
@@ -133,53 +135,64 @@ docker run --rm \
 
 ## Запуск через Docker Compose
 
-Проект самодостаточен: на машине нужен только Docker и интернет при
-первом запуске. Выбор конфигурации зависит от железа:
-
-| Платформа | Команда | Инференс |
-|---|---|---|
-| NVIDIA GPU (Linux/Windows) | `docker compose -f compose.yaml -f compose.gpu.yaml up` | CUDA |
-| AMD GPU (только Linux) | `docker compose -f compose.yaml -f compose.amd.yaml up` | ROCm |
-| macOS, Intel GPU, без дискретной карты | `docker compose up` | CPU |
+Проект использует **общий ollama монорепо** из [`infra/`](../infra/README.md):
+модель скачивается один раз и переиспользуется всеми проектами, поэтому
+`docker compose up` в каталоге проекта поднимает **только приложение**.
 
 ```bash
-git clone https://github.com/VladislavChernov/ohw.git && cd ohw/dz2
-# пример для NVIDIA; на других платформах см. таблицу выше
-docker compose -f compose.yaml -f compose.gpu.yaml up
-# → ollama поднимется, при первом запуске сама скачает модель из .env (~4.7 GB),
+# один раз — стартуем общий сервис (порт 11434, volume ohw_ollama_models)
+cd d:/Otus/ohw
+docker compose -f infra/compose.yaml up -d
+
+# в каталоге dz2 — только приложение (ollama уже запущен)
+cd d:/Otus/ohw/dz2
+docker compose up --build --abort-on-container-exit
 # → приложение сгенерирует тест-кейсы: ./input/*.md|txt → ./output/*.md
 ```
 
-- Базовый `compose.yaml` не требует GPU и работает везде — на macOS
-  контейнеры в принципе не получают доступ к видеокарте, поэтому там
-  инференс идёт на CPU. Для заметного ускорения на Mac поставьте родную
-  сборку [Ollama](https://ollama.com/download) (Metal) и запускайте
-  программу локально через uv/pip.
-- Вариант для NVIDIA (`compose.gpu.yaml`) добавляет резервацию всех GPU;
-  без него ollama молча считает на процессоре.
-- Вариант для AMD (`compose.amd.yaml`) использует образ `ollama/ollama:rocm`
-  и проброс устройств `/dev/kfd`, `/dev/dri`; работает только на Linux.
-  Если карта не определяется, см. переменную `HSA_OVERRIDE_GFX_VERSION`
-  в [документации ollama](https://github.com/ollama/ollama/blob/main/docs/gpu.md).
-- CPU-инференс рабочий, но медленный (qwen2.5:7b ≈ 2–4 токена/с): при
-  полной генерации поднимите `timeout` в секции `[ollama]` файла
-  `ai-testgen.toml` (например, до 600 секунд).
+Приложение ждёт готовности модели (healthcheck); `./input` и `./output`
+монтируются как volume; `--abort-on-container-exit` гасит compose, когда
+работа завершена. Сменить модель — `OLLAMA_MODEL=` в `infra/.env` +
+`docker compose -f infra/compose.yaml restart ollama`.
+
+**Автономный вариант (самодостаточен, для проверки/сдачи).** Поднимает
+`ollama` вместе с приложением в общем volume `ohw_ollama_models`. Требует
+остановки `ohw-ollama`, иначе конфликт порта `11434`:
+
+```bash
+docker compose -f infra/compose.yaml stop          # освободить порт
+docker compose --profile standalone up --build
+```
+
+GPU (NVIDIA): добавьте `compose.gpu.yaml` поверх `compose.yaml` и включите
+профиль standalone. Вариант для AMD (`compose.amd.yaml`) — через тот же
+профиль:
+
+```bash
+docker compose -f infra/compose.yaml stop
+docker compose --profile standalone -f compose.yaml -f compose.gpu.yaml up --build
+```
+
+Без GPU инференс идёт на CPU (медленно, qwen2.5:7b ≈ 2–4 токена/с) — при
+полной генерации поднимите `timeout` в секции `[ollama]` файла
+`ai-testgen.toml` (например, до 600 секунд). Для заметного ускорения на Mac
+поставьте родную сборку [Ollama](https://ollama.com/download) (Metal) и
+запускайте программу локально через uv/pip.
 
 Полезные варианты:
 
 ```bash
-docker compose up -d ollama          # LLM-сервис фоном (порт 11434)
-docker compose run --rm app -n 5     # разовая генерация с другим количеством
-OLLAMA_MODEL=llama3.1:8b docker compose up   # другая модель без правки файлов
+docker compose --profile standalone up -d ollama   # LLM-сервис фоном (порт 11434)
+docker compose run --rm app -n 5                   # разовая генерация с другим количеством
 ```
 
-- Модель хранится в именованном volume проекта (`<имя-каталога>_ollama_models`)
-  и переживает перезапуски; скачивается один раз.
-- Имя модели задаётся в `.env` (строка `OLLAMA_MODEL=...`) — Compose
-  автоматически читает этот файл из корня проекта и подставляет значение
-  вместо `${OLLAMA_MODEL}` в `compose.yaml` (environment обоих сервисов
-  и healthcheck). Тот же эффект даст переменная окружения при запуске.
-- Приложение ходит на ollama по внутренней сети compose (`http://ollama:11434`).
+- Модель хранится в общем volume `ohw_ollama_models` и переживает перезапуски;
+  скачивается один раз для всех проектов монорепо.
+- Имя модели для общего запуска задаётся в `infra/.env` (строка
+  `OLLAMA_MODEL=...`); для автономного (standalone) — в `.env` проекта.
+- Приложение ходит на общий ollama через `OLLAMA_BASE_URL`
+  (`http://host.docker.internal:11434` по умолчанию из `.env`). В автономном
+  режиме ollama публикует тот же порт `11434` на хост, поэтому адрес не меняется.
 
 ## Конфигурация
 
