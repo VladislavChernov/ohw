@@ -4,8 +4,18 @@ from pathlib import Path
 
 import pytest
 
+from api_testgen.config import Config
 from api_testgen.extractor import extract_code
 from api_testgen.prompt import load_prompt, resolve_prompt_path
+
+
+def test_config_default_base_url_is_localhost():
+    assert Config().ollama_base_url == "http://localhost:11434"
+
+
+def test_config_from_env_override(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+    assert Config.from_env().ollama_base_url == "http://host.docker.internal:11434"
 
 
 def test_load_prompt_missing_file(tmp_path):

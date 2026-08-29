@@ -10,6 +10,7 @@ async def generate_code(
     model: str,
     prompt: str,
     max_retries: int = 3,
+    timeout: float = 600.0,
 ) -> str:
     """Send prompt to Ollama and return generated Python code.
 
@@ -29,7 +30,7 @@ async def generate_code(
     last_error: Exception | None = None
     for attempt in range(1, max_retries + 1):
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
@@ -45,4 +46,5 @@ async def generate_code(
 
             await asyncio.sleep(2 * attempt)
 
-    raise RuntimeError(f"Ollama generation failed after {max_retries} attempts: {last_error}")
+    detail = f"{type(last_error).__name__}: {last_error}" if last_error else "unknown error"
+    raise RuntimeError(f"Ollama generation failed after {max_retries} attempts ({detail})")
