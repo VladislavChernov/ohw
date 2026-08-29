@@ -29,6 +29,7 @@ api-testgen [опции]
   --output-dir DIR    Папка для сгенерированных файлов (по умолчанию: ./output)
   --target-url URL    URL целевого API (по умолчанию: https://jsonplaceholder.typicode.com)
   --max-retries N     Макс. попыток генерации (по умолчанию: 3)
+  --input-dir DIR     Папка с шаблоном промпта (input/prompt.txt)
   --no-run            Только сгенерировать, не запускать pytest
   --save-prompt       Сохранить промпт в файл (для отладки)
 ```
@@ -53,6 +54,7 @@ simple/
 │   ├── runner.py       Запуск pytest
 │   └── models.py       Модели данных
 ├── tests/              Unit-тесты
+├── input/              Шаблон промпта (input/prompt.txt) для отправки в Ollama
 ├── output/             Сгенерированные файлы (git-ignored)
 ├── compose.yaml        Docker Compose
 ├── Dockerfile

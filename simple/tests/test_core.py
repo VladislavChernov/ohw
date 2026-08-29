@@ -20,8 +20,31 @@ def test_parse_endpoints_skips_non_http():
 
 
 def test_build_prompt_contains_base_url():
-    prompt = build_prompt([], "https://example.com")
+    template = "API base URL: {base_url}\n{endpoints}"
+    prompt = build_prompt(template, [], "https://example.com")
     assert "https://example.com" in prompt
+    assert "{base_url}" not in prompt
+    assert "{endpoints}" not in prompt
+
+
+def test_load_prompt_template_missing_file(tmp_path):
+    from api_testgen.prompt import load_prompt_template
+
+    missing_dir = tmp_path / "input"
+    try:
+        load_prompt_template(missing_dir)
+        assert False, "should raise FileNotFoundError"
+    except FileNotFoundError:
+        pass
+
+
+def test_load_prompt_template_reads_file(tmp_path):
+    from api_testgen.prompt import load_prompt_template
+
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "prompt.txt").write_text("Hello {base_url}", encoding="utf-8")
+    assert load_prompt_template(input_dir) == "Hello {base_url}"
 
 
 def test_extract_code_from_fences():

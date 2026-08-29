@@ -1,41 +1,23 @@
-"""Prompt builder for LLM."""
+"""Prompt loader — reads template from a file in the input directory."""
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from api_testgen.models import Endpoint
 
 
-def build_prompt(endpoints: list[Endpoint], base_url: str) -> str:
-    """Build prompt asking LLM to generate pytest tests.
+def load_prompt_template(input_dir: Path) -> str:
+    """Read the prompt template from input/prompt.txt."""
+    path = input_dir / "prompt.txt"
+    if not path.exists():
+        raise FileNotFoundError(f"Prompt file not found: {path}")
+    return path.read_text(encoding="utf-8")
 
-    The prompt includes the OpenAPI spec and asks for 4 tests (one per CRUD type).
-    """
-    endpoints_desc = _format_endpoints(endpoints)
 
-    return f"""You are a senior QA engineer. Generate exactly 4 pytest test functions
-for the following REST API. Use the `requests` library.
-
-API base URL: {base_url}
-
-API Endpoints:
-{endpoints_desc}
-
-Requirements:
-- Generate exactly 4 test functions, one for each CRUD operation:
-  1. CREATE (POST) — create a new resource
-  2. READ (GET) — get an existing resource
-  3. UPDATE (PUT) — update an existing resource
-  4. DELETE (DELETE) — delete a resource
-- Pick the most appropriate endpoint for each operation from the spec above.
-- Each test MUST check:
-  - The HTTP status code is correct (based on the spec responses)
-  - The response body contains the expected fields and types
-- Use realistic test data based on the request body schemas.
-- Do NOT use fixtures or helpers — each test must be self-contained.
-- Output ONLY valid Python code, no markdown fences, no commentary.
-- Each test function must start with `def test_` (pytest convention).
-- Import `requests` at the top of the file.
-"""
+def build_prompt(template: str, endpoints: list[Endpoint], base_url: str) -> str:
+    """Fill the prompt template with the base URL and endpoint list."""
+    return template.format(base_url=base_url, endpoints=_format_endpoints(endpoints))
 
 
 def _format_endpoints(endpoints: list[Endpoint]) -> str:
