@@ -1,0 +1,48 @@
+name: ohw-infra
+
+# Shared ollama for the whole homework monorepo (ohw). One service, one model
+# volume (ohw_ollama_models) reused by every project so the model is downloaded once.
+#
+#   docker compose -f infra/compose.yaml up -d       # start once / after reboot
+#   docker compose -f infra/compose.yaml logs -f      # server logs
+#   docker compose -f infra/compose.yaml stop         # free port 11434 before a standalone run
+#   docker compose -f infra/compose.yaml restart ollama # after editing OLLAMA_MODEL in .env
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ohw-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+    volumes:
+      - ollama_models:/root/.ollama
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ollama serve &
+        server=$$!
+        until ollama ls >/dev/null 2>&1; do sleep 1; done
+        if ollama ls | awk '{print $$1}' | grep -Fxq "$$OLLAMA_MODEL"; then
+          echo "model ready: $$OLLAMA_MODEL"
+        else
+          echo "pulling '$$OLLAMA_MODEL' (one-time download)..."
+          until ollama pull "$$OLLAMA_MODEL"; do
+            echo "pull failed, retrying in 5s..."
+            sleep 5
+          done
+        fi
+        wait $$server
+    healthcheck:
+      test: ["CMD-SHELL", "ollama show \"$$OLLAMA_MODEL\" >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 15s
+
+volumes:
+  ollama_models:
+    name: ohw_ollama_models
