@@ -1,5 +1,6 @@
 services:
   ollama:
+    profiles: ["standalone"]
     image: ollama/ollama:latest
     restart: unless-stopped
     ports:
@@ -19,7 +20,10 @@ services:
           echo "model ready: $$OLLAMA_MODEL"
         else
           echo "pulling '$$OLLAMA_MODEL' (one-time download)..."
-          ollama pull "$$OLLAMA_MODEL"
+          until ollama pull "$$OLLAMA_MODEL"; do
+            echo "pull failed, retrying in 5s..."
+            sleep 5
+          done
         fi
         wait $$server
     healthcheck:
@@ -34,7 +38,7 @@ services:
     restart: "no"
     command: ["--count", "10"]
     environment:
-      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
     volumes:
       - ./input:/data/input
@@ -42,6 +46,10 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
+        required: false
 
 volumes:
   ollama_models:
+    external: true
+    name: ohw_ollama_models
+
