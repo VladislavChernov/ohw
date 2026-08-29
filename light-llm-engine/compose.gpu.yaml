@@ -1,5 +1,5 @@
 # GPU override: NVIDIA CUDA. Use as:
-#   docker compose -f compose.yaml -f compose.gpu.yaml up --build
+#   docker compose --profile standalone -f compose.yaml -f compose.gpu.yaml up --build
 services:
   ollama:
     deploy:

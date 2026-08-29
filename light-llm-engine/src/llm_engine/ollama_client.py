@@ -20,7 +20,7 @@ class OllamaClient:
         self,
         base_url: str = DEFAULT_BASE_URL,
         model: str = "",
-        timeout: float = 120.0,
+        timeout: float = 300.0,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")

@@ -7,7 +7,9 @@ from typing import cast
 
 from llm_engine.ollama_client import DEFAULT_BASE_URL
 
-DEFAULT_TIMEOUT = 120.0
+# Generous by design: with stream=False ollama returns the full reply only
+# after loading the model into RAM (a 7B model on CPU can take minutes).
+DEFAULT_TIMEOUT = 300.0
 CONFIG_FILE_NAME = "light-llm-engine.toml"
 
 

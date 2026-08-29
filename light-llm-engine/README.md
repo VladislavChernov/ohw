@@ -34,19 +34,43 @@ uv run python -m llm_engine --input-dir custom --output-dir out --model qwen2.5:
 
 ### В Docker Compose
 
+**Вариант 1 — совместно с единым ollama (рекомендуется для домашек).**
+Один `ollama` с моделью кэшируется в общем volume `ohw_ollama_models` и
+переиспользуется всеми проектами монорепо — модель скачивается один раз.
+
 ```bash
+# один раз — стартуем общий сервис
+cd d:/Otus/ohw
+docker compose -f infra/compose.yaml up -d
+
+# в каталоге проекта — ТОЛЬКО приложение (ollama уже запущен выше)
+cd d:/Otus/ohw/light-llm-engine
 docker compose up --build --abort-on-container-exit
 ```
 
-Движок и ollama поднимаются вместе: модель скачивается один раз (volume
-`ollama_models`), приложение стартует только после готовности модели
-(healthcheck), файлы монтируются из `./input` и `./output`. Флаг
-`--abort-on-container-exit` гасит compose, когда приложение закончило работу.
+Приложение ждёт готовности модели (healthcheck); `./input` и `./output`
+монтируются как volume, `--abort-on-container-exit` гасит compose, когда
+работа завершена. Сменить модель — `OLLAMA_MODEL=` в `infra/.env` +
+`docker compose -f infra/compose.yaml restart ollama`.
 
-Сменить модель — правьте `OLLAMA_MODEL` в `.env` (или переопределите при
-запуске: `$env:OLLAMA_MODEL="llama3.2:3b"; docker compose up`).
+**Вариант 2 — автономно (самодостаточно для проверки/сдачи).**
+Поднимает `ollama` вместе с приложением в отдельном volume
+(`ohw_ollama_models`) — удобно, когда общий сервис не удалось запустить
+(например, ghcr.io недоступен). Требует остановки `ohw-ollama`, иначе
+конфликт порта `11434`.
 
-GPU (NVIDIA): `docker compose -f compose.yaml -f compose.gpu.yaml up --build`.
+```bash
+docker compose -f infra/compose.yaml stop          # освободить порт
+docker compose --profile standalone up --build --abort-on-container-exit
+```
+
+GPU (NVIDIA): добавьте `compose.gpu.yaml` поверх `compose.yaml` и включите
+профиль standalone:
+
+```bash
+docker compose -f infra/compose.yaml stop
+docker compose --profile standalone -f compose.yaml -f compose.gpu.yaml up --build
+```
 
 ## Конфигурация
 
