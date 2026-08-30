@@ -31,3 +31,18 @@ IMPORTANT about writes (create/update/delete):
 - Output ONLY valid Python code, no markdown fences, no commentary.
 - Every test function must start with `def test_` (pytest convention).
 - Import `requests` at the top of the file.
+
+Test quality requirements (IMPORTANT):
+- Every `assert` MUST include a human-readable message after the condition:
+  `assert <condition>, "<what exactly failed and what was expected>"`.
+- Split each scenario into separate, individually named asserts — one for the
+  status code, one for the body schema, one for the semantics. Do NOT combine
+  everything into one giant assert.
+- Every test function MUST have a docstring (one line: what it verifies).
+- Name tests descriptively by intent, e.g. `test_list_posts_returns_100_items`,
+  not `test_1`.
+- For list endpoints, remember the response is a JSON ARRAY (do not wrap it in
+  a dict check); verify it is a non-empty list and items have the documented fields.
+- Avoid printing/dumping whole response payloads in messages: reference short
+  values (status code, item count, field names) instead.
+- Prefer `response.status_code == expected` checks with explicit expected codes.
