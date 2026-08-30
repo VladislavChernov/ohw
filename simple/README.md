@@ -5,16 +5,17 @@
 ## Требования
 
 - Python 3.13+, uv
-- Docker (для shared ollama из `ohw/infra/`)
+- Docker (для shared ollama из каталога `infra/`)
 
 ## Быстрый старт
 
-```bash
-# 1. Убедитесь, что shared ollama запущен
-cd ../infra && docker compose up -d
-cd ../dz3/simple
+```powershell
+# 1. Поднимаем нужные компоненты инфраструктуры (читает simple/infra.yaml)
+cd <local-path>
+.\up.ps1 -Project <local-path>
 
 # 2. Установить зависимости
+cd <local-path>
 uv sync --dev
 
 # 3. Положить промпт в input/prompt.txt (см. примеры в examples/input/)
@@ -51,7 +52,18 @@ api-testgen [опции]
 
 ## Docker
 
-```bash
+Проект использует **общую инфраструктуру** из каталога
+[`infra/`](../infra/README.md): компоненты (сейчас — `ollama`) описываются
+один раз в [`infra/compose.yaml`](../infra/compose.yaml). Объявление проекта —
+в [`infra.yaml`](infra.yaml): `components: [ollama]`.
+
+```powershell
+# 1. поднять нужные компоненты (ollama) в общей сети ohw_net
+cd <local-path>
+.\up.ps1 -Project <local-path>
+
+# 2. только приложение (сервис app на сети ohw_net)
+cd <local-path>
 docker compose up --build app
 ```
 
