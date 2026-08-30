@@ -28,6 +28,50 @@ def _parse_counts(stdout: str) -> tuple[int, int, int]:
     return stdout.count("PASSED"), stdout.count("FAILED"), stdout.count("ERROR")
 
 
+_FAIL_LINE_RE = re.compile(r"^FAILED\s+(\S+)\s*-\s*(.*)$")
+
+
+def _parse_failures(stdout: str) -> list[tuple[str, str]]:
+    """Extract (test node, short reason) pairs from the short summary block."""
+    failures = []
+    in_summary = False
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("=== short test summary"):
+            in_summary = True
+            continue
+        if in_summary:
+            m = _FAIL_LINE_RE.match(stripped)
+            if m:
+                failures.append((m.group(1), m.group(2).strip()))
+    return failures
+
+
+def _humanize_reason(reason: str, limit: int = 220) -> str:
+    """Make a pytest failure reason readable: strip noise, truncate values."""
+    reason = re.sub(r"^AssertionError:\s*", "assert failed: ", reason)
+    if len(reason) > limit:
+        reason = reason[:limit].rsplit(" ", 1)[0] + " …(truncated)"
+    return reason
+
+
+def _failed_tests_section(results: dict) -> list[str]:
+    """Human-readable 'Failed tests' block; one bullet per failure."""
+    failures = _parse_failures(results.get("stdout", ""))
+    if not failures:
+        return []
+    lines = ["## Failed tests", ""]
+    for node, reason in failures:
+        short_node = node.split("::")[-1].replace("output/generated_tests.py::", "")
+        lines.append(f"- **`{short_node}`** — {_humanize_reason(reason)}")
+    lines += [
+        "",
+        "Full tracebacks with payloads are in the [Pytest output](#pytest-output) appendix.",
+        "",
+    ]
+    return lines
+
+
 def run_pytest(test_file: Path) -> dict:
     """Run pytest on the given file and return structured results."""
     result = subprocess.run(  # noqa: PLW1510
@@ -96,6 +140,10 @@ def format_report_markdown(results: dict) -> str:
         f"- **Result:** `{status}`",
         f"- **Test file:** `{results['file']}`",
         f"- **Exit code:** `{results['exit_code']}`",
+    ]
+    if results.get("model"):
+        md.append(f"- **Model:** `{results['model']}`")
+    md += [
         "",
         "## Summary",
         "",
@@ -107,6 +155,7 @@ def format_report_markdown(results: dict) -> str:
         f"| Errors | {results['errors']} |",
         "",
     ]
+    md += _failed_tests_section(results)
     if results["stdout"]:
         md += [
             "## Pytest output",
