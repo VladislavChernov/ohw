@@ -1,19 +1,19 @@
-# Tasks: harden-testgen-run
+# tasks.md — harden-testgen-run
 
-## 1. Reporting
+## 1. Отчёты
 
-- [x] 1.1 Parse pytest summary line (`N passed, M failed, E errors`) in `runner.run_pytest`; fallback to substring counts
-- [x] 1.2 Add `-p no:cacheprovider` to pytest args
-- [x] 1.3 Tests: summary-line parsing (with duplicated FAILED in short summary), fallback
+- [x] 1.1 Парсинг итоговой строки pytest (`N passed, M failed, E errors`) в `runner.run_pytest`; fallback на подсчёт подстрок
+- [x] 1.2 Добавлен `-p no:cacheprovider` в аргументы pytest
+- [x] 1.3 Тесты: парсинг итоговой строки (с дублированием FAILED в short summary), fallback
 
-## 2. Coverage validation + feedback loop
+## 2. Валидация покрытия + feedback-луп
 
-- [x] 2.1 New `validator.py`: `find_missing(code, required) -> list[str]`
-- [x] 2.2 `ollama.generate_code` accepts optional validator; on missing coverage resends with feedback
+- [x] 2.1 Новый `validator.py`: `find_missing(code, required) -> list[str]`
+- [x] 2.2 `ollama.generate_code` принимает опциональный валидатор; при неполном покрытии повторная отправка с фидбеком
 - [x] 2.3 Config/CLI: `--required-markers` (env `REQUIRED_MARKERS`), `--temperature`, `--num-predict`, `--seed`
-- [x] 2.4 Tests: missing-marker detection, feedback payload built
+- [x] 2.4 Тесты: обнаружение недостающих маркеров, формирование фидбека
 
-## 3. Docs / infra shutdown
+## 3. Документация / выключение infra
 
-- [x] 3.1 README: `infra/down.ps1` after a run; sampling flags documented
-- [x] 3.2 Unit suite green
+- [x] 3.1 README: `infra/down.ps1` после прогона; описаны флаги семплирования
+- [x] 3.2 Юнит-тесты зелёные
