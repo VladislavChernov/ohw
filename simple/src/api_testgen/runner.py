@@ -37,7 +37,7 @@ def _parse_failures(stdout: str) -> list[tuple[str, str]]:
     in_summary = False
     for line in stdout.splitlines():
         stripped = line.strip()
-        if stripped.startswith("=== short test summary"):
+        if "short test summary" in stripped and stripped.startswith("="):
             in_summary = True
             continue
         if in_summary:

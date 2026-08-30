@@ -162,7 +162,7 @@ def test_parse_failures_from_short_summary():
 
     stdout = (
         "test_a PASSED\n"
-        "=== short test summary info ===\n"
+        "=========================== short test summary info ============================\n"
         "FAILED output/generated_tests.py::test_list_posts - AssertionError: assert 'p...\n"
         "=== 1 failed, 5 passed in 5.29s ===\n"
     )
@@ -176,7 +176,7 @@ def test_failed_tests_section_is_human_readable():
 
     big_payload = "x" * 500
     stdout = (
-        "=== short test summary info ===\n"
+        "=========================== short test summary info ============================\n"
         f"FAILED output/generated_tests.py::test_list_posts - AssertionError: assert 'posts' in [{big_payload}]\n"
     )
     results = {
