@@ -25,9 +25,8 @@ uv run api-testgen
 
 ## Папка input/
 
-По аналогии с DZ2:
-
-- `input/` — рабочая папка (git-ignored). Сюда кладёшь файл промпта `prompt.txt`, который уйдёт на сервер Ollama.
+- `input/` — рабочая папка (**в git** — чтобы показать результат). Сюда кладёшь файл промпта `prompt.txt`, который уйдёт на сервер Ollama.
+- `output/` — сюда падают сгенерированные тесты и отчёт прогона (`report.md`), тоже **в git**.
 - `examples/input/` — шаблоны и примеры (в репозитории):
   - `prompt-template.txt` — общий шаблон промпта (LLM сама решает, какие эндпоинты проверять).
   - `jsonplaceholder.txt` — конкретный запрос для https://jsonplaceholder.typicode.com/guide/ (с учётом того, что create/update/delete «фейковые»).
@@ -117,15 +116,23 @@ simple/
 │   ├── cli.py          CLI + пайплайн
 │   ├── config.py       Конфигурация из .env
 │   ├── prompt.py       Загрузка промпта из файла
-│   ├── ollama.py       Клиент Ollama
+│   ├── ollama.py       Клиент Ollama + feedback-луп покрытия
+│   ├── validator.py    Валидатор покрытия (обязательные маркеры)
 │   ├── extractor.py    Извлечение кода из ответа LLM
-│   ├── runner.py       Запуск pytest
+│   ├── runner.py       Запуск pytest + markdown-отчёт
 │   └── models.py       Модели данных
 ├── tests/              Unit-тесты
 ├── examples/input/     Шаблоны и примеры промптов (в репо)
-├── input/              Рабочая папка с промптами (git-ignored)
-├── output/             Сгенерированные файлы (git-ignored)
+├── input/              Рабочая папка с промптами (в git)
+├── output/             Сгенерированные тесты + отчёт (в git)
 ├── compose.yaml        Docker Compose
 ├── Dockerfile
-└── .devcontainer/      Dev Container
+└── .devcontainer/      Dev Container (python 3.13 + uv + docker-outside-of-docker)
 ```
+
+## Dev Container
+
+`.devcontainer/` рабочий: python 3.13 + uv + доступ к docker хоста
+(`docker-outside-of-docker`). Открывается из VS Code («Reopen in Container»);
+внутри контейнера `docker` команды идут к демону хоста, поэтому shared-ollama
+и `docker compose up` работают как с хоста.
