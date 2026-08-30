@@ -154,7 +154,67 @@ def test_parse_counts_fallback_without_summary():
     assert _parse_counts(stdout) == (2, 1, 0)
 
 
-# --- coverage validator ------------------------------------------------
+# --- failure report humanization --------------------------------------
+
+
+def test_parse_failures_from_short_summary():
+    from api_testgen.runner import _parse_failures
+
+    stdout = (
+        "test_a PASSED\n"
+        "=== short test summary info ===\n"
+        "FAILED output/generated_tests.py::test_list_posts - AssertionError: assert 'p...\n"
+        "=== 1 failed, 5 passed in 5.29s ===\n"
+    )
+    assert _parse_failures(stdout) == [
+        ("output/generated_tests.py::test_list_posts", "AssertionError: assert 'p...")
+    ]
+
+
+def test_failed_tests_section_is_human_readable():
+    from api_testgen.runner import format_report_markdown
+
+    big_payload = "x" * 500
+    stdout = (
+        "=== short test summary info ===\n"
+        f"FAILED output/generated_tests.py::test_list_posts - AssertionError: assert 'posts' in [{big_payload}]\n"
+    )
+    results = {
+        "file": "output/generated_tests.py",
+        "exit_code": 1,
+        "passed": 5,
+        "failed": 1,
+        "errors": 0,
+        "total": 6,
+        "stdout": stdout,
+        "stderr": "",
+        "model": "qwen2.5:7b-instruct",
+    }
+    md = format_report_markdown(results)
+    assert "## Failed tests" in md
+    assert "**`test_list_posts`**" in md
+    assert "assert failed:" in md
+    assert "…(truncated)" in md
+    assert "- **Model:** `qwen2.5:7b-instruct`" in md
+    assert big_payload not in md.split("## Pytest output")[0].split("## Failed tests")[1]
+
+
+def test_no_failed_section_when_all_passed():
+    from api_testgen.runner import format_report_markdown
+
+    results = {
+        "file": "output/generated_tests.py",
+        "exit_code": 0,
+        "passed": 6,
+        "failed": 0,
+        "errors": 0,
+        "total": 6,
+        "stdout": "6 passed in 1.00s\n",
+        "stderr": "",
+    }
+    md = format_report_markdown(results)
+    assert "## Failed tests" not in md
+
 
 
 def test_find_missing_markers():

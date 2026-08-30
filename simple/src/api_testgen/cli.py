@@ -109,6 +109,7 @@ def main() -> None:
 
     print("[4/4] Running pytest...")
     results = run_pytest(test_file)
+    results["model"] = config.ollama_model
     print(f"  Report saved to {save_report(results, Path(config.output_dir))}")
     report = format_report(results)
     print(report)
