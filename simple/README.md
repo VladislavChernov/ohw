@@ -64,6 +64,21 @@ App-образ наследуется от общего базового `ohw-py
 powershell -File D:/Otus/infra/python/build.ps1
 ```
 
+Сеть: сервис `app` ходит к ollama по внутренней сети `ohw_net`
+(`http://ohw-ollama:11434`) и **имеет доступ в интернет** — сгенерированные
+тесты обращаются к внешнему API (`jsonplaceholder.typicode.com`).
+
+GPU-ускорение ollama (NVIDIA/AMD) — оверлеи задаются при запуске инфры:
+
+```powershell
+cd d:/Otus/infra
+.\up.ps1 -Project D:\Otus\Dz3\simple -Gpu    # NVIDIA CUDA
+.\up.ps1 -Project D:\Otus\Dz3\simple -Amd    # AMD ROCm
+```
+
+Без флага инференс идёт на CPU (медленно, qwen2.5:7b ≈ 2–4 ток/с). Модельный
+volume общий — при переключении CPU↔GPU модель повторно не скачивается.
+
 ```powershell
 # 1. поднять нужные компоненты (ollama) в общей сети ohw_net
 cd d:/Otus/infra
@@ -73,6 +88,26 @@ cd d:/Otus/infra
 cd d:/Otus/Dz3/simple
 docker compose up --build app
 ```
+
+## После прогона: выключение ollama
+
+Shared-ollama продолжает работать после генерации (это общая инфраструктура, проект ею не владеет). По завершении работы останавливайте её явно:
+
+```powershell
+cd D:\Otus\infra
+.\down.ps1          # docker compose down всей инфраструктуры каталога
+```
+
+Модель также выгружается из VRAM сама после ~5 минут простоя (ollama `keep_alive`), так что забытый контейнер ничего не тратит, кроме памяти.
+
+## Опции семплирования LLM
+
+| Флаг | Env | По умолчанию | Смысл |
+|---|---|---|---|
+| `--temperature` | `OLLAMA_TEMPERATURE` | `0.3` | температура семплирования |
+| `--num-predict` | `OLLAMA_NUM_PREDICT` | `4096` | максимум генерируемых токенов |
+| `--seed` | `OLLAMA_SEED` | — | фиксированный seed → воспроизводимая генерация |
+| `--required-markers` | `REQUIRED_MARKERS` | `GET,POST,PUT,PATCH,DELETE` | контракт покрытия: ответ без любого маркера отклоняется, модели уходит фидбек «не хватает X — перегенерируй» в рамках retry-бюджета |
 
 ## Структура
 
