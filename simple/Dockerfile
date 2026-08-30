@@ -1,20 +1,19 @@
-FROM python:3.13-slim-bookworm AS builder
-RUN pip install --no-cache-dir uv
+# Base image (built once via D:\Otus\infra\python\build.ps1):
+# python:3.13-slim-bookworm + uv + unprivileged user `app`.
+FROM ohw-python:3.13 AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
 
 WORKDIR /app
 
-COPY README.md pyproject.toml ./
+COPY README.md pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-install-project --no-dev
 
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-editable
 
-FROM python:3.13-slim-bookworm
-
-RUN groupadd -r app && useradd -r -g app app
+FROM ohw-python:3.13
 
 WORKDIR /data
 COPY --from=builder /app/.venv /app/.venv

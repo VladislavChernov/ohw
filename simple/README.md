@@ -57,6 +57,13 @@ api-testgen [опции]
 один раз в [`infra/compose.yaml`](../infra/compose.yaml). Объявление проекта —
 в [`infra.yaml`](infra.yaml): `components: [ollama]`.
 
+App-образ наследуется от общего базового `ohw-python:3.13`
+(`python:3.13-slim` + `uv` + юзер `app`). Он собирается один раз:
+
+```powershell
+powershell -File D:/Otus/infra/python/build.ps1
+```
+
 ```powershell
 # 1. поднять нужные компоненты (ollama) в общей сети ohw_net
 cd d:/Otus/infra
