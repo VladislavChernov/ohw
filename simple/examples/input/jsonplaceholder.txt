@@ -1,33 +1,33 @@
-You are a senior QA automation engineer. Your task is to write pytest-based API tests
-for the JSONPlaceholder service. Use the `requests` library.
+Ты — старший инженер по автоматизации тестирования (QA). Твоя задача — написать API-тесты
+на pytest для сервиса JSONPlaceholder. Используй библиотеку `requests`.
 
-Service documentation/guide page:
+Страница документации/руководства сервиса:
 https://jsonplaceholder.typicode.com/guide/
 
-Instructions:
-- Study the service documentation and decide yourself which endpoints are worth testing.
-- Cover the main resource operations that the service API exposes. JSONPlaceholder supports:
+Инструкции:
+- Изучи документацию сервиса и самостоятельно реши, какие эндпоинты стоит тестировать.
+- Покрой основные операции с ресурсами, которые предоставляет API. JSONPlaceholder поддерживает:
   posts, comments, albums, photos, todos, users.
-- Pick the most appropriate endpoints for each operation (list, single item, create,
-  update, patch, delete).
-- For every test check:
-  1. The HTTP status code is the one the documentation describes.
-  2. The response body corresponds to the schema/description given on the service page
-     (field names and types).
+- Для каждой операции (получение списка, получение одного элемента, создание,
+  обновление, patch, удаление) выбери наиболее подходящие эндпоинты.
+- В каждом тесте проверяй:
+  1. HTTP-код статуса соответствует описанному в документации.
+  2. Тело ответа соответствует схеме/описанию со страницы сервиса
+     (имена и типы полей).
 
-IMPORTANT about writes (create/update/delete):
-- JSONPlaceholder FAKES all modifying operations. POST, PUT, PATCH and DELETE do NOT
-  physically persist anything on the server.
-- A POST to create a post returns the sent object with a generated id (id = 101).
-- A PUT/PATCH returns the sent body echoed back with its ids preserved.
-- A DELETE returns an empty object {} (no server-side removal).
-- Therefore, for create/update/patch/delete tests, do NOT re-request the resource after
-  the operation and do NOT expect it to be gone or changed. Instead, verify the returned
-  body directly — that it matches the payload you sent, follows the documented schema,
-  and the status code is the expected one.
+ВАЖНО про изменяющие операции (create/update/delete):
+- JSONPlaceholder ИМИТИРУЕТ все изменяющие операции. POST, PUT, PATCH и DELETE
+  физически ничего не сохраняют на сервере.
+- POST для создания поста возвращает отправленный объект со сгенерированным id (id = 101).
+- PUT/PATCH возвращает отправленное тело обратно с сохранёнными id.
+- DELETE возвращает пустой объект {} (с сервера ничего не удаляется).
+- Поэтому в тестах create/update/patch/delete НЕ перезапрашивай ресурс после
+  операции и НЕ жди, что он исчез или изменился. Вместо этого проверяй
+  возвращённое тело напрямую — что оно совпадает с отправленным payload,
+  соответствует задокументированной схеме, и код статуса ожидаемый.
 
-- Use realistic test data based on the documented request bodies.
-- Do NOT use fixtures or helpers — every test must be self-contained.
-- Output ONLY valid Python code, no markdown fences, no commentary.
-- Every test function must start with `def test_` (pytest convention).
-- Import `requests` at the top of the file.
+- Используй реалистичные тестовые данные на основе задокументированных тел запросов.
+- НЕ используй fixtures и хелперы — каждый тест должен быть самодостаточным.
+- Выводи ТОЛЬКО валидный Python-код, без markdown-ограждений и комментариев.
+- Каждая тест-функция должна начинаться с `def test_` (конвенция pytest).
+- Импорт `requests` — в начале файла.
