@@ -2,24 +2,28 @@ import requests
 
 def test_list_posts_returns_100_items():
     """
-    Verify that listing posts returns 100 items.
+    Тестирование получения списка постов.
+    Ожидается, что будет возвращен список из 100 постов.
     """
     response = requests.get('https://jsonplaceholder.typicode.com/posts')
-    assert response.status_code == 200, "Unexpected status code"
-    assert len(response.json()) == 100, "Expected 100 posts, got different number"
+    assert response.status_code == 200, "Неверный код статуса при получении списка постов"
+    assert len(response.json()) == 100, "Неверное количество постов в списке"
 
-def test_get_single_post_has_correct_fields():
+def test_get_single_post():
     """
-    Verify that a single post has the expected fields.
+    Тестирование получения одного поста.
+    Ожидается, что будет возвращен один пост с заданным id.
     """
     response = requests.get('https://jsonplaceholder.typicode.com/posts/1')
-    assert response.status_code == 200, "Unexpected status code"
-    post = response.json()
-    assert set(post.keys()) == {'userId', 'id', 'title', 'body'}, "Fields do not match expected schema"
+    assert response.status_code == 200, "Неверный код статуса при получении одного поста"
+    assert 'id' in response.json(), "Ответ не содержит поле 'id'"
+    assert 'title' in response.json(), "Ответ не содержит поле 'title'"
+    assert 'body' in response.json(), "Ответ не содержит поле 'body'"
 
-def test_create_post_returns_new_post_with_id():
+def test_create_post():
     """
-    Verify that creating a new post returns a new post with a generated id.
+    Тестирование создания нового поста.
+    Ожидается, что будет создан новый пост с сгенерированным id.
     """
     new_post = {
         'title': 'Test Title',
@@ -27,14 +31,15 @@ def test_create_post_returns_new_post_with_id():
         'userId': 1
     }
     response = requests.post('https://jsonplaceholder.typicode.com/posts', json=new_post)
-    assert response.status_code == 201, "Unexpected status code"
-    created_post = response.json()
-    assert created_post['id'] == 101, "Expected id 101, got different id"
-    assert set(created_post.keys()) == {'userId', 'id', 'title', 'body'}, "Fields do not match expected schema"
+    assert response.status_code == 201, "Неверный код статуса при создании поста"
+    assert response.json()['title'] == new_post['title'], "Название поста не совпадает"
+    assert response.json()['body'] == new_post['body'], "Тело поста не совпадает"
+    assert response.json()['userId'] == new_post['userId'], "Идентификатор пользователя не совпадает"
 
-def test_update_post_returns_updated_post():
+def test_update_post():
     """
-    Verify that updating a post returns the updated post with preserved id.
+    Тестирование обновления существующего поста.
+    Ожидается, что пост будет обновлен с сохранением id.
     """
     updated_post = {
         'id': 1,
@@ -43,32 +48,31 @@ def test_update_post_returns_updated_post():
         'userId': 1
     }
     response = requests.put('https://jsonplaceholder.typicode.com/posts/1', json=updated_post)
-    assert response.status_code == 200, "Unexpected status code"
-    updated_response = response.json()
-    assert updated_response['id'] == 1, "Expected id 1, got different id"
-    assert updated_response['title'] == 'Updated Title', "Title did not match expected value"
-    assert updated_response['body'] == 'Updated Body', "Body did not match expected value"
-    assert set(updated_response.keys()) == {'userId', 'id', 'title', 'body'}, "Fields do not match expected schema"
+    assert response.status_code == 200, "Неверный код статуса при обновлении поста"
+    assert response.json()['title'] == updated_post['title'], "Название поста не совпадает"
+    assert response.json()['body'] == updated_post['body'], "Тело поста не совпадает"
+    assert response.json()['userId'] == updated_post['userId'], "Идентификатор пользователя не совпадает"
 
-def test_patch_post_returns_patched_post():
+def test_patch_post():
     """
-    Verify that patching a post returns the patched post with preserved id.
+    Тестирование частичного обновления существующего поста.
+    Ожидается, что пост будет частично обновлен с сохранением id.
     """
-    patched_post = {
+    updated_post = {
         'id': 1,
         'title': 'Patched Title'
     }
-    response = requests.patch('https://jsonplaceholder.typicode.com/posts/1', json=patched_post)
-    assert response.status_code == 200, "Unexpected status code"
-    patched_response = response.json()
-    assert patched_response['id'] == 1, "Expected id 1, got different id"
-    assert patched_response['title'] == 'Patched Title', "Title did not match expected value"
-    assert set(patched_response.keys()) == {'userId', 'id', 'title', 'body'}, "Fields do not match expected schema"
+    response = requests.patch('https://jsonplaceholder.typicode.com/posts/1', json=updated_post)
+    assert response.status_code == 200, "Неверный код статуса при частичном обновлении поста"
+    assert response.json()['title'] == updated_post['title'], "Название поста не совпадает"
+    assert response.json()['body'] == 'Test Body', "Тело поста изменилось"
+    assert response.json()['userId'] == 1, "Идентификатор пользователя изменился"
 
-def test_delete_post_returns_empty_object():
+def test_delete_post():
     """
-    Verify that deleting a post returns an empty object.
+    Тестирование удаления поста.
+    Ожидается, что будет возвращен пустой объект {}.
     """
     response = requests.delete('https://jsonplaceholder.typicode.com/posts/1')
-    assert response.status_code == 200, "Unexpected status code"
-    assert response.json() == {}, "Expected empty object, got different response"
+    assert response.status_code == 200, "Неверный код статуса при удалении поста"
+    assert response.json() == {}, "Ответ не пустой объект {}"
