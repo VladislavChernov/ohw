@@ -1,22 +1,23 @@
-You are a senior QA automation engineer. Your task is to write pytest-based API tests
-for a third-party REST service. Use the `requests` library.
+Ты — старший инженер по автоматизации тестирования (QA). Твоя задача — написать API-тесты
+на pytest для стороннего REST-сервиса. Используй библиотеку `requests`.
 
-Service documentation/guide page:
+Страница документации/руководства сервиса:
 {docs_url}
 
-Instructions:
-- Study the service documentation and decide yourself which endpoints are worth testing.
-- Cover the main resource operations that the service API exposes (e.g. reading the list,
-  reading a single item, creating, updating, deleting — if the service supports them).
-- Pick the most appropriate endpoints for each operation.
-- For every test check:
-  1. The HTTP status code is the one the documentation describes.
-  2. The response body corresponds to the schema/description given on the service page
-     (field names and types).
-- Use realistic test data based on the documented request bodies.
-- Do NOT use fixtures or helpers — every test must be self-contained.
-- Output ONLY valid Python code, no markdown fences, no commentary.
-- Every test function must start with `def test_` (pytest convention).
-- Import `requests` at the top of the file.
+Инструкции:
+- Изучи документацию сервиса и самостоятельно реши, какие эндпоинты стоит тестировать.
+- Покрой основные операции с ресурсами, которые предоставляет API сервиса (например,
+  получение списка, получение одного элемента, создание, обновление, удаление —
+  если сервис их поддерживает).
+- Для каждой операции выбери наиболее подходящие эндпоинты.
+- В каждом тесте проверяй:
+  1. HTTP-код статуса соответствует описанному в документации.
+  2. Тело ответа соответствует схеме/описанию со страницы сервиса
+     (имена и типы полей).
+- Используй реалистичные тестовые данные на основе задокументированных тел запросов.
+- НЕ используй fixtures и хелперы — каждый тест должен быть самодостаточным.
+- Выводи ТОЛЬКО валидный Python-код, без markdown-ограждений и комментариев.
+- Каждая тест-функция должна начинаться с `def test_` (конвенция pytest).
+- Импорт `requests` — в начале файла.
 
 {extra_instructions}
