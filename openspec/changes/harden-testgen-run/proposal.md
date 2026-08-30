@@ -1,36 +1,37 @@
-# Proposal: harden test-run reporting, LLM feedback loop, sampling options, infra shutdown
+# Change: укрепление прогона тестов — отчёты, feedback-луп ЛЛМ, опции семплирования, выключение infra
 
-## Why
+## Почему
 
-E2E run on GPU exposed four issues:
+E2E-прогон на GPU выявил четыре проблемы:
 
-1. Report counts were parsed by counting `"PASSED"`/`"FAILED"` substrings in
-   pytest output — the `short test summary info` block duplicates `FAILED ...`
-   lines, so totals were wrong (reported 7/2 while pytest said 5/1).
-2. pytest tried to write `.pytest_cache` into the host-mounted `/data` volume
-   owned by root; the unprivileged `app` user got `Permission denied` warnings.
-3. The LLM sometimes "gets lazy": returns tests for only one resource or
-   misses HTTP verbs (e.g. asserted `"posts" in response.json()` for a list
-   endpoint). The pipeline accepted the first syntactically valid answer.
-4. Sampling (temperature, `num_predict`, seed) was hard-coded in `ollama.py`;
-   and after a run the shared ollama container keeps running with no
-   documented shutdown step.
+1. Счётчики в отчёте считались по количеству подстрок `"PASSED"`/`"FAILED"` в
+   выводе pytest — блок `short test summary info` дублирует строки `FAILED ...`,
+   из-за чего итог был неверным (отчёт говорил 7/2, pytest — 5/1).
+2. pytest пытался писать `.pytest_cache` в примонтированный с хоста volume
+   `/data`, принадлежащий root; непривилегированный юзер `app` получал
+   `Permission denied`.
+3. ЛЛМ иногда «ленится»: возвращает тесты только для одного ресурса или
+   пропускает HTTP-глаголы (например, `assert "posts" in response.json()` для
+   list-эндпоинта). Конвейер принимал первый синтаксически валидный ответ.
+4. Семплирование (temperature, `num_predict`, seed) было захардкожено в
+   `ollama.py`; а после прогона shared-ollama продолжала работать без
+   задокументированного способа выключения.
 
-## What Changes
+## Что меняется
 
-- `runner.py`: parse the pytest **summary line** (`N passed, M failed, E errors`)
-  with a regex; substring counts only as fallback. Add `-p no:cacheprovider`
-  to the pytest invocation (fixes cache permission warnings in containers).
-- New `validator.py`: coverage validation of the generated code against
-  required markers (default: HTTP verbs GET/POST/PUT/PATCH/DELETE; configurable).
-- `ollama.py`: feedback loop — when the response is missing required coverage,
-  the model is sent a follow-up prompt ("your previous answer is missing X,
-  regenerate the full file including it") within the retry budget.
-- `config.py` / `cli.py`: `--temperature`, `--num-predict`, `--seed`,
-  `--required-markers` options (env overrides supported).
-- README: documented ollama shutdown after a run (`infra/down.ps1`).
+- `runner.py`: парсинг **итоговой строки** pytest (`N passed, M failed, E errors`)
+  по регулярному выражению; подсчёт подстрок — только как fallback. В вызов
+  pytest добавлен `-p no:cacheprovider` (убирает cache-варнинги в контейнерах).
+- Новый `validator.py`: проверка покрытия сгенерированного кода обязательными
+  маркерами (по умолчанию HTTP-глаголы GET/POST/PUT/PATCH/DELETE; настраивается).
+- `ollama.py`: feedback-луп — если в ответе не хватает покрытия, модели
+  уходит повторный промпт («в твоём ответе не хватает X, перегенерируй полный
+  файл с учётом этого») в рамках retry-бюджета.
+- `config.py` / `cli.py`: опции `--temperature`, `--num-predict`, `--seed`,
+  `--required-markers` (с переопределением через env).
+- README: задокументировано выключение ollama после прогона (`infra/down.ps1`).
 
-## Impact
+## Влияние
 
-- Affected specs: `api-test-generator`
-- Affected code: `src/api_testgen/{runner,validator,ollama,config,cli}.py`, `tests/test_core.py`, README
+- Спеки: `api-test-generator`
+- Код: `src/api_testgen/{runner,validator,ollama,config,cli}.py`, `tests/test_core.py`, README
