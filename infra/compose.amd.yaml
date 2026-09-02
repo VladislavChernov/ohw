@@ -1,0 +1,12 @@
+# infra AMD overlay: ROCm build. Use as:
+#   .\up.ps1 -Project <path> -Amd
+# or:  docker compose -f compose.yaml -f compose.amd.yaml --profile ollama up -d
+services:
+  ollama:
+    image: ollama/ollama:rocm
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    group_add:
+      - video
+      - render

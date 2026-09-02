@@ -1,0 +1,12 @@
+# infra GPU overlay: NVIDIA CUDA. Use as:
+#   .\up.ps1 -Project <path> -Gpu
+# or:  docker compose -f compose.yaml -f compose.gpu.yaml --profile ollama up -d
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
