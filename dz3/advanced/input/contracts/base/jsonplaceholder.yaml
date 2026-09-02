@@ -1,0 +1,157 @@
+openapi: 3.0.0
+info:
+  title: JSONPlaceholder API
+  version: 1.0.0
+servers:
+  - url: https://jsonplaceholder.typicode.com
+paths:
+  /posts:
+    get:
+      summary: List all posts
+      responses:
+        '200':
+          description: Array of posts
+    post:
+      summary: Create a new post
+      responses:
+        '201':
+          description: Post created (simulated, id=101)
+  /posts/{id}:
+    get:
+      summary: Retrieve a single post
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: A single post
+    put:
+      summary: Update a post (simulated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Updated post returned
+    patch:
+      summary: Partially update a post (simulated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Patched post returned
+    delete:
+      summary: Delete a post (simulated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Empty object
+  /comments:
+    get:
+      summary: List all comments (optionally filtered by postId)
+      parameters:
+        - name: postId
+          in: query
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Array of comments
+  /albums:
+    get:
+      summary: List all albums
+      responses:
+        '200':
+          description: Array of albums
+  /albums/{id}:
+    get:
+      summary: Retrieve a single album
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: A single album
+  /photos:
+    get:
+      summary: List all photos
+      responses:
+        '200':
+          description: Array of photos
+  /photos/{id}:
+    get:
+      summary: Retrieve a single photo
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: A single photo
+  /todos:
+    get:
+      summary: List all todos
+      responses:
+        '200':
+          description: Array of todos
+  /todos/{id}:
+    get:
+      summary: Retrieve a single todo
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: A single todo
+    put:
+      summary: Update a todo (simulated)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Updated todo returned
+  /users:
+    get:
+      summary: List all users
+      responses:
+        '200':
+          description: Array of users
+  /users/{id}:
+    get:
+      summary: Retrieve a single user
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: A single user

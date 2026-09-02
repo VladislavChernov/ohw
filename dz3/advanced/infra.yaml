@@ -1,0 +1,7 @@
+# Компоненты общей инфраструктуры, которые нужны advanced.
+# Каталог: ../infra/ (локальный <local-path>, публикуется в ohw/infra).
+#
+#   cd <local-path>
+#   .\up.ps1 -Project <local-path>
+components:
+  - ollama
