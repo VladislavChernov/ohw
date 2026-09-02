@@ -1,31 +1,101 @@
-# Shared ollama (ohw-infra)
+# infra — shared infrastructure catalog (ohw)
 
-Single shared `ollama` service for the whole homework monorepo.
+Общие переиспользуемые компоненты для всех проектов. Каждый компонент описан
+**один раз** здесь, а проекты **объявляют**, какие компоненты им нужны (в своём
+`infra.yaml`). Инфраструктура поднимается только в том составе, который нужен
+конкретному проекту.
 
-Usage
------
-```bash
-cd d:/Otus/ohw
-# Launch the shared service (one-time model download, cached in ohw_ollama_models):
-docker compose -f infra/compose.yaml up -d
+## Как это работает
 
-# Check it's up and the model is loaded:
-docker compose -f infra/compose.yaml ps
-docker compose -f infra/compose.yaml logs -f
+Корень проекта → `infra.yaml`:
+```yaml
+# dz3/simple/infra.yaml
+components:
+  - ollama
 ```
 
-- Model is selected by `OLLAMA_MODEL=` in `infra/.env`
-  (default `qwen2.5:7b-instruct`). To switch: edit `.env`, then
-  `docker compose -f infra/compose.yaml restart ollama`.
-- Every project compose stack points its app at the **shared** ollama via
-  `OLLAMA_BASE_URL=http://host.docker.internal:11434` (see project `.env`).
-  So `docker compose up --build` in a project starts **only the app** and
-  reuses the shared ollama — no extra model download, no per-project volume.
-- Port `11434` belongs to `ohw-ollama`. Do **not** run a per-project
-  `--profile standalone` ollama while the shared one is up (port conflict).
-  Standalone mode exists only for a fully self-contained run/snapshot:
-  ```
-  docker compose --profile standalone up --build
-  ```
+Запуск нужных компонентов — из этой папки (`infra/`):
+```powershell
+.\up.ps1 -Project ..\dz2            # поднимет ollama (см. dz2/infra.yaml)
+.\up.ps1 -Project ..\dz3\simple
+.\down.ps1                          # остановить всё
+.\ps.ps1                            # статус
+```
 
+GPU-ускорение общего ollama (NVIDIA/AMD) — оверлеи задаются при запуске:
+```powershell
+.\up.ps1 -Project <path> -Gpu            # NVIDIA CUDA (compose.gpu.yaml)
+.\up.ps1 -Project <path> -Amd            # AMD ROCm (ollama/ollama:rocm)
+```
+Без флага инференс идёт на CPU (медленно, qwen2.5:7b ≈ 2–4 ток/с). Модельный
+volume общий, при переключении CPU↔GPU модель повторно не скачивается.
+`up.ps1` читает `components:` и выполняет `docker compose -f infra/compose.yaml
+--profile <компонент> ... up -d`. Компонент стартует только если он заявлен в
+`infra.yaml` проекта — так из одного каталога выбираются разные составы.
 
+## Каталог компонентов
+
+| Компонент | Профиль | Назначение | Кто использует |
+|---|---|---|---|
+| `ollama` | `ollama` | Локальная LLM, модель `qwen2.5:7b-instruct`, volume `ohw_ollama_models` (скачивание один раз) | dz2, dz3, light-llm-engine |
+
+### Контракт доступа (`ollama`)
+
+| Где работает приложение | Адрес |
+|---|---|
+| Windows-хост (`uv run`) | `http://localhost:11434` |
+| devcontainer проекта | `http://host.docker.internal:11434` |
+| compose-сервис проекта (общая сеть `ohw_net`) | `http://ohw-ollama:11434` |
+
+Порт `11434` принадлежит `ohw-ollama`. Не запускайте параллельно per-project
+ollama, пока общая поднята (конфликт порта).
+
+#### Сеть: внутренние компоненты vs интернет
+
+- Компоненты инфраструктуры общаются с проектами **только по внутренней сети
+  `ohw_net`** (по имени сервиса, без публикации лишних портов). Проверено:
+  контейнер на `ohw_net` достаёт `ohw-ollama` по имени.
+- Проектные контейнеры на `ohw_net` **имеют доступ в интернет** (обычный
+  bridge/NAT Docker). Это осознанный контракт: например, `dz3/simple` гоняет
+  сгенерированные тесты против внешнего API `jsonplaceholder.typicode.com`.
+  Проверено: `urllib` из `ohw-python`-контейнера на `ohw_net` получает `200`
+  от внешнего API. Если компоненту или проекту интернет не нужен — это
+  решается на уровне проекта, а не каталога.
+
+## Как добавить новый компонент
+
+1. Добавить сервис в `compose.yaml` с `profiles: ["<имя>"]` (+ сеть `ohw_net`, если к нему должны ходить контейнеры проектов).
+2. Добавить строку в таблицу «Каталог компонентов» (README).
+3. Проект подключает его, добавив имя в свой `infra.yaml`; правки самого проекта под инфраструктуру — в README проекта.
+
+### Базовый образ python (`ohw-python:3.13`)
+
+Активные проекты собирают app-контейнеры от общего базового образа
+`ohw-python:3.13` — `python:3.13-slim-bookworm` + предустановленный `uv` +
+unprivileged-юзер `app`. Собирается один раз:
+
+```powershell
+powershell -File .\python\build.ps1   # docker build -t ohw-python:3.13 infra/python
+```
+
+Замороженные проекты (dz1, dz2) используют собственные `Dockerfile` с
+`python:3.13-slim-bookworm` напрямую и от образа не зависят.
+
+## Связь с общим кодом (`ohw_kit`)
+
+`infra` — это **уровень развёртывания** (поднял ollama в `ohw_net`, задал
+`OLLAMA_BASE_URL`). Общий **код** для обращения к нему живёт в
+[`kit/`](../kit/README.md) (пакет `ohw-kit`, импорт `ohw_kit`): `OllamaClient`
+читает `OLLAMA_BASE_URL` и ходит на `/api/chat`, ридеры input и рендер
+markdown — там же. Связка: `infra` поднимает сервис, `ohw_kit` с ним
+общается, дз определяет смысл (что делать с ответом модели).
+
+## Публикация в монорепо
+
+`infra/` лежит в корне монорепо `ohw/` (рядом с `kit/` и домашками `dzN/`),
+поэтому все пути в этом README — относительные корня репозитория. Каталог
+публикуется как обычная папка репозитория через commit/push.
+
+Локальная рабочая копия для правок живёт отдельно от git (на вашей машине —
+`D:\Otus\infra`) и синхронизируется сюда; такие пути machine-specific и в
+репозиторий не попадают.

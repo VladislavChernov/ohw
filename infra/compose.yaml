@@ -1,15 +1,25 @@
 name: ohw-infra
 
-# Shared ollama for the whole homework monorepo (ohw). One service, one model
-# volume (ohw_ollama_models) reused by every project so the model is downloaded once.
+# Component catalog. One shared service per component, each enabled by its own
+# compose profile (the profile name == component name). Projects declare which
+# components they need in their <project>/infra.yaml; `up.ps1` reads that file
+# and starts exactly the declared profiles.
 #
-#   docker compose -f infra/compose.yaml up -d       # start once / after reboot
-#   docker compose -f infra/compose.yaml logs -f      # server logs
-#   docker compose -f infra/compose.yaml stop         # free port 11434 before a standalone run
-#   docker compose -f infra/compose.yaml restart ollama # after editing OLLAMA_MODEL in .env
+#   .\up.ps1 -Project D:\Otus\Dz2     # start components declared by Dz2
+#   .\up.ps1 -Project D:\Otus\Dz3\simple
+#   .\down.ps1                        # stop all shared components
+#   .\ps.ps1                          # status
+#
+# Contracts (how a project reaches a component):
+#   - host process (uv run ...):         http://localhost:<port>
+#   - project devcontainer:              http://host.docker.internal:<port>
+#   - project compose on shared network: http://<service-name>:<port>
+# The network `ohw_net` below is created once (external for projects) so app
+# services can join it and talk to any component by its container name.
 
 services:
   ollama:
+    profiles: ["ollama"]
     image: ollama/ollama:latest
     container_name: ohw-ollama
     restart: unless-stopped
@@ -42,6 +52,12 @@ services:
       timeout: 3s
       retries: 60
       start_period: 15s
+    networks:
+      - ohw_net
+
+networks:
+  ohw_net:
+    name: ohw_net
 
 volumes:
   ollama_models:
