@@ -1,0 +1,46 @@
+[project]
+name = "json-testgen-advanced"
+version = "0.1.0"
+description = "Advanced variant: JSON test-plan from LLM + HTTP engine (no pytest)."
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28",
+    "requests>=2.32",
+    "pyyaml>=6.0",
+    "ohw-kit",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "json_testgen_advanced"
+
+[tool.uv.sources]
+ohw-kit = { path = "../../kit" }
+
+[project.scripts]
+json-testgen-advanced = "json_testgen_advanced.cli:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "pytest-mock>=3.14",
+    "ruff>=0.9",
+    "types-PyYAML>=6.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+ignore = ["EXE002"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true

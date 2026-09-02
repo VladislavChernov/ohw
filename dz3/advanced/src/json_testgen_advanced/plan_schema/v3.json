@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "plan/v3.json",
+  "title": "Test plan v3",
+  "description": "JSON contract version 3 for an LLM-produced API test plan.",
+  "type": "object",
+  "required": ["service", "tests"],
+  "additionalProperties": false,
+  "properties": {
+    "service": { "type": "string", "minLength": 1 },
+    "tests": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/test" }
+    }
+  },
+  "definitions": {
+    "test": {
+      "type": "object",
+      "required": ["name", "steps"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "vars": { "type": "object", "additionalProperties": true },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/definitions/step" } },
+        "cleanup": { "type": "array", "items": { "$ref": "#/definitions/step" } },
+        "provisional": { "type": "boolean", "default": false },
+        "request": { "$ref": "#/definitions/request" },
+        "expect": { "$ref": "#/definitions/expect" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": ["request"],
+      "properties": {
+        "name": { "type": "string" },
+        "request": { "$ref": "#/definitions/request" },
+        "extract": { "type": "object", "additionalProperties": { "type": "string" } },
+        "expect": { "$ref": "#/definitions/expect" },
+        "on_fail": { "enum": ["abort", "continue"] }
+      }
+    },
+    "request": {
+      "type": "object",
+      "required": ["method", "path"],
+      "properties": {
+        "method": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "body": { "type": ["object", "array", "string", "number", "boolean", "null"] }
+      }
+    },
+    "expect": {
+      "type": "object",
+      "properties": {
+        "status_code": { "type": "integer" },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["op"],
+            "properties": {
+              "op": { "enum": ["eq", "len_eq", "contains", "fields_eq", "type"] },
+              "path": { "type": "string" },
+              "value": {}
+            }
+          }
+        }
+      }
+    }
+  }
+}

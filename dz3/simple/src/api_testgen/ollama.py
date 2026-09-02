@@ -23,7 +23,7 @@ async def generate_code(
     and the next attempt includes explicit feedback about what is missing.
     """
     url = f"{base_url.rstrip('/')}/api/generate"
-    options: dict = {
+    options: dict[str, object] = {
         "temperature": temperature,
         "num_predict": num_predict,
     }
@@ -47,7 +47,8 @@ async def generate_code(
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
-                code = data.get("response", "").strip()
+                raw = data.get("response", "")
+                code = raw.strip() if isinstance(raw, str) else ""
                 if code and "def test_" in code:
                     missing = find_missing(code, required_markers or [])
                     if not missing:

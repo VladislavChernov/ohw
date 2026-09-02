@@ -9,6 +9,12 @@ The kit owns the machinery that homeworks keep re-implementing by hand:
 - **Input reading** — an *extensible* registry of directory readers
   (`{extension -> reader}`) so a homework can read `.txt`, `.md`, `.pdf`, …
   by registering a reader, without touching the kit.
+- **JSON replies** — extract strict JSON from a model reply (markdown fences
+  tolerated) with feedback-ready error messages, plus the shared
+  `ValidationResult(ok, issues)` shape used by feedback loops.
+- **Expect-check evaluation** — reference evaluator for a declarative check
+  DSL (`eq / len_eq / contains / fields_eq / type`) over a JSONPath subset,
+  no external dependencies; results are report-ready.
 - **Rendering** — optional helpers to wrap a model reply in a Markdown
   document.
 

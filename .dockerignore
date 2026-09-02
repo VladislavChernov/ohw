@@ -1,0 +1,12 @@
+# Keep build context (monorepo root) lean for dz3/compose.yaml (project app builds).
+.git
+.opencode
+node_modules
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.egg-info
+**/.env

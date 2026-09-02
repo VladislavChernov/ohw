@@ -6,8 +6,23 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 _PAIR_RE = re.compile(r"(\d+) (passed|failed|error)")
+
+
+class ReportResult(TypedDict):
+    """Structured result of a pytest run over the generated test file."""
+
+    file: str
+    exit_code: int
+    passed: int
+    failed: int
+    errors: int
+    total: int
+    stdout: str
+    stderr: str
+    model: NotRequired[str]
 
 
 def _parse_counts(stdout: str) -> tuple[int, int, int]:
@@ -55,7 +70,7 @@ def _humanize_reason(reason: str, limit: int = 220) -> str:
     return reason
 
 
-def _failed_tests_section(results: dict) -> list[str]:
+def _failed_tests_section(results: ReportResult) -> list[str]:
     """Human-readable 'Failed tests' block; one bullet per failure."""
     failures = _parse_failures(results.get("stdout", ""))
     if not failures:
@@ -72,7 +87,7 @@ def _failed_tests_section(results: dict) -> list[str]:
     return lines
 
 
-def run_pytest(test_file: Path) -> dict:
+def run_pytest(test_file: Path) -> ReportResult:
     """Run pytest on the given file and return structured results."""
     result = subprocess.run(  # noqa: PLW1510
         [
@@ -98,7 +113,7 @@ def run_pytest(test_file: Path) -> dict:
     }
 
 
-def format_report(results: dict) -> str:
+def format_report(results: ReportResult) -> str:
     """Format a human-readable report for the console."""
     lines = [
         "=" * 60,
@@ -123,7 +138,7 @@ def format_report(results: dict) -> str:
     return "\n".join(lines)
 
 
-def format_report_markdown(results: dict) -> str:
+def format_report_markdown(results: ReportResult) -> str:
     """Format a report as Markdown and persist it to the output dir.
 
     The run report is a deliverable: it records how the generated API tests
@@ -177,7 +192,7 @@ def format_report_markdown(results: dict) -> str:
     return "\n".join(md).rstrip() + "\n"
 
 
-def save_report(results: dict, output_dir: Path) -> Path:
+def save_report(results: ReportResult, output_dir: Path) -> Path:
     """Write the Markdown run report to the output dir."""
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / "report.md"

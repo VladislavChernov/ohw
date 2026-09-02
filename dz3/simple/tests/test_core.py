@@ -282,8 +282,10 @@ def test_generate_code_feedback_loop(monkeypatch):
         FakeResp.codes = iter(
             [
                 "def test_get():\n    requests.get('http://x')",
-                "def test_get():\n    requests.get('http://x')\n"
-                "def test_post():\n    requests.post('http://x')",
+                (
+                    "def test_get():\n    requests.get('http://x')\n"
+                    "def test_post():\n    requests.post('http://x')"
+                ),
             ]
         )
 

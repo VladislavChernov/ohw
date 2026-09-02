@@ -1,0 +1,7 @@
+# Компоненты общей инфраструктуры, которые нужны advanced.
+# Каталог: ../infra/ (локальный D:\Otus\infra, публикуется в ohw/infra).
+#
+#   cd d:/Otus/infra
+#   .\up.ps1 -Project D:\Otus\ohw\dz3\advanced
+components:
+  - ollama
