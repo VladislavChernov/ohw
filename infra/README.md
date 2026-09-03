@@ -14,24 +14,28 @@ components:
   - ollama
 ```
 
-Запуск нужных компонентов — из этой папки (`infra/`):
-```powershell
-.\up.ps1 -Project ..\dz2            # поднимет ollama (см. dz2/infra.yaml)
-.\up.ps1 -Project ..\dz3\simple
-.\down.ps1                          # остановить всё
-.\ps.ps1                            # статус
+Запуск нужных компонентов — из этой папки (`infra/`); скрипты кроссплатформенные
+(Linux / macOS / Windows — через Git Bash или WSL):
+```bash
+./up.sh ../dz2            # поднимет ollama (см. dz2/infra.yaml)
+./up.sh ../dz3/simple
+./down.sh                 # остановить всё
+./ps.sh                   # статус
 ```
 
 GPU-ускорение общего ollama (NVIDIA/AMD) — оверлеи задаются при запуске:
-```powershell
-.\up.ps1 -Project <path> -Gpu            # NVIDIA CUDA (compose.gpu.yaml)
-.\up.ps1 -Project <path> -Amd            # AMD ROCm (ollama/ollama:rocm)
+```bash
+./up.sh <path> --gpu      # NVIDIA CUDA (compose.gpu.yaml)
+./up.sh <path> --amd      # AMD ROCm (ollama/ollama:rocm)
 ```
 Без флага инференс идёт на CPU (медленно, qwen2.5:7b ≈ 2–4 ток/с). Модельный
 volume общий, при переключении CPU↔GPU модель повторно не скачивается.
-`up.ps1` читает `components:` и выполняет `docker compose -f infra/compose.yaml
+`up.sh` читает `components:` и выполняет `docker compose -f infra/compose.yaml
 --profile <компонент> ... up -d`. Компонент стартует только если он заявлен в
 `infra.yaml` проекта — так из одного каталога выбираются разные составы.
+
+Версии зафиксированы: образ `ollama/ollama:0.3.15` (не `latest`), модель
+`qwen2.5:7b-instruct` (тег по умолчанию, переопределяется `OLLAMA_MODEL`).
 
 ## Каталог компонентов
 
