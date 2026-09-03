@@ -78,8 +78,8 @@ ollama, пока общая поднята (конфликт порта).
 `ohw-python:3.13` — `python:3.13-slim-bookworm` + предустановленный `uv` +
 unprivileged-юзер `app`. Собирается один раз:
 
-```powershell
-powershell -File .\python\build.ps1   # docker build -t ohw-python:3.13 infra/python
+```bash
+./python/build.sh        # docker build -t ohw-python:3.13 infra/python
 ```
 
 Замороженные проекты (dz1, dz2) используют собственные `Dockerfile` с
