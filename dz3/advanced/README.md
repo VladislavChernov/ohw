@@ -63,8 +63,6 @@ plan
 
 **Операторы `expect.checks[].op`:** `eq`, `len_eq`, `contains`, `fields_eq`, `type` — реализованы в `ohw_kit.checks.evaluate`.
 
-**Плоская форма (v1)** автоматически нормализуется в `steps` — `plan.py` поддерживает оба варианта.
-
 ## Переиспользование kit (правило «только через kit, без копирования»)
 
 Advanced зависит от `../kit` (`uv add ../kit`) и использует:
