@@ -27,35 +27,78 @@
   (`ohw-kit @ file:///.../kit`); simple — учебный и свой код не трогает.
 - **`infra`** — единый сервис `ohw-ollama` (модель `qwen2.5:7b-instruct`),
   переиспользуется проектами; задаётся в [`infra.yaml`](infra.yaml) → запуск
-  через [`../infra/up.ps1`](../infra/up.ps1).
+  через [`../infra/up.sh`](../infra/up.sh).
 
-## Быстрый старт
+## Способы запуска
 
-```powershell
-# simple: LLM генерирует pytest-код
-cd ohw/dz3/simple
-uv sync --dev
-# (поднять инфраструктуру: ../infra/up.ps1 -Project ohw/dz3/simple)
-uv run api-testgen
+Разработка ведётся в **devcontainer** (`.devcontainer/` каждого варианта), а
+«продовый» прогон — в Docker. Но любой вариант можно запустить и на машине
+с обычным системным Python — стека devcontainer не требуется.
 
-# advanced: LLM строит JSON-план, ядро исполняет
+### 1. Devcontainer (основной способ)
+
+Откройте `ohw/dz3` в VS Code → «Reopen in Container». Инфраструктура
+(`ohw-ollama`) уже доступна контейнеру по `http://host.docker.internal:11434`.
+Внутри — те же команды, что и локально (`uv sync --dev`, `uv run ...`).
+
+### 2. Локально, системный Python (Linux / macOS / Windows)
+
+Требуется: Python 3.13+, [uv](https://docs.astral.sh/uv/), Docker Desktop
+(только ради общего ollama — сам код локально ходит на `localhost:11434`).
+
+```bash
+# 1) поднять общий ollama (кроссплатформенный bash-скрипт инфры)
+cd ohw/infra && ./up.sh ../dz3 && cd ../..
+
+# 2) запустить advanced локально (uv сам создаст venv и поставит kit по file://)
 cd ohw/dz3/advanced
 uv sync --dev
 uv run json-testgen-advanced
+
+# simple (если нужен):
+cd ../simple && uv sync --dev && uv run api-testgen
+```
+
+Если ollama уже слушает не на `localhost:11434`, переопределите адрес:
+`OLLAMA_BASE_URL=http://host.docker.internal:11434 uv run json-testgen-advanced`.
+
+### 3. Docker (E2E, как в CI)
+
+```bash
+# 1) shared ollama на сети ohw_net
+cd ohw/infra && ./up.sh ../dz3
+
+# 2) app-контейнер advanced на той же сети; input/output монтируются из dz3/advanced
+cd ohw/dz3
+docker compose up --build
+```
+
+Отчёт появится в `ohw/dz3/advanced/output/report.md`, план — в `plan.json`.
+Генерация плана на CPU занимает несколько минут (`OLLAMA_TIMEOUT` по умолчанию
+1200 с); для GPU запустите инфру с `./up.sh ../dz3 --gpu`.
+
+## Быстрый старт
+
+Кратко (подробности и варианты запуска — ниже, в «Способы запуска»):
+
+```bash
+cd ohw/dz3/advanced
+uv sync --dev
+uv run json-testgen-advanced      # перед этим: ohw/infra/up.sh ../dz3
 ```
 
 ## Разработка (качество)
 
 Каждый вариант проверяется своим тулчейном:
 
-```powershell
+```bash
 uv run pytest -q        # юнит-тесты (без сети)
 uv run ruff check src tests
 uv run mypy src
 ```
 
 - **simple**: 22 теста — green.
-- **advanced**: 39 тестов — green.
+- **advanced**: 50 тестов — green.
 
 ## Структура
 
