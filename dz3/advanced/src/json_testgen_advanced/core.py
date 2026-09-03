@@ -8,6 +8,7 @@ execution tree. The transport is injectable so tests never hit the network.
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -64,6 +65,20 @@ class PlanExecution:
     @property
     def total(self) -> int:
         return len(self.tests)
+
+
+def _unresolved(value: Any) -> list[str]:
+    """Return ``{var}`` placeholders that remain after substitution."""
+    if isinstance(value, str):
+        return _PLACEHOLDER_RE.findall(value)
+    if isinstance(value, dict):
+        return [p for v in value.values() for p in _unresolved(v)]
+    if isinstance(value, list):
+        return [p for v in value for p in _unresolved(v)]
+    return []
+
+
+_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _substitute(value: Any, variables: dict[str, Any]) -> Any:
@@ -149,6 +164,18 @@ def _run_step(
         headers = _substitute(step.request.headers, variables)
         body = _substitute(step.request.body, variables)
         se.path = path
+
+        # A placeholder that survived substitution means the plan referenced an
+        # unknown variable (LLM naming mismatch). Fail loudly with the exact
+        # resource and the available vars — never send a literal "{id}".
+        leftover = sorted(set(_unresolved(path) + _unresolved(headers) + _unresolved(body)))
+        if leftover:
+            se.error = (
+                f"неразрешённые плейсхолдеры {leftover}; "
+                f"доступные vars: {sorted(variables)}"
+            )
+            se.ok = False
+            return se
 
         start = time.perf_counter()
         response = client.request(

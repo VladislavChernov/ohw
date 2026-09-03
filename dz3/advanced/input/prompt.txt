@@ -22,6 +22,9 @@
   - `steps` — упорядоченные шаги:
     - `name` — человекочитаемое описание шага;
     - `request` — `{method, path, headers?, body?}` (в path/headers/body можно подставлять {var});
+        ВАЖНО: имя плейсхолдера обязано совпадать с ключом в `vars` или именем из `extract`
+        (vars: {"id": 1} + path: "/albums/{id}" — верно; vars: {"album_id": 1} при "{id}" в path — ошибка).
+        Никаких строковых заглушек вида "{post_data}" вместо реального тела запроса.
     - `extract` — `{имя_переменной: JSONPath}` для сохранения значений из ответа;
     - `expect` — `{status_code?, checks?}`; `checks` — массив `{op, path, value}`;
     - `on_fail` — `abort` (по умолчанию) или `continue`;

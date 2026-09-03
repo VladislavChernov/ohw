@@ -286,6 +286,38 @@ def test_check_failure_marks_step_not_ok() -> None:
     assert not step.checks[0].ok
 
 
+def test_unresolved_placeholder_fails_step_loudly() -> None:
+    """Vars/path name mismatch must fail the step with an explicit error,
+    never send a literal "{id}" to the API."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"request must not be sent: {request.url}")
+
+    exec_ = _run(
+        {
+            "service": "s",
+            "tests": [
+                {
+                    "name": "t",
+                    "vars": {"album_id": 1},  # name mismatch with "{id}"
+                    "steps": [
+                        {
+                            "request": {"method": "GET", "path": "/albums/{id}"},
+                            "expect": {"status_code": 200},
+                        }
+                    ],
+                }
+            ],
+        },
+        handler,
+    )
+    step = exec_.tests[0].steps[0]
+    assert not step.ok
+    assert step.status_code is None
+    assert "неразрешённые плейсхолдеры ['id']" in (step.error or "")
+    assert "album_id" in (step.error or "")
+
+
 def test_network_error_handled_gracefully() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom")
