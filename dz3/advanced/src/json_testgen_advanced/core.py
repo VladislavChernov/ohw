@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -111,13 +112,79 @@ def execute_plan(
     *,
     base_url: str,
     transport: httpx.BaseTransport | None = None,
+    max_workers: int = 8,
 ) -> PlanExecution:
-    """Run every test scenario of ``plan`` against ``base_url``."""
+    """Run every test scenario of ``plan`` against ``base_url``.
+
+    Within one test scenario the steps always run sequentially (a mutation and
+    its cleanup must not interleave). Different scenarios run in parallel with
+    one guarantee: scenarios that mutate the same resource collection are
+    grouped and executed sequentially, so they never race on the same data.
+    """
     execution = PlanExecution(service=plan.service, doc_mode=plan.doc_mode)
     with httpx.Client(base_url=base_url, timeout=30.0, transport=transport) as client:
-        for test in plan.tests:
-            execution.tests.append(_run_test(client, test))
+        if max_workers <= 1 or len(plan.tests) < 2:
+            for test in plan.tests:
+                execution.tests.append(_run_test(client, test))
+            return execution
+
+        groups = _conflict_free_groups(plan.tests)
+        results: list[TestExecution | None] = [None] * len(plan.tests)
+
+        def run_group(indices: list[int]) -> None:
+            for i in indices:
+                results[i] = _run_test(client, plan.tests[i])
+
+        workers = min(max_workers, len(groups))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(run_group, groups))
+        execution.tests = list(results)
     return execution
+
+
+_MUTATING_METHODS = frozenset({"PUT", "PATCH", "DELETE"})
+
+
+def _mutation_prefixes(test: TestSpec) -> set[str]:
+    """Static resource collections a test mutates via PUT/PATCH/DELETE.
+
+    POST is deliberately excluded: the server assigns fresh ids, so concurrent
+    creates never collide. The prefix is the path up to the first placeholder,
+    e.g. ``/posts/{id}`` -> ``/posts``: any two tests mutating ``/posts/*`` are
+    conservatively treated as potentially touching the same entity.
+    """
+    prefixes: set[str] = set()
+    for step in (*test.steps, *test.cleanup):
+        if step.request.method.upper() in _MUTATING_METHODS:
+            prefixes.add(step.request.path.split("/{", 1)[0].rstrip("/") or "/")
+    return prefixes
+
+
+def _conflict_free_groups(tests: list[TestSpec]) -> list[list[int]]:
+    """Group tests so that only tests sharing a mutated collection share a
+    group (and thus run sequentially); everything else runs in parallel.
+    Groups are merged transitively when a test bridges two of them."""
+
+    @dataclass
+    class _Group:
+        keys: set[str]
+        idxs: list[int]
+
+    groups: list[_Group] = []
+    for i, test in enumerate(tests):
+        keys = _mutation_prefixes(test)
+        matched = [g for g in groups if keys & g.keys]
+        if not matched:
+            groups.append(_Group(keys=keys, idxs=[i]))
+            continue
+        first = matched[0]
+        for g in matched[1:]:
+            first.keys |= g.keys
+            first.idxs += g.idxs
+            groups.remove(g)
+        first.keys |= keys
+        first.idxs.append(i)
+    return [g.idxs for g in groups]
 
 
 def _run_test(client: httpx.Client, test: TestSpec) -> TestExecution:
