@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Callable
 
 import httpx
@@ -316,6 +318,77 @@ def test_unresolved_placeholder_fails_step_loudly() -> None:
     assert step.status_code is None
     assert "неразрешённые плейсхолдеры ['id']" in (step.error or "")
     assert "album_id" in (step.error or "")
+
+
+def test_disjoint_tests_run_in_parallel() -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.15)
+        with lock:
+            active -= 1
+        return httpx.Response(200, json={"id": 1})
+
+    exec_ = _run(
+        {
+            "service": "s",
+            "tests": [
+                {"name": "a", "steps": [{"request": {"method": "GET", "path": "/albums"},
+                                         "expect": {"status_code": 200}}]},
+                {"name": "b", "steps": [{"request": {"method": "GET", "path": "/comments"},
+                                         "expect": {"status_code": 200}}]},
+                {"name": "c", "steps": [{"request": {"method": "GET", "path": "/photos"},
+                                         "expect": {"status_code": 200}}]},
+            ],
+        },
+        handler,
+    )
+    assert all(t.ok for t in exec_.tests)
+    assert max_active >= 2  # executed concurrently
+
+
+def test_tests_mutating_same_collection_run_sequentially() -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.15)
+        with lock:
+            active -= 1
+        return httpx.Response(200, json={"id": 1})
+
+    exec_ = _run(
+        {
+            "service": "s",
+            "tests": [
+                {"name": "put1", "vars": {"id": 1},
+                 "steps": [{"request": {"method": "PUT", "path": "/posts/{id}"},
+                            "expect": {"status_code": 200}}]},
+                {"name": "put2", "vars": {"id": 2},
+                 "steps": [{"request": {"method": "PUT", "path": "/posts/{id}"},
+                            "expect": {"status_code": 200}}]},
+                {"name": "del_album", "vars": {"id": 99001},
+                 "steps": [{"request": {"method": "DELETE", "path": "/albums/{id}"},
+                            "expect": {"status_code": 200}}]},
+            ],
+        },
+        handler,
+    )
+    assert all(t.ok for t in exec_.tests)
+    # both PUT /posts/* tests were serialized; DELETE /albums ran separately
+    assert max_active == 2
+    assert [t.name for t in exec_.tests] == ["put1", "put2", "del_album"]
 
 
 def test_network_error_handled_gracefully() -> None:
