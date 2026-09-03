@@ -1,0 +1,481 @@
+{
+  "service": "JSONPlaceholder",
+  "tests": [
+    {
+      "name": "GET /albums",
+      "steps": [
+        {
+          "name": "Получение списка альбомов",
+          "request": {
+            "method": "GET",
+            "path": "/albums",
+            "headers": null,
+            "body": null
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка списка альбомов"
+    },
+    {
+      "name": "GET /albums/{id}",
+      "steps": [
+        {
+          "name": "Получение конкретного альбома",
+          "request": {
+            "method": "GET",
+            "path": "/albums/{album_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": {
+            "album": "$"
+          },
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка конкретного альбома",
+      "vars": {
+        "album_id": 1
+      }
+    },
+    {
+      "name": "GET /comments",
+      "steps": [
+        {
+          "name": "Получение списка комментариев",
+          "request": {
+            "method": "GET",
+            "path": "/comments",
+            "headers": null,
+            "body": null
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка списка комментариев"
+    },
+    {
+      "name": "GET /photos",
+      "steps": [
+        {
+          "name": "Получение списка фотографий",
+          "request": {
+            "method": "GET",
+            "path": "/photos",
+            "headers": null,
+            "body": null
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка списка фотографий"
+    },
+    {
+      "name": "GET /photos/{id}",
+      "steps": [
+        {
+          "name": "Получение конкретной фотографии",
+          "request": {
+            "method": "GET",
+            "path": "/photos/{photo_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": {
+            "photo": "$"
+          },
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка конкретной фотографии",
+      "vars": {
+        "photo_id": 1
+      }
+    },
+    {
+      "name": "GET /posts",
+      "steps": [
+        {
+          "name": "Получение списка постов",
+          "request": {
+            "method": "GET",
+            "path": "/posts",
+            "headers": null,
+            "body": null
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка списка постов"
+    },
+    {
+      "name": "POST /posts",
+      "steps": [
+        {
+          "name": "Создание нового поста",
+          "request": {
+            "method": "POST",
+            "path": "/posts",
+            "headers": null,
+            "body": {
+              "title": "{post_title}",
+              "body": "{post_body}"
+            }
+          },
+          "extract": {
+            "post_id": "$.id"
+          },
+          "expect": {
+            "status_code": 201
+          }
+        },
+        {
+          "name": "Получение созданного поста",
+          "request": {
+            "method": "GET",
+            "path": "/posts/{post_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": {
+            "post": "$"
+          },
+          "expect": {
+            "status_code": 200,
+            "checks": [
+              {
+                "op": "eq",
+                "path": "$.title",
+                "value": "{post_title}"
+              },
+              {
+                "op": "eq",
+                "path": "$.body",
+                "value": "{post_body}"
+              }
+            ]
+          }
+        }
+      ],
+      "description": "Создание нового поста",
+      "vars": {
+        "post_title": "Test Post",
+        "post_body": "Test Body"
+      },
+      "cleanup": [
+        {
+          "name": "Удаление созданного поста",
+          "request": {
+            "method": "DELETE",
+            "path": "/posts/{post_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": null
+        }
+      ]
+    },
+    {
+      "name": "DELETE /posts/{id}",
+      "steps": [
+        {
+          "name": "Удаление поста",
+          "request": {
+            "method": "DELETE",
+            "path": "/posts/{post_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Удаление поста",
+      "vars": {
+        "post_id": 1
+      }
+    },
+    {
+      "name": "GET /posts/{id}",
+      "steps": [
+        {
+          "name": "Получение существующего поста",
+          "request": {
+            "method": "GET",
+            "path": "/posts/{post_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": {
+            "post": "$"
+          },
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка существующего поста",
+      "vars": {
+        "post_id": 1
+      }
+    },
+    {
+      "name": "PATCH /posts/{id}",
+      "steps": [
+        {
+          "name": "Обновление поста",
+          "request": {
+            "method": "PATCH",
+            "path": "/posts/{post_id}",
+            "headers": null,
+            "body": "{patch_data}"
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        },
+        {
+          "name": "Проверка обновленного поста",
+          "request": {
+            "method": "GET",
+            "path": "/posts/{post_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": {
+            "post": "$"
+          },
+          "expect": {
+            "status_code": 200,
+            "checks": [
+              {
+                "op": "eq",
+                "path": "$.title",
+                "value": "Updated Title"
+              }
+            ]
+          }
+        }
+      ],
+      "description": "Обновление поста",
+      "vars": {
+        "post_id": 1,
+        "patch_data": {
+          "title": "Updated Title"
+        }
+      }
+    },
+    {
+      "name": "PUT /posts/{id}",
+      "steps": [
+        {
+          "name": "Полное обновление поста",
+          "request": {
+            "method": "PUT",
+            "path": "/posts/{post_id}",
+            "headers": null,
+            "body": "{post_data}"
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        },
+        {
+          "name": "Проверка обновленного поста",
+          "request": {
+            "method": "GET",
+            "path": "/posts/{post_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": {
+            "post": "$"
+          },
+          "expect": {
+            "status_code": 200,
+            "checks": [
+              {
+                "op": "eq",
+                "path": "$.title",
+                "value": "Updated Title"
+              },
+              {
+                "op": "eq",
+                "path": "$.body",
+                "value": "Updated Body"
+              }
+            ]
+          }
+        }
+      ],
+      "description": "Полное обновление поста",
+      "vars": {
+        "post_id": 1,
+        "post_data": {
+          "title": "Updated Title",
+          "body": "Updated Body"
+        }
+      }
+    },
+    {
+      "name": "GET /todos",
+      "steps": [
+        {
+          "name": "Получение списка задач",
+          "request": {
+            "method": "GET",
+            "path": "/todos",
+            "headers": null,
+            "body": null
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка списка задач"
+    },
+    {
+      "name": "GET /todos/{id}",
+      "steps": [
+        {
+          "name": "Получение конкретной задачи",
+          "request": {
+            "method": "GET",
+            "path": "/todos/{todo_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": {
+            "todo": "$"
+          },
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка конкретной задачи",
+      "vars": {
+        "todo_id": 1
+      }
+    },
+    {
+      "name": "PUT /todos/{id}",
+      "steps": [
+        {
+          "name": "Обновление задачи",
+          "request": {
+            "method": "PUT",
+            "path": "/todos/{todo_id}",
+            "headers": null,
+            "body": "{todo_data}"
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        },
+        {
+          "name": "Проверка обновленной задачи",
+          "request": {
+            "method": "GET",
+            "path": "/todos/{todo_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": {
+            "todo": "$"
+          },
+          "expect": {
+            "status_code": 200,
+            "checks": [
+              {
+                "op": "eq",
+                "path": "$.title",
+                "value": "Updated Todo Title"
+              },
+              {
+                "op": "eq",
+                "path": "$.completed",
+                "value": true
+              }
+            ]
+          }
+        }
+      ],
+      "description": "Обновление задачи",
+      "vars": {
+        "todo_id": 1,
+        "todo_data": {
+          "title": "Updated Todo Title",
+          "completed": true
+        }
+      }
+    },
+    {
+      "name": "GET /users",
+      "steps": [
+        {
+          "name": "Получение списка пользователей",
+          "request": {
+            "method": "GET",
+            "path": "/users",
+            "headers": null,
+            "body": null
+          },
+          "extract": null,
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка списка пользователей"
+    },
+    {
+      "name": "GET /users/{id}",
+      "steps": [
+        {
+          "name": "Получение конкретного пользователя",
+          "request": {
+            "method": "GET",
+            "path": "/users/{user_id}",
+            "headers": null,
+            "body": null
+          },
+          "extract": {
+            "user": "$"
+          },
+          "expect": {
+            "status_code": 200
+          }
+        }
+      ],
+      "description": "Проверка конкретного пользователя",
+      "vars": {
+        "user_id": 1
+      }
+    }
+  ]
+}
