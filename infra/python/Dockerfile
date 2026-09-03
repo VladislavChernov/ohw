@@ -1,8 +1,10 @@
 # ohw-python:3.13 — shared base image for homework app containers.
-# Built once from this folder (build.ps1); projects inherit FROM it instead of
-# repeating python:3.13-slim-bookworm + pip install uv + user app in every Dockerfile.
+# Built once from this folder (build.sh); projects inherit FROM it instead of
+# repeating python + uv + user app in every Dockerfile.
 # Components are NOT bundled: build tools stay in pip layer, no git/curl extras.
-FROM python:3.13-slim-bookworm
+# Python version is pinned exactly (was 3.13.5 in ohw-python:3.13 / devcontainer);
+# bump consciously and rerun unit tests + E2E after a bump.
+FROM python:3.13.5-slim-bookworm
 
 RUN pip install --no-cache-dir uv
 
