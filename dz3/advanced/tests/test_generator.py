@@ -58,6 +58,22 @@ def test_feedback_loop_mentions_missing_resource() -> None:
     assert "users" in prompts[1]
 
 
+def test_plan_parse_error_triggers_feedback() -> None:
+    # request is a string, not an object -> PlanParseError (was a crash before fix)
+    bad_request = {
+        "service": "jsonplaceholder",
+        "tests": [
+            {"name": "bad", "steps": [{"request": "GET /posts/1"}]},
+        ],
+    }
+    client, prompts = _client([json.dumps(bad_request), json.dumps(VALID_PLAN)])
+    plan = generate_plan(client, "prompt", max_retries=3, required_resources=["posts", "users"])
+    assert len(plan.tests) == 2
+    assert len(prompts) == 2
+    assert "Предыдущий JSON-план отклонён" in prompts[1]
+    assert "request" in prompts[1]
+
+
 def test_schema_invalid_then_valid() -> None:
     not_a_plan = json.dumps({"service": "x"})  # no tests -> schema issue
     client, prompts = _client([not_a_plan, json.dumps(VALID_PLAN)])
