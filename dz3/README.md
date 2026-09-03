@@ -43,7 +43,7 @@
 
 ### 2. Локально, системный Python (Linux / macOS / Windows)
 
-Требуется: Python 3.13+, [uv](https://docs.astral.sh/uv/), Docker Desktop
+Требуется: Python 3.13+, [uv](https://docs.astral.sh/uv/), Docker
 (только ради общего ollama — сам код локально ходит на `localhost:11434`).
 
 ```bash
