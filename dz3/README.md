@@ -64,7 +64,19 @@ cd ../simple && uv sync --dev && uv run api-testgen
 
 ### 3. Docker (E2E, как в CI)
 
-Варианты запускаются **раздельно** — каждый своим compose-файлом:
+Варианты запускаются **раздельно** — по одному стартовому скрипту на вариант.
+Скрипт сам: соберёт базовый образ `ohw-python:3.13` (если его ещё нет),
+поднимет общий ollama (`infra/up.sh`) и запустит нужный compose:
+
+```bash
+# advanced: отчёт в advanced/output/report.md, план в plan.json
+cd ohw/dz3 && ./start_advanced.sh          # CPU; ./start_advanced.sh --gpu для CUDA
+
+# simple (отдельно):
+cd ohw/dz3 && ./start_simple.sh            # CPU; --gpu аналогично
+```
+
+Ручной эквивалент (если хочется по шагам):
 
 ```bash
 # 0) базовый образ ohw-python:3.13 (один раз, собирается локально)
@@ -73,10 +85,8 @@ cd ohw && ./infra/python/build.sh
 # 1) shared ollama на сети ohw_net (общий для обоих вариантов)
 cd ohw/infra && ./up.sh ../dz3
 
-# 2) advanced: app-контейнер на той же сети; input/output монтируются из dz3/advanced
+# 2) advanced:
 cd ohw/dz3 && docker compose up --build
-# → отчёт в advanced/output/report.md, план в plan.json
-
 # 2') simple (отдельно, свой compose):
 cd ohw/dz3/simple && docker compose up --build
 ```
