@@ -65,6 +65,9 @@ cd ../simple && uv sync --dev && uv run api-testgen
 ### 3. Docker (E2E, как в CI)
 
 ```bash
+# 0) базовый образ ohw-python:3.13 (один раз, собирается локально)
+cd ohw && ./infra/python/build.sh
+
 # 1) shared ollama на сети ohw_net
 cd ohw/infra && ./up.sh ../dz3
 
@@ -76,6 +79,29 @@ docker compose up --build
 Отчёт появится в `ohw/dz3/advanced/output/report.md`, план — в `plan.json`.
 Генерация плана на CPU занимает несколько минут (`OLLAMA_TIMEOUT` по умолчанию
 1200 с); для GPU запустите инфру с `./up.sh ../dz3 --gpu`.
+
+## Нужен только advanced? Минимальный набор
+
+`advanced` жёстко зависит от двух соседних папок монорепо: `kit/` (path-зависимость
+`ohw-kit = { path = "../../kit" }`) и `infra/` (общий ollama для docker-запуска).
+Отдельно скопировать папку `dz3/advanced` нельзя — `uv sync` не найдёт kit.
+
+Проще всего склонировать репозиторий целиком (это только тексты, несколько МБ).
+Если хочется выкачивать лишь часть — **sparse-checkout внутри того же одного
+репозитория** (никаких сторонних репозиториев не добавляется):
+
+```bash
+git clone --no-checkout https://github.com/VladislavChernov/ohw.git
+cd ohw
+git sparse-checkout set dz3/advanced kit infra   # минимальный набор
+git checkout
+```
+
+Если ollama уже стоит у вас локально (не через инфру), `infra` можно не выкачивать:
+`git sparse-checkout set dz3/advanced kit` и запускать с `OLLAMA_BASE_URL`.
+Дальше — как в «Способы запуска» (всё качается из стандартных реестров: пакеты
+из PyPI через uv, образы из Docker Hub, модель — ollama registry; сторонних
+git-репозиториев не требуется).
 
 ## Быстрый старт
 
