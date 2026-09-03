@@ -22,7 +22,7 @@ services:
     profiles: ["ollama"]
     # Pinned deliberately (was :latest) so every machine runs the same engine.
     # Bump consciously: update tag, then re-run E2E.
-    image: ollama/ollama:0.32.15
+    image: ollama/ollama:0.33.3
     container_name: ohw-ollama
     restart: unless-stopped
     ports:
