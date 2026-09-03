@@ -15,6 +15,7 @@ from ohw_kit.jsonreply import JsonReplyError, extract_json
 from ohw_kit.ollama_client import OllamaClient
 
 from json_testgen_advanced.plan import (
+    PlanParseError,
     TestPlan,
     load_plan,
     validate_plan,
@@ -58,8 +59,13 @@ def generate_plan(
             current_prompt = _feedback(prompt, schema_ok.issues)
             continue
 
+        try:
+            plan = load_plan(reply)
+        except PlanParseError as exc:
+            last_issue = f"невалидный план: {exc}"
+            current_prompt = _feedback(prompt, [last_issue])
+            continue
 
-        plan = load_plan(reply)
         plan_ok = validate_plan(plan, required_resources or [])
         if plan_ok.ok:
             return plan
