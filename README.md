@@ -24,7 +24,7 @@
 
 | Компонент | Назначение | Кто использует | Статус |
 |---|---|---|---|
-| [infra/](infra/) | Каталог общих компонентов: единый LLM-сервис `ohw-ollama` (`qwen2.5:7b-instruct`, volume `ohw_ollama_models`, скачивание один раз), общая сеть `ohw_net`, GPU-оверлеи, базовый образ `ohw-python:3.13`; запуск `infra/up.ps1 -Project <dzN>` | dz2, dz3, light-llm-engine | реализовано |
+| [infra/](infra/) | Каталог общих компонентов: единый LLM-сервис `ohw-ollama` (`qwen2.5:7b-instruct`, volume `ohw_ollama_models`, скачивание один раз), общая сеть `ohw_net`, GPU-оверлеи, базовый образ `ohw-python:3.13`; запуск `infra/up.sh <dzN>` (bash, кроссплатформенно) | dz2, dz3, light-llm-engine | реализовано |
 | [kit/](kit/) | **ohw-kit** — общая Python-библиотека, выделенная из задач: LLM-клиент (`OllamaClient`), чтение контрактов (`io`), извлечение JSON из ответа модели (`jsonreply`), оценщик условий (`checks`), рендер (`render`) | dz3/advanced и последующие | реализовано |
 
 `dz1` — исключение из общей инфраструктуры: там свой CUDA-контейнер для

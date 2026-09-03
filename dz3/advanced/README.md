@@ -126,6 +126,20 @@ JSONPath-подмножество: `$`, `.key`, `[i]`, `[*]`, `..key`.
 
 ## Запуск
 
+Три способа: devcontainer (основной), локально с системным Python, Docker —
+подробно описаны в корневом [`../README.md` → «Способы запуска»](../README.md#способы-запуска).
+Кратко, локально:
+
+```bash
+# 1) поднять общий ollama (из каталога ohw/infra; для GPU добавь --gpu)
+cd ../infra && ./up.sh ../dz3 && cd advanced
+uv sync --dev
+uv run json-testgen-advanced
+
+# либо целиком в Docker (E2E):
+cd ../.. && docker compose -f dz3/compose.yaml up --build
+```
+
 ```powershell
 cd ohw/dz3/advanced
 uv sync --dev
