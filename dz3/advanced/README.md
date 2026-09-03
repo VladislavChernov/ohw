@@ -39,6 +39,32 @@ LLM-код никогда не запускается; pytest в рантайм�
 | `config.py` / `cli.py` | Конфиг из env + CLI-пайплайн |
 | `openapi_reader.py` | Проектные ридеры `.json/.yaml/.yml`, регистрируемые в `ohw_kit.io` |
 
+## Контракт v3
+
+**Где:** `src/json_testgen_advanced/plan_schema/v3.json` (JSON Schema draft-07).
+
+Это тот самый «язык», на котором LLM возвращает план, а ядро его исполняет. Ниже — карта полей.
+
+```
+plan
+├── service: string               # имя тестируемого сервиса
+└── tests: test[]                 # сценарии (параллельно, см. «Параллельное исполнение»)
+      ├── name: string
+      ├── description?: string
+      ├── vars?: { [key]: any }   # переменные сценария (подстановка + общий контекст)
+      ├── provisional?: boolean   # true → возможны 404/500, cleanup обязателен
+      ├── steps: step[]           # последовательно; мутация + extract + проверки
+      │     ├── request: { method, path, headers?, body? }
+      │     ├── extract?: { [key]: jsonpath }   # сохранить из ответа в vars
+      │     ├── expect?: { status_code?, checks?: [{ op, path?, value? }] }
+      │     └── on_fail?: "abort" | "continue"
+      └── cleanup?: step[]        # после steps в любом случае; не влияет на статус
+```
+
+**Операторы `expect.checks[].op`:** `eq`, `len_eq`, `contains`, `fields_eq`, `type` — реализованы в `ohw_kit.checks.evaluate`.
+
+**Плоская форма (v1)** автоматически нормализуется в `steps` — `plan.py` поддерживает оба варианта.
+
 ## Переиспользование kit (правило «только через kit, без копирования»)
 
 Advanced зависит от `../kit` (`uv add ../kit`) и использует:
