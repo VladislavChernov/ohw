@@ -1,0 +1,7 @@
+# Общая инфраструктура Dz3 (simple и advanced): shared `ollama` из каталога infra/.
+# Один контейнер ohw-ollama на общей сети ohw_net переиспользуется обоими вариантами.
+#
+#   cd <local-path>
+#   .\up.ps1 -Project <local-path>
+components:
+  - ollama
