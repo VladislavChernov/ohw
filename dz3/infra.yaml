@@ -1,0 +1,7 @@
+# Общая инфраструктура Dz3 (simple и advanced): shared `ollama` из каталога infra/.
+# Один контейнер ohw-ollama на общей сети ohw_net переиспользуется обоими вариантами.
+#
+#   cd d:/Otus/infra
+#   .\up.ps1 -Project D:\Otus\ohw\dz3
+components:
+  - ollama

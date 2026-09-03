@@ -1,0 +1,31 @@
+# Общий compose Dz3 (advanced). Shared `ollama` приходит из каталога infra/
+# (один контейнер ohw-ollama на общей сети ohw_net). Этот compose поднимает ТОЛЬКО
+# app-контейнер advanced и заставляет его ждать shared ollama по сети.
+#
+#   cd d:/Otus/infra
+#   .\up.ps1 -Project D:\Otus\ohw\dz3          # shared ollama на ohw_net
+#   docker compose -f dz3/compose.yaml up --build   # app advanced на ohw_net
+
+services:
+  app:
+    build:
+      context: ..              # корень монорепо ohw/ (нужен для ohw/kit); запускать compose из dz3/
+      dockerfile: dz3/Dockerfile
+    restart: "no"
+    command: ["json_testgen_advanced"]
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ohw-ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      # CPU-генерация большого JSON-плана идёт дольше 5 минут — даём 20 мин.
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-1200}
+      DEBUG_RAW_DIR: ${DEBUG_RAW_DIR:-/data/output/debug}
+    volumes:
+      - ./advanced/input:/data/input
+      - ./advanced/output:/data/output
+    networks:
+      - ohw-net
+
+networks:
+  ohw-net:
+    external: true
+    name: ohw_net

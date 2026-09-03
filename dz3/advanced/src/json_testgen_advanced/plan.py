@@ -143,7 +143,15 @@ class TestSpec:
             steps = [StepSpec.from_dict({"name": name, "request": raw.get("request"),
                                          "expect": raw.get("expect")})]
 
+        # Backward-compat normalization: some models (esp. qwen2.5 on CPU) nest
+        # ``cleanup`` inside the first mutating step instead of placing it on the
+        # test. Promote those to test-level cleanup so the plan still validates.
         cleanup_raw = raw.get("cleanup") or []
+        for s in steps_raw:
+            if isinstance(s, dict) and isinstance(s.get("cleanup"), list):
+                for c in s["cleanup"]:
+                    if isinstance(c, dict):
+                        cleanup_raw.append(c)
         if not isinstance(cleanup_raw, list):
             raise PlanParseError("test.cleanup — массив")
         cleanup = [StepSpec.from_dict(s) for s in cleanup_raw]
@@ -314,13 +322,16 @@ def validate_plan(plan: TestPlan, required_resources: list[str]) -> ValidationRe
     """
     issues: list[str] = []
 
-    # (b) mutating scenario must have cleanup (or be a provisional create).
+    # (b) create (POST) MUST be reverted: cleanup or provisional.
+    #     PUT/PATCH/DELETE on existing entities is tolerant — these operate on
+    #     pre-existing resources (e.g. jsonplaceholder), so rollback is optional.
     for t in plan.tests:
-        if t.is_mutating and not t.cleanup and not t.provisional:
+        if "POST" in {s.request.method for s in t.steps} and not t.cleanup and not t.provisional:
+            steps_list = ", ".join(s.request.method + " " + s.request.path for s in t.steps)
             issues.append(
-                f"В сценарии '{t.name}' есть мутирующие шаги (POST/PUT/PATCH/DELETE), "
-                f"но нет cleanup и нет provisional. Добавь cleanup-откат либо "
-                f"provisional: true для create."
+                f"В сценарии '{t.name}' есть POST (create), но нет cleanup и нет "
+                f"provisional. Добавь cleanup-откат либо provisional: true для create. "
+                f"Шаги: {steps_list}"
             )
 
     # (c) every {var} used in cleanup must be defined in vars or extracted in steps.

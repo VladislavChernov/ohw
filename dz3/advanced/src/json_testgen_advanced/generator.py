@@ -8,6 +8,7 @@ is never executed — only its JSON plan is.
 
 from __future__ import annotations
 
+import os
 import time
 
 from ohw_kit.jsonreply import JsonReplyError, extract_json
@@ -39,6 +40,11 @@ def generate_plan(
     last_issue = "неизвестная ошибка"
     for attempt in range(1, max_retries + 1):
         reply = client.chat(system="Ты — инженер по тестированию API. Отвечай ТОЛЬКО JSON-планом.", user=current_prompt)
+        debug_dir = os.getenv("DEBUG_RAW_DIR")
+        if debug_dir:
+            os.makedirs(debug_dir, exist_ok=True)
+            with open(os.path.join(debug_dir, f"raw_attempt_{attempt}.txt"), "w", encoding="utf-8") as fh:
+                fh.write(reply)
         try:
             raw = extract_json(reply)
         except JsonReplyError as exc:
