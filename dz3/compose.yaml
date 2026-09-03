@@ -1,9 +1,10 @@
-# Общий compose Dz3 (advanced). Shared `ollama` приходит из каталога infra/
-# (один контейнер ohw-ollama на общей сети ohw_net). Этот compose поднимает ТОЛЬКО
-# app-контейнер advanced и заставляет его ждать shared ollama по сети.
+# Общий compose Dz3 — поднимает ТОЛЬКО app-контейнер advanced (simple запускается
+# отдельно: dz3/simple/compose.yaml). Shared `ollama` приходит из каталога infra/
+# (один контейнер ohw-ollama на общей сети ohw_net). Этот compose заставляет app
+# ждать shared ollama по сети.
 #
-#   cd d:/Otus/infra
-#   .\up.ps1 -Project D:\Otus\ohw\dz3          # shared ollama на ohw_net
+#   cd ohw/infra
+#   ./up.sh ../dz3                                  # shared ollama на ohw_net
 #   docker compose -f dz3/compose.yaml up --build   # app advanced на ohw_net
 
 services:

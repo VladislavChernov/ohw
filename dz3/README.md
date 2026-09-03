@@ -64,23 +64,27 @@ cd ../simple && uv sync --dev && uv run api-testgen
 
 ### 3. Docker (E2E, как в CI)
 
+Варианты запускаются **раздельно** — каждый своим compose-файлом:
+
 ```bash
 # 0) базовый образ ohw-python:3.13 (один раз, собирается локально)
 cd ohw && ./infra/python/build.sh
 
-# 1) shared ollama на сети ohw_net
+# 1) shared ollama на сети ohw_net (общий для обоих вариантов)
 cd ohw/infra && ./up.sh ../dz3
 
-# 2) app-контейнер advanced на той же сети; input/output монтируются из dz3/advanced
-cd ohw/dz3
-docker compose up --build
+# 2) advanced: app-контейнер на той же сети; input/output монтируются из dz3/advanced
+cd ohw/dz3 && docker compose up --build
+# → отчёт в advanced/output/report.md, план в plan.json
+
+# 2') simple (отдельно, свой compose):
+cd ohw/dz3/simple && docker compose up --build
 ```
 
-Отчёт появится в `ohw/dz3/advanced/output/report.md`, план — в `plan.json`.
 Генерация плана на CPU занимает несколько минут (`OLLAMA_TIMEOUT` по умолчанию
 1200 с); для GPU запустите инфру с `./up.sh ../dz3 --gpu`.
 
-## Нужен только advanced? Минимальный набор
+## Нужен только один вариант? Минимальный набор
 
 `advanced` жёстко зависит от двух соседних папок монорепо: `kit/` (path-зависимость
 `ohw-kit = { path = "../../kit" }`) и `infra/` (общий ollama для docker-запуска).
@@ -93,7 +97,8 @@ docker compose up --build
 ```bash
 git clone --no-checkout https://github.com/VladislavChernov/ohw.git
 cd ohw
-git sparse-checkout set dz3/advanced kit infra   # минимальный набор
+git sparse-checkout set dz3/advanced kit infra   # только advanced (+ kit, infra)
+# или: git sparse-checkout set dz3/simple        # только simple (kit не нужен)
 git checkout
 ```
 
