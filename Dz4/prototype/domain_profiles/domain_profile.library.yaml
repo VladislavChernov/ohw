@@ -1,0 +1,60 @@
+# Domain Profile: library (пример расширения, документы docs/01 §1)
+# Источник: docs/01 §2; docs/04 §4 (glossary.library.yaml — terms авторы,
+#           genre_aliases, pen_names, unicode_map).
+# Каркас: секции обязательны, содержимое наполняется при калибровке.
+
+profile:
+  name: "library"
+  description: "Литература: авторы, произведения, жанры, экранизации"
+  language: "ru"
+  version: "1"
+
+ontology:
+  node_types:
+    - type: "Author"
+      unique_key: "canonical_name"
+    - type: "Book"
+      unique_key: "id"
+    - type: "Genre"
+      unique_key: "canonical_name"
+  edge_types:
+    - from: "Author"
+      to: "Book"
+      type: "WROTE"
+    - from: "Book"
+      to: "Genre"
+      type: "BELONGS_TO"
+    - from: "Book"
+      to: "Book"
+      type: "ADAPTED_INTO"
+
+extraction:
+  prompt_template:
+    id: "extract_library_v1"
+    system: "Извлеки сущности и связи по онтологии library (авторы, книги, жанры)."
+  temperature: 0.1
+  max_tokens: 4096
+
+validation:
+  rules: []
+
+canonicalization:
+  nodes:
+    Author:
+      layers: ["unicode", "glossary", "trim_lower"]
+    Book:
+      layers: ["trim_lower"]
+    Genre:
+      layers: ["unicode", "glossary", "trim_lower"]
+
+chunking:
+  strategy: "sliding_window"
+  chunk_size: 512
+  overlap: 64
+
+context_assembly:
+  template:
+    id: "context_library_v1"
+    priorities: ["graph", "vector"]
+  max_tokens: 4096
+  eviction: "drop_lowest_reranker_score"

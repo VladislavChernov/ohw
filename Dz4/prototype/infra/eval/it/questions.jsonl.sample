@@ -1,0 +1,2 @@
+{"id": "it_001", "question": "Должны ли пересекаться REQUIRES и CONTRADICTS в одном требовании?", "expected": "1", "category": "semantics"}
+{"id": "it_002", "question": "К какой категории относится O(n^2)?", "expected": "complexity", "category": "canonicalization"}

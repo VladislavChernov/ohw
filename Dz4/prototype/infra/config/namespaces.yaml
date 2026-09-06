@@ -1,0 +1,67 @@
+# Наборы ключей runtime config по неймспейсам (Config Service)
+# Источник: docs/04 §5.1 (полный набор), docs/history/v7/CONCEPT.md §6.5.
+# Используется как дефолтные значения при инициализации слайсов Config Service;
+# значения хранятся в Config Service (SQLite), файл — стартовый эталон (SSOT).
+#
+# Инварианты L1–L3 не конфигурируются: пороги ниже — реализация инвариантов,
+# а не их определение (docs/invariants.md §2).
+
+domain:
+  active_profile: "it"
+  profiles_available: ["it", "library", "cinema"]
+  auto_reload: false
+
+retrieval:
+  cosine_threshold: 0.7
+  max_graph_nodes: 5
+  max_vector_chunks: 5
+  context_size: 4096
+  reranker_enabled: true
+  graph_search_enabled: true
+  similar_to_expansion: true
+
+extraction:
+  model: "qwen2.5:7b-instruct"
+  temperature: 0.1
+  max_tokens: 4096
+
+normalizer:
+  dedup_auto_threshold: 0.92
+  dedup_llm_threshold: 0.75
+  similar_to_threshold: 0.85
+  llm_canonicalize_fallback: true
+  unicode_normalization: true
+  log_normalization: true
+
+llm:
+  model: "qwen2.5:7b-instruct"
+  temperature: 0.3
+  max_tokens: 2048
+  context_window: 32768
+
+embeddings:
+  model: "bge-m3"
+  dimensions: 1024
+  max_tokens: 8192
+  batch_size: 32
+
+storage:
+  graph_store: "neo4j_graph"
+  vector_store: "neo4j_vector"
+  neo4j_uri: "bolt://neo4j:7687"
+
+auth:
+  api_key: "${GRAPH_AUTH_API_KEY:-changeme}"
+
+flags:
+  graph_search_enabled: true
+  reranker_enabled: true
+  similar_to_expansion: true
+  semantic_validation: true
+
+adapters:
+  graph_store: "neo4j_graph"
+  vector_store: "neo4j_vector"
+  llm: "ollama"
+  embeddings: "bge_m3_service"
+  reranker: "bge_reranker"

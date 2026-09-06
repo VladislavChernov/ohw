@@ -1,0 +1,17 @@
+# Глоссарий: library (docs/04 §4 — terms авторы, genre_aliases, pen_names, unicode_map)
+# Каркас: секции зафиксированы, наполнение при калибровке домена.
+
+terms:
+  - canonical_name: "zjdanov"
+    aliases: ["Жданов", "Zhdanov"]
+
+genre_aliases:
+  - canonical_name: "sf"
+    aliases: ["научная фантастика", "sci-fi", "фантастика"]
+
+pen_names:
+  - canonical_name: "arkadij_strugackij"
+    aliases: ["Аркадий Стругацкий"]
+
+unicode_map:
+  "²": "2"

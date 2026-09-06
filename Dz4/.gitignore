@@ -1,0 +1,10 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[co]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime data (SQLite прототипа, локальные прогоны)
+prototype/runtime/

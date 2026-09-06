@@ -1,0 +1,60 @@
+# Domain Profile: cinema (пример расширения, docs/01 §1)
+# Источник: docs/01 §2; docs/04 §4 (glossary.cinema.yaml — terms фильмы,
+#           director_aliases, genre_aliases).
+# Каркас: секции обязательны, содержимое наполняется при калибровке.
+
+profile:
+  name: "cinema"
+  description: "Кино: фильмы, режиссёры, жанры, рекомендации"
+  language: "ru"
+  version: "1"
+
+ontology:
+  node_types:
+    - type: "Movie"
+      unique_key: "canonical_name"
+    - type: "Director"
+      unique_key: "canonical_name"
+    - type: "Genre"
+      unique_key: "canonical_name"
+  edge_types:
+    - from: "Director"
+      to: "Movie"
+      type: "DIRECTED"
+    - from: "Movie"
+      to: "Genre"
+      type: "BELONGS_TO"
+    - from: "Movie"
+      to: "Movie"
+      type: "SIMILAR_TO"
+
+extraction:
+  prompt_template:
+    id: "extract_cinema_v1"
+    system: "Извлеки сущности и связи по онтологии cinema (фильмы, режиссёры, жанры)."
+  temperature: 0.1
+  max_tokens: 4096
+
+validation:
+  rules: []
+
+canonicalization:
+  nodes:
+    Movie:
+      layers: ["unicode", "glossary", "trim_lower"]
+    Director:
+      layers: ["unicode", "glossary", "trim_lower"]
+    Genre:
+      layers: ["unicode", "glossary", "trim_lower"]
+
+chunking:
+  strategy: "sliding_window"
+  chunk_size: 512
+  overlap: 64
+
+context_assembly:
+  template:
+    id: "context_cinema_v1"
+    priorities: ["graph", "vector"]
+  max_tokens: 4096
+  eviction: "drop_lowest_reranker_score"

@@ -1,0 +1,1 @@
+"""GraphRAG прототип (ДЗ4): контур M0 — Config Service + Glossary Service."""

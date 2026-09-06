@@ -1,0 +1,3 @@
+# Графовый скелет (placeholder) — заполняется при сборке прототипа (M3/M4).
+# Пакеты Python по вехам: core (ядра-интерфейсы), adapters, pipeline, services.
+# Здесь фиксируется только структура; работаем по docs/prototype_requirements.md.

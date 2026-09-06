@@ -1,0 +1,44 @@
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[project]
+name = "graphrag-proto"
+version = "0.1.0"
+description = "GraphRAG prototype: Config Service + Glossary Service (ДЗ4, веха M0)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+graphrag-config = "graphrag_proto.config_service.app:main"
+graphrag-glossary = "graphrag_proto.glossary_service.app:main"
+
+[dependency-groups]
+dev = [
+    "httpx2>=0.1",
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "pytest-mock>=3.14",
+    "ruff>=0.9",
+    "types-PyYAML>=6.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+ignore = ["EXE002"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
