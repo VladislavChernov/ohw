@@ -1,0 +1,23 @@
+# Runtime-конфигурация слоя адаптеров (namespace: adapters)
+# Источник: docs/04 §3, §5.1; docs/history/v7/CONCEPT.md §2.5; docs/adapters_guide.md.
+# Читается Config Service / Topology Orchestrator при старте; переключение на лету —
+# через PUT /api/v1/config/adapters (L1-03, ADR-019).
+#
+# Значения по умолчанию = прототип (v7 §2.5). Доступные оси фиксированы:
+# graph_store, vector_store, llm, embeddings, reranker.
+
+adapters:
+  graph_store: "neo4j_graph"
+  vector_store: "neo4j_vector"
+  llm: "ollama"
+  embeddings: "bge_m3_service"
+  reranker: "bge_reranker"
+
+# Параметры соединения для конкретных реализаций (namespace: storage).
+storage:
+  neo4j_uri: "bolt://neo4j:7687"
+  neo4j_user: "neo4j"
+  neo4j_password: "${NEO4J_PASSWORD:-graphrag}"
+  # Заполняется при подключении дополнительных реализаций (docs/adapters_guide.md):
+  # qdrant_url: "http://qdrant:6333"
+  # qdrant_collection: "chunks"

@@ -1,0 +1,277 @@
+# GraphRAG Prototype — Docker Compose skeleton
+# Источник: docs/infrastructure_stack.md §2, docs/04 §1, docs/05_adr_log.md ADR-019,
+#           docs/history/v7/CONCEPT.md §8.2 (профили), README §3, §5 (запуск, JVM).
+#
+# Статус: каркас для вехи M0. Имена образов (build/image) уточняются при реализации;
+#         все сервисы уже распределены по профилям и портам согласно документации.
+name: ohw
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ------------------------------------------------------------------ config
+  # Работает ВСЕГДА. Config Service + Glossary Service.
+  config-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/config-service:prototype
+    profiles: ["config"]
+    container_name: ohw-config
+    networks: [ohw_net]
+    ports: ["8001:8001"]
+    environment:
+      CONFIG_DB_PATH: /data/config.sqlite
+      DOMAIN_PROFILES_DIR: /profiles
+      NAMESPACES_PATH: /config/namespaces.yaml
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - config_data:/data
+      - ../domain_profiles:/profiles:ro
+      - ./config:/config:ro
+    healthcheck:
+      test:
+        - "CMD"
+        - "sh"
+        - "-lc"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/api/v1/config/domain/active', timeout=2)\""
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    <<: *logging
+
+  glossary-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/glossary-service:prototype
+    command: ["graphrag-glossary"]
+    profiles: ["config"]
+    container_name: ohw-glossary
+    depends_on:
+      - config-service
+    networks: [ohw_net]
+    ports: ["8003:8003"]
+    environment:
+      DOMAIN_PROFILES_DIR: /glossaries
+      CONFIG_URL: http://config-service:8001
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - ../domain_profiles:/glossaries:ro
+    healthcheck:
+      test:
+        - "CMD"
+        - "sh"
+        - "-lc"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8003/api/v1/glossary/it', timeout=2)\""
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    <<: *logging
+
+  # ------------------------------------------------------------------- graph
+  # Neo4j Community. Работает ВСЕГДА. JVM ограничена (риск №2, v7 §8.4).
+  neo4j:
+    image: neo4j:5.26-community
+    profiles: ["graph"]
+    container_name: ohw-neo4j
+    networks: [ohw_net]
+    ports:
+      - "7474:7474"   # HTTP (Web UI Neo4j)
+      - "7687:7687"   # Bolt
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-graphrag}
+      NEO4J_server_memory_heap_max__size: "1G"
+      NEO4J_server_memory_pagecache_size: "512M"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD:-graphrag}", "RETURN 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    <<: *logging
+
+  # --------------------------------------------------------------- topology
+  # ADR-019: отдельный сервис фабрики провайдеров + отдельный Topology UI.
+  topology-orchestrator:
+    image: ohw/topology-service:prototype
+    profiles: ["topology"]
+    container_name: ohw-topology
+    networks: [ohw_net]
+    ports: ["8005:8005"]
+    environment:
+      INFRA_TOPOLOGY_PATH: /topology/infra_topology.yaml
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
+      - ./config:/config:ro
+    <<: *logging
+
+  topology-ui:
+    image: ohw/topology-ui:prototype
+    profiles: ["topology"]
+    container_name: ohw-topology-ui
+    depends_on:
+      - topology-orchestrator
+    networks: [ohw_net]
+    ports: ["8502:8502"]
+    environment:
+      TOPOLOGY_API_URL: http://topology-orchestrator:8005
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    <<: *logging
+
+  # -------------------------------------------------------------- embeddings
+  # bge-m3 на GPU. Только на фазе индексации (L4-01 — поочерёдная работа).
+  embeddings-service:
+    image: ohw/embeddings-service:prototype
+    profiles: ["embeddings"]
+    container_name: ohw-embeddings
+    networks: [ohw_net]
+    ports: ["8004:8004"]
+    environment:
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSIONS: 1024
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - models_data:/models
+    <<: [*gpu, *logging]
+
+  # --------------------------------------------------------------- ingestion
+  # Ingestion API + пайплайн (9 этапов). Поочерёдно забирает GPU.
+  ingestion-api:
+    image: ohw/ingestion-service:prototype
+    profiles: ["ingestion"]
+    container_name: ohw-ingestion
+    depends_on:
+      - config-service
+      - glossary-service
+      - neo4j
+    networks: [ohw_net]
+    ports: ["8002:8002"]
+    environment:
+      CONFIG_URL: http://config-service:8001
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-graphrag}
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - ../domain_profiles:/profiles:ro
+    <<: [*gpu, *logging]
+
+  # --------------------------------------------------------------------- llm
+  # Query API + Ollama (Qwen 7B). Фаза поиска.
+  query-api:
+    image: ohw/query-api:prototype
+    profiles: ["llm"]
+    container_name: ohw-query
+    depends_on:
+      - config-service
+      - glossary-service
+      - neo4j
+      - ollama
+    networks: [ohw_net]
+    ports: ["8000:8000"]
+    environment:
+      CONFIG_URL: http://config-service:8001
+      NEO4J_URI: bolt://neo4j:7687
+      OLLAMA_URL: http://ollama:11434
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    <<: *logging
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["llm"]
+    container_name: ohw-ollama
+    networks: [ohw_net]
+    ports: ["11434:11434"]
+    volumes:
+      - ollama_data:/root/.ollama
+    <<: [*gpu, *logging]
+
+  # ---------------------------------------------------------------- reranker
+  # bge-reranker-base на CPU. Опционально (NoOp-адаптер допустим).
+  reranker:
+    image: ohw/reranker:prototype
+    profiles: ["reranker"]
+    container_name: ohw-reranker
+    depends_on:
+      - config-service
+    networks: [ohw_net]
+    environment:
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    <<: *logging
+
+  # ---------------------------------------------------------------- query-ui
+  # Web UI — Конфигуратор «Бизнес-онтология» (фаза 2, веха M5; вне M0–M4).
+  configurator-ui:
+    image: ohw/configurator-ui:prototype
+    profiles: ["configurator"]
+    container_name: ohw-configurator-ui
+    depends_on:
+      - config-service
+      - glossary-service
+    networks: [ohw_net]
+    ports: ["8501:8501"]
+    environment:
+      CONFIG_URL: http://config-service:8001
+      GLOSSARY_URL: http://glossary-service:8003
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    <<: *logging
+
+  # -------------------------------------------------------------- monitoring
+  # По требованию (фаза 2). Prometheus + Grafana + Loki.
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["monitoring"]
+    container_name: ohw-prometheus
+    networks: [ohw_net]
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+    <<: *logging
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["monitoring"]
+    container_name: ohw-grafana
+    depends_on:
+      - prometheus
+    networks: [ohw_net]
+    ports: ["3000:3000"]
+    <<: *logging
+
+  loki:
+    image: grafana/loki:latest
+    profiles: ["monitoring"]
+    container_name: ohw-loki
+    networks: [ohw_net]
+    ports: ["3100:3100"]
+    <<: *logging
+
+networks:
+  ohw_net:
+    driver: bridge
+
+volumes:
+  config_data:
+  neo4j_data:
+  models_data:
+  ollama_data:

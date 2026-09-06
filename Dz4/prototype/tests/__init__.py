@@ -1,0 +1,1 @@
+"""Тесты M0: Config Service и Glossary Service."""

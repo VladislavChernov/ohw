@@ -1,0 +1,87 @@
+# Domain Profile: it (базовый профиль, поставляется из коробки)
+# Источник: docs/01 §2 (структура контракта ядра), §3 (генерация constraints),
+#           docs/history/v7/CONCEPT.md §3 (архитектура доменов).
+# Обязательные секции: profile, ontology, extraction, validation,
+# canonicalization, chunking, context_assembly.
+
+profile:
+  name: "it"
+  description: "ИТ-домен: требования, концепции, контракты (Requirement -> Concept -> Contract)"
+  language: "ru"
+  version: "1"
+  # Канонические узлы/рёбра загружаются в Neo4j через unique_key при активации.
+
+ontology:
+  node_types:
+    - type: "Requirement"
+      unique_key: "id"
+      properties: ["id", "name", "text"]
+    - type: "Concept"
+      unique_key: "canonical_name"
+      properties: ["canonical_name", "aliases", "description"]
+    - type: "Contract"
+      unique_key: "id"
+      properties: ["id", "name", "category"]
+  edge_types:
+    - from: "Requirement"
+      to: "Concept"
+      type: "REQUIRES_CONSTRAINT"
+    - from: "Requirement"
+      to: "Requirement"
+      type: "CONTRADICTS"
+    - from: "Concept"
+      to: "Concept"
+      type: "SIMILAR_TO"
+    - from: "Concept"
+      to: "Contract"
+      type: "REFERENCES"
+
+extraction:
+  prompt_template:
+    id: "extract_it_v1"
+    system: "Извлеки сущности и связи из текста по доменной онтологии it."
+    user: |
+      Формат вывода: JSON со списками requirements, concepts, contracts и
+      связей REQUIRES_CONSTRAINT / CONTRADICTS / SIMILAR_TO / REFERENCES.
+      Отвечай только JSON, без пояснений.
+  temperature: 0.1
+  max_tokens: 4096
+
+validation:
+  rules:
+    - id: "req_must_have_id"
+      severity: "error"
+      cypher: |
+        MATCH (r:Requirement) WHERE r.id IS MISSING RETURN r
+    - id: "requires_constraint_no_target"
+      severity: "warning"
+      cypher: |
+        MATCH (r:Requirement)-[:REQUIRES_CONSTRAINT]->(c:Concept)
+        WHERE c IS NULL RETURN r
+
+canonicalization:
+  # Слои трансформации для каждой категории узла (ADR-007).
+  nodes:
+    Concept:
+      layers: ["unicode", "glossary", "trim_lower"]
+    Requirement:
+      layers: ["trim_lower"]
+    Contract:
+      layers: ["trim_lower"]
+
+chunking:
+  strategy: "sliding_window"
+  chunk_size: 512
+  overlap: 64
+  chunk_size_by_type:
+    default: 512
+    # book/schema/poem — стратегии по типам источников (заполняется по факту)
+
+context_assembly:
+  template:
+    id: "context_it_v1"
+    priorities:
+      - "graph"
+      - "vector"
+  max_tokens: 4096
+  eviction: "drop_lowest_reranker_score"

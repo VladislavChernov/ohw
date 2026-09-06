@@ -1,0 +1,14 @@
+# Глоссарий: cinema (docs/04 §4 — terms фильмы, director_aliases, genre_aliases)
+# Каркас: секции зафиксированы, наполнение при калибровке домена.
+
+terms:
+  - canonical_name: "matrix"
+    aliases: [ "Матрица", "The Matrix" ]
+
+director_aliases:
+  - canonical_name: "wachowskis"
+    aliases: ["Вачовски", "The Wachowskis"]
+
+genre_aliases:
+  - canonical_name: "sci-fi"
+    aliases: ["научная фантастика", "sf"]

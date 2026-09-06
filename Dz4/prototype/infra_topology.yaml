@@ -1,0 +1,39 @@
+# Конфигурация сетевой топологии инсталляции (Topology Orchestrator)
+# Источник: docs/05_adr_log.md (ADR-019), docs/00 (TOPO), docs/glossary.md,
+#           docs/04 §1 (порты), docs/security.md §2 (роль operator).
+#
+# Читает Topology Orchestrator Service (:8005) и подменяет InMemory-классы
+# на сетевые драйверы (Redis/RabbitMQ/vLLM) на лету (L1-03).
+# Правки — оператор через Topology UI (:8502) или правка YAML.
+
+version: 1
+environment: ${GRAPH_ENV:-prototype}
+network: ohw_net
+
+# Пулы соединений и драйверы текущей инсталляции (активные провайдеры).
+providers:
+  graph_store: neo4j_graph
+  vector_store: neo4j_vector
+  llm: ollama
+  embeddings: bge_m3_service
+  reranker: bge_reranker
+  # Сетевые пулы (v6-контур): заполняются при включении Task Queue / в vLLM:
+  queue_provider: none          # none | valkey_streams | rabbitmq
+  # cache: "none"
+
+# Параметры соединений (перекрываются из namespace: storage).
+endpoints:
+  neo4j:
+    bolt: "bolt://neo4j:7687"
+    http: "http://neo4j:7474"
+  ollama:
+    base: "http://ollama:11434"
+  embeddings:
+    base: "http://embeddings-service:8004"
+  valkey:
+    base: "redis://valkey:6379"
+
+# Настройки запуска инсталляции.
+startup:
+  auto_apply_adapters: true    # применять providers из этого файла при старте
+  require_topology_apply: false # при false сервисы стартуют с InMemory-адаптерами

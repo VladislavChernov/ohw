@@ -1,0 +1,31 @@
+# Глоссарий: it (docs/04 §4)
+# Секции: terms, data_types, complexity_aliases, unicode_map, function_synonyms.
+# Канонизация: один тег -> один canonical_name (валидируется при сохранении).
+
+terms:
+  - canonical_name: "big_o"
+    aliases: ["Big-O", "big o", "сложность алгоритма"]
+  - canonical_name: "b-tree"
+    aliases: ["B-дерево", "B tree", "BTree"]
+
+data_types:
+  - canonical_name: "integer"
+    aliases: ["int", "целое число"]
+  - canonical_name: "string"
+    aliases: ["строка"]
+
+complexity_aliases:
+  - canonical_name: "o(n)"
+    aliases: ["O(N)", "O(n)", "линейная"]
+  - canonical_name: "o(n^2)"
+    aliases: ["O(N^2)", "квадратичная"]
+
+function_synonyms:
+  log: ["lg", "ln", "log_2", "log_10", "log2", "logn", "log₂", "log₁₀"]
+  sqrt: ["√", "cbrt"]
+  factorial: ["!", "fact"]
+
+unicode_map:
+  "²": "2"
+  "√": "sqrt"
+  "Σ": "sum"
