@@ -221,7 +221,7 @@ services:
   # llama.cpp server (CUDA-сборка). Модель монтируется bind-mount'ом с хоста.
   # По умолчанию путь — локальный GGUF-каталог LM Studio; переопределяется через LLM_GGUF_HOST_DIR.
   llm:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b10853
     profiles: ["llm"]
     container_name: ohw-llm
     networks: [ohw_net]
