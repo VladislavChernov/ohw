@@ -41,7 +41,7 @@ Query API Gateway — **граница**, а не часть ядра. Его о
 ## 3. Что НЕ трогается при замене веб-слоя
 
 - Python-ядро: пайплайн 9 этапов, ретривер, Config/Glossary Service, адаптеры, Domain Profiles.
-- Neo4j, Ollama, Valkey, embeddings/reranker-сервисы.
+- Neo4j, llama.cpp, Valkey, embeddings/reranker-сервисы.
 - Docker-профили, сеть `ohw_net` (меняется только образ `query-api` в `prototype/infra/compose.yaml`).
 - Контракты ADR-016/017/018 (остаются SSOT для границы).
 - Eval-инфраструктура, глоссарии, ролевая модель.
@@ -53,7 +53,7 @@ Query API Gateway — **граница**, а не часть ядра. Его о
 2. **Реализовать** новую поверхность: HTTP+SSE/WS, MCP, auth, rate-limit; читать Task Queue
    и обращаться к Config/Glossary по контрактам (§2).
 3. **Обновить композ:** в `prototype/infra/compose.yaml` заменить образ `query-api`
-   (профиль `llm`); при необходимости — переменные окружения (OLLAMA_URL, CONFIG_URL и т.п.).
+   (профиль `llm`); при необходимости — переменные окружения (LLM_BASE_URL, CONFIG_URL и т.п.).
 4. **Прогнать контрактные тесты** границы (§A) и eval-срез (`prototype/infra/eval/`, ADR-015),
    чтобы убедиться, что поведение не изменилось (та же метрика groundedness/coverage).
 5. **Зафиксировать решение ADR-записью** (новый ADR или update ADR-020) с указанием языка

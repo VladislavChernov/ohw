@@ -20,7 +20,7 @@
 - `similar_to_expansion`
 
 **namespace: extraction**
-- `model` ("qwen2.5:7b-instruct")
+- `model` ("qwen2.5-coder-7b-instruct-abliterated-q4_k_m")
 - `temperature` (0.1)
 - `max_tokens` (4096)
 - Примечание: доменный prompt_template подгружается динамически из профиля
@@ -34,7 +34,7 @@
 - `log_normalization` (true)
 
 **namespace: llm**
-- `model` ("qwen2.5:7b-instruct")
+- `model` ("qwen2.5-coder-7b-instruct-abliterated-q4_k_m")
 - `temperature` (0.3)
 - `max_tokens` (2048)
 - `context_window` (32768)
@@ -100,7 +100,7 @@
   и настроечное приложение оператора; включается по требованию.
 - **"embeddings"** — Embeddings Service (bge-m3). Включается только на фазе индексации.
 - **"ingestion"** — Ingestion API + Скрипты пайплайна. Поочерёдно забирает GPU.
-- **"llm"** — Query API + Ollama (Qwen 7B). Включается на фазе поиска.
+- **"llm"** — Query API + llama.cpp (Qwen 2.5 Coder 7B Abliterate q4_K_M). Включается на фазе поиска.
 - **"reranker"** — bge-reranker-base (CPU). Опциональный контейнер фазы поиска.
 - **"monitoring"** — Prometheus + Grafana + Loki. Разворачивается по требованию.
 
@@ -118,7 +118,7 @@
 | Глоссарий            | YAML + SQLite     | Postgres          | Postgres            |
 | Кэш                  | Нет               | Valkey (Redis)    | Valkey (кластер)    |
 | Очередь ingestion    | Синхронно         | Redis / RabbitMQ  | Kafka               |
-| Модель LLM           | Qwen 7B (1 GPU)   | Qwen 14B (1 GPU)  | Qwen 72B (multi-GPU)|
+| Модель LLM           | Qwen 2.5 Coder 7B Abliterate q4_K_M (1 GPU)   | Qwen 14B (1 GPU)  | Qwen 72B (multi-GPU)|
 | Модель эмбеддингов   | bge-m3 (1 GPU)    | bge-m3 (1 GPU)    | bge-m3 (отдельный)  |
 | GPU                  | 1 (поэтапно)      | 2 (параллельно)   | N (автоскейлинг)    |
 

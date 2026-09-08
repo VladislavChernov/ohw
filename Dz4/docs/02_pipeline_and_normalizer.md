@@ -7,15 +7,37 @@
 
 Движок последовательно прогоняет данные через этапы:
 
-1. **INGEST** — Приём документа через Ingestion API (:8002). Поддержка: .txt, .md, .pdf, .json. Метаданные: source_url, domain, doc_type.
+1. **INGEST** — Приём документа через Ingestion API (:8002). Поддержка: .txt, .md, .pdf (в M1; .json — вне скоупа, см. ADR-021). Метаданные: source_url, domain, doc_type. Выход этапа — **канонический документ** (DocumentReader, ADR-021), источник-агностичный. Пайплайн ниже работает ТОЛЬКО с этим представлением.
 2. **CHUNK** — Фрагментация текста. Стратегия: sliding window с overlap (chunk_size=512, overlap=64 токена). Сохранение: Chunk-узлы с CONTAINS-связями к Source.
 3. **EMBED** — Генерация векторных embeddings через **Embeddings Adapter**. Выбор модели — через runtime config (namespace: adapters.embeddings). Базовая реализация: bge-m3 (1024 dim), HTTP к Embeddings Service :8004. Альтернатива: LocalSentenceTransformerAdapter — встроен в пайплайн, без отдельного контейнера. Batch: 32 фрагмента за запрос (настраивается: namespace: embeddings.batch_size). Ядро не знает, какой эмбеддер под капотом.
-4. **EXTRACT** — Сырая экстракция сущностей через **LLM Adapter**. Выбор модели — через runtime config (namespace: adapters.llm). Базовая реализация: OllamaAdapter — HTTP к :11434, Qwen 2.5 7B. Альтернатива: OpenAICompatibleAdapter — vLLM, LM Studio, любой /v1/chat/completions. Промпт: доменный prompt_template из активного Domain Profile. Модель отвечает ТОЛЬКО за экстракцию сырых сущностей и связей. Гарантия детерминированности — на стороне Python (нормализация).
+4. **EXTRACT** — Сырая экстракция сущностей через **LLM Adapter**. Выбор модели — через runtime config (namespace: adapters.llm). Реализация: OpenAICompatibleAdapter (llama.cpp `/v1/chat/completions`), Qwen 2.5 Coder 7B Abliterate q4_K_M. Альтернатива: OllamaAdapter — HTTP к :11434, и любой другой `/v1/chat/completions` (vLLM, LM Studio). Промпт: доменный prompt_template из активного Domain Profile. Модель отвечает ТОЛЬКО за экстракцию сырых сущностей и связей. Гарантия детерминированности — на стороне Python (нормализация).
 5. **NORMALIZE** — Контекстно-зависимая канонизация. Правила канонизации берутся из Domain Profile (canonicalization). Математические символы (Big-O) изолированы от текстовых полей. Unicode-нормализация через таблицу unicode_map из Glossary Service. LLM-fallback: при сбое regex-валидации — автоматический fallback на исходную строку + warning в лог.
 6. **DEDUP** — Двухступенчатая дедупликация. Ступень 1 (auto): косинус >= 0.92 → автоматическое слияние. Эмбеддинги получаются через **Embeddings Adapter**. Ступень 2 (LLM): зона 0.75–0.92 → верификация через **LLM Adapter**. LLM-fallback: при недоступности LLM — сохранение как separate entities + связь SIMILAR_TO + warning. Зона < 0.75 → разные сущности, не склеиваются.
 7. **CONTRACT** — Склейка вложенных JSON-схем. Поиск связей EXTENDS и REFERENCES ($ref, allOf) для построения иерархии Contract-узлов.
 8. **VALIDATE** — Семантическая валидация графа. Cypher-правила из Domain Profile (validation_rules). Типы ошибок: structural (нет обязательного поля), semantic (логические противоречия).
 9. **COMMIT** — Атомарная запись в хранилище через **GraphStoreProvider** (узлы/рёбра) и **VectorStoreProvider** (эмбеддинги чанков). Используется транзакция с rollback при ошибке. После коммита — обновление Document Registry.
+
+### 1.1. Канонический документ (выход INGEST) и DocumentReader
+
+Контракт «источник → канонический документ» фиксирует **ADR-021**. Etap INGEST отдаёт
+пайплайну единственный источник-агностичный формат:
+
+```json
+Document {
+  source_id, source_url, domain, doc_type,
+  content_hash,               // sha256 по сериализации нормализованного канонич. вида
+  blocks: [ { type, page, order, data } ]  // type: text | code | image
+}
+```
+
+- `Document` — результат `DocumentReader.read()`; каждый `doc_type` (txt/md/pdf) имеет
+  свою реализацию ридера. Новый ридер/OCR = НОВАЯ реализация интерфейса, без правки этапов.
+- `content_hash` считается с канонического вида (нормализация переносов и whitespace) —
+  источник-независим, обеспечивает идемпотентность (ADR-014, L2-06).
+- **Инвариант (ADR-021):** этапы CHUNK…COMMIT читают ТОЛЬКО `Document`; доступ к
+  исходным байтам допустим только внутри `DocumentReader`.
+- PDF в M1: текст (склейка переносов), code-блоки → `type:code`, изображения → `type:image`
+  (без смысла, `data.ref`). OCR — M3 (та же реализация интерфейса расширяется).
 
 ---
 

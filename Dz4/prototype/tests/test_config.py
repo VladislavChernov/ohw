@@ -160,3 +160,52 @@ def test_validate_profile_module(tmp_path: Path) -> None:
     data = load_profile_yaml(path)
     assert data["profile"]["name"] == "it"
     assert validate_profile(data) == []
+
+
+def _with_glossary(data: dict, glossary: dict) -> dict:
+    merged = copy.deepcopy(data)
+    merged["glossary"] = glossary
+    return merged
+
+
+def test_glossary_validation_valid(tmp_path: Path) -> None:
+    profile = _with_glossary(
+        MINIMAL_PROFILE,
+        {
+            "terms": [
+                {"canonical_name": "big_o", "aliases": ["Big-O", "big o"]},
+                {"canonical_name": "b-tree", "aliases": ["B-дерево", "B tree"]},
+            ]
+        },
+    )
+    assert validate_profile(profile) == []
+
+
+def test_glossary_validation_conflicting_aliases(tmp_path: Path) -> None:
+    profile = _with_glossary(
+        MINIMAL_PROFILE,
+        {
+            "terms": [
+                {"canonical_name": "a", "aliases": ["tag", "другой"]},
+                {"canonical_name": "b", "aliases": ["TAG"]},  # конфликт: один тег -> 2 термина
+            ]
+        },
+    )
+    errors = validate_profile(profile)
+    assert any("не может быть двух канонизаций" in e for e in errors)
+
+
+def test_glossary_validation_non_list_section(tmp_path: Path) -> None:
+    profile = _with_glossary(
+        MINIMAL_PROFILE, {"terms": {"canonical_name": "x"}}  # не список
+    )
+    errors = validate_profile(profile)
+    assert any("glossary.terms: должен быть список" in e for e in errors)
+
+
+def test_glossary_validation_missing_canonical(tmp_path: Path) -> None:
+    profile = _with_glossary(
+        MINIMAL_PROFILE, {"terms": [{"aliases": ["без-имени"]}]}
+    )
+    errors = validate_profile(profile)
+    assert any("canonical_name" in e for e in errors)

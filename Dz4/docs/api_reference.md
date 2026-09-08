@@ -141,15 +141,20 @@ DEDUP → CONTRACT → VALIDATE → COMMIT).
 
 | Метод | Путь | Назначение |
 |-------|------|------------|
-| POST | `/api/v1/ingestion/documents` | Загрузка файла (`.txt` / `.md` / `.pdf` / `.json`) или URL; метаданные: `source_url`, `domain`, `doc_type`. Ответ `202` — `{job_id, status, created_at}` |
+| POST | `/api/v1/ingestion/documents` | Загрузка файла (`.txt` / `.md` / `.pdf`; `.json` — вне скоупа M1, ADR-021) или URL; метаданные: `source_url`, `domain`, `doc_type`. Ответ `202` — `{job_id, status, created_at}` |
 | GET | `/api/v1/ingestion/jobs` | Список джоб индексации (пагинация: `page`, `page_size`) |
 | GET | `/api/v1/ingestion/jobs/{job_id}` | Статус джобы: `{job_id, status, stage}` |
 | DELETE | `/api/v1/ingestion/jobs/{job_id}` | Отмена джобы (освобождение GPU) |
 
 Жизненный цикл джобы: `queued → running (stage: INGEST|CHUNK|EMBED|EXTRACT|NORMALIZE|DEDUP|CONTRACT|VALIDATE|COMMIT) → succeeded | failed | cancelled`.
 
+**Выход этапа INGEST — канонический документ (ADR-021):** `Document { source_id,
+source_url, domain, doc_type, content_hash, blocks: [{type, page, order, data}] }`,
+где `content_hash` — sha256 по нормализованному каноническому виду (источник-независим),
+`type: text|code|image`. Пайплайн ниже работает только с этим представлением.
+
 > Контракт и жизненный цикл джоб формально зафиксированы в `docs/05_adr_log.md` ADR-018;
-> правила версионирования/удаления источников — ADR-014.
+> правила версионирования/удаления источников — ADR-014; контракт канонического документа — ADR-021.
 
 ---
 

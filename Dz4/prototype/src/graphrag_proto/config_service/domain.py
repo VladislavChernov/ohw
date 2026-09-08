@@ -41,6 +41,54 @@ def validate_profile(data: dict[str, Any]) -> list[str]:
         for key in ("node_types", "edge_types"):
             if not isinstance(ontology.get(key), list):
                 errors.append(f"ontology.{key}: должен быть список")
+    glossary = data.get("glossary")
+    if glossary is not None:
+        errors.extend(_validate_glossary(glossary))
+    return errors
+
+
+def _validate_glossary(glossary: Any) -> list[str]:
+    """Расширенная glossary-валидация (M1): уникальность canonical_name и алиасов.
+
+    Правила (docs/04 §4, M1-запрос из M0):
+    - секции terms/data_types/complexity_aliases — список словарей {canonical_name, aliases};
+    - один тег (алиас) не ведёт к двум каноническим терминам.
+    """
+    errors: list[str] = []
+    if not isinstance(glossary, dict):
+        return ["glossary: должен быть маппинг"]
+    alias_owner: dict[str, str] = {}
+    for section in ("terms", "data_types", "complexity_aliases"):
+        entries = glossary.get(section)
+        if entries is None:
+            continue
+        if not isinstance(entries, list):
+            errors.append(f"glossary.{section}: должен быть список")
+            continue
+        for i, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                errors.append(f"glossary.{section}[{i}]: должен быть словарь")
+                continue
+            name = entry.get("canonical_name")
+            if not isinstance(name, str) or not name:
+                errors.append(f"glossary.{section}[{i}]: поле canonical_name обязано быть непустой строкой")
+                continue
+            aliases = entry.get("aliases")
+            if aliases is not None and not isinstance(aliases, list):
+                errors.append(f"glossary.{section}[{i}].aliases: должен быть список")
+                continue
+            for alias in aliases or []:
+                if not isinstance(alias, str) or not alias:
+                    continue
+                key = alias.casefold()
+                prev = alias_owner.get(key)
+                if prev is not None and prev != name:
+                    errors.append(
+                        f"glossary.{section}[{i}]: тег '{alias}' уже ведёт к "
+                        f"canonical_name '{prev}' (не может быть двух канонизаций)"
+                    )
+                else:
+                    alias_owner[key] = name
     return errors
 
 

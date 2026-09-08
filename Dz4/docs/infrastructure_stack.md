@@ -40,7 +40,7 @@
 | Glossary Service | Словари доменов, трансляция тегов → канонический ряд | Python | 8003 | config | docs/04 §4, docs/00 |
 | Embeddings Service | Расчёт векторов bge-m3 (GPU) | Python | 8004 | embeddings | docs/04 §1, docs/02 §1 (EMBED) |
 | Neo4j Community | Граф + нативный векторный индекс (ADR-001) | Java (сторонний) | 7687 (Bolt) / 7474 (HTTP) | graph | docs/04 §1, docs/06 §3 |
-| Ollama Server | Инференс Qwen 2.5 7B Instruct (GPU) | Go (сторонний) | 11434 | llm | docs/04 §1 |
+| llama.cpp Server | Инференс Qwen 2.5 Coder 7B Abliterate q4_K_M (GPU, GGUF) | C++ (сторонний) | 8080 (/v1) | llm | docs/04 §1, ADR-022 |
 | bge-m3 (LocalSentenceTransformerAdapter) | Встроенный эмбеддер без отдельного контейнера | Python | — | — | docs/02 §1, adapters_specification.md |
 | bge-reranker-base | Реранкер (CPU); NoOpRerankerAdapter — отключить | Python | — | reranker | docs/03 §1, docs/06 §3 |
 | Prometheus / Grafana / Loki (+Promtail) | Наблюдаемость, метрики `/metrics`, JSON-логи | сторонние | — | monitoring | docs/06 §2 |

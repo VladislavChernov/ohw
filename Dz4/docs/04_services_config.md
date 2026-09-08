@@ -19,7 +19,7 @@
 | Topology UI (Streamlit) | 8502 | Настроечное приложение «Топология инфраструктуры» (оператор, ADR-019) |
 | Neo4j Database      | 7687 (Bolt)   | Bolt-интерфейс для работы с графом                 |
 | Neo4j Database      | 7474 (HTTP)   | Web UI браузера для Neo4j                          |
-| Ollama Server       | 11434         | Инференс локальной модели Qwen 2.5 7B             |
+| llama.cpp Server   | 8080 (/v1)    | Инференс Qwen 2.5 Coder 7B Abliterate q4_K_M (GGUF) |
 
 ---
 
@@ -105,7 +105,7 @@ factorial: ["!", "fact"]
 - `similar_to_expansion`
 
 **namespace: extraction**
-- `model` ("qwen2.5:7b-instruct")
+- `model` ("qwen2.5-coder-7b-instruct-abliterated-q4_k_m")
 - `temperature` (0.1)
 - `max_tokens` (4096)
 - Примечание: доменный prompt_template подгружается динамически из профиля
@@ -119,7 +119,7 @@ factorial: ["!", "fact"]
 - `log_normalization` (true)
 
 **namespace: llm**
-- `model` ("qwen2.5:7b-instruct")
+- `model` ("qwen2.5-coder-7b-instruct-abliterated-q4_k_m")
 - `temperature` (0.3)
 - `max_tokens` (2048)
 - `context_window` (32768)
