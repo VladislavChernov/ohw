@@ -496,7 +496,7 @@ Coder 7B Abliterate q4_K_M**. Модель доступна локально к�
 
 **Решение:**
 
-1. **Базовый LLM-контейнер — llama.cpp server** (`ghcr.io/ggml-org/llama.cpp:server-cuda`),
+1. **Базовый LLM-контейнер — llama.cpp server** (`ghcr.io/ggml-org/llama.cpp:server-cuda-b10853`),
    порт `8080`, OpenAI-совместимое `/v1` API. Модель монтируется bind-mount'ом
    (`LLM_GGUF_HOST_DIR`/`LLM_GGUF_FILE` с host-значениями по умолчанию).
 2. **Контракт ядра не меняется:** `LLMInference` по-прежнему за адаптером; для llama.cpp
