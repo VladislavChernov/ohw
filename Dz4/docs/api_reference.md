@@ -34,7 +34,8 @@
 
 Цикл генерации — 7 шагов по `docs/03_retriever.md`: эмбеддинг запроса → Graph Retriever →
 Vector Retriever → Reranker → Context Assembly → LLM Generation → стриминг ответа.
-Сервис обслуживает WebSockets-сессии в сетевом контуре (язык реализации — на усмотрение
+Healthcheck сервиса — `GET /health` (без `X-API-Key`).
+Сервис обслуживает SSE-сессии в сетевом контуре (язык реализации — на усмотрение
 владельца; прототип — ADR-020, процедура замены — `docs/web_layer_replacement.md`);
 см. `docs/00` §1.
 
@@ -74,14 +75,26 @@ X-API-Key: changeme
 ```
 
 Жизненный цикл статуса: `queued → running → succeeded | failed | cancelled`.
+`stage` — текущая стадия обработки: `embedding` / `graph` / `vector` / `rerank` / `llm`.
+Канонический статус хранится в task store (SQLite `query_tasks`, ADR-023); очередь — только транспорт.
 
-### 3.3. Стриминг результата: WebSockets / SSE
+### 3.2a. Отмена задачи: `DELETE /query/tasks/{task_id}`
 
-Канал доставки — WebSockets (постоянное соединение, обслуживание сотен сессий) либо SSE (HTTP-стрим).
-События:
+Отменяет задачу до начала обработки или во время неё (worker проверяет флаг отмены перед
+публикацией очередных событий). `200` — отменена; `409` — уже в терминальном статусе;
+`404` — задача не найдена. После отмены стрим завершается событием `status: cancelled`.
 
-- `status` — смена стадии обработки (`embedding` / `graph` / `vector` / `rerank` / `llm`).
-- `token` — дельта токенов ответа.
+### 3.3. Стриминг результата: `GET /query/tasks/{task_id}/stream` (SSE)
+
+Канал доставки — SSE (HTTP-стрим, Media Type `text/event-stream`); WebSockets подключатся
+вместе с MCP-шлюзом на том же конверте (M5, ADR-023 OQ1). Разрыв соединения клиента не
+останавливает задачу — worker читает очередь независимо от HTTP-подписчика; статус доступен
+`GET /query/tasks/{id}`.
+
+События — единый конверт ADR-016, `event: <type>`, однострочный JSON в `data:`:
+
+- `status` — смена стадии обработки (`embedding` / `graph` / `vector` / `rerank` / `llm`; `cancelled`).
+- `token` — дельта токенов ответа (`delta`).
 - `done` — завершение: финальный текст, список источников и тайминги.
 - `error` — сбой задачи с кодом ошибки.
 
@@ -94,8 +107,8 @@ X-API-Key: changeme
 ```
 
 > Точный JSON-Schema событий стриминга (конверт события, типы `status`/`token`/`done`/`error`)
-> зафиксирован в `docs/05_adr_log.md` ADR-016. Контракт асинхронного контура
-> «202 Accepted + task_id + стриминг через WebSockets/SSE» — см. `docs/00`, `docs/history.md` Этап 6.
+> зафиксирован в `docs/05_adr_log.md` ADR-016; транспорт и очереди `query:tasks`/`query:events:{task_id}` — ADR-023.
+> Контракт асинхронного контура «202 Accepted + task_id + стриминг через WebSockets/SSE» — см. `docs/00`, `docs/history.md` Этап 6.
 
 ### 3.4. MCP-интеграция ИИ-агентов
 
@@ -145,6 +158,7 @@ DEDUP → CONTRACT → VALIDATE → COMMIT).
 | GET | `/api/v1/ingestion/jobs` | Список джоб индексации (пагинация: `page`, `page_size`) |
 | GET | `/api/v1/ingestion/jobs/{job_id}` | Статус джобы: `{job_id, status, stage}` |
 | DELETE | `/api/v1/ingestion/jobs/{job_id}` | Отмена джобы (освобождение GPU) |
+| DELETE | `/api/v1/ingestion/documents?domain=&source_url=` | Soft-delete источника (L2-05, ADR-014): чанки снимаются с поиска, сущности сохраняются пока есть активные `source_ids`; `200` — удалён, `404` — не найден |
 
 Жизненный цикл джобы: `queued → running (stage: INGEST|CHUNK|EMBED|EXTRACT|NORMALIZE|DEDUP|CONTRACT|VALIDATE|COMMIT) → succeeded | failed | cancelled`.
 

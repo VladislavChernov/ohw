@@ -26,8 +26,8 @@ Query API Gateway — **граница**, а не часть ядра. Его о
 
 | Контракт | Фиксация | Что реализовать |
 |----------|----------|-----------------|
-| Асинхронный Query API | ADR-016, `api_reference.md` §3 | `POST /query`, `202+task_id`, `GET /query/tasks/{id}` |
-| Конверт событий стриминга | ADR-016 | `{type: status\|token\|done\|error, task_id, ts, payload}` через SSE / WS |
+| Асинхронный Query API | ADR-016/023, `api_reference.md` §3 | `POST /query`, `202+task_id`, `GET /query/tasks/{id}`, отмена `DELETE /query/tasks/{id}` |
+| Конверт событий стриминга | ADR-016/023 | `{type: status\|token\|done\|error, task_id, ts, payload}`; SSE `GET /query/tasks/{id}/stream` (WS — с MCP-шлюзом, M5) |
 | MCP-инструменты | ADR-017 | 4 инструмента по JSON-RCP-мосту :8000 |
 | Аутентификация | `security.md` §1 | заголовок `X-API-Key`, `401` при неверном ключе |
 | Ошибки | `api_reference.md` §2 | стандартные коды и формат ошибок |
@@ -53,7 +53,8 @@ Query API Gateway — **граница**, а не часть ядра. Его о
 2. **Реализовать** новую поверхность: HTTP+SSE/WS, MCP, auth, rate-limit; читать Task Queue
    и обращаться к Config/Glossary по контрактам (§2).
 3. **Обновить композ:** в `prototype/infra/compose.yaml` заменить образ `query-api`
-   (профиль `llm`); при необходимости — переменные окружения (LLM_BASE_URL, CONFIG_URL и т.п.).
+   (профиль `llm`, сервисы Task Queue Valkey + Query Worker); при необходимости — переменные
+   окружения (LLM_BASE_URL, CONFIG_URL и т.п.).
 4. **Прогнать контрактные тесты** границы (§A) и eval-срез (`prototype/infra/eval/`, ADR-015),
    чтобы убедиться, что поведение не изменилось (та же метрика groundedness/coverage).
 5. **Зафиксировать решение ADR-записью** (новый ADR или update ADR-020) с указанием языка

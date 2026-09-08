@@ -78,6 +78,7 @@
 
 ```python
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 class GraphStoreProvider(ABC):
@@ -103,14 +104,24 @@ class GraphStoreProvider(ABC):
 
     @abstractmethod
     def delete_node(self, node_id: str) -> bool:
-        """Удаление узла по ID."""
+        """Удаление узла по ID (вместе с инцидентными рёбрами)."""
         ...
+
+    @abstractmethod
+    def list_chunk_ids_of_source(self, source_id: str) -> List[str]:
+        """(M2) Чанки источника по связи CONTAINS — для soft-delete (L2-05)."""
+        ...
+
+    def transaction(self) -> "GraphTx":
+        """(M2) Атомарная запись пачки изменений (L2-04). По умолчанию — no-op (nullcontext)."""
+        return nullcontext(self)
 ```
 
 ### 2.3. Контракт VectorStoreProvider (Abstract Base Class)
 
 ```python
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from typing import Any, Dict, List
 
 class VectorStoreProvider(ABC):
@@ -123,6 +134,15 @@ class VectorStoreProvider(ABC):
     def upsert_vectors(self, items: List[Dict[str, Any]]) -> None:
         """Запись/обновление эмбеддингов (chunk_id -> vector + metadata)."""
         ...
+
+    @abstractmethod
+    def delete_vectors(self, chunk_ids: List[str]) -> None:
+        """(M2) Снятие чанков с поиска — soft-delete (L2-05)."""
+        ...
+
+    def transaction(self) -> "VectorTx":
+        """(M2) Атомарная запись пачки эмбеддингов (L2-04). По умолчанию — no-op (nullcontext)."""
+        return nullcontext(self)
 ```
 
 ### 2.4. Реализации
@@ -192,3 +212,33 @@ class VectorStoreProvider(ABC):
 - Смена хранилища достигается подключением адаптера своей оси (граф/вектор раздельно, ADR-013); перенос данных оси выполняет оператор инсталляции — вне ядра.
 - Векторная ось не отключает графовую: Qdrant замещает только `vector_search`/`upsert_vectors`, обход графа остаётся на `GraphStoreProvider`.
 - Контрактные тесты обязательны для каждой реализации обоих интерфейсов (ADR-012).
+
+### 2.6. Расширение M2: атомарная запись и soft-delete
+
+Вводится в M2 (L2-04/L2-05, ADR-023) вместе с Ingestion COMMIT в реальные хранилища.
+
+#### 2.6.1. Атомарная запись (`transaction()`)
+
+`transaction()` возвращает context manager с самим хранилищем; изменение применяется **на успешном выходе** из блока, при исключении — откатывается целиком (не создаёт частичное состояние). Вложенные `with graph.transaction(), vector.transaction()` в Ingestion/COMMIT дают атомарность граф+вектор в пределах прототипа.
+
+```python
+with graph_store.transaction() as gtx, vector_store.transaction() as vtx:
+    gtx.upsert_nodes(nodes)
+    gtx.upsert_edges(edges)
+    vtx.upsert_vectors(vectors)   # исключение -> откат обеих осей
+```
+
+#### 2.6.2. Схемы payload'ов COMMIT
+
+| Метод | Элемент | Поля |
+|---|---|---|
+| `upsert_nodes` | узел | `node_id` (str), `labels` (list[str]), `properties` (dict) |
+| `upsert_edges` | ребро | `from_id` (str), `to_id` (str), `type` (str), `properties` (dict) |
+| `upsert_vectors` | вектор | `chunk_id` (str), `embedding` (list[float]), `metadata` (dict) |
+| `vector_search` | hit | `chunk_id`, `score`, `embedding`, `metadata` |
+
+MERGE-семантика по `node_id`/`chunk_id` (идемпотентность). Node ID для ядра системы (M2): `src:{domain}:{source_url}` (Source), `ent:{domain}:{canonical_name}` (Entity), `chk:{digest12(source_url:index)}` (Chunk). Графовая и векторная оси связаны по `chunk_id` (общему для узла Chunk и записи вектора).
+
+#### 2.6.3. Soft-delete (L2-05)
+
+`GraphStoreProvider.list_chunk_ids_of_source(source_id)` — чанки по ребру CONTAINS; `delete_node(chunk_id)` удаляет узел и инцидентные рёбра (в том числе CONTAINS); `VectorStoreProvider.delete_vectors(chunk_ids)` снимает те же чанки с поиска. Узлы Entity и Source при soft-delete **сохраняются** (историчность, ADR-014); эмиссия `SIMILAR_TO` при этом не затрагивается.

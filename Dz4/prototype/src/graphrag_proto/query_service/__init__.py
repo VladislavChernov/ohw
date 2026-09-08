@@ -1,0 +1,1 @@
+"""Query Service: асинхронный контур Query API (ADR-023) + Query Worker."""

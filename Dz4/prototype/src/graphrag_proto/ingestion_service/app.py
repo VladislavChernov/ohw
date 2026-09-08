@@ -29,9 +29,15 @@ from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     NormalizeStage,
     PipelineContext,
     ValidateStage,
+    soft_delete_source,
 )
 from graphrag_proto.ingestion_service.readers.registry import factory as readers_factory
-from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry, JobStore
+from graphrag_proto.ingestion_service.storage.registry import (
+    STATUS_DELETED,
+    DocumentRegistry,
+    JobStore,
+)
+from graphrag_proto.retrieval.adapters.factory import build_graph_store, build_vector_store
 
 HOST = "0.0.0.0"
 PORT = 8002
@@ -52,7 +58,12 @@ def _glossary_url() -> str:
     return os.environ.get("GLOSSARY_URL", "")
 
 
-def build_analyzer(registry: DocumentRegistry, glossary_url: str) -> Analyzer:
+def build_analyzer(
+    registry: DocumentRegistry,
+    glossary_url: str,
+    graph_store: Any = None,
+    vector_store: Any = None,
+) -> Analyzer:
     readers = {doc_type: readers_factory(doc_type) for doc_type in sorted(ALLOWED_DOC_TYPES)}
     return Analyzer(
         [
@@ -64,7 +75,7 @@ def build_analyzer(registry: DocumentRegistry, glossary_url: str) -> Analyzer:
             DedupStage(),
             ContractStage(),
             ValidateStage(),
-            CommitStage(registry),
+            CommitStage(registry, graph_store=graph_store, vector_store=vector_store),
         ]
     )
 
@@ -72,10 +83,19 @@ def build_analyzer(registry: DocumentRegistry, glossary_url: str) -> Analyzer:
 class Executor:
     """In-process executor: фон. поток + журнал этапов в JobStore."""
 
-    def __init__(self, jobs: JobStore, registry: DocumentRegistry, glossary_url: str) -> None:
+    def __init__(
+        self,
+        jobs: JobStore,
+        registry: DocumentRegistry,
+        glossary_url: str,
+        graph_store: Any = None,
+        vector_store: Any = None,
+    ) -> None:
         self._jobs = jobs
         self._registry = registry
-        self._analyzer = build_analyzer(registry, glossary_url)
+        self._analyzer = build_analyzer(
+            registry, glossary_url, graph_store=graph_store, vector_store=vector_store
+        )
 
     def start(
         self,
@@ -135,7 +155,9 @@ def create_app(
 
     jobs = JobStore(db_path)
     registry = DocumentRegistry(db_path)
-    executor = Executor(jobs, registry, glossary_url)
+    graph_store = build_graph_store()
+    vector_store = build_vector_store()
+    executor = Executor(jobs, registry, glossary_url, graph_store=graph_store, vector_store=vector_store)
 
     app = FastAPI(title="GraphRAG Ingestion Service", version="0.1.0")
 
@@ -197,6 +219,17 @@ def create_app(
                 detail=f"джоба уже в статусе {job['status']}",
             )
         return {"job_id": job_id, "status": "cancelled"}
+
+    @app.delete("/api/v1/ingestion/documents")
+    def delete_document(domain: str, source_url: str) -> dict[str, Any]:
+        """Soft-delete источника (ADR-014): чанки снимаются с поиска (L2-05)."""
+        deleted = soft_delete_source(registry, graph_store, vector_store, domain, source_url)
+        if not deleted:
+            raise HTTPException(
+                status_code=404,
+                detail=f"источник domain={domain!r} source_url={source_url!r} не найден или уже удалён",
+            )
+        return {"domain": domain, "source_url": source_url, "status": STATUS_DELETED}
 
     return app
 

@@ -5,7 +5,7 @@ build-backend = "uv_build"
 [project]
 name = "graphrag-proto"
 version = "0.1.0"
-description = "GraphRAG prototype: Config/Glossary + Ingestion Pipeline (ДЗ4, веха M1)"
+description = "GraphRAG prototype: Config/Glossary + Ingestion + Query (ДЗ4, M1–M2)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,12 +13,16 @@ dependencies = [
     "uvicorn>=0.32",
     "pyyaml>=6.0",
     "pypdf>=5.0",
+    "redis>=5.2",
+    "neo4j>=5.26",
 ]
 
 [project.scripts]
 graphrag-config = "graphrag_proto.config_service.app:main"
 graphrag-glossary = "graphrag_proto.glossary_service.app:main"
 graphrag-ingestion = "graphrag_proto.ingestion_service.app:main"
+graphrag-query-api = "graphrag_proto.query_service.app:main"
+graphrag-query-worker = "graphrag_proto.query_service.worker:main"
 
 [dependency-groups]
 dev = [

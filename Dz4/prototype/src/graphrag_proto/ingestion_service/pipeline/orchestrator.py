@@ -14,11 +14,34 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from graphrag_proto.retrieval.adapters.base import GraphStoreProvider, VectorStoreProvider
+from graphrag_proto.retrieval.adapters.deterministic import deterministic_embedding
+
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 64
 DEDUP_AUTO = 0.92
 DEDUP_LLM = 0.75
 SIMILAR_TO = 0.85
+
+EXTRACTOR_VERSION = "deterministic:v1"
+
+SOURCE_LABEL = "Source"
+CHUNK_LABEL = "Chunk"
+ENTITY_LABEL = "Entity"
+
+
+def _chunk_id(source_url: str, index: int) -> str:
+    """Стабильный идентификатор чанка (L2-04: оси связаны по chunk_id)."""
+    digest = hashlib.sha256(f"{source_url}:{index}".encode()).hexdigest()[:12]
+    return f"chk:{digest}"
+
+
+def _source_node_id(domain: str, source_url: str) -> str:
+    return f"src:{domain}:{source_url}"
+
+
+def _entity_node_id(domain: str, canonical_name: str) -> str:
+    return f"ent:{domain}:{canonical_name}"
 
 STAGES = (
     "INGEST",
@@ -107,21 +130,17 @@ def _sliding_window(text: str, size: int, overlap: int) -> list[str]:
     return chunks
 
 
-def _make_deterministic_vector(text: str, dim: int = 8) -> list[float]:
-    """Заглушка EMBED: детерминированный псевдо-вектор без GPU/моделей."""
-    digest = hashlib.sha256(text.encode("utf-8")).digest()
-    return [float(b / 256.0) for b in digest[:dim]]
-
-
 class EmbedStage(Stage):
-    """EMBED: заглушка (детерминированный фейк); боевые bge-m3 — M3."""
+    """EMBED: детерминированный фейк (общий с ретривером — L2-04 согласованность оси);
+    боевые bge-m3 — M3."""
 
     name = "EMBED"
 
     def run(self, ctx: PipelineContext) -> None:
         for meta in ctx.chunks_meta:
             chunk = ctx.chunks[meta["index"]]
-            meta["embedding"] = _make_deterministic_vector(chunk)
+            meta["embedding"] = deterministic_embedding(chunk)
+            meta["chunk_id"] = _chunk_id(ctx.source_url, meta["index"])
 
 
 class ExtractStage(Stage):
@@ -217,24 +236,134 @@ class ValidateStage(Stage):
 
 
 class CommitStage(Stage):
-    """COMMIT: атомарная запись в Neo4j (L2-04); в M1 — idempotent-заглушка через GraphStoreProvider.
+    """COMMIT: атомарная запись узлов/рёбер + эмбеддингов чанков (L2-04).
 
-    Реальная атомарность Neo4j (MERGE + транзакция) — при подключении боевого
-    GraphStoreProvider (M2+). Здесь фиксируем результат в контексте (registry.update).
+    M2 (ADR-023/design D5): документ регистрируется в DocumentRegistry (SQLite,
+    источник версий/идемпотентности — ADR-014), а узлы/рёбра/векторы пишутся через
+    GraphStoreProvider/VectorStoreProvider в одной транзакции (rollback при ошибке).
+    Повторная загрузка неизменённого контента — no-op (новая версия не пишется).
     """
 
     name = "COMMIT"
 
-    def __init__(self, registry: Any) -> None:
+    def __init__(
+        self,
+        registry: Any,
+        graph_store: GraphStoreProvider | None = None,
+        vector_store: VectorStoreProvider | None = None,
+    ) -> None:
         self._registry = registry
+        self._graph_store = graph_store
+        self._vector_store = vector_store
 
     def run(self, ctx: PipelineContext) -> None:
-        # Атомарная запись: имитируем транзакцию. На M1 граф-узлы пишутся через
-        # GraphStoreProvider (заглушка-фейк), документ регистрируется атомарно.
-        ctx.commit_applied = True
         doc = ctx.document
         result = self._registry.upsert(doc)
         ctx.registry_result = result
+        ctx.commit_applied = True
+        _doc_id, _version, created_new = result
+        if not created_new:
+            return  # idempotent no-op (L2-06): контент не изменился
+        self._write(doc, ctx)
+
+    def _write(self, doc: Any, ctx: PipelineContext) -> None:
+        if self._graph_store is None or self._vector_store is None:
+            return
+        domain = doc.domain
+        source_url = doc.source_url
+        source_id = _source_node_id(domain, source_url)
+
+        nodes: list[dict[str, Any]] = [
+            {
+                "node_id": source_id,
+                "labels": [SOURCE_LABEL],
+                "properties": {
+                    "source_url": source_url,
+                    "domain": domain,
+                    "doc_type": doc.doc_type,
+                },
+            }
+        ]
+        for entity in ctx.entities:
+            canonical = str(entity.get("canonical") or entity.get("name") or "")
+            nodes.append(
+                {
+                    "node_id": _entity_node_id(domain, canonical),
+                    "labels": [ENTITY_LABEL],
+                    "properties": {
+                        "canonical_name": canonical,
+                        "source_ids": list(entity.get("sources") or []),
+                        "extractor_version": EXTRACTOR_VERSION,
+                        "variants": list(entity.get("variants") or []),
+                    },
+                }
+            )
+
+        edges: list[dict[str, Any]] = []
+        vectors: list[dict[str, Any]] = []
+        for meta in ctx.chunks_meta:
+            chunk_id = meta["chunk_id"]
+            text = ctx.chunks[meta["index"]]
+            nodes.append(
+                {
+                    "node_id": chunk_id,
+                    "labels": [CHUNK_LABEL],
+                    "properties": {
+                        "chunk_id": chunk_id,
+                        "text": text,
+                        "source_url": source_url,
+                        "domain": domain,
+                        "index": meta["index"],
+                    },
+                }
+            )
+            edges.append(
+                {"from_id": source_id, "to_id": chunk_id, "type": "CONTAINS", "properties": {}}
+            )
+            vectors.append(
+                {
+                    "chunk_id": chunk_id,
+                    "embedding": meta["embedding"],
+                    "metadata": {
+                        "text": text,
+                        "source_url": source_url,
+                        "domain": domain,
+                        "index": meta["index"],
+                    },
+                }
+            )
+
+        stale_chunks = self._graph_store.list_chunk_ids_of_source(source_id)
+
+        with self._graph_store.transaction() as graph_tx, self._vector_store.transaction() as vector_tx:
+            for chunk_id in stale_chunks:
+                graph_tx.delete_node(chunk_id)
+            vector_tx.delete_vectors(stale_chunks)
+            graph_tx.upsert_nodes(nodes)
+            graph_tx.upsert_edges(edges)
+            vector_tx.upsert_vectors(vectors)
+
+
+def soft_delete_source(
+    registry: Any,
+    graph_store: GraphStoreProvider,
+    vector_store: VectorStoreProvider,
+    domain: str,
+    source_url: str,
+) -> bool:
+    """Soft-delete источника (L2-05): чанки снимаются с поиска, сущности остаются.
+
+    Возвращает True, если источник имел активную версию и был помечен deleted.
+    """
+    if not registry.soft_delete(domain, source_url):
+        return False
+    source_id = _source_node_id(domain, source_url)
+    chunk_ids = graph_store.list_chunk_ids_of_source(source_id)
+    with graph_store.transaction() as graph_tx, vector_store.transaction() as vector_tx:
+        for chunk_id in chunk_ids:
+            graph_tx.delete_node(chunk_id)
+        vector_tx.delete_vectors(chunk_ids)
+    return True
 
 
 class Analyzer:
