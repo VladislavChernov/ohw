@@ -85,3 +85,13 @@ context_assembly:
       - "vector"
   max_tokens: 4096
   eviction: "drop_lowest_reranker_score"
+
+retrieval:
+  # L1/L2 query (GraphRetriever): MATCH по извлечённым терминам + один хоп рёбер.
+  # {node_labels} подставляется из ontology.node_types в runtime (build_cypher);
+  # подмножество Cypher — см. InMemoryGraphStore (ограниченная грамматика).
+  cypher_template: |
+    MATCH (n) WHERE any(t IN $terms WHERE toLower(n.canonical_name) CONTAINS toLower(t) OR toLower(n.name) CONTAINS toLower(t) OR toLower(n.id) CONTAINS toLower(t))
+    OPTIONAL MATCH (n)-[r]-(m) WHERE m:{node_labels}
+    RETURN n, m, type(r) AS rel_type
+    LIMIT $max_nodes

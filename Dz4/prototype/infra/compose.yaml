@@ -179,6 +179,10 @@ services:
     environment:
       CONFIG_URL: http://config-service:8001
       GLOSSARY_URL: http://glossary-service:8003
+      GRAPH_STORE: neo4j
+      VECTOR_STORE: neo4j
+      EMBEDDER: deterministic
+      RERANKER: noop
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-graphrag}
@@ -198,24 +202,96 @@ services:
     <<: [*gpu, *logging]
 
   # --------------------------------------------------------------------- llm
-  # Query API + llama.cpp server (Qwen 2.5 Coder 7B Abliterate q4_K_M). Фаза поиска.
-  # Модель — локальный GGUF (bind-mount); llama.cpp отдаёт OpenAI-совместимое /v1.
+  # Query API + Query Worker + valkey (Task Queue) + llama.cpp server.
+  # Query API — асинхронный контур M2 (ADR-023): POST /query -> очереди -> SSE stream.
+  valkey:
+    image: valkey/valkey:9.1.2
+    profiles: ["llm"]
+    container_name: ohw-valkey
+    networks: [ohw_net]
+    ports: ["6379:6379"]
+    command: ["valkey-server", "--appendonly", "no"]
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    <<: *logging
+
   query-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
     image: ohw/query-api:prototype
+    command: ["graphrag-query-api"]
     profiles: ["llm"]
     container_name: ohw-query
     depends_on:
       - config-service
-      - glossary-service
       - neo4j
-      - llm
+      - valkey
     networks: [ohw_net]
     ports: ["8000:8000"]
     environment:
       CONFIG_URL: http://config-service:8001
-      NEO4J_URI: bolt://neo4j:7687
+      DOMAIN_PROFILES_DIR: /profiles
+      GRAPH_STORE: neo4j
+      VECTOR_STORE: neo4j
+      EMBEDDER: deterministic
+      RERANKER: noop
+      LLM_ADAPTER: openai
       LLM_BASE_URL: http://llm:8080
+      QUERY_QUEUE: redis
+      QUERY_REDIS_URL: redis://valkey:6379/0
+      QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - ../domain_profiles:/profiles:ro
+      - query_data:/data
+    healthcheck:
+      test:
+        - "CMD"
+        - "sh"
+        - "-lc"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)\""
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    <<: *logging
+
+  query-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/query-worker:prototype
+    command: ["graphrag-query-worker"]
+    profiles: ["llm"]
+    container_name: ohw-query-worker
+    depends_on:
+      - config-service
+      - neo4j
+      - llm
+      - valkey
+    networks: [ohw_net]
+    environment:
+      CONFIG_URL: http://config-service:8001
+      DOMAIN_PROFILES_DIR: /profiles
+      GRAPH_STORE: neo4j
+      VECTOR_STORE: neo4j
+      EMBEDDER: deterministic
+      RERANKER: noop
+      LLM_ADAPTER: openai
+      LLM_BASE_URL: http://llm:8080
+      QUERY_QUEUE: redis
+      QUERY_REDIS_URL: redis://valkey:6379/0
+      QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
+    volumes:
+      - ../domain_profiles:/profiles:ro
+      - query_data:/data
     <<: *logging
 
   # llama.cpp server (CUDA-сборка). Модель монтируется bind-mount'ом с хоста.
@@ -315,4 +391,6 @@ volumes:
   config_data:
   neo4j_data:
   models_data:
+  valkey_data:
+  query_data:
   ollama_data:  # задел (модели LM Studio/ollama), в llm-сервисе bind-mount
