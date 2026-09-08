@@ -5,18 +5,20 @@ build-backend = "uv_build"
 [project]
 name = "graphrag-proto"
 version = "0.1.0"
-description = "GraphRAG prototype: Config Service + Glossary Service (ДЗ4, веха M0)"
+description = "GraphRAG prototype: Config/Glossary + Ingestion Pipeline (ДЗ4, веха M1)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.32",
     "pyyaml>=6.0",
+    "pypdf>=5.0",
 ]
 
 [project.scripts]
 graphrag-config = "graphrag_proto.config_service.app:main"
 graphrag-glossary = "graphrag_proto.glossary_service.app:main"
+graphrag-ingestion = "graphrag_proto.ingestion_service.app:main"
 
 [dependency-groups]
 dev = [

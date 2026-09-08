@@ -1,0 +1,31 @@
+=== АЛГОРИТМ БЕЗОПАСНОГО CYPHER-ЗАПРОСА В NEO4J ===
+
+ОПИСАНИЕ РАБОТЫ АЛГОРИТМА:
+Поисковый запрос выполняется внутри изолированной области видимости базы данных. Модель LLM полностью изолирована от сырого графа и получает данные только после их жесткой фильтрации СУБД.
+
+ШАГИ ВЫПОЛНЕНИЯ ЗАПРОСА В NEO4J:
+
+1. ВЕКТОРНЫЙ ПОИСК С ФИЛЬТРАЦИЕЙ ПО РОЛЯМ
+CALL db.index.vector.queryNodes('chunk_vector_index', 10, $query_embedding)
+YIELD node AS chunk, score AS vectorScore
+WHERE any(role IN chunk.allowed_roles WHERE role IN $user_roles)
+
+2. ПАРАЛЛЕЛЬНЫЙ ПОЛНОТЕКСТОВЫЙ ПОИСК (BM25)
+WITH chunk, vectorScore
+CALL db.index.fulltext.queryNodes('chunk_text_index', $query_text)
+YIELD node AS ftChunk, score AS textScore
+WHERE any(role IN ftChunk.allowed_roles WHERE role IN $user_roles)
+
+3. СЛИЯНИЕ И РАНЖИРОВАНИЕ РЕЗУЛЬТАТОВ (HYBRID SCORES)
+WITH collect({node: chunk, score: vectorScore}) + collect({node: ftChunk, score: textScore}) AS allCandidates
+UNWIND allCandidates AS candidate
+WITH candidate.node AS finalChunk, sum(candidate.score) AS finalScore
+ORDER BY finalScore DESC
+LIMIT 5
+
+4. БЕЗОПАСНОЕ ОБОГАЩЕНИЕ КОНТЕКСТА ИЗ ГРАФА
+MATCH (finalChunk)-[:ОТНОСИТСЯ_К]->(contextEntity)
+RETURN finalChunk.text AS text, contextEntity.name AS context, finalScore;
+
+ЗАКЛЮЧЕНИЕ:
+Переменная $user_roles передается в параметры запроса в неизменяемом виде со стороны бэкенда. Студент или неавторизованный пользователь физически не может повлиять на логику выполнения WHERE внутри СУБД.

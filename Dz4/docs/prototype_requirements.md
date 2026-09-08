@@ -66,7 +66,7 @@
 | Граф | Neo4j Community (native vector index, ADR-001) | `GraphStoreProvider` |
 | Векторы | Neo4j native vector index | `VectorStoreProvider` |
 | Конфиги/глоссарий | SQLite + YAML-профили | Config / Glossary Service |
-| LLM | Ollama + Qwen 2.5 7B Instruct (`qwen2.5:7b-instruct`) | `LLMInference` |
+| LLM | llama.cpp + Qwen 2.5 Coder 7B Abliterate q4_K_M (GGUF, `/v1`) | `LLMInference` |
 | Embeddings | bge-m3, 1024 dim (Embeddings Service :8004 или LocalSentenceTransformerAdapter) | `Embedder` |
 | Reranker | bge-reranker-base (CPU); может быть отключён (NoOpRerankerAdapter) | `Reranker` |
 | Оркестрация | Docker Compose, сеть `ohw_net` | — |
@@ -75,7 +75,7 @@
 | Топология | Topology Orchestrator Service (:8005) + Topology UI (:8502) — отдельный сервис и приложение (ADR-019) | — |
 
 Полная карта контейнеров, портов, профилей и лицензий — `docs/infrastructure_stack.md`.
-Портовая карта конкретной инсталляции (`8000–8005`, `8501–8502`, `7687/7474`, `11434`) —
+Портовая карта конкретной инсталляции (`8000–8005`, `8501–8502`, `7687/7474`, `8080`) —
 `docs/04_services_config.md` §1; консервированный снапшот конкретики v5 —
 `docs/history/v7/CONCEPT.md`.
 

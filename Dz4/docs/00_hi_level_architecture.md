@@ -75,7 +75,7 @@ flowchart LR
     %% ---- Инфраструктура ИИ ----
     subgraph INFRA["Инфраструктура ИИ"]
         direction TB
-        OLL["Ollama :11434<br/>Qwen 2.5 7B (GPU)"]
+        OLL["llama.cpp :8080 /v1<br/>Qwen 2.5 Coder 7B Abliterate q4_K_M (GPU)"]
         BGE["BGE-M3 / LocalSentenceTransformer<br/>(embeddings, GPU)"]
         BGR["bge-reranker-base (CPU)"]
     end
