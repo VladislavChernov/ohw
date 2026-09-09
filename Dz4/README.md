@@ -49,6 +49,7 @@
 | [docs/prototype_requirements.md](./docs/prototype_requirements.md) | Требования к прототипу: цель, границы, стек, вехи, eval-гейт |
 | [docs/web_layer_replacement.md](./docs/web_layer_replacement.md) | Как менять веб-слой (Query API Gateway) без переделки ядра |
 | [docs/demo_runbook.md](./docs/demo_runbook.md) | Runbook демо-контура: подъём стека, UI `:8503`, сценарии в браузере, прогон e2e |
+| [docs/demo_user_guide.md](./docs/demo_user_guide.md) | Руководство пользователя демо: требования, скачивание, запуск, сценарий, устройство |
 
 **Архитектурная концепция (6 документов):**
 1. [01. Онтология и Спецификация Domain Profile](./docs/01_ontology_and_domain_profile.md) — описание узлов, связей и YAML-конфигуратора.

@@ -61,6 +61,7 @@
 |----------|----------|
 | [prototype_requirements.md](./prototype_requirements.md) | Требования к прототипу: цель, границы, стек, вехи, eval-гейт, заглушки User Guide / Runbook |
 | [demo_runbook.md](./demo_runbook.md) | Runbook демо-контура: подъём стека, `:8503`, сценарии в браузере, прогон e2e |
+| [demo_user_guide.md](./demo_user_guide.md) | Руководство пользователя демо: что нужно, скачивание, запуск, сценарий в браузере, как устроено |
 | [web_layer_replacement.md](./web_layer_replacement.md) | Замена веб-слоя (Query API Gateway): контракты границы, процедура, контрактные тесты |
 
 ### Артефакты прототипа (вне docs/)

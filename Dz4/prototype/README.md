@@ -45,8 +45,9 @@ docker run --rm -v "$(Get-Location):/app" -w /app -p 8003:8003 `
 
 ## Демо-контур (:8503) и сквозной e2e
 
-Браузерный прогон «загрузить документ → запрос → ответ со `sources`» — в
-`docs/demo_runbook.md` (в `Dz4/docs`). Коротко:
+Браузерный прогон «загрузить документ → запрос → ответ со `sources`» описан для
+пользователя в `Dz4/docs/demo_user_guide.md` (требования, скачивание, запуск,
+сценарий), операционные детали — в `Dz4/docs/demo_runbook.md`. Коротко:
 
 ```bash
 # полный стек: config + graph + ingestion + llm (в llm-профиле: valkey, query-api,
