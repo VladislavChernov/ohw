@@ -211,7 +211,7 @@ class RedisStreamTaskQueue(TaskQueue):
     def claim(self, worker_id: str) -> Task | None:
         client = self._r()
         while True:
-            result = client.xreadgroup(group=self._group, consumer=worker_id, count=1, block=1000, streams={self._stream: ">"})
+            result = client.xreadgroup(groupname=self._group, consumername=worker_id, count=1, block=1000, streams={self._stream: ">"})
             if not result:
                 return None
             for _stream, entries in result:

@@ -15,6 +15,8 @@ dependencies = [
     "pypdf>=5.0",
     "redis>=5.2",
     "neo4j>=5.26",
+    "requests>=2.32",
+    "streamlit>=1.40",
 ]
 
 [project.scripts]
@@ -23,6 +25,7 @@ graphrag-glossary = "graphrag_proto.glossary_service.app:main"
 graphrag-ingestion = "graphrag_proto.ingestion_service.app:main"
 graphrag-query-api = "graphrag_proto.query_service.app:main"
 graphrag-query-worker = "graphrag_proto.query_service.worker:main"
+graphrag-demo-ui = "graphrag_proto.demo_ui.cli:main"
 
 [dependency-groups]
 dev = [
@@ -32,10 +35,15 @@ dev = [
     "pytest-mock>=3.14",
     "ruff>=0.9",
     "types-PyYAML>=6.0",
+    "types-requests>=2.32",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not e2e'"
+markers = [
+    "e2e: сквозной прогон против живого стека (запускать через infra/scripts/run_demo_e2e.sh)",
+]
 
 [tool.ruff]
 line-length = 100
@@ -45,6 +53,11 @@ target-version = "py311"
 ignore = ["EXE002"]
 
 [tool.mypy]
-python_version = "3.11"
+# 3.12 нужно, чтобы парсить стубы numpy 2.5 (PEP 695 `type`), притянутые streamlit.
+python_version = "3.12"
 strict = true
 files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["streamlit", "streamlit.*"]
+ignore_missing_imports = true
