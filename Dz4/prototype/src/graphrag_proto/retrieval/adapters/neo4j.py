@@ -231,7 +231,7 @@ class Neo4jVectorStore(VectorStoreProvider):
     def vector_search(self, embedding: list[float], top_k: int = 5) -> list[dict[str, Any]]:
         with self._session() as session:
             rows = session.run(
-                f"MATCH (c:{CHUNK_LABEL}) WHERE EXISTS(c.embedding) "
+                f"MATCH (c:{CHUNK_LABEL}) WHERE c.embedding IS NOT NULL "
                 "RETURN c.node_id AS chunk_id, c.embedding AS embedding, c",
                 parameters={},
             ).data()

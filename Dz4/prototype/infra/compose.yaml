@@ -168,6 +168,7 @@ services:
   # Ingestion API + пайплайн (9 этапов). Поочерёдно забирает GPU.
   ingestion-api:
     image: ohw/ingestion-service:prototype
+    command: ["graphrag-ingestion"]
     profiles: ["ingestion"]
     container_name: ohw-ingestion
     depends_on:
@@ -292,6 +293,40 @@ services:
     volumes:
       - ../domain_profiles:/profiles:ro
       - query_data:/data
+    <<: *logging
+
+  # --------------------------------------------------------------- demo-ui
+  # Браузерный демо-контур (add-demo-ui-e2e): загрузка txt/md -> INGEST ->
+  # запрос -> SSE-стрим ответа со sources. Streamlit на :8503.
+  demo-ui:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/demo-ui:prototype
+    command: ["graphrag-demo-ui"]
+    profiles: ["llm"]
+    container_name: ohw-demo-ui
+    depends_on:
+      - config-service
+      - ingestion-api
+      - query-api
+    networks: [ohw_net]
+    ports: ["8503:8503"]
+    environment:
+      INGESTION_URL: http://ingestion-api:8002
+      QUERY_URL: http://query-api:8000
+      CONFIG_URL: http://config-service:8001
+      X_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    healthcheck:
+      test:
+        - "CMD"
+        - "sh"
+        - "-lc"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8503/_stcore/health', timeout=2)\""
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
     <<: *logging
 
   # llama.cpp server (CUDA-сборка). Модель монтируется bind-mount'ом с хоста.

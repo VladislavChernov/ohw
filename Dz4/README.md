@@ -48,6 +48,7 @@
 | [docs/invariants.md](./docs/invariants.md) | Инварианты платформы: обязательные контракты по слоям (L1–L5) |
 | [docs/prototype_requirements.md](./docs/prototype_requirements.md) | Требования к прототипу: цель, границы, стек, вехи, eval-гейт |
 | [docs/web_layer_replacement.md](./docs/web_layer_replacement.md) | Как менять веб-слой (Query API Gateway) без переделки ядра |
+| [docs/demo_runbook.md](./docs/demo_runbook.md) | Runbook демо-контура: подъём стека, UI `:8503`, сценарии в браузере, прогон e2e |
 
 **Архитектурная концепция (6 документов):**
 1. [01. Онтология и Спецификация Domain Profile](./docs/01_ontology_and_domain_profile.md) — описание узлов, связей и YAML-конфигуратора.
@@ -94,6 +95,21 @@ docker compose --file prototype/infra/compose.yaml down --remove-orphans
 > Артефакты прототипа (compose, профили доменов, глоссарии, инфраструктура) живут
 > в `prototype/` отдельно от документации: README/docs — стабильный основной элемент,
 > прототип — временный валидационный контур этапа M0–M4.
+
+### Демо-контур (браузерный UI `:8503`)
+
+Сквозной контур на уровне API работает с M2; браузерная точка входа — Streamlit-демо
+`:8503` (профиль `llm`): загрузка txt/md → стадии INGEST → запрос со стримингом
+ответа и `sources` → soft-delete документа. Инструкция — [docs/demo_runbook.md](./docs/demo_runbook.md).
+
+```bash
+# полный стек: config + graph + ingestion + llm (llm-профиль: valkey, query-api, query-worker, llama.cpp, demo-ui)
+docker compose --profile config --profile graph --profile ingestion --profile llm up -d --wait
+
+# UI: http://localhost:8503
+# автоматизированный сквозной прогон (сбрасывает volumes — предусловие детерминизма)
+bash prototype/infra/scripts/run_demo_e2e.sh
+```
 
 ---
 

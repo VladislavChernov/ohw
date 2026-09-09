@@ -11,6 +11,7 @@
 | [dz1](dz1/) | Учебная LLM на одном слое самовнимания (SelfAttention) | реализовано |
 | [dz2](dz2/) | CLI-утилита генерации тест-кейсов/чек-листов/тест-планов через ollama LLM | реализовано |
 | [dz3](dz3/) | Генератор API-автотестов через LLM: simple — pytest-код; advanced — JSON-план + своё детерминированное ядро | simple — реализовано; advanced — реализовано (E2E в Docker прогнана: 16 сценариев, см. dz3/README) |
+| [dz4](dz4/) | Enterprise GraphRAG-платформа (граф Neo4j + векторный поиск + LLM): Config/Glossary/Ingestion/Query сервисы, прототип вех M0–M4 | M0–M2 реализованы; демо-контур UI `:8503` + e2e-харнесс (см. [demo_runbook.md](dz4/docs/demo_runbook.md)) |
 | [light-llm-engine](light-llm-engine/) | Движок запросов к локальной LLM (ollama): файл из `input/` → ответ модели → `output/`; запуск в Docker | реализовано |
 
 Каждое задание имеет собственный стек и `.devcontainer/`. Открывайте нужную
