@@ -128,33 +128,51 @@ Dz4/
 
 ## 6. Состав работ по вехам
 
+> **Статус реализации (обновлено 2026-09-10):**
+>
+> | Веха | Статус | Коммиты | Кратко |
+> |------|--------|---------|--------|
+> | M0 — Инфраструктура | ✅ закрыта | `9225b3a` | Compose+профили, Config :8001, Glossary :8003, Neo4j+llama.cpp |
+> | M1 — Ingestion Pipeline | ✅ закрыта | `55914ff` | Ingestion API :8002, 9 этапов INGEST→COMMIT, DocumentReader (ADR-021) |
+> | M2 — Query API async + Retriever | ✅ закрыта | `a9c36f3`, `b7558ca`, `93b96c3` | Query :8000+SSE, Worker+Valkey (ADR-023), граф∥вектор+Context Assembly, demo-ui+e2e, тумблер граф-оси |
+> | M3 — Адаптеры и runtime-переключение | 🚧 в работе | `dfb7e9f`, `81490af` | Бандл 1/3 `add-topology-adapters` завершён (:8005 + hot-reload); далее `add-real-embeddings-reranker`, `add-semantic-cache` |
+> | M4 — Eval и гейт готовности | ⬜ не начата | — | — |
+> | M5 — MCP-шлюз и UI | ⬜ не начата | — | — |
+>
+> Детали каждого бандла — в `docs/history.md` «Этап 9» и `openspec/changes/<bundle>/`.
+> Отдельные пункты вех, помеченные ниже как «(partial)», реализованы частично
+> (например, EMBED до M3 — детерминированный эмбеддер вместо bge-m3).
+
 ### Веха 0 — Инфраструктура (основа)
-- [ ] Docker Compose: профили `config`, `graph` (Neo4j, ограничение JVM), сеть `ohw_net`.
-- [ ] Проверка GPU через Docker, каталог volumes для весов моделей.
-- [ ] Config Service: SQLite + загрузка Domain Profile (YAML), endpoints `docs/04` §2.
-- [ ] Glossary Service: `glossary.{profile}.yaml`, RESOLVE/VALIDATE (стек proto: SQLite).
-- [ ] Topology Orchestrator Service (:8005) + профиль `topology` (ADR-019).
+- [x] Docker Compose: профили `config`, `graph` (Neo4j, ограничение JVM), сеть `ohw_net`.
+- [x] Проверка GPU через Docker, каталог volumes для весов моделей.
+- [x] Config Service: SQLite + загрузка Domain Profile (YAML), endpoints `docs/04` §2.
+- [x] Glossary Service: `glossary.{profile}.yaml`, RESOLVE/VALIDATE (стек proto: SQLite).
+- [x] Topology Orchestrator Service (:8005) + профиль `topology` (ADR-019).
 
 ### Веха 1 — Ingestion Pipeline (9 этапов)
-- [ ] Ingestion API (:8002): POST /documents, GET/DELETE /jobs/{id} (ADR-018).
-- [ ] Этап INGEST→COMMIT: CHUNK (512/64), EMBED (bge-m3, batch 32), EXTRACT (Qwen),
+- [x] Ingestion API (:8002): POST /documents, GET/DELETE /jobs/{id} (ADR-018).
+- [x] Этап INGEST→COMMIT: CHUNK (512/64), EMBED (bge-m3, batch 32; на прототипе до M3 —
+      детерминированный эмбеддер, см. add-real-embeddings-reranker), EXTRACT (Qwen),
       NORMALIZE (v3, fallback), DEDUP (0.92/0.75/0.85), CONTRACT, VALIDATE, COMMIT.
-- [ ] Document Registry + версии источника (ADR-014), идемпотентность по content hash.
+- [x] Document Registry + версии источника (ADR-014), идемпотентность по content hash.
 - [ ] Семейство «запуск профилей embeddings/ingestion поочерёдно» (L4-01).
 
 ### Веха 2 — Query API (асинхронный контур)
-- [ ] Query API (:8000): POST /query → 202, GET /query/tasks/{task_id}.
-- [ ] Query Workers + Task Queue (Valkey/Redis Streams).
-- [ ] Стриминг WebSockets/SSE: контракт ADR-016.
-- [ ] Retriever: Graph (Cypher-шаблон) ∥ Vector + Reranker + Context Assembly (4096, вытеснение).
+- [x] Query API (:8000): POST /query → 202, GET /query/tasks/{task_id}.
+- [x] Query Workers + Task Queue (Valkey/Redis Streams).
+- [x] Стриминг WebSockets/SSE: контракт ADR-016.
+- [x] Retriever: Graph (Cypher-шаблон) ∥ Vector + Reranker + Context Assembly (4096, вытеснение).
 
 ### Веха 3 — Адаптеры и runtime-переключение
-- [ ] Интерфейсы-адаптеры: GraphStoreProvider, VectorStoreProvider, LLMInference, Embedder, Reranker.
-- [ ] Реализации-кандидаты из снапшота v7 (§2): Neo4jGraphStore, Neo4jVectorStore,
-      OllamaAdapter, BgeM3ServiceAdapter / LocalSentenceTransformerAdapter, BgeRerankerAdapter.
-- [ ] `PUT /api/v1/config/adapters` — переключение оси на лету через Topology Orchestrator
-      Service без перезапуска (L1-03, ADR-019).
-- [ ] Несколько профилей доменов (it / library / cinema) + переключение активацией (L1-01).
+- [x] Интерфейсы-адаптеры: GraphStoreProvider, VectorStoreProvider, LLMInference, Embedder, Reranker.
+- [~] Реализации-кандидаты из снапшота v7 (§2): [x] Neo4jGraphStore, [x] Neo4jVectorStore,
+      [~] OpenAICompatibleAdapter (вместо OllamaAdapter — до бандла 2), [ ] BgeM3ServiceAdapter,
+      [ ] BgeRerankerAdapter (бандл 2/3 add-real-embeddings-reranker).
+- [x] `PUT /api/v1/config/adapters` — переключение оси на лету через Topology Orchestrator
+      Service (:8005) без перезапуска (L1-03, ADR-019) + hot-reload воркера.
+- [~] Несколько профилей доменов (it / library / cinema) + переключение активацией (L1-01):
+      профили есть, runtime-активация — частично.
 
 ### Веха 4 — Eval и гейт готовности
 - [ ] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (мин. 50 вопросов/домен для базового среза).

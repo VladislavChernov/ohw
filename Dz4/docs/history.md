@@ -1,7 +1,7 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v8 (итерация поверх базы v5)
-> **Последнее обновление:** 2026-09-05
+> **Версия:** v9 (реализация прототипа: вехи M0–M2, M3-бандл адаптеров+topology)
+> **Последнее обновление:** 2026-09-10
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
 
@@ -225,6 +225,70 @@ v6 — следующая итерация концепции и докумен�
   (гомогенный контур, скорость итераций; железо прототипа не ограничивает выбор). Сетевая
   граница объявлена заменяемой: смена языка (цель — Go/Rust, фаза 2) не затрагивает ядро,
   очередь и хранилища — процедура в `docs/web_layer_replacement.md`.
+
+---
+
+## Этап 9: Реализация прототипа — вехи M0–M2 закрыты, M3 в работе
+
+**Дата:** 2026-09-10
+**Статус:** Активный код (прототип `prototype/`, репозиторий состоит из каталогов dz0–dz4)
+
+Переход от требований (`docs/prototype_requirements.md`) к коду. Вехи M0–M2 завершены
+и запушены в `origin master`; веха M3 ведётся бандлами OpenSpec
+(`openspec/changes/`), каждый бандл — proposal → задачи → реализация → тесты → живой
+прогон → ревью → коммит.
+
+### M0 — Инфраструктура (коммит `9225b3a`)
+
+- Docker Compose с профилями `config`/`graph`/`ingestion`/`llm` (Neo4j с ограничением JVM),
+  сеть `ohw_net`.
+- Config Service (:8001): SQLite + загрузка Domain Profile (YAML), runtime-namespaces
+  (`docs/04` §2); Glossary Service (:8003): `glossary.{profile}.yaml`, RESOLVE/VALIDATE (ADR-018).
+- Neo4j + llama.cpp (Qwen 2.5 Coder 7B Abliterate q4_K_M, ADR-022).
+
+### M1 — Ingestion Pipeline, 9 этапов (коммит `55914ff`)
+
+- Ingestion API (:8002): `POST /documents`, `GET`/`DELETE /jobs/{id}` (ADR-018).
+- Конвейер INGEST→COMMIT: CHUNK (512/64), EMBED (на прототипе до M3 — детерминированный
+  эмбеддер), EXTRACT (Qwen), NORMALIZE (v3 с fallback), DEDUP (0.92/0.75/0.85), CONTRACT,
+  VALIDATE, COMMIT.
+- DocumentReader + канонический формат документа (ADR-021); Document Registry с версиями
+  источника (ADR-014) и идемпотентностью по content hash.
+
+### M2 — Query API: асинхронный контур + Retriever (коммиты `a9c36f3`, `b7558ca`, `93b96c3`)
+
+- Query API (:8000) async: `POST /query → 202` + `task_id`, `GET`/`DELETE /query/tasks/{id}`,
+  SSE-стриминг (контракт ADR-016).
+- Query Worker + Task Queue на Valkey/Redis Streams (ADR-023); отмена задач.
+- Retriever: граф (Cypher) ∥ вектор + reranker (пока noop) + Context Assembly.
+- Демо-контур (Streamlit :8500) + e2e-харнесс (`infra/scripts/run_demo_e2e.sh`).
+- Тумблер графовой оси `RETRIEVAL_GRAPH_ENABLED` + тайминги `retrieval_time_s`/`total_time_s`
+  (A/B на стеке: граф вкл 5.35 s vs выкл 0.75 s).
+
+### M3 — бандлы (в работе)
+
+**Бандл 1/3 «add-topology-adapters» — ЗАВЕРШЁН (коммиты `dfb7e9f`, `81490af`):**
+
+1. **Каталог провайдеров + сборка по карте** — `retrieval/adapters/factory.py`:
+   регистр слотов (`graph_store`, `vector_store`, `embeddings`, `reranker`, `llm`) и
+   `build_adapters(adapter_map)`; приоритет слота **карта топологии > env > дефолт**;
+   параметры соединений всегда из env. `TopologyClient` — тонкий HTTP-клиент
+   (`adapters_map`/`revision`), сбои топологии → `None` (fallback на M2-поведение).
+2. **Topology Orchestrator Service (:8005)** — реальный сервис вместо заглушки (ADR-019,
+   профиль `topology`): читает `prototype/infra_topology.yaml`, отдаёт базовую карту
+   адаптеров; `PUT /api/v1/config/adapters` пишет SQLite-override и увеличивает монотонный
+   `revision` (только при фактическом изменении); `GET /api/v1/config/adapters/available` —
+   только реализованные провайдеры. `X-API-Key` на всех эндпоинтах кроме `/health`.
+3. **Hot-reload в Query Worker** — опрос `revision` интервалом `TOPOLOGY_POLL_INTERVAL`
+   (дефолт 5 с, 0 — выключено); при смене пайплайн пересобирается **без рестарта
+   контейнера**; топология недоступна — воркер работает по env как в M2.
+4. **Live-приёмка** — GET/PUT адаптеров на живом стеке, revision растёт, в лог воркера
+   падает «пересборка pipeline без рестарта», запрос проходит (succeeded); неизвестный
+   провайдер → 422 без изменения revision. 144 теста зелёные, ruff/mypy чисто.
+
+**Осталось в M3:** бандл 2/3 «add-real-embeddings-reranker» (bge-m3 :8004 и bge-reranker
+в каталог провайдеров), бандл 3/3 «add-semantic-cache» (Valkey-кэш семантических
+запросов).
 
 ---
 
