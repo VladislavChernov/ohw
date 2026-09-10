@@ -60,4 +60,5 @@
 - [x] 5.1. `uv run pytest -q` (юнит/контрактные) — зелёно; e2e-модуль в прогоне скипается.
 - [x] 5.2. `uv run ruff check .`, `uv run mypy` — чисто.
 - [x] 5.3. Ручной браузерный проход по описанному runbook (или e2e-скрипт на живом стеке).
-- [ ] 5.4. `/review` бандла и дельты; коммит + push `origin master`.
+- [x] 5.4. `/review` бандла и дельты (APPROVE, фикс BUG app.py status на RuntimeError);
+      коммиты `b7558ca`, `fdf7234` + push `origin master`.
