@@ -26,6 +26,7 @@ graphrag-ingestion = "graphrag_proto.ingestion_service.app:main"
 graphrag-query-api = "graphrag_proto.query_service.app:main"
 graphrag-query-worker = "graphrag_proto.query_service.worker:main"
 graphrag-demo-ui = "graphrag_proto.demo_ui.cli:main"
+graphrag-topology = "graphrag_proto.topology_service.app:main"
 
 [dependency-groups]
 dev = [

@@ -10,7 +10,7 @@
 | Сервис              | Порт          | Назначение                                         |
 |---------------------|---------------|----------------------------------------------------|
 | Query API           | 8000          | Поисковые запросы и генерация ответов (в т.ч. MCP-интеграция ИИ-агентов) |
-| Config Service      | 8001          | Хранение Feature Flags + Управление Domain Profile + Adapters API |
+| Config Service      | 8001          | Хранение Feature Flags + Управление Domain Profile (Adapters API — на Topology :8005) |
 | Ingestion API       | 8002          | Управление фоновыми джобами индексации            |
 | Glossary Service    | 8003          | Канонизация и загрузка glossary.{profile}.yaml     |
 | Embeddings Service  | 8004          | Расчёт векторов bge-m3 на GPU (опционально, если не используется встроенный адаптер) |
@@ -44,18 +44,22 @@
 - `PUT /api/v1/config/adapters` — Изменить адаптеры (переключение на лету)
 - `GET /api/v1/config/adapters/available` — Получить список доступных адаптеров (включая плагины)
 
+Хост API — **Topology Orchestrator :8005** (ADR-019): управление топологией вынесено
+из Config Service в отдельный сервис с профилем `topology` (при неподнятом профиле
+воркер работает по env с fallback). Форматы запросов/ответов сохранены.
+
 Примеры:
 
 ```bash
 # Получение текущих адаптеров
-curl http://localhost:8001/api/v1/config/adapters
+curl -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8005/api/v1/config/adapters
 
-# Смена векторной оси хранилища на Qdrant
-curl -X PUT http://localhost:8001/api/v1/config/adapters \
-  -d '{"vector_store": "qdrant"}'
+# Смена векторной оси хранилища на inmemory (валидные id — из available)
+curl -X PUT -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8005/api/v1/config/adapters \
+  -d '{"vector_store": "inmemory"}'
 
 # Получение списка доступных адаптеров (включая плагины)
-curl http://localhost:8001/api/v1/config/adapters/available
+curl -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8005/api/v1/config/adapters/available
 ```
 
 ---

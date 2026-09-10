@@ -88,6 +88,42 @@ RETRIEVAL_GRAPH_ENABLED=false bash infra/scripts/run_demo_e2e.sh --keep-volumes 
 Сравните `retrieval_time_s` из `done`-payload (отображается UI и в логах e2e).
 Время `generation_time_s` не зависит от графа; `total_time_s` = retrieval + генерация.
 
+## Topology: переключение адаптеров на лету (M3)
+
+Topology Orchestrator (:8005, профиль `topology`, ADR-019) читает
+`infra_topology.yaml` (базовая карта адаптеров) и хранит операторские override'ы
+в SQLite (`topology_data` volume). `PUT /api/v1/config/adapters` переключает
+провайдеров слотов без рестарта: Query Worker опрашивает `revision`
+(`TOPOLOGY_POLL_INTERVAL`, дефолт 5 с) и пересобирает pipeline при изменении.
+
+```bash
+# подъём стека вместе с топологией (профиль добавляется к основному запуску)
+docker compose --profile config --profile graph --profile ingestion --profile llm --profile topology up -d --wait
+
+# активная карта + revision
+curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8005/api/v1/config/adapters
+
+# реализованные провайдеры по слотам
+curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8005/api/v1/config/adapters/available
+
+# переключение векторной оси на inmemory (revision растёт)
+curl -s -X PUT http://localhost:8005/api/v1/config/adapters \
+  -H "X-API-Key: $GRAPH_AUTH_API_KEY" -H "Content-Type: application/json" \
+  -d '{"vector_store": "inmemory"}'
+
+# невалидный провайдер -> 422, revision не меняется
+curl -s -o /dev/null -w "%{http_code}\n" -X PUT http://localhost:8005/api/v1/config/adapters \
+  -H "X-API-Key: $GRAPH_AUTH_API_KEY" -H "Content-Type: application/json" \
+  -d '{"llm": "mistral"}'
+```
+
+Проверка подхвата воркером: после PUT выполните запрос через Query API (:8000) —
+worker после следующего `TOPOLOGY_POLL_INTERVAL` работает уже на новой карте
+(в логах `docker compose logs query-worker` — без рестарта контейнера). Приоритет
+слота: **карта топологии > env > дефолт**; параметры соединений (NEO4J_URI,
+LLM_BASE_URL) всегда из env. Возврат к исходной оси — `PUT` со значением из
+`infra_topology.yaml` (revision растёт) или сброс override'ов топологии.
+
 ## Ограничения демо (до M3)
 
 - **Эмбеддинги и LLM — детерминированные заглушки** (`deterministic`, FakeLLM):
