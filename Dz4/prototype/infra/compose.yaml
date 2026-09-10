@@ -112,31 +112,48 @@ services:
   # --------------------------------------------------------------- topology
   # ADR-019: отдельный сервис фабрики провайдеров + отдельный Topology UI.
   topology-orchestrator:
-    image: ohw/topology-service:prototype
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/topology-orchestrator:prototype
+    command: ["graphrag-topology"]
     profiles: ["topology"]
     container_name: ohw-topology
     networks: [ohw_net]
     ports: ["8005:8005"]
     environment:
       INFRA_TOPOLOGY_PATH: /topology/infra_topology.yaml
+      TOPOLOGY_DB_PATH: /data/topology.sqlite
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
       - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
-      - ./config:/config:ro
+      - topology_data:/data
+    healthcheck:
+      test:
+        - "CMD"
+        - "sh"
+        - "-lc"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8005/health', timeout=2)\""
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     <<: *logging
 
-  topology-ui:
-    image: ohw/topology-ui:prototype
-    profiles: ["topology"]
-    container_name: ohw-topology-ui
-    depends_on:
-      - topology-orchestrator
-    networks: [ohw_net]
-    ports: ["8502:8502"]
-    environment:
-      TOPOLOGY_API_URL: http://topology-orchestrator:8005
-      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
-    <<: *logging
+  # topology-ui — отложен (ADR-019: Topology UI :8502, веха M3+; образ не собирается).
+  # Блок закомментирован, чтобы профиль `topology` поднимался без несуществующего образа.
+  # topology-ui:
+  #   image: ohw/topology-ui:prototype
+  #   profiles: ["topology"]
+  #   container_name: ohw-topology-ui
+  #   depends_on:
+  #     - topology-orchestrator
+  #   networks: [ohw_net]
+  #   ports: ["8502:8502"]
+  #   environment:
+  #     TOPOLOGY_API_URL: http://topology-orchestrator:8005
+  #     AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+  #   <<: *logging
 
   # -------------------------------------------------------------- embeddings
   # bge-m3 на GPU. Только на фазе индексации (L4-01 — поочерёдная работа).
@@ -291,6 +308,9 @@ services:
       QUERY_REDIS_URL: redis://valkey:6379/0
       QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
       RETRIEVAL_GRAPH_ENABLED: ${RETRIEVAL_GRAPH_ENABLED:-true}
+      TOPOLOGY_URL: ${TOPOLOGY_URL:-http://topology-orchestrator:8005}
+      TOPOLOGY_POLL_INTERVAL: ${TOPOLOGY_POLL_INTERVAL:-5}
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
       - ../domain_profiles:/profiles:ro
       - query_data:/data
@@ -429,4 +449,5 @@ volumes:
   models_data:
   valkey_data:
   query_data:
+  topology_data:
   ollama_data:  # задел (модели LM Studio/ollama), в llm-сервисе bind-mount

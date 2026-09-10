@@ -1,8 +1,9 @@
-"""Сборка зависимостей Query Service из env (M2; runtime-конфиг переключения — M3)."""
+"""Сборка зависимостей Query Service из env (M2; переключение на лету — M3)."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from graphrag_proto.query_service.store import TaskStore
@@ -11,13 +12,7 @@ from graphrag_proto.query_service.task_queue import (
     RedisStreamTaskQueue,
     TaskQueue,
 )
-from graphrag_proto.retrieval.adapters.factory import (
-    build_embedder,
-    build_graph_store,
-    build_llm,
-    build_reranker,
-    build_vector_store,
-)
+from graphrag_proto.retrieval.adapters.factory import build_adapters
 from graphrag_proto.retrieval.pipeline import QueryPipeline
 from graphrag_proto.retrieval.profile import DomainProfileLoader
 
@@ -35,13 +30,15 @@ def build_queue() -> TaskQueue:
     raise ValueError(f"QUERY_QUEUE={kind!r}: допустимо redis|inmemory")
 
 
-def build_pipeline() -> QueryPipeline:
+def build_pipeline(adapter_map: Mapping[str, str] | None = None) -> QueryPipeline:
+    """Сборка пайплайна: карта топологии (M3) > env/дефолт (M2)."""
+    adapters = build_adapters(adapter_map)
     return QueryPipeline(
-        embedder=build_embedder(),
-        graph_store=build_graph_store(),
-        vector_store=build_vector_store(),
-        reranker=build_reranker(),
-        llm=build_llm(),
+        embedder=adapters.embedder,
+        graph_store=adapters.graph_store,
+        vector_store=adapters.vector_store,
+        reranker=adapters.reranker,
+        llm=adapters.llm,
         profile_loader=DomainProfileLoader(config_url=os.environ.get("CONFIG_URL", "")),
     )
 
