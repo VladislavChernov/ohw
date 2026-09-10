@@ -49,7 +49,8 @@ class GraphRetriever:
         terms = extract_query_terms(query)
         if not terms:
             return []
-        # `graph_search_enabled` из namespace retrieval (FakeLLM-ось не влияет).
+        # Ось отключается целиком до вызова здесь — тумблер читает QueryPipeline
+        # (`graph_search_enabled` из profile.retrieval / env RETRIEVAL_GRAPH_ENABLED).
         try:
             rows = self._graph_store.query(
                 self.cypher,

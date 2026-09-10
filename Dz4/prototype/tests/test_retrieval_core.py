@@ -143,8 +143,9 @@ def test_query_pipeline_emits_events_and_done(tmp_path) -> None:
     pipe.run(query_text, domain="it", emit=lambda t, p: events.append((t, p)))
 
     types = [t for t, _ in events]
-    for stage in ("embedding", "graph", "vector", "rerank", "llm"):
+    for stage in ("embedding", "vector", "rerank", "llm"):
         assert ("status", {"stage": stage}) in events
+    assert ("status", {"stage": "graph", "enabled": True}) in events
     assert "done" in types
     assert any(t == "token" for t in types)
 
@@ -152,6 +153,9 @@ def test_query_pipeline_emits_events_and_done(tmp_path) -> None:
     assert done["sources"]  # source_url-источники
     assert done["text"] == "Ответ: база данных это набор данных."
     assert isinstance(done["generation_time_s"], float)
+    assert isinstance(done["retrieval_time_s"], float)
+    assert isinstance(done["total_time_s"], float)
+    assert done["retrieval_time_s"] <= done["total_time_s"]
 
 
 def test_query_pipeline_without_graph_match_still_answers(tmp_path) -> None:

@@ -129,6 +129,29 @@ docker compose --profile config --profile graph --profile ingestion --profile ll
 (`big_o.md`, `b_tree.txt`, `graph_traversal.md`, `war_and_peace_ru.md`) — можно
 загружать их без подготовки своих.
 
+### Сравнение скорости: граф вкл/выкл (`graph_search_enabled`)
+
+Env-переменная `RETRIEVAL_GRAPH_ENABLED` управляет графовой осью поиска
+(true/false, перекрывает `retrieval.graph_search_enabled` в Domain Profile).
+При `false` графовой запрос к Neo4j не выполняется — retrieval идёт только
+по векторам. Нужно для замера разницы: `retrieval_time_s` в `done` отражает
+время обоих осей (параллельно) + rerank + сборка контекста; `total_time_s` —
+весь pipeline, `generation_time_s` — LLM.
+
+```bash
+RETRIEVAL_GRAPH_ENABLED=false  # граф выкл
+RETRIEVAL_GRAPH_ENABLED=true   # граф вкл (по умолчанию)
+```
+
+Пример двух прогонов (stек должен быть поднят):
+
+```bash
+RETRIEVAL_GRAPH_ENABLED=true   bash infra/scripts/run_demo_e2e.sh --keep-volumes
+RETRIEVAL_GRAPH_ENABLED=false  bash infra/scripts/run_demo_e2e.sh --keep-volumes
+```
+
+В UI `done`-блоке видны `retrieval_time_s` и `total_time_s` (рядом с `generation_time_s`).
+
 ---
 
 ## 5. Сценарий в браузере
@@ -139,9 +162,9 @@ txt/md (PDF не входит в демо: JSON-контракт Ingestion не 
 `succeeded`.
 
 **Шаг 2 — задать вопрос.** Вкладка «Запросы» → текст вопроса → «Отправить запрос».
-Пойдёт живой стрим: `status (processing) → token* (токены генерации) → done`.
+Пойдёт живой стрим: `status (processing → graph enabled?) → token* → done`.
 Итог: **текст ответа**, таблица **sources** (`source_url`, `relevance`),
-время генерации `generation_time_s`.
+тайминги `generation_time_s`, `retrieval_time_s`, `total_time_s`.
 
 Пример вопроса к `war_and_peace_ru.md` (домен literature): *«За что НОСТРА
 отвечает по дебиторской задолженности?»* — а к `big_o.md` (домен it): *«Что такое
@@ -162,10 +185,11 @@ O(log n)?»*.
   │      → job_id; UI поллит журнал стадий до succeeded/failed
   └── POST /query                        → Query API :8000
          → задача в очередь (valkey :6379) → воркер
-         → retrieval:  top-k по эмбеддингам → контекст
+         → status {"stage": "graph", "enabled": true/false}
+         → retrieval:  top-k по эмбеддингам + граф (если вкл) → контекст
          → LLM: llama.cpp :8080 (/v1/chat/completions) стримит токены
          → SSE-стрим  GET /query/tasks/{task_id}/stream
-         → конверт {type, task_id, ts, payload}:  status → token* → done{text, sources, generation_time_s}
+         → конверт {type, task_id, ts, payload}:  status → token* → done{text, sources, generation_time_s, retrieval_time_s, total_time_s}
 ```
 
 Поток генерации ответа, стадии и отмену хорошо видно прямо в UI — каждая задача
