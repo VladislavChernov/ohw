@@ -67,6 +67,27 @@ bash infra/scripts/run_demo_e2e.sh
 
 В обычный `uv run pytest -q` харнесс не входит (`addopts = "-m 'not e2e'"`).
 
+## A/B: скорость граф вкл/выкл (graph_search_enabled)
+
+Тумблер графовой оси: `RETRIEVAL_GRAPH_ENABLED=true` (по умолчанию) / `false`.
+Env перекрывает значение из `retrieval.graph_search_enabled` в Domain Profile
+(`domain_profiles/domain_profile.*.yaml`). При `false` графовой запрос к Neo4j
+не выполняется — retrieval идёт только по векторам.
+
+Сравнение скорости (два прогона):
+
+```bash
+# 1. граф вкл (по умолчанию)
+docker compose down -v && docker compose --profile config --profile graph --profile ingestion --profile llm up -d --wait
+RETRIEVAL_GRAPH_ENABLED=true  bash infra/scripts/run_demo_e2e.sh --keep-volumes 2>&1 | grep "retrieval_time_s"
+
+# 2. граф выкл
+RETRIEVAL_GRAPH_ENABLED=false bash infra/scripts/run_demo_e2e.sh --keep-volumes 2>&1 | grep "retrieval_time_s"
+```
+
+Сравните `retrieval_time_s` из `done`-payload (отображается UI и в логах e2e).
+Время `generation_time_s` не зависит от графа; `total_time_s` = retrieval + генерация.
+
 ## Ограничения демо (до M3)
 
 - **Эмбеддинги и LLM — детерминированные заглушки** (`deterministic`, FakeLLM):

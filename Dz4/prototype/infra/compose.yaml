@@ -290,6 +290,7 @@ services:
       QUERY_QUEUE: redis
       QUERY_REDIS_URL: redis://valkey:6379/0
       QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
+      RETRIEVAL_GRAPH_ENABLED: ${RETRIEVAL_GRAPH_ENABLED:-true}
     volumes:
       - ../domain_profiles:/profiles:ro
       - query_data:/data

@@ -206,7 +206,12 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                             record["status"] = "done"
                     st.markdown("### Ответ")
                     st.markdown(str(done.get("text", "")) or "_пусто_")
-                    st.caption(f"task {task_id} · {elapsed:.1f} с")
+                    caption = f"task {task_id} · e2e {elapsed:.1f} с"
+                    retrieval_s = done.get("retrieval_time_s")
+                    total_s = done.get("total_time_s")
+                    if isinstance(retrieval_s, (int, float)) and isinstance(total_s, (int, float)):
+                        caption += f" · retrieval {float(retrieval_s):.3f} с · total {float(total_s):.3f} с"
+                    st.caption(caption)
                     sources = done.get("sources")
                     if isinstance(sources, list) and sources:
                         rows: list[dict[str, Any]] = []
