@@ -54,4 +54,8 @@
 - [x] 5.3. Живой прогон на стеке (профиль `topology`): GET → PUT vector_store=inmemory
       → revision вырос → воркер залогировал «пересборка pipeline без рестарта» →
       запрос прошёл (succeeded, retrieval 7.75 s); PUT с неизвестным → 422, revision.
-- [ ] 5.4. `/review` бандла (reviewer-агент) + коммит + push `origin master` (после подтверждения).
+- [x] 5.4. `/review` бандла (reviewer-агент, REQUEST-CHANGES → 2 фикса: TypeError в
+      TopologyClient + AUTH_API_KEY у query-worker, повторный зелёный прогон) +
+      коммит `dfb7e9f` + push `origin master`.
+- [x] 5.5. Приёмка (L1-03): live-прогон на стеке с профилем `topology` — GET/PUT
+      адаптеров, revision растёт, воркер «пересборка без рестарта», запрос succeeded.
