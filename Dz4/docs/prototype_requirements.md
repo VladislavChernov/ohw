@@ -157,7 +157,9 @@ Dz4/
       детерминированный эмбеддер, см. add-real-embeddings-reranker), EXTRACT (Qwen),
       NORMALIZE (v3, fallback), DEDUP (0.92/0.75/0.85), CONTRACT, VALIDATE, COMMIT.
 - [x] Document Registry + версии источника (ADR-014), идемпотентность по content hash.
-- [ ] Семейство «запуск профилей embeddings/ingestion поочерёдно» (L4-01).
+- [x] Семейство «запуск профилей embeddings/ingestion поочерёдно» (L4-01): процедура
+      фазирования — `docs/demo_runbook.md` «GPU-гейтинг»; реальный VRAM-прогон с
+      bge-m3 :8004 — в бандле 2/3 add-real-embeddings-reranker.
 
 ### Веха 2 — Query API (асинхронный контур)
 - [x] Query API (:8000): POST /query → 202, GET /query/tasks/{task_id}.
@@ -172,8 +174,10 @@ Dz4/
       [ ] BgeRerankerAdapter (бандл 2/3 add-real-embeddings-reranker).
 - [x] `PUT /api/v1/config/adapters` — переключение оси на лету через Topology Orchestrator
       Service (:8005) без перезапуска (L1-03, ADR-019) + hot-reload воркера.
-- [~] Несколько профилей доменов (it / library / cinema) + переключение активацией (L1-01):
-      профили есть, runtime-активация — частично.
+- [x] Несколько профилей доменов (it / library / cinema) + переключение активацией (L1-01):
+      активация через `POST /domain/activate` (Config :8001); Glossary и Query-сервис
+      тянут активный домен pull-моделью на каждый запрос — переключение без рестарта
+      (`docs/demo_runbook.md`, `tests/test_domain_activation.py`).
 
 ### Веха 4 — Eval и гейт готовности
 - [ ] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (мин. 50 вопросов/домен для базового среза).
