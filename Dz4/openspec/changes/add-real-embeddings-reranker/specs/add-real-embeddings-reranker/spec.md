@@ -3,7 +3,7 @@
 ## Embeddings Service (:8004, профиль `embeddings`, GPU)
 
 - `GET /health` → `{"status": "ok", "service": "embeddings", "model": <str>,
-  "dimensions": <int>, "mode": "mock" | "bge-m3"}`.
+  "dimensions": <int>, "mode": "mock" | "sentence-transformer"}`.
 - `POST /api/v1/embed`:
   - request: `{"text": str(≥1 символ), "domain": str?}`;
   - response 200: `{"vector": [float; len == dimensions], "dimensions": <int>}`;

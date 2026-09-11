@@ -189,10 +189,12 @@ def test_embed_stage_writes_injected_embedder_vector(tmp_path: Path) -> None:
     analyzer, _ = build_analyzer(tmp_path, graph, vector, embedder=ReflectedEmbedder(bge_vector))
     src = tmp_path / "d.txt"
     src.write_text(CONTENT_1, encoding="utf-8")
-    ctx = run_source(analyzer, src)
+    run_source(analyzer, src)
 
-    chunk_text = ctx.chunks[0]
-    expected = ReflectedEmbedder(bge_vector).embed(chunk_text)
-    hits = vector.vector_search(expected, top_k=10)
-    assert hits, "ось поиска должна работать с вектором инжектированного эмбеддера (L2-04)"
-    assert hits[0]["chunk_id"] in graph.list_chunk_ids_of_source(_source_node_id("it", "src://d.txt"))
+    source_id = _source_node_id("it", "src://d.txt")
+    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    assert chunk_ids
+    # L2-04: в хранилище лежит именно вектор инжектированного эмбеддера
+    # (тест падает, если EmbedStage вернётся к детерминированному эмбеддеру).
+    for chunk_id in chunk_ids:
+        assert vector._vectors[chunk_id]["embedding"] == bge_vector

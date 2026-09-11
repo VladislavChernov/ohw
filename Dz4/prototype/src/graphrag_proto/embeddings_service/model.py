@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 from typing import Any
 
 
@@ -79,20 +80,23 @@ class SentenceTransformerEmbeddingProvider(EmbeddingProvider):
         self.dimensions = dimensions
         self._max_tokens = max_tokens
         self._model_cache: Any | None = None
+        self._lock = threading.Lock()
 
     def _model(self) -> Any:
         if self._model_cache is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-            except ImportError as exc:
-                raise RuntimeError(
-                    "sentence-transformers не установлен: соберите образ "
-                    "Dockerfile.embeddings или включите EMBEDDINGS_MOCK=true"
-                ) from exc
-            self._model_cache = SentenceTransformer(self.model, device=self._device)
-            if self._max_tokens:
-                model = self._model_cache
-                model.max_seq_length = min(int(model.max_seq_length), self._max_tokens)
+            with self._lock:
+                if self._model_cache is None:
+                    try:
+                        from sentence_transformers import SentenceTransformer
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "sentence-transformers не установлен: соберите образ "
+                            "Dockerfile.embeddings или включите EMBEDDINGS_MOCK=true"
+                        ) from exc
+                    self._model_cache = SentenceTransformer(self.model, device=self._device)
+                    if self._max_tokens:
+                        model = self._model_cache
+                        model.max_seq_length = min(int(model.max_seq_length), self._max_tokens)
         return self._model_cache
 
     def embed(self, text: str) -> list[float]:

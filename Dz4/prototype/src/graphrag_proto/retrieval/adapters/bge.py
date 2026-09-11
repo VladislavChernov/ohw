@@ -64,6 +64,8 @@ class BgeM3ServiceAdapter(Embedder):
             body: dict[str, object] = resp.json()
         except requests.RequestException as exc:
             raise EmbeddingServiceError(f"embeddings-service недоступен: {exc}") from exc
+        except ValueError as exc:
+            raise EmbeddingServiceError(f"невалидный JSON от embeddings-service: {exc}") from exc
         vector = body.get("vector")
         if not isinstance(vector, list) or not all(isinstance(x, (int, float)) for x in vector):
             raise EmbeddingServiceError("неожиданный ответ embeddings-service")
@@ -113,6 +115,8 @@ class BgeRerankerAdapter(Reranker):
             body: dict[str, object] = resp.json()
         except requests.RequestException as exc:
             raise RerankerServiceError(f"reranker-service недоступен: {exc}") from exc
+        except ValueError as exc:
+            raise RerankerServiceError(f"невалидный JSON от reranker-service: {exc}") from exc
         scores = body.get("scores")
         if not isinstance(scores, list) or len(scores) != len(chunks):
             raise RerankerServiceError("неожиданный ответ reranker-service")

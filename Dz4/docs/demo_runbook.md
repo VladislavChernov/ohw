@@ -206,9 +206,11 @@ EMBEDDINGS_MOCK=true EMBEDDER=bge_m3_service docker compose \
 
 - проверка сервисов: `curl :8004/health` (mode: "mock", dimensions: 1024),
   `curl :8006/health` (mode: "mock");
-- реальный вызов контракта:
-  `curl -X POST :8004/api/v1/embed -d '{"text":"..."}'` → `{"vector":[1024 floats],...}`;
-  `curl -X POST :8006/api/v1/rerank -d '{"query":"...","chunks":[{"text":"..."}]}'` → `{"scores":[]}`;
+- реальный вызов контракта (эндпоинты кроме `/health` требуют `X-API-Key`, L5-01):
+  `curl -H "X-API-Key: $GRAPH_AUTH_API_KEY" -X POST :8004/api/v1/embed
+  -d '{"text":"..."}'` → `{"vector":[1024 floats],...}`;
+  `curl -H "X-API-Key: $GRAPH_AUTH_API_KEY" -X POST :8006/api/v1/rerank
+  -d '{"query":"...","chunks":[{"text":"..."}]}'` → `{"scores":[]}`;
 - индексированные чанки и вектор запроса считаются одним сервисом (ось L2-04
   консистентна), размерность — 1024.
 
@@ -230,6 +232,14 @@ EMBEDDER=bge_m3_service docker compose \
 - `:8004/health` → `mode: "sentence-transformer"`, dimensions: 1024.
 - Reranker — CPU-профиль, запускается независимо:
   `RERANKER=bge_reranker docker compose --profile reranker up -d --wait`.
+
+> **Гибкая приёмка без GPU/больших весов.** Реальный контур обязателен к проверке
+> на CPU с компактными моделями той же архитектуры: `EMBEDDING_MODEL=
+> sentence-transformers/all-MiniLM-L6-v2 EMBEDDING_DIMENSIONS=384` (encode 384-dim) и
+> `RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2`. Это доказывает путь
+> real-инференса (torch + sentence-transformers); боевые bge-m3/bge-reranker-base
+> подключаются теми же env-переменными (`EMBEDDING_MODEL`, `RERANKER_MODEL`), веса
+> ~2.3 ГБ скачиваются при первом вызове.
 
 ### Переключение Query-стороны на bge (топология)
 

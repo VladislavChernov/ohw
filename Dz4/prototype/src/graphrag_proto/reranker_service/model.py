@@ -11,6 +11,7 @@ ML-зависимости импортируются lazy: модуль корр
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any
 
 
@@ -59,17 +60,20 @@ class CrossEncoderRerankScorer(RerankScorer):
         self.model = model
         self._device = device or "cpu"
         self._model_cache: Any | None = None
+        self._lock = threading.Lock()
 
     def _model(self) -> Any:
         if self._model_cache is None:
-            try:
-                from sentence_transformers import CrossEncoder
-            except ImportError as exc:
-                raise RuntimeError(
-                    "sentence-transformers не установлен: соберите образ "
-                    "Dockerfile.reranker или включите RERANKER_MOCK=true"
-                ) from exc
-            self._model_cache = CrossEncoder(self.model, device=self._device)
+            with self._lock:
+                if self._model_cache is None:
+                    try:
+                        from sentence_transformers import CrossEncoder
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "sentence-transformers не установлен: соберите образ "
+                            "Dockerfile.reranker или включите RERANKER_MOCK=true"
+                        ) from exc
+                    self._model_cache = CrossEncoder(self.model, device=self._device)
         return self._model_cache
 
     def score(self, query: str, texts: list[str]) -> list[float]:

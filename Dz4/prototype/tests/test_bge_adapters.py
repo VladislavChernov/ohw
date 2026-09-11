@@ -100,6 +100,15 @@ def test_bge_m3_adapter_http_error_fails_fast() -> None:
             adapter.embed("текст")
 
 
+def test_bge_m3_adapter_malformed_json_fails_fast() -> None:
+    state = _State()
+    state.responses = {"/api/v1/embed": (200, "not-json")}
+    with _stub_model_server(state) as url:
+        adapter = BgeM3ServiceAdapter(base_url=url, dimensions=8)
+        with pytest.raises(EmbeddingServiceError):
+            adapter.embed("текст")
+
+
 CHUNKS: list[dict[str, Any]] = [
     {"id": "chk:a", "text": "про базы данных"},
     {"id": "chk:b", "text": "про граф знаний"},
@@ -133,6 +142,15 @@ def test_bge_reranker_adapter_len_mismatch_fails_fast() -> None:
 def test_bge_reranker_adapter_http_error_fails_fast() -> None:
     state = _State()
     state.responses = {"/api/v1/rerank": (503, '{"detail": "unavailable"}')}
+    with _stub_model_server(state) as url:
+        adapter = BgeRerankerAdapter(base_url=url)
+        with pytest.raises(RerankerServiceError):
+            adapter.rerank("базы данных", CHUNKS)
+
+
+def test_bge_reranker_adapter_malformed_json_fails_fast() -> None:
+    state = _State()
+    state.responses = {"/api/v1/rerank": (200, "not-json")}
     with _stub_model_server(state) as url:
         adapter = BgeRerankerAdapter(base_url=url)
         with pytest.raises(RerankerServiceError):
