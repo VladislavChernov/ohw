@@ -23,6 +23,7 @@ from graphrag_proto.retrieval.adapters.base import (
     Reranker,
     VectorStoreProvider,
 )
+from graphrag_proto.retrieval.adapters.bge import BgeM3ServiceAdapter, BgeRerankerAdapter
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
 from graphrag_proto.retrieval.adapters.llm import FakeLLM, OpenAICompatibleAdapter
@@ -38,8 +39,8 @@ SLOT_LLM = "llm"
 ADAPTER_CATALOG: dict[str, list[str]] = {
     SLOT_GRAPH_STORE: ["neo4j", "inmemory"],
     SLOT_VECTOR_STORE: ["neo4j", "inmemory"],
-    SLOT_EMBEDDINGS: ["deterministic"],
-    SLOT_RERANKER: ["noop"],
+    SLOT_EMBEDDINGS: ["deterministic", "bge_m3_service"],
+    SLOT_RERANKER: ["noop", "bge_reranker"],
     SLOT_LLM: ["openai", "fake"],
 }
 
@@ -119,6 +120,8 @@ def _build_embedder(kind: str) -> Embedder:
     kind = kind.strip().lower()
     if kind == "deterministic":
         return DeterministicEmbedder()
+    if kind == "bge_m3_service":
+        return BgeM3ServiceAdapter.from_env()
     raise ValueError(f"embeddings={kind!r}: допустимо {', '.join(ADAPTER_CATALOG[SLOT_EMBEDDINGS])}")
 
 
@@ -126,6 +129,8 @@ def _build_reranker(kind: str) -> Reranker:
     kind = kind.strip().lower()
     if kind in ("noop", "none", "disabled", ""):
         return NoOpRerankerAdapter()
+    if kind == "bge_reranker":
+        return BgeRerankerAdapter.from_env()
     raise ValueError(f"reranker={kind!r}: допустимо {', '.join(ADAPTER_CATALOG[SLOT_RERANKER])}")
 
 

@@ -27,6 +27,8 @@ graphrag-query-api = "graphrag_proto.query_service.app:main"
 graphrag-query-worker = "graphrag_proto.query_service.worker:main"
 graphrag-demo-ui = "graphrag_proto.demo_ui.cli:main"
 graphrag-topology = "graphrag_proto.topology_service.app:main"
+graphrag-embeddings = "graphrag_proto.embeddings_service.app:main"
+graphrag-reranker = "graphrag_proto.reranker_service.app:main"
 
 [dependency-groups]
 dev = [
@@ -61,4 +63,8 @@ files = ["src"]
 
 [[tool.mypy.overrides]]
 module = ["streamlit", "streamlit.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["torch", "torch.*", "sentence_transformers", "sentence_transformers.*"]
 ignore_missing_imports = true

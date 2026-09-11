@@ -120,8 +120,8 @@ def test_get_available(topology_yaml: Path, tmp_path: Path) -> None:
     assert resp.status_code == 200
     slots = resp.json()["slots"]
     assert slots["graph_store"] == ["neo4j", "inmemory"]
-    assert slots["reranker"] == ["noop"]
-    assert slots["embeddings"] == ["deterministic"]
+    assert slots["reranker"] == ["noop", "bge_reranker"]
+    assert slots["embeddings"] == ["deterministic", "bge_m3_service"]
 
 
 def test_get_topology(topology_yaml: Path, tmp_path: Path) -> None:

@@ -1,0 +1,1 @@
+"""Reranker Service (:8006): bge-reranker-base (real) / лексический (mock). Бандл M3.2."""

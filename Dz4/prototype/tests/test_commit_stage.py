@@ -23,6 +23,7 @@ from graphrag_proto.ingestion_service.pipeline.orchestrator import (
 )
 from graphrag_proto.ingestion_service.readers.registry import TxtReader
 from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
+from graphrag_proto.retrieval.adapters.base import Embedder
 from graphrag_proto.retrieval.adapters.deterministic import deterministic_embedding
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
 
@@ -30,21 +31,25 @@ CONTENT_1 = "кэширование данные дедупликация алг
 CONTENT_2 = "индекс поиск дедупликация граф знаний через рёбра и вершины\n"
 
 
-def build_analyzer(tmp_path: Path, graph, vector) -> Analyzer:
+def build_analyzer(
+    tmp_path: Path,
+    graph: InMemoryGraphStore,
+    vector: InMemoryVectorStore,
+    embedder: Embedder | None = None,
+) -> tuple[Analyzer, DocumentRegistry]:
     registry = DocumentRegistry(tmp_path / "commit.db")
-    return Analyzer(
-        [
-            IngestStage({"txt": TxtReader()}),
-            ChunkStage(),
-            EmbedStage(),
-            ExtractStage(),
-            NormalizeStage(""),
-            DedupStage(),
-            ContractStage(),
-            ValidateStage(),
-            CommitStage(registry, graph_store=graph, vector_store=vector),
-        ]
-    ), registry
+    stages = [
+        IngestStage({"txt": TxtReader()}),
+        ChunkStage(),
+        EmbedStage(embedder),
+        ExtractStage(),
+        NormalizeStage(""),
+        DedupStage(),
+        ContractStage(),
+        ValidateStage(),
+        CommitStage(registry, graph_store=graph, vector_store=vector),
+    ]
+    return Analyzer(stages), registry
 
 
 def run_source(analyzer: Analyzer, src: Path) -> PipelineContext:
@@ -166,3 +171,28 @@ def test_soft_delete_source_removes_chunks_keeps_entities(tmp_path: Path) -> Non
 def test_chunk_id_deterministic() -> None:
     assert _chunk_id("src://d.txt", 0) == _chunk_id("src://d.txt", 0)
     assert _chunk_id("src://d.txt", 0) != _chunk_id("src://d.txt", 1)
+
+
+class ReflectedEmbedder(Embedder):
+    """Эмбеддер, возвращающий заданный вектор — M3.2: EMBED пишет вектор адаптера."""
+
+    def __init__(self, vector: list[float]) -> None:
+        self._vector = vector
+
+    def embed(self, text: str, domain: str = "") -> list[float]:
+        return list(self._vector)
+
+
+def test_embed_stage_writes_injected_embedder_vector(tmp_path: Path) -> None:
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    bge_vector = [0.01 * i for i in range(1, 9)]
+    analyzer, _ = build_analyzer(tmp_path, graph, vector, embedder=ReflectedEmbedder(bge_vector))
+    src = tmp_path / "d.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    ctx = run_source(analyzer, src)
+
+    chunk_text = ctx.chunks[0]
+    expected = ReflectedEmbedder(bge_vector).embed(chunk_text)
+    hits = vector.vector_search(expected, top_k=10)
+    assert hits, "ось поиска должна работать с вектором инжектированного эмбеддера (L2-04)"
+    assert hits[0]["chunk_id"] in graph.list_chunk_ids_of_source(_source_node_id("it", "src://d.txt"))

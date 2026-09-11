@@ -15,6 +15,7 @@
 | Glossary Service    | 8003          | Канонизация и загрузка glossary.{profile}.yaml     |
 | Embeddings Service  | 8004          | Расчёт векторов bge-m3 на GPU (опционально, если не используется встроенный адаптер) |
 | Topology Orchestrator Service | 8005 | Фабрика провайдеров по `prototype/infra_topology.yaml`, runtime-переключение адаптеров (ADR-019) |
+| Reranker Service    | 8006          | Реранкинг чанков bge-reranker-base на CPU (опционально; NoOp-адаптер допустим) |
 | Web UI — Конфигуратор (Streamlit) | 8501 | Веб-панель «Бизнес-онтология» (Domain Profile, глоссарии) |
 | Topology UI (Streamlit) | 8502 | Настроечное приложение «Топология инфраструктуры» (оператор, ADR-019) |
 | Neo4j Database      | 7687 (Bolt)   | Bolt-интерфейс для работы с графом                 |

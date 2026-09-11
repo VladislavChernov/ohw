@@ -156,16 +156,23 @@ services:
   #   <<: *logging
 
   # -------------------------------------------------------------- embeddings
-  # bge-m3 на GPU. Только на фазе индексации (L4-01 — поочерёдная работа).
+  # bge-m3 на GPU (образа собирается из Dockerfile.embeddings).
+  # Только на фазе индексации (L4-01 — поочерёдная работа).
   embeddings-service:
     image: ohw/embeddings-service:prototype
+    build:
+      context: ..
+      dockerfile: Dockerfile.embeddings
     profiles: ["embeddings"]
     container_name: ohw-embeddings
+    command: ["graphrag-embeddings"]
     networks: [ohw_net]
     ports: ["8004:8004"]
     environment:
       EMBEDDING_MODEL: bge-m3
       EMBEDDING_DIMENSIONS: 1024
+      EMBEDDINGS_MOCK: ${EMBEDDINGS_MOCK:-false}
+      EMBEDDINGS_DEVICE: ${EMBEDDINGS_DEVICE:-cuda}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
       - models_data:/models
@@ -380,16 +387,32 @@ services:
     <<: [*gpu, *logging]
 
   # ---------------------------------------------------------------- reranker
-  # bge-reranker-base на CPU. Опционально (NoOp-адаптер допустим).
+  # bge-reranker-base на CPU (образ из Dockerfile.reranker).
+  # Опционально (NoOp-адаптер допустим).
   reranker:
     image: ohw/reranker:prototype
+    build:
+      context: ..
+      dockerfile: Dockerfile.reranker
     profiles: ["reranker"]
     container_name: ohw-reranker
-    depends_on:
-      - config-service
+    command: ["graphrag-reranker"]
     networks: [ohw_net]
+    ports: ["8006:8006"]
     environment:
+      RERANKER_MODEL: bge-reranker-base
+      RERANKER_MOCK: ${RERANKER_MOCK:-false}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    healthcheck:
+      test:
+        - "CMD"
+        - "sh"
+        - "-lc"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8006/health', timeout=2)\""
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
     <<: *logging
 
   # ---------------------------------------------------------------- query-ui

@@ -1,0 +1,1 @@
+"""Embeddings Service (:8004): bge-m3 (real) / детерминированный (mock). Бандл M3.2."""

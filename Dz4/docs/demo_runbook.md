@@ -167,8 +167,8 @@ Docker Compose Profiles — GPU-профили не поднимаются од�
 запуска»):
 
 ```bash
-# Фаза индексации (после бандла add-real-embeddings-reranker добавить --profile embeddings)
-docker compose --profile config --profile graph --profile ingestion up -d --wait
+# Фаза индексации (используются реальные bge-m3 :8004 — см. «Реальные эмбеддинги и реранкер»)
+docker compose --profile config --profile graph --profile ingestion --profile embeddings up -d --wait
 #   ... загрузка документов, дождаться succeeded ...
 
 # Фаза поиска (индексирующие GPU-профили погашены)
@@ -181,8 +181,73 @@ docker compose --profile config --profile graph --profile llm up -d --wait
 - `embeddings`/`ingestion` и `llm` (llama.cpp) **никогда** не активны одновременно;
 - конфиг стека валиден при любом наборе профилей:
   `docker compose -f infra/compose.yaml config --quiet`;
-- до бандла 2 EMBED — детерминированный (CPU), конфликта по VRAM нет по построению;
-  реальный VRAM-прогон с bge-m3 :8004 выполняется в `add-real-embeddings-reranker`.
+- EMBED по умолчанию — детерминированный (`EMBEDDER=deterministic`, CPU);
+  реальный VRAM-прогон с bge-m3 :8004 — по разделу ниже (профиль `embeddings`,
+  `EMBEDDINGS_MOCK=false`).
+
+## Реальные эмбеддинги и реранкер (M3.2)
+
+Бандл 2/3 добавил **Embeddings Service (:8004, bge-m3)**, **Reranker Service
+(:8006, bge-reranker-base)** и провайдеры в каталог фабрики. Идентификаторы —
+как в SSOT namespace `adapters`: `bge_m3_service`, `bge_reranker`. Смена провайдера
+оси на стороне Ingestion — env (`EMBEDDER`/`RERANKER`, конвенция M2); на стороне
+Query — карта Topology (hot-reload, бандл 1).
+
+### Быстрый путь: mock-режим (без GPU/модели, wiring контура)
+
+Оба сервиса умеют `EMBEDDINGS_MOCK=true` / `RERANKER_MOCK=true` — детерминированные
+векторы/скоры той же размерности (1024), без ML-зависимостей:
+
+```bash
+# (1) поднять индексирующий контур с mock-эмбеддерами
+EMBEDDINGS_MOCK=true EMBEDDER=bge_m3_service docker compose \
+  --profile config --profile graph --profile ingestion --profile embeddings up -d --wait
+```
+
+- проверка сервисов: `curl :8004/health` (mode: "mock", dimensions: 1024),
+  `curl :8006/health` (mode: "mock");
+- реальный вызов контракта:
+  `curl -X POST :8004/api/v1/embed -d '{"text":"..."}'` → `{"vector":[1024 floats],...}`;
+  `curl -X POST :8006/api/v1/rerank -d '{"query":"...","chunks":[{"text":"..."}]}'` → `{"scores":[]}`;
+- индексированные чанки и вектор запроса считаются одним сервисом (ось L2-04
+  консистентна), размерность — 1024.
+
+### Реальный прогон (bge-m3 на GPU)
+
+Всегда **фаза индексации** (L4-01: `embeddings`/`ingestion` активны, `llm` погашен):
+
+```bash
+# сборка боевого образа (torch + sentence-transformers, ~5 ГБ; один раз)
+docker compose build embeddings-service
+
+# подъём с реальной моделью (GPU; при недоступности cuda — деградация на cpu)
+EMBEDDER=bge_m3_service docker compose \
+  --profile config --profile graph --profile ingestion --profile embeddings up -d --wait
+
+# кэш весов bge-m3 лежит в volume models_data (при первом старте скачивается ~2.3 ГБ)
+```
+
+- `:8004/health` → `mode: "sentence-transformer"`, dimensions: 1024.
+- Reranker — CPU-профиль, запускается независимо:
+  `RERANKER=bge_reranker docker compose --profile reranker up -d --wait`.
+
+### Переключение Query-стороны на bge (топология)
+
+```bash
+# правка prototype/infra_topology.yaml -> providers: embeddings: bge_m3_service, reranker: bge_reranker
+docker compose restart topology-orchestrator   # yaml читается при старте
+# активная карта
+curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8005/api/v1/config/adapters
+```
+
+Query Worker подхватит карту через `TOPOLOGY_POLL_INTERVAL` без рестарта. После
+переиндексации (EMBEDDER=bge_m3_service) запросы идут через тот же :8004.
+
+### Сбой контракта = явная ошибка
+
+Недоступность :8004/:8006 или неверная размерность вектора → fail-fast
+(`RuntimeError` в пайплайне/запросе), а не тихий fallback — ось эмбеддингов не
+ломается молча. Модель не загрузилась → 503 на эндпоинте.
 
 ## Ограничения демо (до M3)
 

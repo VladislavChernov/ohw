@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+from graphrag_proto.retrieval.adapters.bge import BgeM3ServiceAdapter, BgeRerankerAdapter
 from graphrag_proto.retrieval.adapters.factory import (
     ADAPTER_CATALOG,
     Adapters,
     build_adapters,
+    build_embedder,
     build_graph_store,
     build_llm,
     build_reranker,
@@ -66,6 +68,26 @@ def test_reranker_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
     for alias in ("none", "disabled", ""):
         monkeypatch.setenv("RERANKER", alias)
         assert isinstance(build_reranker(), NoOpRerankerAdapter)
+
+
+def test_build_embedder_bge_m3_service(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMBEDDER", "bge_m3_service")
+    monkeypatch.setenv("EMBEDDINGS_URL", "http://127.0.0.1:1")
+    assert isinstance(build_embedder(), BgeM3ServiceAdapter)
+
+
+def test_build_reranker_bge(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RERANKER", "bge_reranker")
+    monkeypatch.setenv("RERANKER_URL", "http://127.0.0.1:1")
+    assert isinstance(build_reranker(), BgeRerankerAdapter)
+
+
+def test_build_adapters_bge_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EMBEDDINGS_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("RERANKER_URL", "http://127.0.0.1:1")
+    adapters = build_adapters(adapter_map={"embeddings": "bge_m3_service", "reranker": "bge_reranker"})
+    assert isinstance(adapters.embedder, BgeM3ServiceAdapter)
+    assert isinstance(adapters.reranker, BgeRerankerAdapter)
 
 
 @pytest.mark.parametrize(

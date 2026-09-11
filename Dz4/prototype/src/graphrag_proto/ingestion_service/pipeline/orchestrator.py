@@ -14,8 +14,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from graphrag_proto.retrieval.adapters.base import GraphStoreProvider, VectorStoreProvider
-from graphrag_proto.retrieval.adapters.deterministic import deterministic_embedding
+from graphrag_proto.retrieval.adapters.base import Embedder, GraphStoreProvider, VectorStoreProvider
+from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 
 CHUNK_SIZE = 512
 CHUNK_OVERLAP = 64
@@ -131,15 +131,21 @@ def _sliding_window(text: str, size: int, overlap: int) -> list[str]:
 
 
 class EmbedStage(Stage):
-    """EMBED: детерминированный фейк (общий с ретривером — L2-04 согласованность оси);
-    боевые bge-m3 — M3."""
+    """EMBED: эмбеддинг чанков (адаптер оси; L2-04 — общий с ретривером).
+
+    По умолчанию `DeterministicEmbedder(dim=8)` (M2-совместимость и тесты);
+    bge_m3_service — M3, связь ingest/query через один провайдер.
+    """
 
     name = "EMBED"
+
+    def __init__(self, embedder: Embedder | None = None) -> None:
+        self._embedder = embedder or DeterministicEmbedder()
 
     def run(self, ctx: PipelineContext) -> None:
         for meta in ctx.chunks_meta:
             chunk = ctx.chunks[meta["index"]]
-            meta["embedding"] = deterministic_embedding(chunk)
+            meta["embedding"] = self._embedder.embed(chunk, ctx.domain)
             meta["chunk_id"] = _chunk_id(ctx.source_url, meta["index"])
 
 

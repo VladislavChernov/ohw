@@ -37,7 +37,12 @@ from graphrag_proto.ingestion_service.storage.registry import (
     DocumentRegistry,
     JobStore,
 )
-from graphrag_proto.retrieval.adapters.factory import build_graph_store, build_vector_store
+from graphrag_proto.retrieval.adapters.base import Embedder
+from graphrag_proto.retrieval.adapters.factory import (
+    build_embedder,
+    build_graph_store,
+    build_vector_store,
+)
 
 HOST = "0.0.0.0"
 PORT = 8002
@@ -63,13 +68,14 @@ def build_analyzer(
     glossary_url: str,
     graph_store: Any = None,
     vector_store: Any = None,
+    embedder: Embedder | None = None,
 ) -> Analyzer:
     readers = {doc_type: readers_factory(doc_type) for doc_type in sorted(ALLOWED_DOC_TYPES)}
     return Analyzer(
         [
             IngestStage(readers),
             ChunkStage(),
-            EmbedStage(),
+            EmbedStage(embedder or build_embedder()),
             ExtractStage(),
             NormalizeStage(glossary_url),
             DedupStage(),
@@ -90,11 +96,16 @@ class Executor:
         glossary_url: str,
         graph_store: Any = None,
         vector_store: Any = None,
+        embedder: Embedder | None = None,
     ) -> None:
         self._jobs = jobs
         self._registry = registry
         self._analyzer = build_analyzer(
-            registry, glossary_url, graph_store=graph_store, vector_store=vector_store
+            registry,
+            glossary_url,
+            graph_store=graph_store,
+            vector_store=vector_store,
+            embedder=embedder,
         )
 
     def start(

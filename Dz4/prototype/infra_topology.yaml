@@ -12,7 +12,9 @@ network: ohw_net
 
 # Пулы соединений и драйверы текущей инсталляции (активные провайдеры).
 # Значения — id реализованных провайдеров каталога (retrieval/adapters/factory.py).
-# Прожект-имена bge_m3_service / bge_reranker подключатся бандлом M3.2 (реальные эмбеддинги).
+# Реализованы bge_m3_service (:8004) и bge_reranker (:8006) — см. docs/demo_runbook.md (M3.2).
+# Снизу базовые значения deterministic/noop: запуск без GPU из коробки;
+# переключение на bge — операторский шаг runbook (профили + правка providers).
 providers:
   graph_store: neo4j
   vector_store: neo4j

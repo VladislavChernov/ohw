@@ -228,7 +228,7 @@ v6 — следующая итерация концепции и докумен�
 
 ---
 
-## Этап 9: Реализация прототипа — вехи M0–M2 закрыты, M3 в работе
+## Этап 9: Реализация прототипа — вехи M0–M2 закрыты, M3 в работе (бандл 2/3 реализован)
 
 **Дата:** 2026-09-10
 **Статус:** Активный код (прототип `prototype/`, репозиторий состоит из каталогов dz0–dz4)
@@ -286,8 +286,43 @@ v6 — следующая итерация концепции и докумен�
    падает «пересборка pipeline без рестарта», запрос проходит (succeeded); неизвестный
    провайдер → 422 без изменения revision. 144 теста зелёные, ruff/mypy чисто.
 
-**Осталось в M3:** бандл 2/3 «add-real-embeddings-reranker» (bge-m3 :8004 и bge-reranker
-в каталог провайдеров), бандл 3/3 «add-semantic-cache» (Valkey-кэш семантических
+**Бандл 2/3 «add-real-embeddings-reranker» — РЕАЛИЗОВАН (до коммита, mock-тесты + live):**
+
+1. **Embeddings Service (:8004, bge-m3)** — `prototype/src/graphrag_proto/embeddings_service/`:
+   `EmbeddingProvider` (нормализованные векторы, dims по умолчанию 1024), реализации
+   `MockEmbeddingProvider` и `SentenceTransformerEmbeddingProvider` (lazy-импорт
+   torch/sentence-transformers, устройство cuda с fallback на cpu), сборка из env
+   (`EMBEDDINGS_MOCK`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `EMBEDDING_MAX_TOKENS`,
+   `EMBEDDINGS_DEVICE`). FastAPI: `/health`, `POST /api/v1/embed`, `POST /api/v1/embed/batch`;
+   невалидный JSON → 422, сбой модели → 503. Консольный скрипт `graphrag-embeddings`.
+2. **Reranker Service (:8006, bge-reranker-base)** — `reranker_service/`: `ScoreProvider`,
+   `MockRerankScorer` (лексический скор, режим `mock`) и `CrossEncoderRerankScorer`
+   (lazy, `RERANKER_DEVICE`); `/health`, `POST /api/v1/rerank` (скоры выровнены по порядку
+   чанков); 422/503. Скрипт `graphrag-reranker`. Порт 8006 добавлен в `docs/04_services_config.md`.
+3. **Адаптеры-клиенты** — `retrieval/adapters/bge.py`: `BgeM3ServiceAdapter` и
+   `BgeRerankerAdapter` (URL/таймауты из env, X-API-Key из `AUTH_API_KEY`/`GRAPH_AUTH_API_KEY`,
+   fail-fast `RuntimeError`). Зарегистрированы в `ADAPTER_CATALOG`: embeddings —
+   `deterministic`, `bge_m3_service`; reranker — `noop`, `bge_reranker`. Появляются в
+   `available` Topology :8005 и в списках `build_embedder`/`build_reranker` (factory).
+4. **EmbedStage на адаптерах** — `ingestion_service/pipeline/orchestrator.py`: `EmbedStage`
+   принимает `embedder` (по умолчанию детерминированный), реальный эмбеддер подключается
+   картой `infra_topology.yaml`/env; инвариант L2-04 (consistency ingest/query)
+   держится на одной фабрике — тест `test_commit_stage.py` (ReflectedEmbedder).
+5. **Образы и compose** — `Dockerfile.embeddings`/`Dockerfile.reranker`: `uv sync` +
+   `uv pip install torch sentence-transformers` в `.venv` образа (pyproject/uv.lock не
+   трогались, mypy-overrides для torch/ST); сервисы `embeddings-service` и `reranker`
+   в `infra/compose.yaml` с env mock/dev и портом 8006.
+6. **Тесты и приёмка** — +`test_embeddings_service.py`, `test_reranker_service.py`,
+   `test_bge_adapters.py` (стаб HTTP-сервера), расширены `test_factory_adapters.py`,
+   `test_topology_service.py`; 169 тестов зелёные, ruff/mypy чисто (59 файлов).
+   **Live-приёмка:** mock-контур на реальном стеке — `:8004/health` (dims 1024, mode mock),
+   `/api/v1/embed` (1024-dim), `/embed/batch` (2×1024), `:8006` health + rerank
+   (упорядоченные скоры 1.0/0.0); **real-режим**: torch+sentence-transformers установлены
+   в изолированный venv, проверен реальный инференс на CPU — MiniLM encode (384-dim),
+   cross-encoder rerank (графовый чанк top-1); bge-m3/bge-reranker-base подключаются
+   через `EMBEDDING_MODEL`/`RERANKER_MODEL` (веса ~2.3 ГБ — по требованию, шаг в Runbook).
+
+**Осталось в M3:** бандл 3/3 «add-semantic-cache» (Valkey-кэш семантических
 запросов).
 
 **Закрытые хвосты вех (L1-01, L4-01), перед бандлом 2/3:**

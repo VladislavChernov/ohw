@@ -135,7 +135,7 @@ Dz4/
 > | M0 — Инфраструктура | ✅ закрыта | `9225b3a` | Compose+профили, Config :8001, Glossary :8003, Neo4j+llama.cpp |
 > | M1 — Ingestion Pipeline | ✅ закрыта | `55914ff` | Ingestion API :8002, 9 этапов INGEST→COMMIT, DocumentReader (ADR-021) |
 > | M2 — Query API async + Retriever | ✅ закрыта | `a9c36f3`, `b7558ca`, `93b96c3` | Query :8000+SSE, Worker+Valkey (ADR-023), граф∥вектор+Context Assembly, demo-ui+e2e, тумблер граф-оси |
-> | M3 — Адаптеры и runtime-переключение | 🚧 в работе | `dfb7e9f`, `81490af` | Бандл 1/3 `add-topology-adapters` завершён (:8005 + hot-reload); далее `add-real-embeddings-reranker`, `add-semantic-cache` |
+> | M3 — Адаптеры и runtime-переключение | 🚧 в работе | `dfb7e9f`, `81490af`; бандл 2/3 — до коммита | Бандл 2/3 `add-real-embeddings-reranker` реализован (Embeddings :8004 bge-m3, Reranker :8006 bge-reranker-base, адаптеры, EmbedStage на Embedder, live mock + real-прогон MiniLM/CE); далее `add-semantic-cache` (бандл 3/3) |
 > | M4 — Eval и гейт готовности | ⬜ не начата | — | — |
 > | M5 — MCP-шлюз и UI | ⬜ не начата | — | — |
 > | M6 — Внешние источники (коннекторы) | ⬜ запланирована | — | План-бандл `add-source-connectors`; гайд `docs/connectors_guide.md`; реализация — по потребности, вне скоупа M3–M5 |
@@ -170,8 +170,9 @@ Dz4/
 ### Веха 3 — Адаптеры и runtime-переключение
 - [x] Интерфейсы-адаптеры: GraphStoreProvider, VectorStoreProvider, LLMInference, Embedder, Reranker.
 - [~] Реализации-кандидаты из снапшота v7 (§2): [x] Neo4jGraphStore, [x] Neo4jVectorStore,
-      [~] OpenAICompatibleAdapter (вместо OllamaAdapter — до бандла 2), [ ] BgeM3ServiceAdapter,
-      [ ] BgeRerankerAdapter (бандл 2/3 add-real-embeddings-reranker).
+      [~] OpenAICompatibleAdapter (вместо OllamaAdapter — подключается бандлом LLM-режима),
+      [x] BgeM3ServiceAdapter (:8004), [x] BgeRerankerAdapter (:8006) — бандл 2/3
+      add-real-embeddings-reranker (реальные эмбеддинги + реранкер, mock/real-режимы).
 - [x] `PUT /api/v1/config/adapters` — переключение оси на лету через Topology Orchestrator
       Service (:8005) без перезапуска (L1-03, ADR-019) + hot-reload воркера.
 - [x] Несколько профилей доменов (it / library / cinema) + переключение активацией (L1-01):
