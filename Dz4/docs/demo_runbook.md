@@ -124,6 +124,66 @@ worker после следующего `TOPOLOGY_POLL_INTERVAL` работает
 LLM_BASE_URL) всегда из env. Возврат к исходной оси — `PUT` со значением из
 `infra_topology.yaml` (revision растёт) или сброс override'ов топологии.
 
+## Домен: активация it → library → cinema (L1-01)
+
+Переключение активного домена — рантайм (`POST /api/v1/config/domain/activate`), без
+рестарта контейнеров. Query Worker и Glossary Service берут активный домен
+**pull-моделью** из Config Service на каждый запрос (`docs/04` §2, §4): следующий
+query/resolve уже работает с новым профилем/словарём.
+
+```bash
+# подъём базового стека (для демонстрации достаточно config + graph + llm)
+docker compose --profile config --profile graph --profile llm up -d --wait
+
+# текущий активный домен и доступные профили
+curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8001/api/v1/config/domain/active
+curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8001/api/v1/config/domain/profiles
+
+# активация library
+curl -s -X POST -H "X-API-Key: $GRAPH_AUTH_API_KEY" -H "Content-Type: application/json" \
+  http://localhost:8001/api/v1/config/domain/activate -d '{"domain": "library"}'
+
+# глоссарий БЕЗ явного domain резолвит по активному домену -> словарь library
+curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" -H "Content-Type: application/json" \
+  http://localhost:8003/api/v1/glossary/resolve -d '{"term": "Жданов"}'
+#   -> {"canonical_name": "zjdanov", "variants": [...]}  (не big_o из it)
+
+# активация cinema / возврат к it
+curl -s -X POST -H "X-API-Key: $GRAPH_AUTH_API_KEY" -H "Content-Type: application/json" \
+  http://localhost:8001/api/v1/config/domain/activate -d '{"domain": "cinema"}'
+curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8001/api/v1/config/domain/active
+```
+
+Инвариант L1-01: активация it → library → cinema не требует изменений кода и
+перезапуска контейнеров. Pull-механизм покрыт `tests/test_domain_activation.py`;
+запрос без явного `metadata.domain` в Query API использует тот же активный профиль
+(`retrieval/profile.py::DomainProfileLoader`).
+
+## GPU-гейтинг: поочерёдный запуск фаз (L4-01)
+
+bge-m3 / ingestion и llama.cpp (Qwen 7B) делят одну видеокарту RTX 2070 Super
+(8 ГБ VRAM). Риск №1 (`docs/06` §5) митигируется жёсткой поочерёдностью через
+Docker Compose Profiles — GPU-профили не поднимаются одновременно («семейство
+запуска»):
+
+```bash
+# Фаза индексации (после бандла add-real-embeddings-reranker добавить --profile embeddings)
+docker compose --profile config --profile graph --profile ingestion up -d --wait
+#   ... загрузка документов, дождаться succeeded ...
+
+# Фаза поиска (индексирующие GPU-профили погашены)
+docker compose stop embeddings ingestion
+docker compose --profile config --profile graph --profile llm up -d --wait
+#   ... запросы через Query API ...
+```
+
+Правила:
+- `embeddings`/`ingestion` и `llm` (llama.cpp) **никогда** не активны одновременно;
+- конфиг стека валиден при любом наборе профилей:
+  `docker compose -f infra/compose.yaml config --quiet`;
+- до бандла 2 EMBED — детерминированный (CPU), конфликта по VRAM нет по построению;
+  реальный VRAM-прогон с bge-m3 :8004 выполняется в `add-real-embeddings-reranker`.
+
 ## Ограничения демо (до M3)
 
 - **Эмбеддинги и LLM — детерминированные заглушки** (`deterministic`, FakeLLM):

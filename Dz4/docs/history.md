@@ -290,6 +290,18 @@ v6 — следующая итерация концепции и докумен�
 в каталог провайдеров), бандл 3/3 «add-semantic-cache» (Valkey-кэш семантических
 запросов).
 
+**Закрытые хвосты вех (L1-01, L4-01), перед бандлом 2/3:**
+
+1. **L1-01 runtime-активация доменов** — закрыта полностью: `POST /domain/activate`
+   (Config :8001) уже переключал активный домен в SQLite; добавлен интеграционный тест
+   `tests/test_domain_activation.py` (+3) на pull-механизм (Query `DomainProfileLoader`
+   и Glossary резолвят по активному домену БЕЗ рестарта) и раздел Runbook «Домен:
+   активация it → library → cinema».
+2. **L4-01 поочерёдный запуск профилей** — процедура фазирования GPU закрыта: Runbook
+   «GPU-гейтинг» (фаза индексации — ingestion/embeddings, фаза поиска — llm, GPU-профили
+   одновременно невозможны), compose-конфиг валиден (`config --quiet`). Физический
+   VRAM-прогон с bge-m3 :8004 — в бандле 2/3.
+
 **Планируемый бандл (вне M3–M5, по потребности): «add-source-connectors»** — подключение
 внешних источников данных (Jira, TestRail/Test Management, Confluence/Wiki, GitLab) как
 коннекторов. План-бандл `openspec/changes/add-source-connectors/` (контракт `SourceProvider`,
