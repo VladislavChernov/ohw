@@ -1,8 +1,8 @@
 # Документация: Подключение внешних систем через слой адаптеров (Adapter Guide)
 
 > **Версия:** v5.1  
-> **Последнее обновление:** 2026-09-05  
-> **См. также:** [CONCEPT.md §2](../CONCEPT.md) — слой адаптеров; [ADR-012](./05_adr_log.md) — введение слоя; [ADR-013](./05_adr_log.md) — разделение Graph/Vector осей; [adapters_specification.md](./adapters_specification.md) — контракты интерфейсов.
+> **Последнее обновление:** 2026-09-11  
+> **См. также:** [CONCEPT.md §2](../CONCEPT.md) — слой адаптеров; [ADR-012](./05_adr_log.md) — введение слоя; [ADR-013](./05_adr_log.md) — разделение Graph/Vector осей; [adapters_specification.md](./adapters_specification.md) — контракты интерфейсов; [connectors_guide.md](./connectors_guide.md) — источники данных (Jira/TestRail/Wiki), ортогональны адаптерам (работают до пайплайна).
 
 ---
 
