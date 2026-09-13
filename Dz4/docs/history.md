@@ -1,6 +1,6 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга; self-contained LLM-образ)
+> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах)
 > **Последнее обновление:** 2026-09-13
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
@@ -384,6 +384,17 @@ v6 — следующая итерация концепции и докумен�
    Compose: `build` из `Dockerfile.llm` (image `ohw/llm:prototype`), bind-mount удалён,
    healthcheck на `curl` (в образе llama.cpp нет `python`). Переносимость/детерминизм —
    источник и хеш проверены по HF API (2026-09-13).
+
+**M3-хвост: X-API-Key на всех HTTP-контурах (по ревью `fast_review2.md` P0: auth Config/Ingestion).**
+
+1. **Проблема:** `X-API-Key` требовали 4 из 6 контуров; Config :8001, Ingestion :8002 и Glossary :8003
+   были открыты (анонимный `POST /config/domain/validate`, загрузка документов), хотя `AUTH_API_KEY`
+   уже был объявлен в compose.
+2. **Решение:** единый `require_key` (401 при отсутствии/неверном ключе; `api_key=""` — выключение
+   для тестов) в Config/Ingestion/Glossary + незащищённый `/health`; внутренние клиенты
+   config/glossary (чанкер-профиль, DomainProfileLoader, NormalizeStage, glossary active-domain)
+   шлют `X-API-Key` из `AUTH_API_KEY`/`GRAPH_AUTH_API_KEY`; healthcheck'и переведены на `/health`.
+   Инвариант L5-01 теперь фактически выполнен (security.md §5 — честный чек-лист).
 
 **Планируемый бандл (вне M3–M5, по потребности): «add-source-connectors»** — подключение
 внешних источников данных (Jira, TestRail/Test Management, Confluence/Wiki, GitLab) как

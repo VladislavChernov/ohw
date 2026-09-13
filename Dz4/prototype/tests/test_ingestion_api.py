@@ -12,6 +12,17 @@ from graphrag_proto.ingestion_service.storage.registry import (
     DocumentRegistry,
 )
 
+API_KEY = "changeme"
+
+
+class _AuthedClient(TestClient):
+    """TestClient, подставляющий X-API-Key по умолчанию (запросы без ключа — в auth-тестах)."""
+
+    def request(self, method, url, **kwargs):
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("X-API-Key", API_KEY)
+        return super().request(method, url, headers=headers, **kwargs)
+
 
 def wait_until(condition, timeout: float = 10.0, interval: float = 0.1) -> bool:
     deadline = time.monotonic() + timeout
@@ -30,7 +41,7 @@ def make_app(tmp_path: Path, glossary_url: str = ""):
 
 def test_post_document_202_and_job_succeeds(tmp_path: Path) -> None:
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post(
             "/api/v1/ingestion/documents",
             json={
@@ -64,14 +75,14 @@ def test_post_document_202_and_job_succeeds(tmp_path: Path) -> None:
 
 def test_validation_422_missing_fields(tmp_path: Path) -> None:
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/ingestion/documents", json={"source_url": "x"})
         assert resp.status_code == 422
 
 
 def test_validation_422_bad_doc_type(tmp_path: Path) -> None:
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post(
             "/api/v1/ingestion/documents",
             json={"source_url": "x.json", "domain": "it", "doc_type": "json", "content": "{}"},
@@ -81,14 +92,14 @@ def test_validation_422_bad_doc_type(tmp_path: Path) -> None:
 
 def test_job_not_found_404(tmp_path: Path) -> None:
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.get("/api/v1/ingestion/jobs/nope")
         assert resp.status_code == 404
 
 
 def test_list_jobs_paginated_reflects_total(tmp_path: Path) -> None:
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         for i in range(3):
             client.post(
                 "/api/v1/ingestion/documents",
@@ -116,7 +127,7 @@ def test_idempotent_noop_on_same_content(tmp_path: Path) -> None:
         "doc_type": "txt",
         "content": "одинаковый контент документа",
     }
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         j1 = client.post("/api/v1/ingestion/documents", json=payload).json()["job_id"]
         assert wait_until(lambda: client.get(f"/api/v1/ingestion/jobs/{j1}").json().get("status") == "succeeded")
         j2 = client.post("/api/v1/ingestion/documents", json=payload).json()["job_id"]
@@ -132,7 +143,7 @@ def test_changed_content_creates_new_version(tmp_path: Path) -> None:
     db = tmp_path / "ingestion.db"
     uploads = tmp_path / "uploads"
     app = create_app(upload_dir=uploads, db_path=db, glossary_url="")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         j1 = client.post(
             "/api/v1/ingestion/documents",
             json={"source_url": "src://chg.txt", "domain": "it", "doc_type": "txt", "content": "версия 1"},
@@ -160,7 +171,7 @@ def test_soft_delete(tmp_path: Path) -> None:
     db = tmp_path / "ingestion.db"
     uploads = tmp_path / "uploads"
     app = create_app(upload_dir=uploads, db_path=db, glossary_url="")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         j1 = client.post(
             "/api/v1/ingestion/documents",
             json={"source_url": "src://del.txt", "domain": "it", "doc_type": "txt", "content": "удаляемый"},
@@ -177,7 +188,7 @@ def test_reingest_after_soft_delete_gets_new_version(tmp_path: Path) -> None:
     db = tmp_path / "ingestion.db"
     uploads = tmp_path / "uploads"
     app = create_app(upload_dir=uploads, db_path=db, glossary_url="")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         j1 = client.post(
             "/api/v1/ingestion/documents",
             json={"source_url": "src://rev.txt", "domain": "it", "doc_type": "txt", "content": "версия 1"},
@@ -187,7 +198,7 @@ def test_reingest_after_soft_delete_gets_new_version(tmp_path: Path) -> None:
     reg = DocumentRegistry(db)
     assert reg.soft_delete("it", "src://rev.txt") is True
 
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         j2 = client.post(
             "/api/v1/ingestion/documents",
             json={"source_url": "src://rev.txt", "domain": "it", "doc_type": "txt", "content": "новая версия"},
@@ -204,7 +215,7 @@ def test_cancel_running_job_returns_cancelled(tmp_path: Path) -> None:
     db = tmp_path / "ingestion.db"
     uploads = tmp_path / "uploads"
     app = create_app(upload_dir=uploads, db_path=db, glossary_url="")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         jid = client.post(
             "/api/v1/ingestion/documents",
             json={"source_url": "src://c.txt", "domain": "it", "doc_type": "txt", "content": "x" * 5000},
@@ -228,7 +239,7 @@ def test_cancel_running_job_returns_cancelled(tmp_path: Path) -> None:
 def test_finished_job_journal_all_stages_terminal(tmp_path: Path) -> None:
     """Все 9 этапов в журнале завершены (не «висят» running) после успеха."""
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         jid = client.post(
             "/api/v1/ingestion/documents",
             json={"source_url": "src://j.txt", "domain": "it", "doc_type": "txt", "content": "текст джобы"},
@@ -241,9 +252,34 @@ def test_finished_job_journal_all_stages_terminal(tmp_path: Path) -> None:
 
 def test_cancel_missing_job_404(tmp_path: Path) -> None:
     app = make_app(tmp_path)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.delete("/api/v1/ingestion/jobs/nope")
         assert resp.status_code == 404
+
+
+def test_requires_api_key_401(tmp_path: Path) -> None:
+    uploads = tmp_path / "uploads"
+    app = create_app(
+        upload_dir=uploads,
+        db_path=tmp_path / "ingestion.db",
+        glossary_url="",
+        api_key="secret",
+    )
+    with TestClient(app) as client:
+        payload = {"source_url": "x", "domain": "it", "doc_type": "txt", "content": "текст"}
+        assert client.post("/api/v1/ingestion/documents", json=payload).status_code == 401
+        assert client.get("/api/v1/ingestion/jobs").status_code == 401
+        assert client.delete("/api/v1/ingestion/jobs/nope").status_code == 401
+
+
+def test_health_is_open() -> None:
+    import tempfile
+    from pathlib import Path
+
+    tmp = Path(tempfile.mkdtemp())
+    app = create_app(upload_dir=tmp / "uploads", db_path=tmp / "i.db", api_key="secret")
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
 
 
 def test_runner_normしalize_without_glossary_keeps_entities(tmp_path: Path) -> None:

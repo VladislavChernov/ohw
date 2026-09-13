@@ -29,6 +29,11 @@ def _profiles_dir() -> Path:
     return Path(env) if env else Path("domain_profiles")
 
 
+def _config_headers() -> dict[str, str]:
+    key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "")
+    return {"X-API-Key": key} if key else {}
+
+
 class DomainProfileLoader:
     """Источник профилей: Config Service (remote) -> локальный YAML (fallback)."""
 
@@ -40,7 +45,11 @@ class DomainProfileLoader:
     def active_domain(self) -> str:
         if self._config_url:
             try:
-                with urllib.request.urlopen(f"{self._config_url}/api/v1/config/domain/active", timeout=3) as resp:
+                request = urllib.request.Request(
+                    f"{self._config_url}/api/v1/config/domain/active",
+                    headers=_config_headers(),
+                )
+                with urllib.request.urlopen(request, timeout=3) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 domain = data.get("domain")
                 if isinstance(domain, str) and _is_safe_domain(domain) and domain:
@@ -55,9 +64,11 @@ class DomainProfileLoader:
             raise ProfileError(f"небезопасное имя домена: {domain!r}")
         if self._config_url:
             try:
-                with urllib.request.urlopen(
-                    f"{self._config_url}/api/v1/config/domain/profile/{domain}", timeout=3
-                ) as resp:
+                request = urllib.request.Request(
+                    f"{self._config_url}/api/v1/config/domain/profile/{domain}",
+                    headers=_config_headers(),
+                )
+                with urllib.request.urlopen(request, timeout=3) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                 if isinstance(data, dict):
                     return data

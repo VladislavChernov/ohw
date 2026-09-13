@@ -7,7 +7,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 
 from graphrag_proto.glossary_service.glossary import Glossary, GlossaryError, load_glossary
 
@@ -32,8 +32,18 @@ def _is_safe_domain(name: str) -> bool:
 
 
 def _fetch_active_domain(config_url: str) -> str | None:
+    import os
+
+    headers = {}
+    api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "")
+    if api_key:
+        headers["X-API-Key"] = api_key
     try:
-        with urllib.request.urlopen(f"{config_url}/api/v1/config/domain/active", timeout=3) as resp:
+        request = urllib.request.Request(
+            f"{config_url}/api/v1/config/domain/active",
+            headers=headers,
+        )
+        with urllib.request.urlopen(request, timeout=3) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         domain = data.get("domain")
         return domain if isinstance(domain, str) and domain else None
@@ -41,11 +51,15 @@ def _fetch_active_domain(config_url: str) -> str | None:
         return None
 
 
-def create_app(profiles_dir: Path | None = None, config_url: str | None = None) -> FastAPI:
+def create_app(profiles_dir: Path | None = None, config_url: str | None = None, api_key: str = "changeme") -> FastAPI:
     profiles_dir = profiles_dir or _profiles_dir()
     config_url = config_url or _config_url()
 
     app = FastAPI(title="GraphRAG Glossary Service", version="0.1.0")
+
+    def require_key(x_api_key: str | None = Header(None, alias="X-API-Key")) -> None:
+        if api_key and x_api_key != api_key:
+            raise HTTPException(status_code=401, detail="неверный или отсутствующий X-API-Key")
 
     def active_domain() -> str:
         if config_url:
@@ -71,11 +85,15 @@ def create_app(profiles_dir: Path | None = None, config_url: str | None = None) 
         except GlossaryError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.get("/api/v1/glossary/{domain}")
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/api/v1/glossary/{domain}", dependencies=[Depends(require_key)])
     def get_glossary(domain: str) -> dict[str, Any]:
         return glossary_for(domain).raw_dict()
 
-    @app.post("/api/v1/glossary/resolve")
+    @app.post("/api/v1/glossary/resolve", dependencies=[Depends(require_key)])
     def resolve(payload: dict[str, Any]) -> dict[str, Any]:
         term = payload.get("term")
         if not isinstance(term, str) or not term:
@@ -83,7 +101,7 @@ def create_app(profiles_dir: Path | None = None, config_url: str | None = None) 
         canonical, variants = glossary_for(resolve_domain(payload)).resolve_with_variants(term)
         return {"canonical_name": canonical, "variants": variants}
 
-    @app.post("/api/v1/glossary/validate")
+    @app.post("/api/v1/glossary/validate", dependencies=[Depends(require_key)])
     def validate(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = payload or {}
         duplicates = glossary_for(resolve_domain(body)).duplicates()
@@ -95,7 +113,8 @@ def create_app(profiles_dir: Path | None = None, config_url: str | None = None) 
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(create_app(), host=HOST, port=PORT)
+    api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
+    uvicorn.run(create_app(api_key=api_key), host=HOST, port=PORT)
 
 
 if __name__ == "__main__":

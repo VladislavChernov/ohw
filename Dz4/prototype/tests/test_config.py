@@ -9,6 +9,17 @@ from fastapi.testclient import TestClient
 from graphrag_proto.config_service.app import create_app
 from graphrag_proto.config_service.domain import load_profile_yaml, validate_profile
 
+API_KEY = "changeme"
+
+
+class _AuthedClient(TestClient):
+    """TestClient, подставляющий X-API-Key по умолчанию (запросы без ключа — в auth-тестах)."""
+
+    def request(self, method, url, **kwargs):
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("X-API-Key", API_KEY)
+        return super().request(method, url, headers=headers, **kwargs)
+
 MINIMAL_PROFILE = {
     "profile": {"name": "it", "description": "тест", "language": "ru", "version": "1"},
     "ontology": {"node_types": [], "edge_types": []},
@@ -37,7 +48,7 @@ def make_profiles_dir(tmp_path: Path) -> Path:
 
 def test_profiles_lists_domains(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_profiles_dir(tmp_path), db_path=tmp_path / "c.db")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.get("/api/v1/config/domain/profiles")
     assert resp.status_code == 200
     assert resp.json()["domains"] == ["it", "library"]
@@ -45,7 +56,7 @@ def test_profiles_lists_domains(tmp_path: Path) -> None:
 
 def test_active_default_profile(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_profiles_dir(tmp_path), db_path=tmp_path / "c.db")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.get("/api/v1/config/domain/active")
     assert resp.status_code == 200
     assert resp.json() == {"domain": "it"}
@@ -53,7 +64,7 @@ def test_active_default_profile(tmp_path: Path) -> None:
 
 def test_validate_valid_profile(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_profiles_dir(tmp_path), db_path=tmp_path / "c.db")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post(
             "/api/v1/config/domain/validate",
             content=VALID_YAML,
@@ -65,7 +76,7 @@ def test_validate_valid_profile(tmp_path: Path) -> None:
 
 def test_validate_invalid_profile(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_profiles_dir(tmp_path), db_path=tmp_path / "c.db")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post(
             "/api/v1/config/domain/validate",
             content=INVALID_YAML,
@@ -78,7 +89,7 @@ def test_validate_invalid_profile(tmp_path: Path) -> None:
 
 def test_validate_malformed_yaml_400(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_profiles_dir(tmp_path), db_path=tmp_path / "c.db")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post(
             "/api/v1/config/domain/validate",
             content="[::broken::",
@@ -89,7 +100,7 @@ def test_validate_malformed_yaml_400(tmp_path: Path) -> None:
 
 def test_validate_non_mapping_400(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_profiles_dir(tmp_path), db_path=tmp_path / "c.db")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post(
             "/api/v1/config/domain/validate",
             content="[1, 2]",
@@ -100,7 +111,7 @@ def test_validate_non_mapping_400(tmp_path: Path) -> None:
 
 def test_activate_changes_active_profile(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_profiles_dir(tmp_path), db_path=tmp_path / "c.db")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/config/domain/activate", json={"domain": "library"})
         assert resp.status_code == 200
         assert resp.json()["activated"] is True
@@ -113,11 +124,11 @@ def test_activate_persists_across_app_instances(tmp_path: Path) -> None:
     db_path = tmp_path / "persist.db"
     profiles = make_profiles_dir(tmp_path)
     app1 = create_app(profiles_dir=profiles, db_path=db_path)
-    with TestClient(app1) as client:
+    with _AuthedClient(app1) as client:
         assert client.post("/api/v1/config/domain/activate", json={"domain": "library"}).status_code == 200
 
     app2 = create_app(profiles_dir=profiles, db_path=db_path)
-    with TestClient(app2) as client:
+    with _AuthedClient(app2) as client:
         assert client.get("/api/v1/config/domain/active").json()["domain"] == "library"
 
 
@@ -130,7 +141,7 @@ def test_activate_profile_name_mismatch_422(tmp_path: Path) -> None:
         yaml.safe_dump(profile), encoding="utf-8"
     )
     app = create_app(profiles_dir=profiles, db_path=tmp_path / "c.db")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/config/domain/activate", json={"domain": "mismatch"})
     assert resp.status_code == 422
 
@@ -143,15 +154,41 @@ def test_default_profile_from_namespaces(tmp_path: Path) -> None:
         yaml.safe_dump({"domain": {"active_profile": "library"}}), encoding="utf-8"
     )
     app = create_app(profiles_dir=profiles, db_path=tmp_path / "c.db", namespaces_path=infra / "namespaces.yaml")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         assert client.get("/api/v1/config/domain/active").json()["domain"] == "library"
 
 
 def test_activate_unknown_profile_404(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_profiles_dir(tmp_path), db_path=tmp_path / "c.db")
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/config/domain/activate", json={"domain": "nope"})
     assert resp.status_code == 404
+
+
+def test_requires_api_key_401(tmp_path: Path) -> None:
+    app = create_app(
+        profiles_dir=make_profiles_dir(tmp_path),
+        db_path=tmp_path / "c.db",
+        api_key="secret",
+    )
+    with TestClient(app) as client:
+        assert client.get("/api/v1/config/domain/profiles").status_code == 401
+        assert client.post("/api/v1/config/domain/activate", json={"domain": "it"}).status_code == 401
+        assert (
+            client.get("/api/v1/config/domain/profiles", headers={"X-API-Key": "wrong"}).status_code
+            == 401
+        )
+        assert (
+            client.get("/api/v1/config/domain/profiles", headers={"X-API-Key": "secret"}).status_code
+            == 200
+        )
+
+
+def test_health_is_open(tmp_path: Path) -> None:
+    app = create_app(profiles_dir=make_profiles_dir(tmp_path), db_path=tmp_path / "h.db", api_key="secret")
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/health").json() == {"status": "ok"}
 
 
 def test_validate_profile_module(tmp_path: Path) -> None:

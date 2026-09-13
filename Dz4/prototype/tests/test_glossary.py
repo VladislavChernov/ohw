@@ -9,6 +9,17 @@ from fastapi.testclient import TestClient
 from graphrag_proto.glossary_service.app import create_app
 from graphrag_proto.glossary_service.glossary import Glossary, GlossaryError, load_glossary
 
+API_KEY = "changeme"
+
+
+class _AuthedClient(TestClient):
+    """TestClient, подставляющий X-API-Key по умолчанию (запросы без ключа — в auth-тестах)."""
+
+    def request(self, method, url, **kwargs):
+        headers = dict(kwargs.pop("headers", None) or {})
+        headers.setdefault("X-API-Key", API_KEY)
+        return super().request(method, url, headers=headers, **kwargs)
+
 VALID_GLOSSARY = {
     "terms": [
         {"canonical_name": "big_o", "aliases": ["Big-O", "big o"]},
@@ -40,7 +51,7 @@ def make_glossary_dir(tmp_path: Path) -> Path:
 
 def test_get_glossary(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.get("/api/v1/glossary/it")
     assert resp.status_code == 200
     data = resp.json()
@@ -50,14 +61,14 @@ def test_get_glossary(tmp_path: Path) -> None:
 
 def test_get_glossary_unknown_404(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.get("/api/v1/glossary/cinema")
     assert resp.status_code == 404
 
 
 def test_resolve_default_domain(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/glossary/resolve", json={"term": "BTree"})
     assert resp.status_code == 200
     body = resp.json()
@@ -67,7 +78,7 @@ def test_resolve_default_domain(tmp_path: Path) -> None:
 
 def test_resolve_explicit_domain_in_payload(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/glossary/resolve", json={"term": "zzz", "domain": "lib"})
     assert resp.status_code == 200
     assert resp.json()["canonical_name"] is None
@@ -75,7 +86,7 @@ def test_resolve_explicit_domain_in_payload(tmp_path: Path) -> None:
 
 def test_resolve_explicit_domain_variants(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/glossary/resolve", json={"term": "x", "domain": "lib"})
     assert resp.status_code == 200
     assert resp.json()["canonical_name"] in ("a", "b")  # x дублируется -> последний выигрывает
@@ -83,7 +94,7 @@ def test_resolve_explicit_domain_variants(tmp_path: Path) -> None:
 
 def test_resolve_case_insensitive(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/glossary/resolve", json={"term": "BIG-O"})
     body = resp.json()
     assert body["canonical_name"] == "big_o"
@@ -91,7 +102,7 @@ def test_resolve_case_insensitive(tmp_path: Path) -> None:
 
 def test_resolve_not_found(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/glossary/resolve", json={"term": "zzz"})
     assert resp.status_code == 200
     assert resp.json()["canonical_name"] is None
@@ -99,21 +110,21 @@ def test_resolve_not_found(tmp_path: Path) -> None:
 
 def test_resolve_empty_term_422(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/glossary/resolve", json={"term": ""})
     assert resp.status_code == 422
 
 
 def test_resolve_unknown_domain_404(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/glossary/resolve", json={"term": "x", "domain": "nope"})
     assert resp.status_code == 404
 
 
 def test_validate_duplicates_reported(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/glossary/validate", json={"domain": "lib"})
     assert resp.status_code == 200
     body = resp.json()
@@ -123,7 +134,7 @@ def test_validate_duplicates_reported(tmp_path: Path) -> None:
 
 def test_validate_clean_default_domain(tmp_path: Path) -> None:
     app = create_app(profiles_dir=make_glossary_dir(tmp_path), config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.post("/api/v1/glossary/validate")
     assert resp.status_code == 200
     assert resp.json()["valid"] is True
@@ -148,6 +159,21 @@ def test_glossary_malformed_yaml_returns_404(tmp_path: Path) -> None:
     profiles.mkdir()
     (profiles / "glossary.bad.yaml").write_text("[::not-dict::", encoding="utf-8")
     app = create_app(profiles_dir=profiles, config_url=None)
-    with TestClient(app) as client:
+    with _AuthedClient(app) as client:
         resp = client.get("/api/v1/glossary/bad")
     assert resp.status_code == 404
+
+
+def test_requires_api_key_401(tmp_path: Path) -> None:
+    profiles = tmp_path / "domain_profiles"
+    profiles.mkdir()
+    (profiles / "glossary.it.yaml").write_text(
+        "terms:\n  - canonical_name: a\n    aliases: [A]\n", encoding="utf-8"
+    )
+    app = create_app(profiles_dir=profiles, config_url=None, api_key="secret")
+    with TestClient(app) as client:
+        assert client.get("/api/v1/glossary/it").status_code == 401
+        assert client.post("/api/v1/glossary/resolve", json={"term": "x"}).status_code == 401
+        assert client.post("/api/v1/glossary/validate", json={"domain": "it"}).status_code == 401
+        assert client.get("/api/v1/glossary/it", headers={"X-API-Key": "secret"}).status_code == 200
+        assert client.get("/health").status_code == 200

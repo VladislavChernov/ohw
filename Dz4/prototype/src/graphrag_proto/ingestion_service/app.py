@@ -2,6 +2,7 @@
 
 Lifecycle (ADR-018): queued -> running (INGEST..COMMIT) -> succeeded | failed | cancelled.
 Джоба исполняется в фоновом потоке (in-process executor); Task Queue — M2.
+Все эндпоинты требуют `X-API-Key` (L5-01).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
@@ -161,6 +162,7 @@ def create_app(
     upload_dir: Path | None = None,
     db_path: Path | None = None,
     glossary_url: str | None = None,
+    api_key: str = "changeme",
 ) -> FastAPI:
     upload_dir = upload_dir or _upload_dir()
     db_path = db_path or _db_path()
@@ -176,7 +178,15 @@ def create_app(
 
     app = FastAPI(title="GraphRAG Ingestion Service", version="0.1.0")
 
-    @app.post("/api/v1/ingestion/documents")
+    def require_key(x_api_key: str | None = Header(None, alias="X-API-Key")) -> None:
+        if api_key and x_api_key != api_key:
+            raise HTTPException(status_code=401, detail="неверный или отсутствующий X-API-Key")
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.post("/api/v1/ingestion/documents", dependencies=[Depends(require_key)])
     def create_document(payload: dict[str, Any] = Body(...)) -> JSONResponse:  # noqa: B008
         source_url = payload.get("source_url")
         domain = payload.get("domain")
@@ -209,12 +219,12 @@ def create_app(
             status_code=202,
         )
 
-    @app.get("/api/v1/ingestion/jobs")
+    @app.get("/api/v1/ingestion/jobs", dependencies=[Depends(require_key)])
     def list_jobs(page: int = 1, page_size: int = 20) -> dict[str, Any]:
         items, total = jobs.list(page, page_size)
         return {"items": items, "page": page, "page_size": page_size, "total": total}
 
-    @app.get("/api/v1/ingestion/jobs/{job_id}")
+    @app.get("/api/v1/ingestion/jobs/{job_id}", dependencies=[Depends(require_key)])
     def get_job(job_id: str) -> dict[str, Any]:
         job = jobs.get(job_id)
         if not job:
@@ -222,7 +232,7 @@ def create_app(
         job["stages"] = jobs.stages(job_id)
         return job
 
-    @app.delete("/api/v1/ingestion/jobs/{job_id}")
+    @app.delete("/api/v1/ingestion/jobs/{job_id}", dependencies=[Depends(require_key)])
     def cancel_job(job_id: str) -> dict[str, Any]:
         cancelled = executor.cancel(job_id)
         if not cancelled:
@@ -235,7 +245,7 @@ def create_app(
             )
         return {"job_id": job_id, "status": "cancelled"}
 
-    @app.delete("/api/v1/ingestion/documents")
+    @app.delete("/api/v1/ingestion/documents", dependencies=[Depends(require_key)])
     def delete_document(domain: str, source_url: str) -> dict[str, Any]:
         """Soft-delete источника (ADR-014): чанки снимаются с поиска (L2-05)."""
         deleted = soft_delete_source(registry, graph_store, vector_store, domain, source_url)
@@ -252,7 +262,8 @@ def create_app(
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(create_app(), host=HOST, port=PORT)
+    api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
+    uvicorn.run(create_app(api_key=api_key), host=HOST, port=PORT)
 
 
 if __name__ == "__main__":

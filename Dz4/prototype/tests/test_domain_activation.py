@@ -140,7 +140,7 @@ def test_glossary_resolves_via_active_domain(tmp_path: Path) -> None:
     state = _State()
     state.active = "it"
     with _stub_config_server(state) as url:
-        app = create_glossary_app(profiles_dir=profiles, config_url=url)
+        app = create_glossary_app(profiles_dir=profiles, config_url=url, api_key="")
         with TestClient(app) as client:
             before = client.post("/api/v1/glossary/resolve", json={"term": "Жданов"}).json()
             state.active = "library"

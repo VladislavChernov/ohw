@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
 from graphrag_proto.config_service.domain import (
@@ -46,6 +46,7 @@ def create_app(
     db_path: Path | None = None,
     namespaces_path: Path | None = None,
     default_profile: str | None = None,
+    api_key: str = "changeme",
 ) -> FastAPI:
     profiles_dir = profiles_dir or _profiles_dir()
     db_path = db_path or _db_path()
@@ -55,6 +56,14 @@ def create_app(
     store = ConfigStore(db_path)
 
     app = FastAPI(title="GraphRAG Config Service", version="0.1.0")
+
+    def require_key(x_api_key: str | None = Header(None, alias="X-API-Key")) -> None:
+        if api_key and x_api_key != api_key:
+            raise HTTPException(status_code=401, detail="неверный или отсутствующий X-API-Key")
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
 
     def listed_domains() -> list[str]:
         domains: list[str] = []
@@ -73,21 +82,21 @@ def create_app(
         except DomainProfileError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    @app.get("/api/v1/config/domain/active")
+    @app.get("/api/v1/config/domain/active", dependencies=[Depends(require_key)])
     def active() -> dict[str, str]:
         return {"domain": store.get_active_profile(default_profile)}
 
-    @app.get("/api/v1/config/domain/profiles")
+    @app.get("/api/v1/config/domain/profiles", dependencies=[Depends(require_key)])
     def profiles() -> dict[str, list[str]]:
         return {"domains": listed_domains()}
 
-    @app.get("/api/v1/config/domain/profile/{name}")
+    @app.get("/api/v1/config/domain/profile/{name}", dependencies=[Depends(require_key)])
     def profile(name: str) -> dict[str, Any]:
         if not _is_safe_domain(name):
             raise HTTPException(status_code=404, detail=f"профиль '{name}' не найден")
         return load_profile(name)
 
-    @app.post("/api/v1/config/domain/validate")
+    @app.post("/api/v1/config/domain/validate", dependencies=[Depends(require_key)])
     def validate(body: str = Body(..., media_type="application/yaml")) -> dict[str, Any]:
         try:
             data = yaml.safe_load(body)
@@ -98,7 +107,7 @@ def create_app(
         errors = validate_profile(data)
         return {"valid": not errors, "errors": errors}
 
-    @app.post("/api/v1/config/domain/activate")
+    @app.post("/api/v1/config/domain/activate", dependencies=[Depends(require_key)])
     def activate(payload: dict[str, str]) -> JSONResponse:
         domain = payload.get("domain")
         if not domain:
@@ -121,7 +130,8 @@ def create_app(
 def main() -> None:
     import uvicorn
 
-    uvicorn.run(create_app(), host=HOST, port=PORT)
+    api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
+    uvicorn.run(create_app(api_key=api_key), host=HOST, port=PORT)
 
 
 if __name__ == "__main__":

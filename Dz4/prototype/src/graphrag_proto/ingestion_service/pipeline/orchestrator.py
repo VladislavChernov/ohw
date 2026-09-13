@@ -172,7 +172,13 @@ class NormalizeStage(Stage):
     def run(self, ctx: PipelineContext) -> None:
         if not self._glossary_url:
             return
+        import os
         import urllib.request
+
+        headers = {"Content-Type": "application/json"}
+        api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "")
+        if api_key:
+            headers["X-API-Key"] = api_key
 
         for entity in ctx.entities:
             body = json.dumps(
@@ -181,7 +187,7 @@ class NormalizeStage(Stage):
             req = urllib.request.Request(
                 f"{self._glossary_url}/api/v1/glossary/resolve",
                 data=body,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST",
             )
             try:

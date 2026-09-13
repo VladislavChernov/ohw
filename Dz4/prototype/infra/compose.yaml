@@ -48,7 +48,7 @@ services:
         - "CMD"
         - "sh"
         - "-lc"
-        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/api/v1/config/domain/active', timeout=2)\""
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)\""
       interval: 10s
       timeout: 3s
       retries: 5
@@ -78,7 +78,7 @@ services:
         - "CMD"
         - "sh"
         - "-lc"
-        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8003/api/v1/glossary/it', timeout=2)\""
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)\""
       interval: 10s
       timeout: 3s
       retries: 5
@@ -222,7 +222,7 @@ services:
         - "CMD"
         - "sh"
         - "-lc"
-        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/api/v1/ingestion/jobs', timeout=2)\""
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)\""
       interval: 10s
       timeout: 3s
       retries: 5

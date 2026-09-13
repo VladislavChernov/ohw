@@ -245,10 +245,16 @@ def _fetch_profile(domain: str, config_url: str) -> dict[str, object]:
     пустой результат → fallback на namespaces/дефолт (паттерн Glossary fallback).
     """
     import json
+    import os
     import urllib.request
 
+    headers = {}
+    api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "")
+    if api_key:
+        headers["X-API-Key"] = api_key
     url = urllib.request.Request(
         f"{config_url.rstrip('/')}/api/v1/config/domain/profile/{domain}",
+        headers=headers,
         method="GET",
     )
     try:
