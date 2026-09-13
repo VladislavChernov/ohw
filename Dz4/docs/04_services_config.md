@@ -157,8 +157,8 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
   без установленного пакета выбранный адаптер даёт fail-fast при вызове.
 
 **namespace: storage**
-- `graph_store` ("neo4j_graph") — графовая ось: Neo4jGraphStore / MemgraphGraphStore.
-- `vector_store` ("neo4j_vector") — векторная ось: Neo4jVectorStore / QdrantVectorStore.
+- `graph_store` ("neo4j") — графовая ось: Neo4jGraphStore / MemgraphGraphStore.
+- `vector_store` ("neo4j") — векторная ось: Neo4jVectorStore / QdrantVectorStore.
 - `neo4j_uri` ("bolt://neo4j:7687")
 
 **namespace: auth**
@@ -171,8 +171,11 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
 - `semantic_validation`
 
 **namespace: adapters (новое в v5)**
-- `graph_store` ("neo4j_graph")
-- `vector_store` ("neo4j_vector")
-- `llm` ("ollama")
+- `graph_store` ("neo4j")
+- `vector_store` ("neo4j")
+- `llm` ("openai")
 - `embeddings` ("bge_m3_service")
 - `reranker` ("bge_reranker")
+
+Допустимые id каждого слота — каталог фабрики `retrieval/adapters/factory.py::ADAPTER_CATALOG`
+(SSOT по контракту `tests/test_adapter_catalog_ssot.py`: значение YAML ∈ каталог слота).

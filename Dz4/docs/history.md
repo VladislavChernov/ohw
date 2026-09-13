@@ -1,6 +1,6 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429)
+> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика)
 > **Последнее обновление:** 2026-09-13
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
@@ -413,6 +413,18 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
    (`INGEST_MAX_CONCURRENT`, по умолчанию 2); при заполненных слотах `POST /documents` → `429`
    с пометкой джобы `failed` (а не зависшей `queued`); слот освобождается в `finally`.
    +3 теста (лимит, невалидный N, эндпоинт-429).
+
+**M3-хвост: единый словарь id адаптеров YAML↔фабрика (по ревью `review.md`,
+`review_2.md` §4.1, `critical_review.md` №1, `fast_review2.md` P0-1).**
+
+1. **Проблема:** YAML-конфиги (`infra/config/adapters.yaml`, `namespaces.yaml` — namespace
+   `adapters` и `storage`) декларировали id `neo4j_graph`, `neo4j_vector`, `ollama`, которых
+   нет в каталоге фабрики (`ADAPTER_CATALOG`: `neo4j|inmemory`, `openai|fake`, ...) — SSOT-дрейф,
+   «что активно сейчас» не определялось ни одним словарём.
+2. **Решение:** значения YAML приведены к каталогу фабрики (`neo4j`, `openai`); добавлен
+   контрактный тест `tests/test_adapter_catalog_ssot.py` (каждое значение слота ∈ каталог,
+   набор слотов YAML == каталог); доки 04/06/adapters_specification/adapters_guide
+   синхронизированы с каталогом.
 
 **Планируемый бандл (вне M3–M5, по потребности): «add-source-connectors»** — подключение
 внешних источников данных (Jira, TestRail/Test Management, Confluence/Wiki, GitLab) как

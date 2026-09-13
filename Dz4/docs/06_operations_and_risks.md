@@ -46,8 +46,8 @@
 - `batch_size` (32)
 
 **namespace: storage**
-- `graph_store` ("neo4j_graph") — графовая ось: Neo4jGraphStore / MemgraphGraphStore.
-- `vector_store` ("neo4j_vector") — векторная ось: Neo4jVectorStore / QdrantVectorStore.
+- `graph_store` ("neo4j") — графовая ось: Neo4jGraphStore / MemgraphGraphStore.
+- `vector_store` ("neo4j") — векторная ось: Neo4jVectorStore / QdrantVectorStore.
 - `neo4j_uri` ("bolt://neo4j:7687")
 
 **namespace: auth**
@@ -60,9 +60,9 @@
 - `semantic_validation`
 
 **namespace: adapters (новое в v5)**
-- `graph_store` ("neo4j_graph")
-- `vector_store` ("neo4j_vector")
-- `llm` ("ollama")
+- `graph_store` ("neo4j")
+- `vector_store` ("neo4j")
+- `llm` ("openai")
 - `embeddings` ("bge_m3_service")
 - `reranker` ("bge_reranker")
 

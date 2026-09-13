@@ -142,7 +142,7 @@ my_vector_db = "my_package.adapters.myvectordb:MyVectorDBStore"
 ```yaml
 # prototype/infra/config/adapters.yaml
 adapters:
-  vector_store: "my_vector_db"   # было "neo4j_vector"
+  vector_store: "my_vector_db"   # было "neo4j"
 storage:
   myvectordb_url: "http://myvectordb:6333"
   myvectordb_collection: "chunks"
@@ -164,7 +164,7 @@ curl http://localhost:8001/api/v1/config/adapters
 
 ```bash
 curl -X PUT http://localhost:8001/api/v1/config/adapters \
-  -d '{"vector_store": "neo4j_vector"}'
+  -d '{"vector_store": "neo4j"}'
 ```
 
 ---

@@ -155,7 +155,7 @@ class VectorStoreProvider(ABC):
 - **Конфигурация:**
   ```yaml
   adapters:
-    graph_store: "neo4j_graph"
+    graph_store: "neo4j"
   storage:
     neo4j_uri: "bolt://neo4j:7687"
   ```
@@ -167,7 +167,7 @@ class VectorStoreProvider(ABC):
 - **Конфигурация:**
   ```yaml
   adapters:
-    vector_store: "neo4j_vector"
+    vector_store: "neo4j"
   storage:
     neo4j_uri: "bolt://neo4j:7687"
     vector_index: "chunk_embeddings"
