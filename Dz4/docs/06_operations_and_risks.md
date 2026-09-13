@@ -102,7 +102,8 @@
 - **"ingestion"** — Ingestion API + Скрипты пайплайна. Поочерёдно забирает GPU.
 - **"llm"** — Query API + llama.cpp (Qwen 2.5 Coder 7B Abliterate q4_K_M). Включается на фазе поиска.
 - **"reranker"** — bge-reranker-base (CPU). Опциональный контейнер фазы поиска.
-- **"monitoring"** — Prometheus + Grafana + Loki. Разворачивается по требованию.
+- **"monitoring"** — Prometheus + Grafana + Loki. **Задел (фаза 2): блок отключён в compose.yaml** —
+  нет конфигурации Prometheus и /metrics-экспортов, профиль не запускается до их реализации.
 
 Примечание: Docker-профили не связаны с Domain Profile. Domain Profile — это конфигурация (YAML), а не отдельный контейнер. Переключение домена не требует перезапуска контейнеров.
 

@@ -43,8 +43,8 @@
 | llama.cpp Server | Инференс Qwen 2.5 Coder 7B Abliterate q4_K_M (GPU, GGUF) | C++ (сторонний) | 8080 (/v1) | llm | docs/04 §1, ADR-022 |
 | bge-m3 (LocalSentenceTransformerAdapter) | Встроенный эмбеддер без отдельного контейнера | Python | — | — | docs/02 §1, adapters_specification.md |
 | bge-reranker-base | Реранкер (CPU); NoOpRerankerAdapter — отключить | Python | — | reranker | docs/03 §1, docs/06 §3 |
-| Prometheus / Grafana / Loki (+Promtail) | Наблюдаемость, метрики `/metrics`, JSON-логи | сторонние | — | monitoring | docs/06 §2 |
-| DCGM Exporter | Мониторинг VRAM/температуры GPU | сторонний | — | monitoring | docs/06 §2 |
+| Prometheus / Grafana / Loki (+Promtail) | Наблюдаемость, метрики `/metrics`, JSON-логи | сторонние | — | monitoring (задел, отключён) | docs/06 §2, docs/06 §3 |
+| DCGM Exporter | Мониторинг VRAM/температуры GPU | сторонний | — | monitoring (задел, отключён) | docs/06 §2 |
 
 ## 3. Внешние системы и СУБД по осям и фазам
 
@@ -75,7 +75,7 @@
 | `ingestion` | Ingestion API + скрипты пайплайна | поочерёдный захват GPU |
 | `llm` | Query API + Ollama (Qwen 7B) | фаза поиска |
 | `reranker` | bge-reranker-base (CPU) | опционально, фаза поиска |
-| `monitoring` | Prometheus + Grafana + Loki | по требованию |
+| `monitoring` | Prometheus + Grafana + Loki | **задел, отключён до фазы 2** (нет конфигурации/экспортов) |
 
 Профиль Docker ≠ Domain Profile: домен — конфигурация (YAML), его смена не требует перезапуска
 контейнеров (`docs/06` §3).
