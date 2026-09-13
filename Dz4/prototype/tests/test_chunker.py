@@ -32,6 +32,19 @@ def test_sliding_short_input_single_chunk() -> None:
     assert chunker.chunk("   ") == []
 
 
+def test_sliding_window_boundary_by_words() -> None:
+    """P-1: окончательная граница — по словам, а не по символам."""
+    chunker = SlidingWindowChunker(chunk_size=10, overlap=2)
+    exactly = " ".join(f"w{i}" for i in range(10))
+    assert chunker.chunk(exactly) == [exactly]
+    over = " ".join(f"w{i}" for i in range(11))
+    chunks = chunker.chunk(over)
+    assert len(chunks) == 2
+    assert all(len(c.split(" ")) <= 10 for c in chunks)
+    long_word = "a" * 5000
+    assert chunker.chunk(long_word) == [long_word]
+
+
 def test_sliding_invalid_params_raise() -> None:
     import pytest
 

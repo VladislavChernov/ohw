@@ -109,6 +109,18 @@ def test_plugin_factory_wrong_type_fails_fast(monkeypatch) -> None:
         build_chunker()
 
 
+def test_plugin_factory_error_wrapped_as_plugin_error(monkeypatch) -> None:
+    """P-2: фабрика с неверным контрактом → PluginLoadError, не TypeError."""
+    def _bad_factory(**kwargs):
+        raise RuntimeError("boom")
+
+    _clear_env(monkeypatch)
+    _install_plugin(monkeypatch, "bad_factory", "fake_plugin_mod7", _bad_factory)
+    monkeypatch.setenv("INGEST_CHUNKER", "bad_factory")
+    with pytest.raises(PluginLoadError, match="boom"):
+        build_chunker()
+
+
 def test_unknown_strategy_message_lists_plugins(monkeypatch) -> None:
     _clear_env(monkeypatch)
     _install_plugin(monkeypatch, "my_splitter", "fake_plugin_mod5", _build_plugin)

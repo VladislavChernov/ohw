@@ -63,12 +63,14 @@ class SlidingWindowChunker(Chunker):
         self._overlap = overlap
 
     def chunk(self, text: str) -> list[str]:
-        if len(text) <= self._chunk_size:
-            return [text] if text.strip() else []
+        if not text.strip():
+            return []
         words = text.split(" ")
+        if len(words) <= self._chunk_size:
+            return [text]
         chunks: list[str] = []
         step = max(self._chunk_size - self._overlap, 1)
-        for i in range(0, max(len(words), 1), step):
+        for i in range(0, len(words), step):
             chunk = " ".join(words[i : i + self._chunk_size])
             if chunk.strip():
                 chunks.append(chunk)
@@ -337,7 +339,13 @@ def _build_chunker_from_plugin(
         factory = load_plugin(CHUNKER_ENTRY_POINT_GROUP, strategy)
     except PluginMissingError:
         return None
-    chunker = factory(chunk_size=chunk_size, overlap=overlap)
+    try:
+        chunker = factory(chunk_size=chunk_size, overlap=overlap)
+    except Exception as exc:
+        raise PluginLoadError(
+            f"плагин {strategy!r}: фабрика не собрала Chunker при вызове "
+            f"factory(chunk_size=..., overlap=...): {exc}"
+        ) from exc
     if not isinstance(chunker, Chunker):
         raise PluginLoadError(
             f"плагин {strategy!r}: фабрика вернула не Chunker, а {type(chunker).__name__}"
