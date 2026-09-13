@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections.abc import Callable
@@ -20,6 +21,8 @@ from graphrag_proto.query_service.store import TaskStore
 from graphrag_proto.query_service.task_queue import TaskQueue
 from graphrag_proto.retrieval.adapters.topology_client import TopologyClient
 from graphrag_proto.retrieval.pipeline import QueryPipeline
+
+_LOG = logging.getLogger("graphrag_proto.query_service.worker")
 
 
 class QueryWorker:
@@ -31,6 +34,10 @@ class QueryWorker:
         worker_id: str = "worker-1",
         poll_interval_s: float = 5.0,
         pipeline_rebuilder: Callable[[], None] | None = None,
+        backoff_base_s: float = 1.0,
+        backoff_max_s: float = 30.0,
+        reclaim_timeout_s: float = 60.0,
+        reclaim_interval_s: float = 10.0,
     ) -> None:
         self._queue = queue
         self._store = store
@@ -38,10 +45,22 @@ class QueryWorker:
         self._worker_id = worker_id
         self._poll_interval_s = max(0.0, poll_interval_s)
         self._pipeline_rebuilder = pipeline_rebuilder if self._poll_interval_s > 0 else None
+        self._backoff_base_s = max(0.1, backoff_base_s)
+        self._backoff_max_s = max(self._backoff_base_s, backoff_max_s)
+        self._reclaim_timeout_s = max(1.0, reclaim_timeout_s)
+        self._reclaim_interval_s = max(0.0, reclaim_interval_s)
 
     def set_pipeline(self, pipeline: QueryPipeline) -> None:
-        """Замена пайплайна после hot-reload (вызывается между итерациями цикла)."""
+        """Замена пайплайна после hot-reload (вызывается между итерациями цикла).
+
+        Каждый пайплайн владеет своим общим executor'ом — старый пул закрывается,
+        чтобы не копить потоки при частых ребилдах топологии.
+        """
+        old = self._pipeline
         self._pipeline = pipeline
+        shutdown = getattr(old, "shutdown", None)
+        if callable(shutdown):
+            shutdown()
 
     def process_one(self, idle_sleep_s: float = 0.2) -> bool:
         """Обработка одной задачи; False — очередь пуста (воркер может ждать)."""
@@ -70,20 +89,39 @@ class QueryWorker:
 
     def loop(self, idle_sleep_s: float = 0.2) -> None:
         next_poll = 0.0
+        next_reclaim = 0.0
+        failures = 0
         while True:
             if self._pipeline_rebuilder is not None and time.monotonic() >= next_poll:
                 try:
                     self._pipeline_rebuilder()
-                except Exception:  # noqa: BLE001, S110 - опрос топологии не роняет воркер
-                    pass
+                except Exception:  # noqa: BLE001 - опрос топологии не роняет воркер
+                    _LOG.exception("topology poll failed")
                 next_poll = time.monotonic() + self._poll_interval_s
+            if self._reclaim_interval_s > 0 and time.monotonic() >= next_reclaim:
+                try:
+                    self._queue.reclaim(self._worker_id, min_idle_s=self._reclaim_timeout_s)
+                except Exception:  # noqa: BLE001 - reclaim терпим к транспорту
+                    _LOG.warning("reclaim failed", exc_info=True)
+                next_reclaim = time.monotonic() + self._reclaim_interval_s
             process = False
             try:
                 process = self.process_one()
+                failures = 0
             except KeyboardInterrupt:
                 return
-            except Exception:  # noqa: BLE001 - очередь не должна ронять воркер
-                process = True
+            except Exception:  # noqa: BLE001 - транспорт/бэкенд: backoff вместо tight loop
+                failures += 1
+                delay = min(self._backoff_max_s, self._backoff_base_s * (2 ** (failures - 1)))
+                _LOG.warning(
+                    "worker %s: transport/backend failure #%d, backoff %.1fs",
+                    self._worker_id,
+                    failures,
+                    delay,
+                    exc_info=True,
+                )
+                time.sleep(delay)
+                continue
             if not process:
                 time.sleep(idle_sleep_s)
 
@@ -131,6 +169,10 @@ def main() -> None:
         pipeline=pipeline,
         worker_id=worker_id,
         poll_interval_s=poll_interval_s,
+        backoff_base_s=float(os.environ.get("WORKER_BACKOFF_BASE_S", "1")),
+        backoff_max_s=float(os.environ.get("WORKER_BACKOFF_MAX_S", "30")),
+        reclaim_timeout_s=float(os.environ.get("TASK_RECLAIM_TIMEOUT_S", "60")),
+        reclaim_interval_s=float(os.environ.get("TASK_RECLAIM_INTERVAL_S", "10")),
         pipeline_rebuilder=_topology_rebuilder(
             client,
             on_reload=lambda adapter_map: worker.set_pipeline(build_pipeline(adapter_map=adapter_map)),

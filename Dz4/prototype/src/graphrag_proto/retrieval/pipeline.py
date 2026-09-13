@@ -79,6 +79,7 @@ class QueryPipeline:
         profile_loader: DomainProfileLoader | None = None,
         max_graph_nodes: int = 5,
         max_vector_chunks: int = 5,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._embedder = embedder
         self._graph_store = graph_store
@@ -88,6 +89,11 @@ class QueryPipeline:
         self._profiles = profile_loader or DomainProfileLoader()
         self._max_graph_nodes = max_graph_nodes
         self._max_vector_chunks = max_vector_chunks
+        self._executor = executor or ThreadPoolExecutor(max_workers=2, thread_name_prefix="query-pipeline")
+
+    def shutdown(self) -> None:
+        """Закрытие общего executor'а (вызывается при замене пайплайна/остановке воркера)."""
+        self._executor.shutdown(wait=False)
 
     def run(self, query: str, domain: str | None = None, emit: Emit | None = None) -> dict[str, Any]:
         emit = emit or _noop_emit
@@ -107,12 +113,11 @@ class QueryPipeline:
         emit("status", {"stage": "graph", "enabled": enabled})
         emit("status", {"stage": "vector"})
         future_graph: Future[list[dict[str, Any]]] | None = None
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            future_vector = pool.submit(vector_retriever.retrieve, embedding)
-            if enabled:
-                future_graph = pool.submit(graph_retriever.retrieve, query)
-            skeleton_rows = future_graph.result() if future_graph is not None else []
-            body_chunks = future_vector.result()
+        future_vector = self._executor.submit(vector_retriever.retrieve, embedding)
+        if enabled:
+            future_graph = self._executor.submit(graph_retriever.retrieve, query)
+        skeleton_rows = future_graph.result() if future_graph is not None else []
+        body_chunks = future_vector.result()
 
         emit("status", {"stage": "rerank"})
         scores = self._reranker.rerank(query, body_chunks)

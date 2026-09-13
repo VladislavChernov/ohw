@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 
 from graphrag_proto.query_service.models import Task, new_task_id
 from graphrag_proto.query_service.store import (
@@ -17,6 +19,7 @@ from graphrag_proto.query_service.store import (
 )
 from graphrag_proto.query_service.task_queue import (
     InMemoryTaskQueue,
+    RedisStreamTaskQueue,
     _event_from_fields,
     _task_from_fields,
     envelope,
@@ -126,6 +129,69 @@ def test_inmemory_events_terminal_cancelled() -> None:
     queue.cancel("q_1")
     types = [e.type for e in queue.events("q_1")]
     assert types == ["status", "status"]
+
+
+def test_inmemory_events_heartbeat_keepalive() -> None:
+    queue = InMemoryTaskQueue()
+    stream = queue.events("q_1", heartbeat_interval_s=0.05)
+    assert next(stream).type == "heartbeat"
+    queue.publish("q_1", "status", {"stage": "running"})
+    assert next(stream).type == "status"
+    queue.publish("q_1", "done", {"text": "ok"})
+    assert next(stream).type == "done"
+
+
+def test_inmemory_reclaim_returns_stale_claimed_task() -> None:
+    queue = InMemoryTaskQueue()
+    queue.submit(Task(task_id="q_1", domain="it", query="a"))
+    assert queue.claim("w1") is not None
+    time.sleep(0.05)
+    queue.reclaim("w1", min_idle_s=0.01)
+    claimed = queue.claim("w1")
+    assert claimed is not None and claimed.task_id == "q_1"
+
+
+def test_inmemory_reclaim_skips_cancelled_and_fresh() -> None:
+    queue = InMemoryTaskQueue()
+    queue.submit(Task(task_id="q_fresh", domain="it", query="a"))
+    queue.claim("w1")  # q_fresh — не простывший
+    queue.submit(Task(task_id="q_old_cancel", domain="it", query="b"))
+    queue.claim("w1")  # q_old_cancel — в работе, затем отменена
+    queue.cancel("q_old_cancel")
+    time.sleep(0.05)
+    queue.reclaim("w1", min_idle_s=0.5)  # 0.05с < 0.5с: q_fresh ещё «свежая»
+    assert queue.claim("w1") is None
+
+
+class _FakeRedisClient:
+    def __init__(self, entries: list[tuple[str, dict[bytes, bytes]]]) -> None:
+        self._entries = entries
+        self.acks: list[str] = []
+        self.xadded: list[dict[str, Any]] = []
+        self.xautoclaim_kwargs: dict[str, Any] = {}
+
+    def xautoclaim(self, **kwargs: Any) -> list[Any]:
+        self.xautoclaim_kwargs = dict(kwargs)
+        return ["query:tasks", self._entries, "0-0"]
+
+    def xack(self, stream: str, group: str, entry_id: str) -> None:
+        self.acks.append(entry_id)
+
+    def xadd(self, stream: str, fields: dict[str, Any]) -> None:
+        self.xadded.append(fields)
+
+
+def test_redis_reclaim_requeues_orphaned_pel() -> None:
+    queue = RedisStreamTaskQueue(redis_url="redis://test:6379/0")
+    queue._client = _FakeRedisClient(
+        [("1720000000000-0", {b"task_id": b"q_1", b"domain": b"it", b"query": "вопрос".encode(), b"metadata": b"{}"})]
+    )
+    queue.reclaim("worker-1", min_idle_s=60.0)
+    assert queue._client.xautoclaim_kwargs["min_idle_time"] == 60000
+    assert queue._client.xautoclaim_kwargs["consumername"] == "worker-1"
+    assert queue._client.acks == ["1720000000000-0"]
+    assert len(queue._client.xadded) == 1
+    assert queue._client.xadded[0]["task_id"] == "q_1"
 
 
 def test_serialization_roundtrip() -> None:

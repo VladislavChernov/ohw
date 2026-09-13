@@ -115,3 +115,40 @@ def test_poll_interval_zero_disables_rebuilder(tmp_path: Path) -> None:
         pipeline_rebuilder=rebuilder,
     )
     assert worker._pipeline_rebuilder is None
+
+
+def test_loop_exponential_backoff_on_transport_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from graphrag_proto.query_service.models import Task
+
+    delays: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda delay: delays.append(float(delay)))
+
+    class _StopAfter(BaseException):
+        """Выход из loop через rebuilder (не ловится `except Exception`)."""
+
+    class FailingQueue(InMemoryTaskQueue):
+        def claim(self, worker_id: str, timeout_s: float = 1.0) -> Task | None:
+            raise RuntimeError("transport down")
+
+    calls = {"n": 0}
+
+    def rebuilder() -> None:
+        calls["n"] += 1
+        if calls["n"] >= 4:
+            raise _StopAfter()
+
+    worker = QueryWorker(
+        queue=FailingQueue(),
+        store=TaskStore(tmp_path / "backoff.sqlite"),
+        pipeline=object(),
+        poll_interval_s=0.001,
+        pipeline_rebuilder=rebuilder,
+        backoff_base_s=1.0,
+        backoff_max_s=30.0,
+        reclaim_interval_s=0.0,
+    )
+    with pytest.raises(_StopAfter):
+        worker.loop(idle_sleep_s=0.001)
+    assert delays == [1.0, 2.0, 4.0]

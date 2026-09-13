@@ -68,8 +68,12 @@ class TaskQueue(ABC):
         """Событие задачи (конверт ADR-016) — для подписчика SSE."""
 
     @abstractmethod
-    def events(self, task_id: str) -> Iterator[Event]:
-        """История + новые события задачи (до терминального события)."""
+    def events(self, task_id: str, heartbeat_interval_s: float = 15.0) -> Iterator[Event]:
+        """История + новые события задачи (до терминального события).
+
+        При простое дольше `heartbeat_interval_s` — контрольное событие
+        `type="heartbeat"` (keep-alive SSE-подписки, детект обрыва клиента).
+        """
 
     @abstractmethod
     def is_cancelled(self, task_id: str) -> bool:
@@ -78,6 +82,15 @@ class TaskQueue(ABC):
     @abstractmethod
     def cancel(self, task_id: str) -> None:
         """Отмена: флаг + событие status: cancelled."""
+
+    @abstractmethod
+    def reclaim(self, worker_id: str, min_idle_s: float = 60.0) -> None:
+        """Возврат к забору задач, зависших после claim без ack дольше `min_idle_s`.
+
+        Задача не должна теряться при падении/транспортном сбое воркера (PEL-хвосты
+        Redis Streams, in-flight без ack в памяти): reclaim возвращает её в очередь,
+        и её обработку забирает следующий claim.
+        """
 
 
 class _MemoryChannel:
@@ -93,6 +106,7 @@ class InMemoryTaskQueue(TaskQueue):
         self._cond = threading.Condition()
         self._channels: dict[str, _MemoryChannel] = {}
         self._cancelled: set[str] = set()
+        self._inflight: dict[str, tuple[Task, float]] = {}
 
     def _channel(self, task_id: str) -> _MemoryChannel:
         with self._cond:
@@ -116,19 +130,34 @@ class InMemoryTaskQueue(TaskQueue):
                 task = self._queue.pop(0)
                 if task.task_id in self._cancelled:
                     continue
+                self._inflight[task.task_id] = (task, time.monotonic())
                 return task
             self._cond.wait(timeout=timeout_s)
             while self._queue:
                 task = self._queue.pop(0)
                 if task.task_id not in self._cancelled:
+                    self._inflight[task.task_id] = (task, time.monotonic())
                     return task
             return None
 
     def ack(self, task_id: str, entry_id: str | None = None) -> None:
-        return None
+        with self._cond:
+            self._inflight.pop(task_id, None)
 
     def fail(self, task_id: str, error: str, entry_id: str | None = None) -> None:
-        return None
+        with self._cond:
+            self._inflight.pop(task_id, None)
+
+    def reclaim(self, worker_id: str, min_idle_s: float = 60.0) -> None:
+        with self._cond:
+            now = time.monotonic()
+            stale = [task for task, claimed_at in self._inflight.values() if now - claimed_at >= min_idle_s]
+            for task in stale:
+                self._inflight.pop(task.task_id, None)
+                if task.task_id not in self._cancelled:
+                    self._queue.append(task)
+            if stale:
+                self._cond.notify_all()
 
     def publish(self, task_id: str, event_type: str, payload: dict[str, Any]) -> None:
         event = Event(
@@ -144,18 +173,35 @@ class InMemoryTaskQueue(TaskQueue):
                 ch.terminal = True
             ch.cond.notify_all()
 
-    def events(self, task_id: str) -> Iterator[Event]:
+    def events(self, task_id: str, heartbeat_interval_s: float = 15.0) -> Iterator[Event]:
         ch = self._channel(task_id)
         index = 0
+        last_heartbeat = time.monotonic()
         while True:
             with ch.cond:
+                now = time.monotonic()
                 while index >= len(ch.events):
                     if ch.terminal:
                         return
-                    ch.cond.wait(timeout=1.0)
-                event = ch.events[index]
-                index += 1
-            yield event
+                    if now - last_heartbeat >= heartbeat_interval_s:
+                        break
+                    delay = last_heartbeat + heartbeat_interval_s - now
+                    ch.cond.wait(timeout=min(delay, 1.0))
+                    now = time.monotonic()
+                if index >= len(ch.events):
+                    if ch.terminal:
+                        return
+                    last_heartbeat = now
+                    yield_event = Event(
+                        type="heartbeat",
+                        task_id=task_id,
+                        ts=datetime.now(UTC).isoformat(timespec="seconds"),
+                        payload={},
+                    )
+                else:
+                    yield_event = ch.events[index]
+                    index += 1
+            yield yield_event
 
     def is_cancelled(self, task_id: str) -> bool:
         with self._cond:
@@ -231,6 +277,20 @@ class RedisStreamTaskQueue(TaskQueue):
         self.publish(task_id, "error", {"code": "pipeline_error", "message": error})
         self.ack(task_id, entry_id)
 
+    def reclaim(self, worker_id: str, min_idle_s: float = 60.0) -> None:
+        client = self._r()
+        _stream, entries, _next = client.xautoclaim(
+            name=self._stream,
+            groupname=self._group,
+            consumername=worker_id,
+            min_idle_time=int(min_idle_s * 1000),
+            start_id="0-0",
+            count=100,
+        )
+        for entry_id, fields in entries:
+            client.xack(self._stream, self._group, entry_id)
+            self.submit(_task_from_fields(fields))
+
     def publish(self, task_id: str, event_type: str, payload: dict[str, Any]) -> None:
         body = envelope(event_type, task_id, payload)
         self._r().xadd(
@@ -238,7 +298,7 @@ class RedisStreamTaskQueue(TaskQueue):
             {key: value if isinstance(value, (str, bytes, int, float)) else json.dumps(value, ensure_ascii=False) for key, value in body.items()},
         )
 
-    def events(self, task_id: str) -> Iterator[Event]:
+    def events(self, task_id: str, heartbeat_interval_s: float = 15.0) -> Iterator[Event]:
         client = self._r()
         key = f"{EVENT_PREFIX}{task_id}"
         last: bytes | None = None
@@ -246,25 +306,33 @@ class RedisStreamTaskQueue(TaskQueue):
         for entry_id, fields in batch:
             last = entry_id
             event = _event_from_fields(fields)
-            if _is_terminal(event):
-                yield event
-                return
             yield event
+            if _is_terminal(event):
+                return
+        last_heartbeat = time.monotonic()
         while True:
             if last is None:
                 result = client.xread(count=100, block=2000, streams={key: "$"})
             else:
                 result = client.xread(count=100, block=2000, streams={key: last})
             if not result:
+                now = time.monotonic()
+                if now - last_heartbeat >= heartbeat_interval_s:
+                    yield Event(
+                        type="heartbeat",
+                        task_id=task_id,
+                        ts=datetime.now(UTC).isoformat(timespec="seconds"),
+                        payload={},
+                    )
+                    last_heartbeat = now
                 continue
             for _stream, entries in result:
                 for entry_id, fields in entries:
                     event = _event_from_fields(fields)
                     last = entry_id
-                    if _is_terminal(event):
-                        yield event
-                        return
                     yield event
+                    if _is_terminal(event):
+                        return
 
     def is_cancelled(self, task_id: str) -> bool:
         return bool(self._r().exists(f"{CANCEL_PREFIX}{task_id}"))

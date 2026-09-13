@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 import pytest
@@ -122,6 +124,53 @@ def test_pipeline_env_disabled_overrides_profile(monkeypatch: pytest.MonkeyPatch
     graph = _CountingGraphStore()
     monkeypatch.setenv("RETRIEVAL_GRAPH_ENABLED", "false")
 
-    _pipeline(PROFILE, graph).run("РєР°Рє СѓСЃС‚СЂРѕРµРЅР° Р±Р°Р·Р° РґР°РЅРЅС‹С…")
+    _pipeline(PROFILE, graph).run("как устроена база данных")
 
     assert graph.queries == []
+
+
+class _ThreadRecordingVectorStore(InMemoryVectorStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.threads: list[int] = []
+
+    def vector_search(self, embedding: list[float], top_k: int = 5) -> list[dict[str, Any]]:
+        time.sleep(0.05)
+        self.threads.append(threading.get_ident())
+        return super().vector_search(embedding, top_k)
+
+
+class _ThreadRecordingGraphStore(_CountingGraphStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.threads: list[int] = []
+
+    def query(self, cypher: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        time.sleep(0.05)
+        self.threads.append(threading.get_ident())
+        return super().query(cypher, params)
+
+
+def test_pipeline_reuses_shared_executor() -> None:
+    graph = _ThreadRecordingGraphStore()
+    vector = _ThreadRecordingVectorStore()
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=vector,
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+    pipe.run("как устроена база данных")
+    pipe.run("как устроена база данных")
+    threads = set(graph.threads) | set(vector.threads)
+    assert len(threads) == 2  # один общий пул на оба прогона вместо потока на каждый run
+    pipe.shutdown()
+
+
+def test_pipeline_shutdown_rejects_new_runs() -> None:
+    pipe = _pipeline(PROFILE, _CountingGraphStore())
+    pipe.shutdown()
+    with pytest.raises(RuntimeError):
+        pipe.run("как устроена база данных")

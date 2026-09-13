@@ -1,6 +1,6 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions)
+> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна)
 > **Последнее обновление:** 2026-09-13
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
@@ -445,6 +445,25 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
 2. **Решение:** `.github/workflows/ci.yml` — check via `astral-sh/setup-uv`
    (Python 3.13), `uv sync --group dev` по `uv.lock`, затем `ruff`, `mypy`, `pytest -q`
    (без e2e) из `Dz4/prototype`; триггеры push/PR на master.
+
+**M3-хвост: отказоустойчивость query-контура (по ревью `fast_review2.md` №4–5,
+`review_team.md` B-4).**
+
+1. **Проблема:** (a) воркер ловил любую ошибку в loop как `process=True` — при сбое
+   транспорта `claim/ack` цикл входил в tight loop без бэкоффа, а задачи после `claim`
+   без `ack` терялись при падении воркера (PEL-хвосты); (b) SSE-подписка без keep-alive —
+   при простое задачи обрыв клиента не детектился за разумное время;
+   (c) `ThreadPoolExecutor(max_workers=2)` создавался на каждый запрос — поток на запрос
+   вместо общего пула пайплайна.
+2. **Решение:** `TaskQueue.reclaim(worker_id, min_idle_s)` (ABC; InMemory — in-flight-slot
+   с таймингами и возврат «простывших» claim без ack; Redis — `XAUTOCLAIM` PEL с
+   повторной постановкой в очередь); воркер разделяет транспортные/задачевые ошибки и
+   применяет экспоненциальный бэкофф (1→2→4→…→30 с, `WORKER_BACKOFF_BASE_S`/
+   `WORKER_BACKOFF_MAX_S`) вместо tight loop + периодический reclaim
+   (`TASK_RECLAIM_TIMEOUT_S`/`TASK_RECLAIM_INTERVAL_S`); `events()` шлёт `heartbeat` раз в
+   `heartbeat_interval_s` (SSE-эндпоинт рендерит как SSE-комментарий `: heartbeat`, клиент
+   уже пропускает такие строки); `QueryPipeline` владеет общим executor'ом
+   (`shutdown(wait=False)` — при hot-reload закрывает пул прошлого пайплайна). +7 тестов.
 
 **Планируемый бандл (вне M3–M5, по потребности): «add-source-connectors»** — подключение
 внешних источников данных (Jira, TestRail/Test Management, Confluence/Wiki, GitLab) как

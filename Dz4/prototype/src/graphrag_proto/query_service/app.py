@@ -97,6 +97,9 @@ def create_app(
 
         def generate() -> Any:
             for event in queue.events(task_id):
+                if event.type == "heartbeat":
+                    yield ": heartbeat\n\n"
+                    continue
                 body = {
                     "type": event.type,
                     "task_id": event.task_id,
