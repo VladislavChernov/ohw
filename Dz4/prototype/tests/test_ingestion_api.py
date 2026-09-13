@@ -10,6 +10,7 @@ from graphrag_proto.ingestion_service.storage.registry import (
     STATUS_ACTIVE,
     STATUS_SUPERSEDED,
     DocumentRegistry,
+    JobStore,
 )
 
 API_KEY = "changeme"
@@ -280,6 +281,50 @@ def test_health_is_open() -> None:
     app = create_app(upload_dir=tmp / "uploads", db_path=tmp / "i.db", api_key="secret")
     with TestClient(app) as client:
         assert client.get("/health").status_code == 200
+
+
+def test_executor_limits_concurrent_jobs(tmp_path: Path) -> None:
+    from graphrag_proto.ingestion_service.app import Executor
+
+    jobs = JobStore(tmp_path / "j.db")
+    reg = DocumentRegistry(tmp_path / "r.db")
+    src = tmp_path / "in.txt"
+    src.write_text("какой-то текст документа для обработки", encoding="utf-8")
+    ex = Executor(jobs, reg, glossary_url="", max_concurrent=1)
+    assert ex._slots.acquire(blocking=False) is True
+    try:
+        assert ex.start("blocked", src, "src://blocked", "it", "txt") is False
+    finally:
+        ex._slots.release()
+    jobs.create("ok", "src://ok", "it", "txt")
+    assert ex.start("ok", src, "src://ok", "it", "txt") is True
+    assert wait_until(lambda: jobs.get("ok")["status"] == "succeeded")
+
+
+def test_executor_rejects_invalid_max_concurrent(tmp_path: Path) -> None:
+    import pytest
+
+    from graphrag_proto.ingestion_service.app import Executor
+
+    jobs = JobStore(tmp_path / "j.db")
+    reg = DocumentRegistry(tmp_path / "r.db")
+    with pytest.raises(ValueError):
+        Executor(jobs, reg, glossary_url="", max_concurrent=0)
+
+
+def test_post_when_executor_saturated_returns_429(tmp_path: Path, monkeypatch) -> None:
+    from graphrag_proto.ingestion_service import app as ing_app
+
+    monkeypatch.setattr(ing_app.Executor, "start", lambda self, *a, **kw: False)
+    app = make_app(tmp_path)
+    with _AuthedClient(app) as client:
+        resp = client.post(
+            "/api/v1/ingestion/documents",
+            json={"source_url": "src://full.txt", "domain": "it", "doc_type": "txt", "content": "текст"},
+        )
+        assert resp.status_code == 429
+        jobs = client.get("/api/v1/ingestion/jobs").json()
+    assert jobs["items"][0]["status"] == "failed"
 
 
 def test_runner_normしalize_without_glossary_keeps_entities(tmp_path: Path) -> None:

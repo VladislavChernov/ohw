@@ -1,6 +1,6 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах)
+> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429)
 > **Последнее обновление:** 2026-09-13
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
@@ -395,6 +395,24 @@ v6 — следующая итерация концепции и докумен�
    config/glossary (чанкер-профиль, DomainProfileLoader, NormalizeStage, glossary active-domain)
    шлют `X-API-Key` из `AUTH_API_KEY`/`GRAPH_AUTH_API_KEY`; healthcheck'и переведены на `/health`.
    Инвариант L5-01 теперь фактически выполнен (security.md §5 — честный чек-лист).
+
+**M3-хвост: SQLite WAL + busy_timeout (по ревью `review_2.md` B-2 / `review_team.md` O-2).**
+
+1. **Проблема:** все сторы конфиг/topology/query/ingestion открывали `sqlite3.connect()` по умолчанию
+   (journal=DELETE), конкурентный воркер + HTTP-сервисы могли ловить `database is locked`.
+2. **Решение:** общий `connect_sqlite()` в `graphrag_proto/sqlite_utils.py` —
+   `PRAGMA journal_mode=WAL`, `busy_timeout=5000`, `foreign_keys=ON`; применён в config/topology/query
+   сторы и обоих сторах ingestion (DocumentRegistry + JobStore); +2 теста прагм.
+
+**M3-хвост: лимит параллельных джоб ingestion + 429 (по ревью `critical_review.md`
+worker/PEL/SSE / `fast_review2.md` thread-per-job).**
+
+1. **Проблема:** `Executor` спавнил поток на каждую джобу без лимита — N джоб → N потоков → N*GPU
+   (документация декларирует «поочерёдно забирает GPU»); при перегрузке никакого механизма отказа.
+2. **Решение:** `Executor(..., max_concurrent=N)` на `threading.BoundedSemaphore(N)`
+   (`INGEST_MAX_CONCURRENT`, по умолчанию 2); при заполненных слотах `POST /documents` → `429`
+   с пометкой джобы `failed` (а не зависшей `queued`); слот освобождается в `finally`.
+   +3 теста (лимит, невалидный N, эндпоинт-429).
 
 **Планируемый бандл (вне M3–M5, по потребности): «add-source-connectors»** — подключение
 внешних источников данных (Jira, TestRail/Test Management, Confluence/Wiki, GitLab) как

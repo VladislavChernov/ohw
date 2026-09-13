@@ -65,6 +65,13 @@ def _glossary_url() -> str:
     return os.environ.get("GLOSSARY_URL", "")
 
 
+def _max_concurrent() -> int:
+    try:
+        return max(int(os.environ.get("INGEST_MAX_CONCURRENT", "2")), 1)
+    except ValueError:
+        return 2
+
+
 def build_analyzer(
     registry: DocumentRegistry,
     glossary_url: str,
@@ -101,9 +108,13 @@ class Executor:
         vector_store: Any = None,
         embedder: Embedder | None = None,
         chunker: Chunker | None = None,
+        max_concurrent: int = 2,
     ) -> None:
+        if max_concurrent < 1:
+            raise ValueError("max_concurrent должен быть >= 1")
         self._jobs = jobs
         self._registry = registry
+        self._slots = threading.BoundedSemaphore(max_concurrent)
         self._analyzer = build_analyzer(
             registry,
             glossary_url,
@@ -120,13 +131,17 @@ class Executor:
         source_url: str,
         domain: str,
         doc_type: str,
-    ) -> None:
+    ) -> bool:
+        """Запускает фоновый поток; False, если все слоты заняты (429)."""
+        if not self._slots.acquire(blocking=False):
+            return False
         thread = threading.Thread(
             target=self._run,
             args=(job_id, target, source_url, domain, doc_type),
             daemon=True,
         )
         thread.start()
+        return True
 
     def _run(
         self,
@@ -153,6 +168,8 @@ class Executor:
             self._jobs.finish(job_id, "succeeded")
         except Exception as exc:  # noqa: BLE001 - разнородные источники сбоев этапов
             self._jobs.finish(job_id, "failed", error=str(exc))
+        finally:
+            self._slots.release()
 
     def cancel(self, job_id: str) -> bool:
         return self._jobs.cancel(job_id)
@@ -163,10 +180,12 @@ def create_app(
     db_path: Path | None = None,
     glossary_url: str | None = None,
     api_key: str = "changeme",
+    max_concurrent: int | None = None,
 ) -> FastAPI:
     upload_dir = upload_dir or _upload_dir()
     db_path = db_path or _db_path()
     glossary_url = glossary_url if glossary_url is not None else _glossary_url()
+    max_concurrent = max_concurrent if max_concurrent is not None else _max_concurrent()
     upload_dir.mkdir(parents=True, exist_ok=True)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -174,7 +193,14 @@ def create_app(
     registry = DocumentRegistry(db_path)
     graph_store = build_graph_store()
     vector_store = build_vector_store()
-    executor = Executor(jobs, registry, glossary_url, graph_store=graph_store, vector_store=vector_store)
+    executor = Executor(
+        jobs,
+        registry,
+        glossary_url,
+        graph_store=graph_store,
+        vector_store=vector_store,
+        max_concurrent=max_concurrent,
+    )
 
     app = FastAPI(title="GraphRAG Ingestion Service", version="0.1.0")
 
@@ -209,7 +235,12 @@ def create_app(
         if content is not None:
             raw = content.encode("utf-8") if isinstance(content, str) else content
             target.write_bytes(raw)
-        executor.start(job_id, target, source_url, domain, doc_type)
+        if not executor.start(job_id, target, source_url, domain, doc_type):
+            jobs.finish(job_id, "failed", error="перегрузка: все слоты исполнения заняты")
+            raise HTTPException(
+                status_code=429,
+                detail=f"все {max_concurrent} слотов исполнения заняты; повторите позже",
+            )
         return JSONResponse(
             {
                 "job_id": job_id,

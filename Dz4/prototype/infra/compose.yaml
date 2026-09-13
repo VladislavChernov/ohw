@@ -214,6 +214,7 @@ services:
       INGEST_CHUNKER: ${INGEST_CHUNKER:-sliding_window}
       INGEST_CHUNK_SIZE: ${INGEST_CHUNK_SIZE:-512}
       INGEST_CHUNK_OVERLAP: ${INGEST_CHUNK_OVERLAP:-64}
+      INGEST_MAX_CONCURRENT: ${INGEST_MAX_CONCURRENT:-2}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
       - ../domain_profiles:/profiles:ro
