@@ -360,19 +360,22 @@ services:
       start_period: 15s
     <<: *logging
 
-  # llama.cpp server (CUDA-сборка). Модель монтируется bind-mount'ом с хоста.
-  # По умолчанию путь — локальный GGUF-каталог LM Studio; переопределяется через LLM_GGUF_HOST_DIR.
+  # llama.cpp server (CUDA-сборка). Self-contained: модели вшиты в образ при сборке
+  # (Dockerfile.llm скачивает GGUF с Hugging Face по pin-ревизии и проверяет SHA-256).
+  # Рантайм не зависит от ФС хоста — локальный GGUF-файл не требуется.
+  # Смена модели = build-arg'и HF_REPO/HF_REVISION/HF_FILE/HF_SHA256.
   llm:
-    image: ghcr.io/ggml-org/llama.cpp:server-cuda-b10853
+    build:
+      context: ..
+      dockerfile: Dockerfile.llm
+    image: ohw/llm:prototype
     profiles: ["llm"]
     container_name: ohw-llm
     networks: [ohw_net]
     ports: ["8080:8080"]
-    volumes:
-      - "${LLM_GGUF_HOST_DIR:-<local-path>/lmstudio-community/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF}:/models:ro"
     command:
       - "--model"
-      - "/models/${LLM_GGUF_FILE:-Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf}"
+      - "/models/Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf"
       - "--host"
       - "0.0.0.0"
       - "--port"
@@ -382,7 +385,8 @@ services:
       - "--n-gpu-layers"
       - "99"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; urllib.request.urlopen('http://localhost:8080/health', timeout=5).read()"]
+      # в образе llama.cpp нет `python` (есть `python3` и `curl`) — проба через curl
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -476,4 +480,4 @@ volumes:
   valkey_data:
   query_data:
   topology_data:
-  ollama_data:  # задел (модели LM Studio/ollama), в llm-сервисе bind-mount
+  ollama_data:  # задел (модели Ollama); веса LLM — внутри образа ohw/llm (Dockerfile.llm)

@@ -1,7 +1,7 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга)
-> **Последнее обновление:** 2026-09-11
+> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга; self-contained LLM-образ)
+> **Последнее обновление:** 2026-09-13
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
 
@@ -373,6 +373,17 @@ v6 — следующая итерация концепции и докумен�
 3. **Тесты** — `tests/test_chunker_plugins.py` (7): резолюция via env и профиль per-job,
    приоритет построенных, fail-fast (сломанный импорт / не тот тип результата),
    неизвестное имя со списком плагинов, `list_chunkers()`.
+
+**M3-хвост: self-contained LLM-образ (по ревью `review.md` ТОП-10 №8).**
+
+1. **Проблема:** сервис `llm` монтировал локальный GGUF bind-mount'ом с дефолтом
+   `<local-path>/...` — непереносимый Windows-путь, зависимость рантайма от ФС хоста.
+2. **Решение:** `prototype/Dockerfile.llm` — двухстадийная сборка: стадия `weights`
+   качает GGUF с Hugging Face (`bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF`,
+   pin-ревизия) и проверяет SHA-256; стадия runtime — llama.cpp server с вшитой моделью.
+   Compose: `build` из `Dockerfile.llm` (image `ohw/llm:prototype`), bind-mount удалён,
+   healthcheck на `curl` (в образе llama.cpp нет `python`). Переносимость/детерминизм —
+   источник и хеш проверены по HF API (2026-09-13).
 
 **Планируемый бандл (вне M3–M5, по потребности): «add-source-connectors»** — подключение
 внешних источников данных (Jira, TestRail/Test Management, Confluence/Wiki, GitLab) как

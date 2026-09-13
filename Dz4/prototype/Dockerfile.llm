@@ -1,0 +1,40 @@
+# LLM-сервер llama.cpp (CUDA) с моделью, скачанной с Hugging Face на этапе сборки.
+# Self-contained: образ содержит runtime + веса GGUF; рантайм не зависит от ФС хоста.
+#
+# Источник проверен (2026-09-13): bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF,
+# публичный (gated=false), Apache-2.0. Репозиторий lmstudio-community/* на HF НЕ
+# существует (LM Studio качает локально именно bartowski). Локальный файл совпал
+# побайтово (SHA-256 = fdf02c16…18170) с файлом bartowski.
+#
+# Безопасность сборки: pin commit-ревизии репо (HF_REVISION) + проверка SHA-256
+# скачанного файла (HF_SHA256) — сборка падает при любом расхождении.
+#
+# Сборка (из prototype/):
+#   docker build -f Dockerfile.llm -t ohw/llm:prototype .
+# Смена модели = переопределить HF_REPO/HF_REVISION/HF_FILE/HF_SHA256 (build-args).
+# Для приватного репо: docker build --secret id=hf_token,src=... (см. ниже).
+#
+# Требуется BuildKit (Docker 23+/Compose v2.20+ — есть по README §1).
+
+# --- стадия 1: загрузка и верификация весов (pip остаётся в этой стадии)
+FROM python:3.13-slim-bookworm AS weights
+
+RUN pip install --no-cache-dir "huggingface_hub>=0.26"
+
+ARG HF_REPO=bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF
+ARG HF_REVISION=a416f57ecabe9841551055493e6945895e54e135
+ARG HF_FILE=Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf
+ARG HF_SHA256=fdf02c16fb654ff60b2c30f1e91573ebc603a7084df3449df89120dca2b18170
+ENV HF_HUB_ENABLE_HF_TRANSFER=0
+
+RUN python -c "import os; from huggingface_hub import hf_hub_download; \
+    hf_hub_download(repo_id=os.environ['HF_REPO'], filename=os.environ['HF_FILE'], \
+    local_dir='/models', revision=os.environ['HF_REVISION'])" \
+    && echo "${HF_SHA256}  /models/${HF_FILE}" | sha256sum -c -
+
+# --- стадия 2: runtime llama.cpp + вшитая модель
+FROM ghcr.io/ggml-org/llama.cpp:server-cuda-b10853
+
+ARG HF_FILE=Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf
+COPY --from=weights /models/${HF_FILE} /models/${HF_FILE}
+

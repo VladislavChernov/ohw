@@ -51,7 +51,9 @@ docker run --rm -v "$(Get-Location):/app" -w /app -p 8003:8003 `
 
 ```bash
 # полный стек: config + graph + ingestion + llm (в llm-профиле: valkey, query-api,
-# query-worker, llama.cpp, demo-ui); llama.cpp требует локальный GGUF-файл
+# query-worker, llama.cpp, demo-ui); llama.cpp — self-contained: веса GGUF вшиваются
+# в образ при сборке (Dockerfile.llm, скачивание с Hugging Face + проверка SHA-256),
+# локальный GGUF-файл не требуется
 docker compose --profile config --profile graph --profile ingestion --profile llm up -d --wait
 
 # UI: http://localhost:8503
