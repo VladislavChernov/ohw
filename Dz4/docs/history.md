@@ -1,6 +1,6 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика)
+> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02)
 > **Последнее обновление:** 2026-09-13
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
@@ -425,6 +425,18 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
    контрактный тест `tests/test_adapter_catalog_ssot.py` (каждое значение слота ∈ каталог,
    набор слотов YAML == каталог); доки 04/06/adapters_specification/adapters_guide
    синхронизированы с каталогом.
+
+**M3-хвост: redaction секретов в логах (L5-02; по ревью `critical_review.md` №4,
+`fast_review2.md` §7, `review_2.md` §5).**
+
+1. **Проблема:** инвариант L5-02 «секреты не логируются» был заявлен (§5 cекurity.md,
+   invariants.md), но не реализован: секреты (X-API-Key/Authorization) могли попадать
+   в exc-выводы httpx/requests и json-logs Docker.
+2. **Решение:** `graphrag_proto/security.py` — `redact_secrets()` (regex по ключам
+   X-API-Key/Authorization/api_key/password/neo4j_password/token/secret + подстановка
+   известных значений секретов из env), `RedactingFilter` (msg/args/exc_text),
+   `install_redaction()` вызывается в `main()` всех 8 сервисов; security.md §5 — чек.
+   +13 тестов.
 
 **Планируемый бандл (вне M3–M5, по потребности): «add-source-connectors»** — подключение
 внешних источников данных (Jira, TestRail/Test Management, Confluence/Wiki, GitLab) как

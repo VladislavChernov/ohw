@@ -118,7 +118,9 @@ def main() -> None:
     import uvicorn
 
     from graphrag_proto.query_service.runtime import build_api_key, build_queue, build_store
+    from graphrag_proto.security import install_redaction
 
+    install_redaction()
     uvicorn.run(
         create_app(queue=build_queue(), store=build_store(), api_key=build_api_key()),
         host=HOST,

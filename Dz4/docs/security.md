@@ -45,7 +45,9 @@
   (mTLS — опционально, при наличии PKI). Для внутренней инсталляции на прототипе TLS на
   границе обязателен при доступе с внешних хостов.
 - Secrets (API-ключи, пароли БД, доступ к llama.cpp/LM-серверам) не логируются: поля
-  `X-API-Key`, `Authorization` исключаются из JSON-логов (structlog — redaction).
+  `X-API-Key`, `Authorization` исключаются из логов (`graphrag_proto/security.py` —
+  `RedactingFilter`, реализация L5-02; production JSON-логи через structlog —
+  на стадии production-hardening).
 
 ## 4. Защита от перегрузок
 
@@ -60,7 +62,8 @@
 
 - [x] Единый `X-API-Key` на всех сервисах (включая Topology Orchestrator :8005).
 - [x] Ошибка `401` при неверном ключе (стандартный контракт, `docs/api_reference.md` §2).
-- [ ] Redaction секретов в логах (TODO перед вводом в эксплуатацию).
+- [x] Redaction секретов в логах (реализовано `graphrag_proto/security.py`; TODO:
+  structlog JSON-формат, расширенный набор секретов при production-hardening).
 - [ ] TLS на внешней границе (зависит от способа публикации).
 - [ ] Ролевая модель на Web UI (при переходе на многопользовательский режим).
 - [ ] Ротация ключей (план ротации — в `docs/operations_requirements.md` §4).

@@ -113,6 +113,9 @@ def create_app(profiles_dir: Path | None = None, config_url: str | None = None, 
 def main() -> None:
     import uvicorn
 
+    from graphrag_proto.security import install_redaction
+
+    install_redaction()
     api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
     uvicorn.run(create_app(api_key=api_key), host=HOST, port=PORT)
 

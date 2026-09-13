@@ -99,6 +99,9 @@ def create_app(
 def main() -> None:
     import uvicorn
 
+    from graphrag_proto.security import install_redaction
+
+    install_redaction()
     topology_path = os.environ.get("INFRA_TOPOLOGY_PATH", "infra_topology.yaml")
     db_path = os.environ.get("TOPOLOGY_DB_PATH", "runtime/topology.sqlite")
     api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")

@@ -113,7 +113,9 @@ def _topology_rebuilder(
 
 def main() -> None:
     from graphrag_proto.query_service.runtime import build_pipeline, build_queue, build_store
+    from graphrag_proto.security import install_redaction
 
+    install_redaction()
     queue = build_queue()
     store = build_store()
     worker_id = os.environ.get("QUERY_WORKER_ID", "worker-1")
