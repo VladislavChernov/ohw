@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from graphrag_proto.sqlite_utils import connect_sqlite
 
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
@@ -27,7 +28,7 @@ class TaskStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path = db_path
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn = connect_sqlite(db_path)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS query_tasks ("
             "task_id TEXT PRIMARY KEY,"

@@ -8,9 +8,10 @@ PUT /api/v1/config/adapters пишет переопределения слото
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 from pathlib import Path
+
+from graphrag_proto.sqlite_utils import connect_sqlite
 
 _META_REVISION = "revision"
 
@@ -20,7 +21,7 @@ class TopologyStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path = db_path
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self._conn = connect_sqlite(db_path)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS adapter_overrides ("
             "slot TEXT PRIMARY KEY, provider TEXT NOT NULL, updated_at TEXT NOT NULL)"
