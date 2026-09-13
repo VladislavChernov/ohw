@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
+from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     STAGES,
     Analyzer,
@@ -69,12 +70,13 @@ def build_analyzer(
     graph_store: Any = None,
     vector_store: Any = None,
     embedder: Embedder | None = None,
+    chunker: Chunker | None = None,
 ) -> Analyzer:
     readers = {doc_type: readers_factory(doc_type) for doc_type in sorted(ALLOWED_DOC_TYPES)}
     return Analyzer(
         [
             IngestStage(readers),
-            ChunkStage(),
+            ChunkStage(chunker),
             EmbedStage(embedder or build_embedder()),
             ExtractStage(),
             NormalizeStage(glossary_url),
@@ -97,6 +99,7 @@ class Executor:
         graph_store: Any = None,
         vector_store: Any = None,
         embedder: Embedder | None = None,
+        chunker: Chunker | None = None,
     ) -> None:
         self._jobs = jobs
         self._registry = registry
@@ -106,6 +109,7 @@ class Executor:
             graph_store=graph_store,
             vector_store=vector_store,
             embedder=embedder,
+            chunker=chunker,
         )
 
     def start(

@@ -180,6 +180,24 @@ Dz4/
       тянут активный домен pull-моделью на каждый запрос — переключение без рестарта
       (`docs/demo_runbook.md`, `tests/test_domain_activation.py`).
 
+### Веха 3-хвосты — чанкинг: ABC, настройки, структура, внешние сплиттеры, native index
+- [x] `Chunker` ABC + `SlidingWindowChunker`: вынос `_sliding_window` (512/64) из оркестратора
+      в адаптер, `ChunkStage` на DI (как `EmbedStage` ← `Embedder`); поведение по умолчанию — то же.
+- [x] Настройка чанков: per-field precedence `INGEST_CHUNKER`/`INGEST_CHUNK_SIZE`/`INGEST_CHUNK_OVERLAP`
+      (env) > профиль домена (секция `chunking`, per-job из Config Service) > namespace `chunking`
+      в `infra/config/namespaces.yaml` > дефолты M1 (512/64); `build_chunker_for(domain)`,
+      профиль недоступен → fallback (ingest не падает).
+- [x] `StructureAwareChunker`: пер-секционный чанкинг по заголовкам Markdown (`^#{1,6}\s`),
+      короткая секция → один чанк; для текста без структуры (.txt) — fallback на sliding window.
+- [x] LangChain/LlamaIndex chunker-адаптеры: optional deps (`pyproject [chunking]`), lazy import
+      (как torch/sentence-transformers), fail-fast при отсутствии пакета.
+- [x] Entry-point плагины стратегий: generic-реестр `graphrag_proto/plugin_registry.py`
+      (discovery `importlib.metadata`), группа `graphrag.chunkers`, `list_chunkers()`,
+      приоритет встроенных, fail-fast без тихого fallback (бандл add-chunker-entry-points).
+- [ ] Native vector index (Neo4j HNSW `db.index.vector.queryNodes`) вместо Cypher cosine — низкий
+      приоритет, требуется при росте числа чанков (ADR-023 OQ2); реализация внутри `Neo4jVectorStore`,
+      ядро (ABC) не меняется.
+
 ### Веха 4 — Eval и гейт готовности
 - [ ] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (мин. 50 вопросов/домен для базового среза).
 - [ ] Метрики Retrieval@K=5, генерации (groundedness/coverage), lift-отчёт (ADR-015).
@@ -189,6 +207,11 @@ Dz4/
 - [ ] MCP-шлюз (:8000, JSON-RPC), инструменты ADR-017, rate-limiting (`docs/security.md` §4).
 - [ ] Streamlit — конфигуратор «Бизнес-онтология» (:8501) — отдельное приложение.
 - [ ] Streamlit — Topology UI «Топология инфраструктуры» (:8502) — отдельное приложение (ADR-019).
+
+### Отложено до завершения проекта — OCR
+- [ ] OCR: распознавание image-блоков (image → text) — новая реализация `DocumentReader`
+      (ADR-021 family, пайплайн не переписывается) или OCR-ридер; для demo не требуется,
+      поэтому перенесено к завершению проекта (после M4/M5).
 
 ### Веха 6 — Внешние источники (коннекторы) — запланирована (по потребности, вне M3–M5)
 

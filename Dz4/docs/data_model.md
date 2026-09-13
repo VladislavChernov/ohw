@@ -1,7 +1,7 @@
 # Документация: Схема данных (Data Model)
 
 > **Версия:** v6 (итерация поверх базы v5)
-> **Последнее обновление:** 2026-09-05
+> **Последнее обновление:** 2026-09-11
 >
 > Источники: `CONCEPT.md` §4, `docs/01_ontology_and_domain_profile.md`, `docs/02_pipeline_and_normalizer.md`,
 > `docs/glossary.md` (раздел Data Model), `docs/expert_reviews.md` (рекомендация «Схема узлов и связей»).
@@ -22,7 +22,7 @@ Chunk (см. §6).
 | Узел | Назначение | Ключевые свойства | Источник |
 |------|------------|-------------------|----------|
 | `Source` | Исходный документ (заголовок, URL, тип) | `source_url`, `domain`, `doc_type` | CONCEPT §4.1 (INGEST), docs/02 §1 |
-| `Chunk` | Фрагмент текста (sliding window с overlap) | `chunk_id`, `chunk_index`, `chunk_size` (512), `overlap` (64), `text` | CONCEPT §4.1 (CHUNK), docs/02 §1 |
+| `Chunk` | Фрагмент текста (стратегия и параметры — `namespace: chunking`, см. docs/02 §1) | `chunk_id`, `text`, `source_url`, `domain`, `index` | CONCEPT §4.1 (CHUNK), docs/02 §1 |
 | `Document Registry` | Реестр документов и их версий | `doc_id`, `source_url`, `version`, `status` | CONCEPT §4.1 (COMMIT), docs/00 §1 |
 
 ## 3. Доменные узлы и их свойства

@@ -11,14 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from graphrag_proto.ingestion_service.pipeline.chunker import Chunker, build_chunker_for
 from graphrag_proto.retrieval.adapters.base import Embedder, GraphStoreProvider, VectorStoreProvider
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 
-CHUNK_SIZE = 512
-CHUNK_OVERLAP = 64
 DEDUP_AUTO = 0.92
 DEDUP_LLM = 0.75
 SIMILAR_TO = 0.85
@@ -96,38 +96,33 @@ class IngestStage(Stage):
 
 
 class ChunkStage(Stage):
-    """CHUNK: скользящее окно 512/64; code-блоки не рвутся (нарезка по блокам)."""
+    """CHUNK: фрагментация блоков через `Chunker`.
+
+    `chunker` — фиксированный чанкер (DI в тестах); при `None` чанкер резолвится
+    per-job через `build_chunker_for(ctx.domain)` — precedence env > профиль домена
+    > namespaces > дефолты (512/64). code-блоки не рвутся: чанкер оперирует
+    в пределах одного блока.
+    """
 
     name = "CHUNK"
 
+    def __init__(self, chunker: Chunker | None = None) -> None:
+        if chunker is not None:
+            self._chunkers: Callable[[str], Chunker] = lambda _domain: chunker
+        else:
+            self._chunkers = build_chunker_for
+
     def run(self, ctx: PipelineContext) -> None:
+        chunker = self._chunkers(ctx.domain)
         chunks: list[str] = []
         for block in ctx.document.blocks:
             if block.type not in ("text", "code"):
                 continue
             if not isinstance(block.data, str) or not block.data.strip():
                 continue
-            chunks += _sliding_window(block.data, CHUNK_SIZE, CHUNK_OVERLAP)
+            chunks += chunker.chunk(block.data)
         ctx.chunks = chunks
         ctx.chunks_meta = [{"index": i, "size_tokens": len(c)} for i, c in enumerate(chunks)]
-
-
-def _sliding_window(text: str, size: int, overlap: int) -> list[str]:
-    """Нарезчик по словам (stub: M1 — без токенизатора/модели сегментации).
-
-    Оперирует в пределах одного блока (text|code), поэтому фрагменты кода,
-    попавшие в code-блок, сохраняются целиком и не разрываются пополам.
-    """
-    if len(text) <= size:
-        return [text] if text.strip() else []
-    words = text.split(" ")
-    chunks: list[str] = []
-    step = max(size - overlap, 1)
-    for i in range(0, max(len(words), 1), step):
-        chunk = " ".join(words[i : i + size])
-        if chunk.strip():
-            chunks.append(chunk)
-    return chunks
 
 
 class EmbedStage(Stage):

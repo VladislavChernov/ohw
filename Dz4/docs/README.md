@@ -29,6 +29,7 @@
 | Документ | Описание |
 |----------|----------|
 | [02_pipeline_and_normalizer.md](./02_pipeline_and_normalizer.md) | Регламент Ingestion Pipeline (9 этапов) и Normalizer v3 |
+| [chunkers_guide.md](./chunkers_guide.md) | Контракт Chunker и регламент добавления чанкер-стратегий (родные + плагин через entry_points) |
 | [03_retriever.md](./03_retriever.md) | Стратегия ретривера и слияния контекста |
 
 ### API и сервисы
@@ -106,6 +107,7 @@ CONCEPT.md (главная концепция)
     ├── docs/00_hi_level_architecture.md        (концепт/архитектура)
     ├── docs/01_ontology_and_domain_profile.md  (данные/онтология)
     ├── docs/02_pipeline_and_normalizer.md      (процессы/ingestion)
+    ├── docs/chunkers_guide.md                  (процессы/чанкинг)
     ├── docs/03_retriever.md                    (процессы/ретривер)
     ├── docs/04_services_config.md              (API/сервисы)
     ├── docs/05_adr_log.md                      (решения)

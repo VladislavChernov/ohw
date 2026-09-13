@@ -1,14 +1,14 @@
 # Документация: Ingestion Pipeline и Normalizer v3
 
-> **Версия:** v5.0  
-> **Последнее обновление:** 2026-09-04
+> **Версия:** v5.1  
+> **Последнее обновление:** 2026-09-11
 
 ## 1. Динамический Ingestion Pipeline (9 этапов)
 
 Движок последовательно прогоняет данные через этапы:
 
 1. **INGEST** — Приём документа через Ingestion API (:8002). Поддержка: .txt, .md, .pdf (в M1; .json — вне скоупа, см. ADR-021). Метаданные: source_url, domain, doc_type. Выход этапа — **канонический документ** (DocumentReader, ADR-021), источник-агностичный. Пайплайн ниже работает ТОЛЬКО с этим представлением.
-2. **CHUNK** — Фрагментация текста. Стратегия: sliding window с overlap (chunk_size=512, overlap=64 токена). Сохранение: Chunk-узлы с CONTAINS-связями к Source.
+2. **CHUNK** — Фрагментация текста. Стратегия по умолчанию: sliding window с overlap (chunk_size=512, overlap=64 токена). Чанкер — адаптер (`Chunker`, namespace `chunking`): `sliding_window` (M1-поведение) / `structure_aware` (пер-секционный по заголовкам Markdown, `^#{1,6}\s`; короткая секция — один чанк) / `langchain` / `llamaindex` (optional deps, lazy import, fail-fast). Настройки — per-field precedence `INGEST_CHUNKER`/`INGEST_CHUNK_SIZE`/`INGEST_CHUNK_OVERLAP` (env) > профиль домена (Config Service, per-job) > namespaces.yaml > дефолты M1 (см. `04_services_config.md`, namespace `chunking`). Сохранение: Chunk-узлы с CONTAINS-связями к Source. Контракт Chunker и регламент подключения новых стратегий — `docs/chunkers_guide.md`.
 3. **EMBED** — Генерация векторных embeddings через **Embeddings Adapter**. Выбор модели — через runtime config (namespace: adapters.embeddings). Базовая реализация: bge-m3 (1024 dim), HTTP к Embeddings Service :8004. Альтернатива: LocalSentenceTransformerAdapter — встроен в пайплайн, без отдельного контейнера. Batch: 32 фрагмента за запрос (настраивается: namespace: embeddings.batch_size). Ядро не знает, какой эмбеддер под капотом.
 4. **EXTRACT** — Сырая экстракция сущностей через **LLM Adapter**. Выбор модели — через runtime config (namespace: adapters.llm). Реализация: OpenAICompatibleAdapter (llama.cpp `/v1/chat/completions`), Qwen 2.5 Coder 7B Abliterate q4_K_M. Альтернатива: OllamaAdapter — HTTP к :11434, и любой другой `/v1/chat/completions` (vLLM, LM Studio). Промпт: доменный prompt_template из активного Domain Profile. Модель отвечает ТОЛЬКО за экстракцию сырых сущностей и связей. Гарантия детерминированности — на стороне Python (нормализация).
 5. **NORMALIZE** — Контекстно-зависимая канонизация. Правила канонизации берутся из Domain Profile (canonicalization). Математические символы (Big-O) изолированы от текстовых полей. Unicode-нормализация через таблицу unicode_map из Glossary Service. LLM-fallback: при сбое regex-валидации — автоматический fallback на исходную строку + warning в лог.

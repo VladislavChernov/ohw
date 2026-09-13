@@ -1,7 +1,7 @@
 # Документация: Конфигурация Сервисов и Runtime API
 
-> **Версия:** v5.0  
-> **Последнее обновление:** 2026-09-04
+> **Версия:** v5.1  
+> **Последнее обновление:** 2026-09-11
 
 ## 1. Сетевая архитектура и карта портов в выделенной сети Docker (ohw_net)
 
@@ -134,6 +134,27 @@ factorial: ["!", "fact"]
 - `dimensions` (1024)
 - `max_tokens` (8192)
 - `batch_size` (32)
+
+**Принцип выбора размерности:** default `dimensions` (1024) — фактический
+выходной размер модели `bge-m3`. При смене модели размерность обязана равняться
+её выхлопу (например MiniLM-L6-v2 → 384, тогда `EMBEDDING_DIMENSIONS=384`),
+иначе сервис вернёт `503`, а HTTP-адаптер — fail-fast при несовпадении. Mock и
+real-режимы, а также клиент (`BgeM3ServiceAdapter`) используют строго одну и
+ту же размерность — ось эмбеддингов (L2-04) не ломается при переключении.
+
+**namespace: chunking (новое в v5.1, M3-хвосты)**
+- `strategy` ("sliding_window") — выбрать чанкер: `sliding_window` | `structure_aware` | `langchain` | `llamaindex`
+- `chunk_size` (512) — размер окна (в словах/токенах для sliding-window)
+- `overlap` (64) — перекрытие окон (строго в [0, chunk_size))
+- **Precedence (per-field, вариант 3):** env (`INGEST_CHUNKER`/`INGEST_CHUNK_SIZE`/`INGEST_CHUNK_OVERLAP`) >
+  профиль домена (секция `chunking`, тянется per-job через `GET /api/v1/config/domain/profile/{domain}`
+  из Config Service, `CONFIG_URL`) > namespaces.yaml (`chunking`) > дефолты M1 (512/64, sliding_window).
+  Каждое поле берётся из первого источника, где оно задано; профиль недоступен → fallback на
+  namespaces/дефолт (чанкинг — некритичная настройка, ingest не падает).
+- env-параметры: `INGEST_CHUNKER`, `INGEST_CHUNK_SIZE`, `INGEST_CHUNK_OVERLAP`
+  (дополнительно: `INGEST_LANGCHAIN_SPLITTER`, `INGEST_LLAMAINDEX_PARSER`).
+  LangChain/LlamaIndex — optional dependency (group `[chunking]`), lazy import;
+  без установленного пакета выбранный адаптер даёт fail-fast при вызове.
 
 **namespace: storage**
 - `graph_store` ("neo4j_graph") — графовая ось: Neo4jGraphStore / MemgraphGraphStore.

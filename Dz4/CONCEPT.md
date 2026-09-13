@@ -150,7 +150,7 @@ Management API (`PUT /api/v1/config/adapters`, см. §6.3).
 Движок последовательно прогоняет данные через этапы:
 
 1. **INGEST** — Приём документа через Ingestion API. Поддержка: .txt, .md, .pdf, .json. Метаданные: source_url, domain, doc_type.
-2. **CHUNK** — Фрагментация текста. Стратегия: sliding window с overlap (параметры настраиваются). Сохранение: Chunk-узлы с CONTAINS-связями к Source.
+2. **CHUNK** — Фрагментация текста через интерфейс-стратегию **Chunker** (аналогично слою адаптеров). Выбор стратегии и параметров — runtime config (`namespace: chunking`): sliding window с overlap, structure-aware (по заголовкам документа), на базе внешних фреймворков (например, LangChain / LlamaIndex). Сторонние стратегии регистрируются через entry_points (§2.6). Стратегия по типам источника задаётся Domain Profile (§3.1). Сохранение: Chunk-узлы с CONTAINS-связями к Source.
 3. **EMBED** — Генерация векторных embeddings через **Embeddings Adapter**. Выбор модели — через runtime config (namespace: adapters.embeddings), параметры батча — namespace: embeddings.batch_size. Ядро не знает, какой эмбеддер под капотом.
 4. **EXTRACT** — Сырая экстракция сущностей через **LLM Adapter**. Выбор модели — через runtime config (namespace: adapters.llm). Промпт: доменный prompt_template из активного Domain Profile. Модель отвечает ТОЛЬКО за экстракцию сырых сущностей и связей. Гарантия детерминированности — на стороне Python (нормализация).
 5. **NORMALIZE** — Контекстно-зависимая канонизация. Правила канонизации берутся из Domain Profile (canonicalization). Математические символы (Big-O) изолированы от текстовых полей. Unicode-нормализация через таблицу unicode_map из Glossary Service. LLM-fallback: при сбое regex-валидации — автоматический fallback на исходную строку + warning в лог.
@@ -250,6 +250,9 @@ Glossary Service подгружает соответствующий файл г
 
 **namespace: embeddings**
 - `model`, `dimensions`, `max_tokens`, `batch_size`
+
+**namespace: chunking**
+- `strategy`, `chunk_size`, `overlap` — стратегия фрагментации текста и её параметры (этап CHUNK, §4.1)
 
 **namespace: storage**
 - `graph_store`, `vector_store` — имена выбранных реализаций графовой/векторной оси; параметры подключения — конфигурация соответствующего адаптера (см. `docs/adapters_guide.md`)

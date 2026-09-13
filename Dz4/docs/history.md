@@ -1,7 +1,7 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v9 (реализация прототипа: вехи M0–M2, M3-бандл адаптеров+topology)
-> **Последнее обновление:** 2026-09-10
+> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга)
+> **Последнее обновление:** 2026-09-11
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
 
@@ -336,6 +336,43 @@ v6 — следующая итерация концепции и докумен�
    «GPU-гейтинг» (фаза индексации — ingestion/embeddings, фаза поиска — llm, GPU-профили
    одновременно невозможны), compose-конфиг валиден (`config --quiet`). Физический
    VRAM-прогон с bge-m3 :8004 — в бандле 2/3.
+
+**M3-хвосты: конфигурируемый чанкинг (Chunker) — ЗАВЕРШЕНО (до коммита):**
+
+1. **`Chunker` ABC + детерминированная стратегия** — `ingestion_service/pipeline/chunker.py`:
+   интерфейс `Chunker` (`chunk(text) -> list[str]`), `SlidingWindowChunker` (дефолт M1:
+   512/64, валидация параметров), `StructureAwareChunker` (заголовки Markdown
+   `^#{1,6}\s`, короткая секция — один чанк, .txt — fallback), `LangChainChunker`/
+   `LlamaIndexChunker` (optional deps, lazy import, fail-fast `RuntimeError`,
+   mypy-overrides в pyproject).
+2. **Precedence (вариант 3, per-field fill-if-empty)** — env
+   (`INGEST_CHUNKER`/`INGEST_CHUNK_SIZE`/`INGEST_CHUNK_OVERLAP`) > профиль домена
+   (`chunking`, Config Service per-job, timeout 2 s, недоступность → fallback на
+   namespaces/дефолты) > `namespaces.yaml` (`chunking`) > дефолты M1.
+   `build_chunker_for(domain)` — резолвер по задаче; `build_chunker()` — legacy env-only.
+3. **`ChunkStage` на DI** — `ChunkStage(chunker=None, resolver=build_chunker_for)` →
+   резолвер per-job по `ctx.domain`; жёсткие константы `CHUNK_SIZE`/`CHUNK_OVERLAP`/
+   `_sliding_window` удалены из orchestrator.
+4. **Документация и тесты** — `docs/02` CHUNK, `docs/04` namespace `chunking`, CONCEPT
+   §4.1/§6.5, `data_model.md` (свойства Chunk по факту COMMIT), `docs/chunkers_guide.md`
+   (контракт + регламент добавления стратегий, §4 — entry_points-механизм, реализован);
+   `test_chunker.py` (20 тестов):
+   M1-compat, валидация, structure-aware, все 4 уровня precedence, fallback недоступного
+   профиля, fail-fast внешних стратегий. 195 тестов зелёные, ruff/mypy чисто.
+
+**Бандл «add-chunker-entry-points» — ЗАВЕРШЁН (до коммита):**
+
+1. **Generic-реестр** — `graphrag_proto/plugin_registry.py`: discovery группы entry-point'ов
+   (`importlib.metadata.entry_points(group=...)`, кэш на процесс, `clear_cache()`),
+   `map_plugins`/`load_plugin`/`list_plugins`; ошибки `PluginMissingError`/`PluginLoadError`
+   (RuntimeError, без тихого fallback).
+2. **Группа `graphrag.chunkers`** — `chunker.py`: `list_chunkers()` (встроенные + плагины,
+   без конфликтующих имён), ветка «неизвестное имя → плагин» в `_build_chunker`;
+   встроенные стратегии приоритетнее плагинов; результат фабрики — `isinstance(Chunker)`;
+   неизвестное имя — `ValueError` со списком доступного.
+3. **Тесты** — `tests/test_chunker_plugins.py` (7): резолюция via env и профиль per-job,
+   приоритет построенных, fail-fast (сломанный импорт / не тот тип результата),
+   неизвестное имя со списком плагинов, `list_chunkers()`.
 
 **Планируемый бандл (вне M3–M5, по потребности): «add-source-connectors»** — подключение
 внешних источников данных (Jira, TestRail/Test Management, Confluence/Wiki, GitLab) как
