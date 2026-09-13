@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  checks:
+    name: ruff + mypy + pytest (prototype)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Dz4/prototype
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv + Python 3.13
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies (uv.lock + dev group)
+        run: uv sync --group dev
+      - name: ruff
+        run: uv run ruff check
+      - name: mypy
+        run: uv run mypy
+      - name: pytest (без e2e)
+        run: uv run pytest -q

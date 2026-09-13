@@ -1,6 +1,6 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02)
+> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions)
 > **Последнее обновление:** 2026-09-13
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
@@ -437,6 +437,14 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
    известных значений секретов из env), `RedactingFilter` (msg/args/exc_text),
    `install_redaction()` вызывается в `main()` всех 8 сервисов; security.md §5 — чек.
    +13 тестов.
+
+**M3-хвост: CI (GitHub Actions).**
+
+1. **Проблема:** качество держалось только на локальном прогоне dev-контейнера;
+   пулл-реквесты не проверялись автоматически.
+2. **Решение:** `.github/workflows/ci.yml` — check via `astral-sh/setup-uv`
+   (Python 3.13), `uv sync --group dev` по `uv.lock`, затем `ruff`, `mypy`, `pytest -q`
+   (без e2e) из `Dz4/prototype`; триггеры push/PR на master.
 
 **Планируемый бандл (вне M3–M5, по потребности): «add-source-connectors»** — подключение
 внешних источников данных (Jira, TestRail/Test Management, Confluence/Wiki, GitLab) как
