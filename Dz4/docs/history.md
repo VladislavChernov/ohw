@@ -1,6 +1,6 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v12 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker, semantic-cache; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна; A-2: честный контракт атомарности COMMIT — capability derivation atomic/best_effort + компенсация, ADR-024; Semantic Cache на Valkey, ADR-025; решения по кэшу и ревизии данных)
+> **Версия:** v13 (архивный срез `docs.zip` снят с дерева — восстановим из коммита `8a83c72`; реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker, semantic-cache; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна; A-2: честный контракт атомарности COMMIT — capability derivation atomic/best_effort + компенсация, ADR-024; Semantic Cache на Valkey, ADR-025; решения по кэшу и ревизии данных)
 > **Последнее обновление:** 2026-09-14
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
@@ -495,7 +495,7 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
 ### Архивные артефакты
 
 - **Ревью README (v1–4):** в git-истории (`docs/history/v4/review.md` до удаления).
-- **Высокоуровневые диаграммы v4 (PDF/SVG):** удалены из рабочей директории, исторические копии сохранены в `docs.zip`.
+- **Высокоуровневые диаграммы v4 (PDF/SVG):** удалены из рабочей директории; архивный срез `docs.zip` (диаграммы + снапшот `docs/` v4/v5-эпохи) снят с дерева, восстановим из git: `git show 8a83c72:Dz4/docs.zip > docs.zip` (коммит M0).
 - **C4/arc42-паспорт v6.0, снапшоты v4/v6/v7:** консолидированы в этот документ (Этап 4/6/7);
   полные срезы восстановимы из `git log`, замещены `docs/00_hi_level_architecture.md`.
 
