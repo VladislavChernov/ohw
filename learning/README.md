@@ -14,6 +14,7 @@
 |---|---|---|
 | [data_revision_analytics.md](data_revision_analytics.md) | **Свежесть данных в query-контуре** (Веха 4-хвост) | Что такое ревизия данных, bounded staleness, fingerprint, polling vs events; три развилки и рекомендации |
 | [caching_freshness_learning.md](caching_freshness_learning.md) | **Кэширование и свежесть — методички** | Карта изучения: от «что такое кэш» до версионирования кэш-ключей; книги/курсы/доки по каждому куску теории |
+| [caching_method_selection_learning.md](caching_method_selection_learning.md) | **Выбор метода кэширования** | Что/где/сколько кэшировать, семантика отказа (fail-open), конкурентность (stampede), экономика и критерий «когда кэш не нужен» — то, чего нет в методичке по свежести |
 | [distributed_consistency_learning.md](distributed_consistency_learning.md) | **Консистентность в распределённых системах** | Консистентность, bounded staleness, polling vs push, репликация — материалы |
 | [free_resources_articles.md](free_resources_articles.md) | **Бесплатные статьи и курсы** | Альтернативы платным книгам (DDIA, System Design): бесплатные учебники, RFC, университетские лекции, видео, лабораторные |
 
@@ -27,6 +28,8 @@
    `caching_freshness_learning.md` / `distributed_consistency_learning.md`, пройди
    по разделам от «для начала» к «углублённо».
 3. Конспектируй прямо здесь (правь `*.md`), если хочется зафиксировать понимание.
+4. Выбираешь **метод** кэширования (что кэшировать, где, сколько, как отказывать) —
+   начни с `caching_method_selection_learning.md`.
 
 Материалы подобраны под **практический контекст GraphRAG-прототипа Dz4**: в основном
 методички (книги), не «статьи для галочки».
