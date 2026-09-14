@@ -32,6 +32,7 @@
 | L2-04 | Графовая и векторная оси связаны по ключу `chunk_id`; запись узлов/рёбер и эмбеддингов коммитится атомарно **в пределах одного движка** (атомарная пара: обе оси `consistency_capability()=="atomic"` и общий `engine_key()`); разнородные пары — best-effort c компенсацией (сбой второй оси → граф откатывается `delete_node`, джоба `failed` с пометкой «компенсировано») | CONCEPT §4.1 (COMMIT), ADR-013, ADR-024, `docs/data_model.md` §6, `openspec/changes/architecture-atomic-commit/spec.md` |
 | L2-05 | Удаление источника — soft delete: чанки снимаются с поиска, сущности сохраняются, пока имеют активные `source_ids`; физическое удаление — только фоновый cleanup по retention | ADR-014, `docs/operations_requirements.md` §2 |
 | L2-06 | Идемпотентность INGEST: повторная загрузка неизменённого `source_url` (тот же content hash) — no-op, без плодования версий | ADR-014 |
+| L2-07 | **Bounded staleness (query-контур):** ответ конструируется из данных не старее ревизии `R<domain>`; ревизия = fingerprint активного сета DocumentRegistry (`sha256(sorted content_hash)`, ADR-026). Query-контур знает текущую `R<domain>` (поллер `GET /revision`), кэшированные записи старой эпохи умирают по TTL, «свежесть ответа = свежесть данных» только при совпадении ревизий | ADR-026, `docs/prototype_requirements.md` §Веха 4-хвост, `learning/data_revision_analytics.md` |
 
 ## L3. Процессы (ingestion / retrieval)
 

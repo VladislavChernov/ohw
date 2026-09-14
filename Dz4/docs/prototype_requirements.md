@@ -227,15 +227,29 @@ Dz4/
 в срезе. До появления вехи кэш живёт на TTL + ручной сброс (допущение зафиксировано в
 `openspec/changes/add-semantic-cache/`).
 
+**Решение принято 2026-09-14** (зафиксировано ADR-026, аналитика — `learning/data_revision_analytics.md`):
+
+- **Гранулярность — по-доменная** (`rev<domain>`). Кэш, профили, ingestion и Eval уже
+  по-доменные; мультидоменная инвалидация изолирована (переиндексация `it` не сжигает
+  кэш `legal`).
+- **Источник rev — fingerprint активного сета DocumentRegistry**:
+  `rev<domain> = sha256(sorted(content_hash ОБ активных документов домена))`.
+  Идемпотентен (no-op INGEST не меняет), честно отражает коллекцию источников
+  (2 книги EN+RU на тему = 2 `content_hash` в множестве), переиспользует поля
+  ADR-014 — без новой параллельной модели ревизии.
+- **Доставка — `GET /api/v1/ingestion/revision?domain=` + поллер в worker**
+  (по аналогии с `_topology_rebuilder`, задержка = интервал полла).
+
 - [ ] Экспонировать версии DocumentRegistry (ADR-014) + topology-revision в query-контур;
       fingerprint «профиль домена + карта адаптеров + версия данных» — переиспользование
       ADR-014/topology, без новой параллельной модели.
-- [ ] Определить гранулярность ревизии: глобальная vs по-доменная — решение общее
-      для всего query-контура, не только для кэша.
+- [ ] Реализовать `DocumentRegistry.data_revision(domain) -> str | None` (sha256 активных
+      `content_hash`) + endpoint `GET /api/v1/ingestion/revision?domain=` (X-API-Key).
+- [ ] Query-контур: поллер ревизии (аналог `_topology_rebuilder`), текущая `rev<domain>`
+      в lookup/store; кэш-объект один (ADR-025), старые эпохи умирают по TTL.
+- [ ] Семантический кэш: ключ `query:sc:<rev>:<domain>` (epoch-bump префикс в поле HASH).
 - [ ] `docs/invariants.md` L2-04: зафиксировать bounded staleness явно
       (текущая трактовка подразумевает «свежесть ансвера = свежесть данных»).
-- [ ] Семантический кэш: включить epoch-bump `query:sc:<rev>:<domain>`
-      (planned upgrade path из `openspec/changes/add-semantic-cache/spec.md`).
 - [ ] M4-Eval: воспроизводимый срез фиксирует ревизию знаний (ADR-015).
 
 ### Веха 5 (опционально/отдельным решением) — MCP-шлюз и UI

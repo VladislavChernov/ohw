@@ -135,7 +135,13 @@ def test_loop_exponential_backoff_on_transport_failure(
     from graphrag_proto.query_service.models import Task
 
     delays: list[float] = []
-    monkeypatch.setattr("time.sleep", lambda delay: delays.append(float(delay)))
+    clock = [0.0]
+    # Фиксированная шкала времени: поллер (time.monotonic) и backoff (time.sleep)
+    # движутся на одной виртуальной оси — тест детерминирован на любой скорости CPU.
+    monkeypatch.setattr("time.monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        "time.sleep", lambda delay: (clock.__setitem__(0, clock[0] + delay), delays.append(float(delay)))
+    )
 
     class _StopAfter(BaseException):
         """Выход из loop через rebuilder (не ловится `except Exception`)."""
