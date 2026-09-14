@@ -11,7 +11,7 @@
 > `docs/04_services_config.md` (порты/API), `docs/06_operations_and_risks.md` (ops/профили/риски),
 > `docs/infrastructure_stack.md` (стек), `docs/adapters_specification.md` (реализации адаптеров),
 > `docs/adapters_guide.md` (подключение внешних систем). Прототипный срез с полным набором
-> конкретики, вычищенной на Этапе 7, сохранён в `docs/history/v7/CONCEPT.md`.
+> конкретики, вычищенной на Этапе 7, восстановим из git-истории (см. Этап 7 в `docs/history.md`).
 
 ---
 
@@ -194,7 +194,8 @@ Management API (`PUT /api/v1/config/adapters`, см. §6.3).
 
 Конкретная топология инсталляции (порты, сеть, контейнеры, профили развёртывания) — не предмет
 концепции: см. `docs/04_services_config.md` §1 и `docs/infrastructure_stack.md`. Прототипная карта
-портов и имя сети (ohw_net) сохранены в архивном снапшоте `docs/history/v7/CONCEPT.md`.
+портов и имя сети (ohw_net) сохранены в архивном снапшоте из git-истории (Этап 7,
+`docs/history.md`).
 
 ### 6.2. Runtime Domain Management API (Config Service)
 
@@ -464,5 +465,5 @@ Glossary Service подгружает соответствующий файл г
 - Метрики, профили, масштабирование, риски: `docs/06_operations_and_risks.md` (§2–§5).
 - Стек решений (контейнеры, СУБД, модели, лицензии): `docs/infrastructure_stack.md`.
 - Прототипный операционный срез (включая PromQL-метрики и риски RTX 2070 Super / 16 ГБ ОЗУ):
-  `docs/history/v7/CONCEPT.md`.
+  в git-истории (Этап 7, `docs/history.md`).
 ---

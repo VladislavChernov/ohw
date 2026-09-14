@@ -1,5 +1,5 @@
 # Наборы ключей runtime config по неймспейсам (Config Service)
-# Источник: docs/04 §5.1 (полный набор), docs/history/v7/CONCEPT.md §6.5.
+# Источник: docs/04 §5.1 (полный набор), docs/history.md Этап 7 §6.5.
 # Используется как дефолтные значения при инициализации слайсов Config Service;
 # значения хранятся в Config Service (SQLite), файл — стартовый эталон (SSOT).
 #

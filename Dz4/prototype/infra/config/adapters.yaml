@@ -1,5 +1,5 @@
 # Runtime-конфигурация слоя адаптеров (namespace: adapters)
-# Источник: docs/04 §3, §5.1; docs/history/v7/CONCEPT.md §2.5; docs/adapters_guide.md.
+# Источник: docs/04 §3, §5.1; docs/history.md Этап 7 §2.5; docs/adapters_guide.md.
 # Читается Config Service / Topology Orchestrator при старте; переключение на лету —
 # через PUT /api/v1/config/adapters (L1-03, ADR-019).
 #

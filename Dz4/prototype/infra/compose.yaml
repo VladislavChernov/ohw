@@ -1,6 +1,6 @@
 # GraphRAG Prototype — Docker Compose skeleton
 # Источник: docs/infrastructure_stack.md §2, docs/04 §1, docs/05_adr_log.md ADR-019,
-#           docs/history/v7/CONCEPT.md §8.2 (профили), README §3, §5 (запуск, JVM).
+#           docs/history.md Этап 7 §8.2 (профили), README §3, §5 (запуск, JVM).
 #
 # Статус: каркас для вехи M0. Имена образов (build/image) уточняются при реализации;
 #         все сервисы уже распределены по профилям и портам согласно документации.

@@ -12,7 +12,7 @@ Ingestion API (:8002) принимает источники **push**-модел�
 (`content`) с метаданными `source_url`/`domain`/`doc_type` (`docs/api_reference.md` §5,
 ADR-018). Поддерживаются txt/md/pdf через реестр `DocumentReader` (`registry.py::factory`,
 ADR-021). Внешние системы (GitLab, Confluence/Wiki, Jira) зафиксированы на границе
-системы как входной поток (C4 v6, `docs/history/v6/c4_level1_system_context.txt`), но
+системы как входной поток (C4 v6; см. `docs/00_hi_level_architecture.md` и git-историю), но
 **pull-коннекторов нет и не спланировано**: чтобы загрузить данные из Jira/TestRail/вики,
 сейчас нужно вручную выгрузить контент и передать его в API.
 

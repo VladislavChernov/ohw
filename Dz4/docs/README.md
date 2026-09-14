@@ -92,8 +92,8 @@
 7. **DevOps / эксплуатации:** [infrastructure_stack.md](./infrastructure_stack.md) → [06_operations_and_risks.md](./06_operations_and_risks.md) → [operations_requirements.md](./operations_requirements.md)
 8. **Инженеру по безопасности:** [security.md](./security.md) → [api_reference.md](./api_reference.md) §1–§2, [06_operations_and_risks.md](./06_operations_and_risks.md) §2
 9. **При ревью кода/архитектуры:** [invariants.md](./invariants.md) — обязательный чек-лист контрактов → [05_adr_log.md](./05_adr_log.md) (обоснование)
-10. **Перед началом прототипирования:** [prototype_requirements.md](./prototype_requirements.md) — цель, границы, вехи, стек и eval-гейт; конкретика — в [docs/history/v7/CONCEPT.md](./history/v7/CONCEPT.md)
-11. **Тем, кто собирает прототип:** конкретика-кандидаты в [docs/history/v7/CONCEPT.md](./history/v7/CONCEPT.md) (архивная итерация), контракты — в [api_reference.md](./api_reference.md) и [adapters_specification.md](./adapters_specification.md)
+10. **Перед началом прототипирования:** [prototype_requirements.md](./prototype_requirements.md) — цель, границы, вехи, стек и eval-гейт
+11. **Тем, кто собирает прототип:** контракты — в [api_reference.md](./api_reference.md) и [adapters_specification.md](./adapters_specification.md)
 
 ---
 
@@ -124,10 +124,9 @@ CONCEPT.md (главная концепция)
     │   docs/invariants.md,
     │   docs/history.md                         (контроль и история)
     ├── docs/prototype_requirements.md          (следующий этап: прототип)
-    └── docs/history/v7/ (архив конкретики v5, вычищенной на Этапе 7)
 ```
 
 > **Примечание:** Конкретика инсталляции (порты, имена БД/моделей/адаптеров, network, профили, метрики)
 > вынесена из CONCEPT на Этапе 7 (агностификация) в справочники — `04`, `06`, `infrastructure_stack`,
-> `adapters_specification`, `api_reference`. Инварианты — `invariants.md`. Материал для сборки прототипа —
-> `docs/history/v7/CONCEPT.md`.
+> `adapters_specification`, `api_reference`. Инварианты — `invariants.md`. Полный прототипный срез
+> (до агностификации) — в git-истории, `docs/history.md` Этап 7.

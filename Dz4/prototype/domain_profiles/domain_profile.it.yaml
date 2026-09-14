@@ -1,6 +1,6 @@
 # Domain Profile: it (базовый профиль, поставляется из коробки)
 # Источник: docs/01 §2 (структура контракта ядра), §3 (генерация constraints),
-#           docs/history/v7/CONCEPT.md §3 (архитектура доменов).
+#           docs/history.md Этап 7 §3 (архитектура доменов).
 # Обязательные секции: profile, ontology, extraction, validation,
 # canonicalization, chunking, context_assembly.
 

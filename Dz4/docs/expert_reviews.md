@@ -69,7 +69,7 @@
 
 ### Важные пробелы (нужно закрыть для продакшена):
 
-1. ✅ **Стратегия чанкинга** (размер, overlap, спец-правила для JSON) — детали в `docs/02_pipeline_and_normalizer.md`; спец-правила JSON — в `docs/history/v7/CONCEPT.md` (материал прототипа) и `docs/data_model.md` (контракт разметки)
+1. ✅ **Стратегия чанкинга** (размер, overlap, спец-правила для JSON) — детали в `docs/02_pipeline_and_normalizer.md`; спец-правила JSON — в git-истории снапшота v5 (Этап 7, `docs/history.md`) и `docs/data_model.md` (контракт разметки)
 2. ✅ **Обработка удаления источников** (is_deleted, source_ids) — `docs/05_adr_log.md` ADR-014 (жизненный цикл источников), retention — `docs/operations_requirements.md` §2
 3. ✅ **Индексы Neo4j** (canonical_name, source_ids, extractor_version) — `docs/data_model.md` §5
 4. ✅ **Валидация графа** (дубликаты, изоляты, циклы, orphan-связи) — этап VALIDATE (docs/02 §4), инварианты — CONCEPT §4.1 (VALIDATE), стандартные Cypher-правила профиля
