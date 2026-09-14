@@ -1,7 +1,7 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v10 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна)
-> **Последнее обновление:** 2026-09-13
+> **Версия:** v11 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна; A-2: честный контракт атомарности COMMIT — capability derivation atomic/best_effort + компенсация, ADR-024; решения по кэшу и ревизии данных)
+> **Последнее обновление:** 2026-09-14
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
 
@@ -499,6 +499,53 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
 
 ---
 
+## Этап 10: Честный контракт атомарности COMMIT (A-2) + решения по кэшу и ревизии данных
+
+**Дата:** 2026-09-14
+**Статус:** Активный код (прототип `prototype/`); бандл реализован, до коммита
+
+### A-2 «architecture-atomic-commit» — ADR-024 (закрывает `review_team.md:40-42`)
+
+1. **Capability-контракт** — `retrieval/adapters/base.py`: `consistency_capability()`
+   (`"atomic"|"best_effort"`, дефолт best_effort), `engine_key()` (ключ движка/инстанса),
+   `atomic_batch()` на GraphStoreProvider (протокол `AtomicBatch`). InMemory-пара —
+   `"atomic"` + `inmemory://local`; Neo4j-пара — `"atomic"` + `engine_key` из URI/БД.
+2. **Атомарная пара** (обе оси atomic + общий engine_key) — запись ОБЕИХ осей в одной
+   транзакции движка: Neo4j через единый `session.begin_transaction()` (`_Neo4jBatch`),
+   InMemory — вложенные `transaction()`-контексты единого процесса. Атомарность ровно
+   там, где её даёт движок; никакого 2PC.
+3. **Разнородные пары — best_effort + компенсация** (`CommitStage._write_best_effort`):
+   commit графа → commit вектора; сбой второй оси → компенсация ОБЕИХ осей по полному
+   следу джобы `stale ∪ written` (старые эмбеддинги удаляются вне транзакции —
+   закрывает орфан-вектора при re-index, L2-03), джоба `failed` с пометкой
+   «компенсировано»; повтор идемпотентен (L2-06).
+4. **SSOT** — `capabilities: {graph_store, vector_store}` в `adapters.yaml`/
+   `namespaces.yaml`; тесты `test_adapter_catalog_ssot.py`: валидность/покрытие,
+   декларация == реализация, пара `atomic` ⇔ равен `engine_key`
+   (`test_declared_atomic_pair_is_genuine`). `infra_topology.yaml` — комментарий о
+   выводе стратегии из capability пары.
+5. **Доки** — ADR-024 в `docs/05_adr_log.md`; L2-04 (`docs/invariants.md`), §2.6.1
+   (`docs/adapters_specification.md`), таблица §1.2 (`docs/prototype_requirements.md`);
+   дизайн «БД как плагины» с пометкой «требует обсуждения, не реализуется в бандле».
+6. **Верификация** — 243 теста (включая re-index-компенсацию
+   `test_best_effort_reindex_compensates_stale_vectors`), `ruff check .` и `mypy src`
+   чисто; замечания adversarial-review (орфан-вектор в компенсации, мёртвый
+   `_RecordingBatch.rollback`, `assert vector is not None`, опечатка ADR) — закрыты.
+
+### Решения для бандла 3/3 «add-semantic-cache» (зафиксированы, реализация позже)
+
+1. TTL+`clear()` — допущение управляемой свежести; «плохие» ответы (пустой text, отказ
+   LLM «контекста недостаточно», сбой) не кэшируются; epoch-bump
+   `query:sc:<rev>:<domain>` (при `created_new=True`) — planned upgrade path, не
+   реализуется; инвалидация по источникам — вне скоупа. Триггеры пересмотра: M4 (Eval),
+   M5 (конфигуратор профилей), M6 (коннекторы).
+2. **Веха 4-хвост — «Ревизия данных в query-контуре»** (`docs/prototype_requirements.md`,
+   обязательна до M5/M6): fingerprint «профиль домена + карта адаптеров + версия данных»
+   на основе ADR-014-версий DocumentRegistry + topology-revision; не текущий техдолг,
+   а отложенное архитектурное решение (deferred decision).
+
+---
+
 ## Связи с другими документами
 
 | Документ                        | Связано с                        | Тип связи           |
@@ -508,7 +555,7 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
 | docs/02_pipeline_and_normalizer.md    | CONCEPT.md §4           | Техническая детализация |
 | docs/03_retriever.md                  | CONCEPT.md §5           | Техническая детализация |
 | docs/04_services_config.md            | CONCEPT.md §6           | Техническая детализация |
-| docs/05_adr_log.md                    | CONCEPT.md §7           | Подробное обоснование (ADR-001 - ADR-020) |
+| docs/05_adr_log.md                    | CONCEPT.md §7           | Подробное обоснование (ADR-001 - ADR-024) |
 | docs/06_operations_and_risks.md       | CONCEPT.md §8           | Техническая детализация |
 | docs/adapters_specification.md        | CONCEPT.md §2, ADR-012/013 | Контракты интерфейсов |
 | docs/adapters_guide.md                | CONCEPT.md §2.5, docs/adapters_specification.md | Инструкция подключения внешних систем |

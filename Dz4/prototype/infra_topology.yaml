@@ -25,6 +25,12 @@ providers:
   queue_provider: none          # none | valkey_streams | rabbitmq
   # cache: "none"
 
+# Консистентность COMMIT пары выводится из capability провайдеров (ADR-024, бандл
+# architecture-atomic-commit): обе оси `consistency_capability()=="atomic"` и общий
+# `engine_key()` — атомарная пара (граф+вектор в одной транзакции Neo4j на `endpoints.neo4j.bolt`).
+# Разнородная пара (например neo4j + inmemory) автоматически становится best_effort
+# с компенсацией. Стратегия определяется автоматически по паре — поля для оператора нет.
+
 # Параметры соединений (перекрываются из namespace: storage).
 endpoints:
   neo4j:

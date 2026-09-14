@@ -1,4 +1,4 @@
-"""InMemory-реализации GraphStoreProvider/VectorStoreProvider — контрактные двойники
+﻿"""InMemory-реализации GraphStoreProvider/VectorStoreProvider — контрактные двойники
 для тестов и демо без внешних систем (L1-02, ADR-012: контрактные тесты обязательны).
 
 Поддерживаемое подмножество Cypher в `InMemoryGraphStore.query` (ограниченная грамматика,
@@ -21,7 +21,11 @@ import re
 from contextlib import contextmanager
 from typing import Any
 
-from graphrag_proto.retrieval.adapters.base import GraphStoreProvider, VectorStoreProvider
+from graphrag_proto.retrieval.adapters.base import (
+    Consistency,
+    GraphStoreProvider,
+    VectorStoreProvider,
+)
 
 _TERM_COND_RE = re.compile(r"toLower\(n\.(\w+)\)\s+CONTAINS\s+toLower\(t\)")
 _LABEL_COND_RE = re.compile(r"m:(\w+)")
@@ -143,6 +147,14 @@ class InMemoryGraphStore(GraphStoreProvider):
     def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
         return sorted(to_id for (from_id, to_id, etype) in self._edges if from_id == source_id and etype == "CONTAINS")
 
+    # ----------------------------------------------------------------- A-2 capability
+
+    def consistency_capability(self) -> Consistency:
+        return "atomic"
+
+    def engine_key(self) -> str:
+        return "inmemory://local"
+
     # ------------------------------------------------------------- internals
 
     def _matches(self, node: dict[str, Any], terms: list[str], props: list[str]) -> bool:
@@ -263,3 +275,11 @@ class InMemoryVectorStore(VectorStoreProvider):
             row.update(item.get("metadata") or {})
             result.append(row)
         return result
+
+    # ----------------------------------------------------------------- A-2 capability
+
+    def consistency_capability(self) -> Consistency:
+        return "atomic"
+
+    def engine_key(self) -> str:
+        return "inmemory://local"

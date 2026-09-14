@@ -1,13 +1,19 @@
-"""COMMIT (L2-04/L2-05): запись в провайдеры, атомарность, идемпотентность, soft-delete."""
+"""COMMIT (L2-04/L2-05, A-2): запись в провайдеры, атомарность, идемпотентность, soft-delete."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     Analyzer,
     ChunkStage,
     CommitStage,
+    CommitStageError,
     ContractStage,
     DedupStage,
     EmbedStage,
@@ -198,3 +204,210 @@ def test_embed_stage_writes_injected_embedder_vector(tmp_path: Path) -> None:
     # (тест падает, если EmbedStage вернётся к детерминированному эмбеддеру).
     for chunk_id in chunk_ids:
         assert vector._vectors[chunk_id]["embedding"] == bge_vector
+
+
+# --------------------------------------------------------------------------- A-2 (ADR-024)
+
+class FailingVectorAxis(InMemoryVectorStore):
+    """Разнородная пара (best_effort-контракт): вектор-ось падает на записи."""
+
+    def consistency_capability(self) -> str:
+        return "best_effort"
+
+    def upsert_vectors(self, items) -> None:
+        raise RuntimeError("сбой записи векторов")
+
+
+class FailOnSecondUpsertVector(InMemoryVectorStore):
+    """Второй прогон (re-index) падает на upsert_vectors: имитирует сбой второй оси.
+
+    Первый прогон проходит успешно, что позволяет проверить компенсацию при re-index.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._call_count = 0
+
+    def consistency_capability(self) -> str:
+        return "best_effort"
+
+    def upsert_vectors(self, items) -> None:
+        self._call_count += 1
+        if self._call_count >= 2:
+            raise RuntimeError("сбой векторов на втором прогоне (re-index)")
+        super().upsert_vectors(items)
+
+
+def test_best_effort_compensates_graph_on_vector_failure(tmp_path: Path) -> None:
+    """A-2 (4.1): сбой второй оси в best_effort-паре → граф компенсирован,
+    джоба failed с пометкой «компенсировано», Source/Entity сохраняются."""
+    graph, vector = InMemoryGraphStore(), FailingVectorAxis()
+    assert not _is_atomic_pair_for_test(graph, vector)
+    analyzer, _ = build_analyzer(tmp_path, graph, vector)
+    src = tmp_path / "d.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    source_id = _source_node_id("it", "src://d.txt")
+
+    with pytest.raises(CommitStageError) as excinfo:
+        run_source(analyzer, src)
+    assert excinfo.value.compensated is True
+    assert "компенсирован" in str(excinfo.value)
+
+    # чанки компенсированы, источник/сущности сохранились (историчность, ADR-014)
+    assert graph.list_chunk_ids_of_source(source_id) == []
+    assert graph.get_node(source_id) is not None
+    assert graph.get_node(_entity_node_id("it", "дедупликация")) is not None
+    assert not vector._vectors
+
+
+def _is_atomic_pair_for_test(graph: InMemoryGraphStore, vector: InMemoryVectorStore) -> bool:
+    return (
+        graph.consistency_capability() == "atomic"
+        and vector.consistency_capability() == "atomic"
+        and graph.engine_key() == vector.engine_key()
+    )
+
+
+def test_best_effort_rerun_after_compensation_is_idempotent(tmp_path: Path) -> None:
+    """A-2 (4.3, L2-06): повтор джобы после компенсации — no-op, версия не растёт."""
+    graph, vector = InMemoryGraphStore(), FailingVectorAxis()
+    analyzer, registry = build_analyzer(tmp_path, graph, vector)
+    src = tmp_path / "d.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    source_id = _source_node_id("it", "src://d.txt")
+
+    with pytest.raises(CommitStageError):
+        run_source(analyzer, src)
+    version_after_failure = registry.latest_active("it", "src://d.txt")
+    assert version_after_failure is not None and version_after_failure["version"] == 1
+
+    # повтор без изменения контента — no-op: registry знает версию, _write не вызывается
+    ctx = run_source(analyzer, src)
+    assert ctx.commit_applied is True
+    version_after_rerun = registry.latest_active("it", "src://d.txt")
+    assert version_after_rerun is not None and version_after_rerun["version"] == 1
+    assert graph.list_chunk_ids_of_source(source_id) == []
+
+
+def test_best_effort_reindex_compensates_stale_vectors(tmp_path: Path) -> None:
+    """A-2 (4.1 + L2-03): re-index — первый прогон успешен, второй падает на векторах.
+
+    Компенсация должна удалить чанки ИЗ ГРАФА И ИЗ ВЕКТОРА (старый stale-vector
+    не откатывается транзакцией, если delete_vectors ещё не записался — BUG #1 ревьюера).
+    """
+    vector = FailOnSecondUpsertVector()
+    graph = InMemoryGraphStore()
+    analyzer, registry = build_analyzer(tmp_path, graph, vector)
+    src = tmp_path / "d.txt"
+    source_id = _source_node_id("it", "src://d.txt")
+
+    # --- первый прогон: CONTENT_1, обе оси записаны ---
+    src.write_text(CONTENT_1, encoding="utf-8")
+    run_source(analyzer, src)
+    v1 = registry.latest_active("it", "src://d.txt")
+    assert v1 is not None and v1["version"] == 1
+    chunk_ids_v1 = graph.list_chunk_ids_of_source(source_id)
+    assert len(chunk_ids_v1) > 0, "чанки записаны в граф"
+    assert len(vector._vectors) > 0, "эмбеддинги записаны в вектор"
+
+    # --- второй прогон: CONTENT_2, re-index → вектор падает → компенсация обеих осей ---
+    src.write_text(CONTENT_2, encoding="utf-8")
+    with pytest.raises(CommitStageError) as excinfo:
+        run_source(analyzer, src)
+    assert excinfo.value.compensated is True
+
+    # граф пуст (чанки удалены)
+    assert graph.list_chunk_ids_of_source(source_id) == []
+    # ВЕКТОР тОЖЕ пуст: орфанов нет (L2-03)
+    assert not vector._vectors, "старые эмбеддинги удалены при компенсации"
+    # источник и сущность сохранились (историчность, ADR-014)
+    assert graph.get_node(source_id) is not None
+    assert graph.get_node(_entity_node_id("it", "дедупликация")) is not None
+    v2 = registry.latest_active("it", "src://d.txt")
+    assert v2 is not None and v2["version"] == 2
+
+    # --- третий прогон: CONTENT_2 → no-op (L2-06) ---
+    run_source(analyzer, src)
+    assert registry.latest_active("it", "src://d.txt")["version"] == 2
+    assert graph.list_chunk_ids_of_source(source_id) == []
+    assert not vector._vectors
+
+
+def test_atomic_pair_writes_both_axes_in_one_batch(tmp_path: Path) -> None:
+    """A-2 (4.2/2.2): атомарная пара — обе оси через единый batch движка
+    (Neo4j-контракт `atomic_batch`), без компенсации."""
+    vector_axis = InMemoryVectorStore()
+    graph = _AtomicBatchGraph(vector_axis)
+    assert graph.consistency_capability() == vector_axis.consistency_capability() == "atomic"
+    assert graph.engine_key() == vector_axis.engine_key()
+
+    analyzer, _ = build_analyzer(tmp_path, graph, vector_axis)
+    src = tmp_path / "d.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    run_source(analyzer, src)
+
+    source_id = _source_node_id("it", "src://d.txt")
+    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    assert chunk_ids, "обе оси записаны через единый batch"
+    # в единой транзакции лежат операции ОБЕИХ осей (граф: узлы+рёбра; вектор: delete+upsert)
+    kinds = {kind for kind, _ in graph.batch_calls}
+    assert {"upsert_nodes", "upsert_edges", "upsert_vectors"} <= kinds
+    assert set(vector_axis._vectors) == set(chunk_ids), "оси согласованы после атомарного COMMIT"
+    # компенсация не вызывалась: batch — единственный путь записи
+    assert graph.delete_node_outside_tx == 0
+
+
+class _AtomicBatchGraph(InMemoryGraphStore):
+    """Граф-координатор атомарной пары: единая запись обеих осей (контракт A-2).
+
+    Имитирует Neo4j-pair: `atomic_batch()` возвращает общий контекст, через который
+    идут операции и графовой, и векторной осей (в прототипе — InMemory-делегирование).
+    """
+
+    def __init__(self, vector_axis: InMemoryVectorStore) -> None:
+        super().__init__()
+        self._vector_axis = vector_axis
+        self.batch_calls: list[tuple[str, Any]] = []
+        self.delete_node_outside_tx = 0
+
+    @contextmanager
+    def atomic_batch(self) -> Iterator[_RecordingBatch]:
+        # упрощённая модель: без транзакционного отката внутри батча (в реальном Neo4j
+        # его делает session/begin_transaction); исключение просто пробрасывается
+        yield _RecordingBatch(self, self._vector_axis)
+
+    def delete_node(self, node_id: str) -> bool:
+        if self._journal is None:
+            self.delete_node_outside_tx += 1
+        return super().delete_node(node_id)
+
+
+class _RecordingBatch:
+    """Единый контекст обеих осей (A-2): логирует и делегирует операции в оси."""
+
+    def __init__(self, graph: InMemoryGraphStore, vector: InMemoryVectorStore) -> None:
+        self._graph = graph
+        self._vector = vector
+
+    def _record(self, kind: str, arg: Any) -> None:
+        self._graph.batch_calls.append((kind, arg))
+
+    def upsert_nodes(self, nodes: list[dict[str, Any]]) -> None:
+        self._record("upsert_nodes", nodes)
+        self._graph.upsert_nodes(nodes)
+
+    def upsert_edges(self, edges: list[dict[str, Any]]) -> None:
+        self._record("upsert_edges", edges)
+        self._graph.upsert_edges(edges)
+
+    def delete_node(self, node_id: str) -> bool:
+        self._record("delete_node", node_id)
+        return self._graph.delete_node(node_id)
+
+    def upsert_vectors(self, items: list[dict[str, Any]]) -> None:
+        self._record("upsert_vectors", items)
+        self._vector.upsert_vectors(items)
+
+    def delete_vectors(self, chunk_ids: list[str]) -> None:
+        self._record("delete_vectors", chunk_ids)
+        self._vector.delete_vectors(chunk_ids)

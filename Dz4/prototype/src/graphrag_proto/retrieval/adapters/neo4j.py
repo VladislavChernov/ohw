@@ -14,7 +14,11 @@ import re
 from contextlib import contextmanager
 from typing import Any
 
-from graphrag_proto.retrieval.adapters.base import GraphStoreProvider, VectorStoreProvider
+from graphrag_proto.retrieval.adapters.base import (
+    Consistency,
+    GraphStoreProvider,
+    VectorStoreProvider,
+)
 from graphrag_proto.retrieval.adapters.schemas import (
     normalize_graph_row,
     normalize_vector_row,
@@ -109,6 +113,52 @@ class Neo4jGraphStore(GraphStoreProvider):
         if self._driver is not None:
             self._driver.close()
             self._driver = None
+
+    # ----------------------------------------------------------------- A-2 capability
+
+    def consistency_capability(self) -> Consistency:
+        """Neo4j-ось способна на атомарную запись пары при общем движке (ADR-024)."""
+        return "atomic"
+
+    def engine_key(self) -> str:
+        return f"neo4j:{self._uri}:{self._database or ''}"
+
+    @contextmanager
+    def atomic_batch(self) -> Any:
+        """Обе оси в одной транзакции Neo4j (A-2): один `session.begin_transaction()`.
+
+        Объединяет операции графа и векторов (движок один), коммитит вместе; при
+        исключении внутри блока транзакция откатывается целиком.
+        """
+        with self._session() as session, session.begin_transaction() as tx:
+            yield _Neo4jBatch(tx)
+
+
+class _Neo4jBatch:
+    """Запись обеих осей в общей транзакции Neo4j (A-2, атомарная пара)."""
+
+    def __init__(self, tx: Any) -> None:
+        self._tx = tx
+
+    def upsert_nodes(self, nodes: list[dict[str, Any]]) -> None:
+        _upsert_nodes(self._tx, nodes)
+
+    def upsert_edges(self, edges: list[dict[str, Any]]) -> None:
+        _upsert_edges(self._tx, edges)
+
+    def delete_node(self, node_id: str) -> bool:
+        _delete_node(self._tx, node_id)
+        return True
+
+    def upsert_vectors(self, items: list[dict[str, Any]]) -> None:
+        _upsert_vectors(self._tx, items)
+
+    def delete_vectors(self, chunk_ids: list[str]) -> None:
+        if chunk_ids:
+            self._tx.run(
+                f"MATCH (c:{CHUNK_LABEL}) WHERE c.node_id IN $ids DETACH DELETE c",
+                parameters={"ids": chunk_ids},
+            ).consume()
 
 
 class _TxGraph(GraphStoreProvider):
@@ -248,6 +298,15 @@ class Neo4jVectorStore(VectorStoreProvider):
             for score, row_with_score in scored[: (top_k if top_k > 0 else 5)]
         ]
         return result
+
+    # ----------------------------------------------------------------- A-2 capability
+
+    def consistency_capability(self) -> Consistency:
+        """Neo4j-ось способна на атомарную запись пары при общем движке (ADR-024)."""
+        return "atomic"
+
+    def engine_key(self) -> str:
+        return f"neo4j:{self._uri}:{self._database or ''}"
 
     @contextmanager
     def transaction(self) -> Any:

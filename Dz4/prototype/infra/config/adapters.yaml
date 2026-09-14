@@ -14,6 +14,14 @@ adapters:
   llm: "openai"
   embeddings: "bge_m3_service"
   reranker: "bge_reranker"
+  # A-2 (ADR-024): capability атомарности COMMIT по id адаптера. Значения:
+  # "atomic" — ось может писать обе оси пары в одной транзакции движка при общем
+  # engine_key(); "best_effort" — атомарность пары не обещается. Контракт закрыт
+  # тестом test_adapter_catalog_ssot.py (декларация == consistency_capability()).
+
+  capabilities:
+    graph_store: "atomic"
+    vector_store: "atomic"
 
 # Параметры соединения для конкретных реализаций (namespace: storage).
 storage:

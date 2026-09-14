@@ -217,15 +217,22 @@ class VectorStoreProvider(ABC):
 
 Вводится в M2 (L2-04/L2-05, ADR-023) вместе с Ingestion COMMIT в реальные хранилища.
 
-#### 2.6.1. Атомарная запись (`transaction()`)
+#### 2.6.1. Атомарная запись (`transaction()`, A-2 capability)
 
-`transaction()` возвращает context manager с самим хранилищем; изменение применяется **на успешном выходе** из блока, при исключении — откатывается целиком (не создаёт частичное состояние). Вложенные `with graph.transaction(), vector.transaction()` в Ingestion/COMMIT дают атомарность граф+вектор в пределах прототипа.
+`transaction()` возвращает context manager с самим хранилищем; изменение применяется **на успешном выходе** из блока, при исключении — откатывается целиком (не создаёт частичное состояние).
+
+**Граница атомарности (ADR-024, бандл A-2).** Атомарность пары определяется **capability-контрактом**, а не обёрткой:
+
+- `consistency_capability() -> "atomic" | "best_effort"` — возможность оси участвовать в атомарной записи пары при общем с партнёром `engine_key()` (дефолт — `best_effort`);
+- `engine_key() -> str | None` — ключ движка/инстанса БД (сравнивается только в паре; `None` — уникальный/неизвестный движок);
+- **атомарная пара**: обе оси `"atomic"` И `engine_key()` совпадают → пишет обе оси **в одной транзакции движка**. Для пары с общим движком, предоставляющей `atomic_batch()` (Neo4j-пара — один `session.begin_transaction()`), — через единый batch; для пары с одним процессом (InMemory) — вложенные `transaction()`-контексты, общий откат при исключении;
+- **все прочие пары — best_effort**: commit графа, затем вектора; при сбое второй оси CommitStage компенсирует граф (`delete_node` записанных чанков, Source/Entity сохраняются) и завершает джобу `failed` с пометкой «компенсировано»; повтор — идемпотентен (L2-06). 2PC не вводится (ADR-024).
 
 ```python
-with graph_store.transaction() as gtx, vector_store.transaction() as vtx:
-    gtx.upsert_nodes(nodes)
-    gtx.upsert_edges(edges)
-    vtx.upsert_vectors(vectors)   # исключение -> откат обеих осей
+if g.consistency_capability() == v.consistency_capability() == "atomic" and g.engine_key() == v.engine_key():
+    # атомарная пара: одна транзакция движка (atomic_batch() либо вложенные контексты)
+else:
+    # best_effort: последовательный commit + компенсация (CommitStage, orchestrator.py)
 ```
 
 #### 2.6.2. Схемы payload'ов COMMIT

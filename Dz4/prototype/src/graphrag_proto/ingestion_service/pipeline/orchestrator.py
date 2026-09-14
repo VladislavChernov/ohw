@@ -242,13 +242,56 @@ class ValidateStage(Stage):
                 raise ValueError("сущность без источников на VALIDATE")
 
 
+class CommitStageError(RuntimeError):
+    """Сбой COMMIT (A-2, ADR-024). `compensated=True` — best_effort-пара: сбой второй
+    оси, граф откачен компенсацией; джоба завершается failed с пометкой «компенсировано»."""
+
+    def __init__(self, message: str, *, compensated: bool) -> None:
+        super().__init__(message)
+        self.compensated = compensated
+
+
+def _is_atomic_pair(graph: GraphStoreProvider, vector: VectorStoreProvider) -> bool:
+    """Атомарная пара (A-2): обе оси декларируют `"atomic"` И обслуживаются общим
+    движком (`engine_key()` совпадают). Иначе — best_effort."""
+    return (
+        graph.consistency_capability() == "atomic"
+        and vector.consistency_capability() == "atomic"
+        and graph.engine_key() is not None
+        and graph.engine_key() == vector.engine_key()
+    )
+
+
+def _apply_axes(
+    nodes: list[dict[str, Any]],
+    edges: list[dict[str, Any]],
+    vectors: list[dict[str, Any]],
+    stale_chunks: list[str],
+    graph_tx: Any,
+    vector_tx: Any,
+) -> None:
+    """Применение плана записи к контекстам осей (в атомарном пути `graph_tx` и
+    `vector_tx` — один объект batch движка)."""
+    for chunk_id in stale_chunks:
+        graph_tx.delete_node(chunk_id)
+    vector_tx.delete_vectors(stale_chunks)
+    graph_tx.upsert_nodes(nodes)
+    graph_tx.upsert_edges(edges)
+    vector_tx.upsert_vectors(vectors)
+
+
 class CommitStage(Stage):
-    """COMMIT: атомарная запись узлов/рёбер + эмбеддингов чанков (L2-04).
+    """COMMIT: атомарная запись узлов/рёбер + эмбеддингов чанков (L2-04, A-2).
 
     M2 (ADR-023/design D5): документ регистрируется в DocumentRegistry (SQLite,
     источник версий/идемпотентности — ADR-014), а узлы/рёбра/векторы пишутся через
-    GraphStoreProvider/VectorStoreProvider в одной транзакции (rollback при ошибке).
-    Повторная загрузка неизменённого контента — no-op (новая версия не пишется).
+    GraphStoreProvider/VectorStoreProvider. Повторная загрузка неизменённого контента —
+    no-op (новая версия не пишется).
+
+    A-2 (ADR-024): стратегия по capability пары. Атомарная пара (оба `"atomic"` + общий
+    `engine_key()`) пишет обе оси в одной транзакции движка; иначе — best_effort:
+    последовательный commit графа → вектора, при сбое второй оси граф компенсируется
+    удалением записанных чанков, джоба failed с пометкой «компенсировано».
     """
 
     name = "COMMIT"
@@ -274,7 +317,9 @@ class CommitStage(Stage):
         self._write(doc, ctx)
 
     def _write(self, doc: Any, ctx: PipelineContext) -> None:
-        if self._graph_store is None or self._vector_store is None:
+        graph = self._graph_store
+        vector = self._vector_store
+        if graph is None or vector is None:
             return
         domain = doc.domain
         source_url = doc.source_url
@@ -340,15 +385,78 @@ class CommitStage(Stage):
                 }
             )
 
-        stale_chunks = self._graph_store.list_chunk_ids_of_source(source_id)
+        stale_chunks = graph.list_chunk_ids_of_source(source_id)
+        written_chunk_ids = [meta["chunk_id"] for meta in ctx.chunks_meta]
 
-        with self._graph_store.transaction() as graph_tx, self._vector_store.transaction() as vector_tx:
+        if _is_atomic_pair(graph, vector):
+            self._write_atomic(graph, vector, nodes, edges, vectors, stale_chunks)
+            return
+        self._write_best_effort(graph, vector, nodes, edges, vectors, stale_chunks, written_chunk_ids)
+
+    def _write_atomic(
+        self,
+        graph: GraphStoreProvider,
+        vector: VectorStoreProvider,
+        nodes: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+        vectors: list[dict[str, Any]],
+        stale_chunks: list[str],
+    ) -> None:
+        """Атомарная пара: обе оси в одной транзакции движка (A-2).
+
+        При наличии `atomic_batch()` (Neo4j-пара — один `session.begin_transaction()`)
+        — запись через batch; иначе (InMemory-пара, единый процесс) — вложенные
+        `transaction()`-контексты: исключение откатывает обе оси.
+        """
+        batch = graph.atomic_batch()
+        if batch is not None:
+            with batch as tx:
+                _apply_axes(nodes, edges, vectors, stale_chunks, tx, tx)
+            return
+        with graph.transaction() as graph_tx, vector.transaction() as vector_tx:
+            _apply_axes(nodes, edges, vectors, stale_chunks, graph_tx, vector_tx)
+
+    def _write_best_effort(
+        self,
+        graph: GraphStoreProvider,
+        vector: VectorStoreProvider,
+        nodes: list[dict[str, Any]],
+        edges: list[dict[str, Any]],
+        vectors: list[dict[str, Any]],
+        stale_chunks: list[str],
+        written_chunk_ids: list[str],
+    ) -> None:
+        """best_effort-пара (A-2): commit графа, затем вектора.
+
+        Сбой первой оси — джоба failed без компенсации (ничего не записано). Сбой второй
+        оси — граф компенсируется: удаляются записанные чанки (`delete_node`), остаются
+        Source/Entity; ошибка пробрасывается как `CommitStageError(compensated=True)`.
+        Повтор той же джобы идемпотентен (L2-06): registry знает версию, контент
+        не изменился → write не выполняется.
+        """
+        with graph.transaction() as graph_tx:
             for chunk_id in stale_chunks:
                 graph_tx.delete_node(chunk_id)
-            vector_tx.delete_vectors(stale_chunks)
             graph_tx.upsert_nodes(nodes)
             graph_tx.upsert_edges(edges)
-            vector_tx.upsert_vectors(vectors)
+        try:
+            with vector.transaction() as vector_tx:
+                vector_tx.delete_vectors(stale_chunks)
+                vector_tx.upsert_vectors(vectors)
+        except Exception as exc:
+            # компенсация обеих осей по полному следу джобы (stale + новые): граф уже
+            # коммичен, а векторная транзакция откатила и delete устаревших чанков,
+            # поэтому удалять надо и stale (старые эмбеддинги остались в векторе),
+            # и written (L2-03: без орфанов ни в одной из осей)
+            compensate_ids = sorted(set(stale_chunks) | set(written_chunk_ids))
+            for chunk_id in compensate_ids:
+                graph.delete_node(chunk_id)
+            vector.delete_vectors(compensate_ids)
+            raise CommitStageError(
+                "COMMIT best_effort: сбой второй оси, граф компенсирован "
+                f"(удалено чанков: {len(compensate_ids)})",
+                compensated=True,
+            ) from exc
 
 
 def soft_delete_source(

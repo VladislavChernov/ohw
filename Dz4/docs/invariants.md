@@ -29,7 +29,7 @@
 | L2-01 | Каждая доменная сущность имеет уникальный `canonical_name` (constraint по `unique_key` профиля) и несёт `source_ids` + `extractor_version` | `docs/data_model.md` §3, §5 |
 | L2-02 | Один вариант записи («тег») в домене не может вести к двум разным каноническим терминам | CONCEPT §6.4, `docs/04` §4 |
 | L2-03 | Каждый Chunk принадлежит ровно одному Source (связь `CONTAINS`); орфанные чанки запрещены | CONCEPT §4.1 (CHUNK), `docs/data_model.md` §4 |
-| L2-04 | Графовая и векторная оси связаны по ключу `chunk_id`; запись узлов/рёбер и эмбеддингов коммитится атомарно (rollback при ошибке) | CONCEPT §4.1 (COMMIT), ADR-013, `docs/data_model.md` §6 |
+| L2-04 | Графовая и векторная оси связаны по ключу `chunk_id`; запись узлов/рёбер и эмбеддингов коммитится атомарно **в пределах одного движка** (атомарная пара: обе оси `consistency_capability()=="atomic"` и общий `engine_key()`); разнородные пары — best-effort c компенсацией (сбой второй оси → граф откатывается `delete_node`, джоба `failed` с пометкой «компенсировано») | CONCEPT §4.1 (COMMIT), ADR-013, ADR-024, `docs/data_model.md` §6, `openspec/changes/architecture-atomic-commit/spec.md` |
 | L2-05 | Удаление источника — soft delete: чанки снимаются с поиска, сущности сохраняются, пока имеют активные `source_ids`; физическое удаление — только фоновый cleanup по retention | ADR-014, `docs/operations_requirements.md` §2 |
 | L2-06 | Идемпотентность INGEST: повторная загрузка неизменённого `source_url` (тот же content hash) — no-op, без плодования версий | ADR-014 |
 

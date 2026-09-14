@@ -70,3 +70,7 @@ adapters:
   llm: "openai"
   embeddings: "bge_m3_service"
   reranker: "bge_reranker"
+  # A-2 (ADR-024): capability атомарности COMMIT (см. infra/config/adapters.yaml).
+  capabilities:
+    graph_store: "atomic"
+    vector_store: "atomic"
