@@ -31,11 +31,17 @@ class CachedAnswer:            # то, что вернёт hit
 
 class SemanticCache(ABC):
     mode: str                  # "inmemory" | "redis"
-    def lookup(self, embedding: list[float], threshold: float) -> CachedAnswer | None: ...
-    def store(self, embedding: list[float], answer: CachedAnswer) -> None: ...
+    threshold: float           # порог живёт на инстансе (из env)
+    ttl_s: float               # срок жизни записи (0 = без истечения)
+    def lookup(self, embedding: list[float], threshold: float, domain: str = "") -> CachedAnswer | None: ...
+    def store(self, embedding: list[float], answer: CachedAnswer, domain: str = "") -> None: ...
     def stats(self) -> dict[str, int]: ...   # {entries, hits, misses}
     def clear(self) -> None: ...
 ```
+
+`domain` — активный домен запроса (дефолт `""`): имя Redis-ключа `query:sc:<domain>` и
+namespace-бакет InMemory-реализации. Добавлен на этапе реализаций с обратносовместимым
+дефолтом (зафиксировано 2026-09-14).
 
 Hit: `max cosine(embedding, stored_embedding) >= threshold` (по живому TTL).
 Косинус — метрика по умолчанию (эмбеддинги L2-нормализованы → косинус = dot).

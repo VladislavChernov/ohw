@@ -15,11 +15,18 @@ class CachedAnswer:
 
 class SemanticCache(ABC):
     mode: str
-    def lookup(self, embedding: list[float], threshold: float) -> CachedAnswer | None
-    def store(self, embedding: list[float], answer: CachedAnswer) -> None
+    threshold: float            # порог живёт на инстансе (из env)
+    ttl_s: float                # срок жизни записи (0 = без истечения)
+    def lookup(self, embedding: list[float], threshold: float, domain: str = "") -> CachedAnswer | None
+    def store(self, embedding: list[float], answer: CachedAnswer, domain: str = "") -> None
     def stats(self) -> dict[str, int]   # {entries, hits, misses}
     def clear(self) -> None
 ```
+
+- `domain` — активный домен запроса (`""` по умолчанию); участвует в имени Redis-ключа
+  `query:sc:<domain>` (и в namespace bucket'а InMemory-реализации). Расширение сигнатуры
+  относительно исходного черновика дополнено на этапе реализаций с обратносовместимым
+  дефолтом `""` (зафиксировано 2026-09-14).
 
 - `lookup` возвращает ответ с **максимальным** косинусом среди живых (по TTL)
   записей, если `max_cosine >= threshold`; иначе `None`. Пустой/нулевой
@@ -47,13 +54,13 @@ class SemanticCache(ABC):
 `run()`:
 1. `embed()` (как сейчас);
 2. если кэш есть:
-   - `answer = cache.lookup(embedding, threshold)`;
+   - `answer = cache.lookup(embedding, cache.threshold, domain)`
    - **hit**: `emit("status", {"stage": "cache", "hit": True})`;
      `done = {text: answer.text, sources: answer.sources,
      cache_hit: True, cache_lookup_s: <float>, generation_time_s: 0.0,
      retrieval_time_s: 0.0, total_time_s: <float>}`;
      `emit("done", done)`; вернуть `done`. LLM/store не вызываются, `token` не шлётся.
-   - **miss**: обычный цикл; перед `emit("done")` `cache.store(embedding, CachedAnswer(done.text, done.sources))`;
+   - **miss**: обычный цикл; перед `emit("done")` `cache.store(embedding, CachedAnswer(done.text, done.sources), domain)`;
      `done["cache_hit"] = False`; `done["cache_lookup_s"] = <float>`.
 3. Статус-события не упорядочиваются иначе; `status: cache` — новый не-терминальный
    stage (конверт ADR-016 сохраняется).

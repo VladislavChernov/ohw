@@ -2,9 +2,9 @@
 
 ## 1. Спецификация
 
-- [ ] 1.1. План и дизайн: `proposal.md` (готов), `design.md` — выбор размещения в
+- [x] 1.1. План и дизайн: `proposal.md` (готов), `design.md` — выбор размещения в
       `QueryPipeline.run` (после `embed`), структуры записей, TTL/порог.
-- [ ] 1.2. `specs/add-semantic-cache/spec.md`: контракт `SemanticCache`, поведение
+- [x] 1.2. `specs/add-semantic-cache/spec.md`: контракт `SemanticCache`, поведение
       hit/miss, поля `done`, env-переменные, Redis-ключи, ограничения.
 
 ## 2. Реализация
