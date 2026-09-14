@@ -150,7 +150,12 @@ def _topology_rebuilder(
 
 
 def main() -> None:
-    from graphrag_proto.query_service.runtime import build_pipeline, build_queue, build_store
+    from graphrag_proto.query_service.runtime import (
+        build_pipeline,
+        build_queue,
+        build_semantic_cache,
+        build_store,
+    )
     from graphrag_proto.security import install_redaction
 
     install_redaction()
@@ -158,9 +163,13 @@ def main() -> None:
     store = build_store()
     worker_id = os.environ.get("QUERY_WORKER_ID", "worker-1")
 
+    # Semantic Cache (бандл 3/3): собирается один раз и переживает hot-reload —
+    # объект общий для initial-сборки и пересборок пайплайна (записи сохраняются).
+    semantic_cache = build_semantic_cache()
+
     client = TopologyClient.from_env()
     initial_map = client.adapters_map() if client is not None else None
-    pipeline = build_pipeline(adapter_map=initial_map)
+    pipeline = build_pipeline(adapter_map=initial_map, semantic_cache=semantic_cache)
 
     poll_interval_s = float(os.environ.get("TOPOLOGY_POLL_INTERVAL", "5"))
     worker = QueryWorker(
@@ -175,7 +184,9 @@ def main() -> None:
         reclaim_interval_s=float(os.environ.get("TASK_RECLAIM_INTERVAL_S", "10")),
         pipeline_rebuilder=_topology_rebuilder(
             client,
-            on_reload=lambda adapter_map: worker.set_pipeline(build_pipeline(adapter_map=adapter_map)),
+            on_reload=lambda adapter_map: worker.set_pipeline(
+                build_pipeline(adapter_map=adapter_map, semantic_cache=semantic_cache)
+            ),
         )
         if client is not None and poll_interval_s > 0
         else None,

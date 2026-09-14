@@ -15,6 +15,11 @@ from graphrag_proto.query_service.task_queue import (
 from graphrag_proto.retrieval.adapters.factory import build_adapters
 from graphrag_proto.retrieval.pipeline import QueryPipeline
 from graphrag_proto.retrieval.profile import DomainProfileLoader
+from graphrag_proto.retrieval.semantic_cache import (
+    InMemorySemanticCache,
+    RedisSemanticCache,
+    SemanticCache,
+)
 
 
 def build_store(db_path: str | None = None) -> TaskStore:
@@ -30,8 +35,53 @@ def build_queue() -> TaskQueue:
     raise ValueError(f"QUERY_QUEUE={kind!r}: допустимо redis|inmemory")
 
 
-def build_pipeline(adapter_map: Mapping[str, str] | None = None) -> QueryPipeline:
-    """Сборка пайплайна: карта топологии (M3) > env/дефолт (M2)."""
+def _cache_threshold() -> float:
+    try:
+        threshold = float(os.environ.get("SEMANTIC_CACHE_THRESHOLD", "0.85"))
+    except ValueError:
+        raise ValueError("SEMANTIC_CACHE_THRESHOLD должен быть числом") from None
+    if not 0.0 < threshold <= 1.0:
+        raise ValueError(f"SEMANTIC_CACHE_THRESHOLD={threshold:g} вне диапазона (0, 1]")
+    return threshold
+
+
+def _cache_ttl() -> float:
+    raw = os.environ.get("SEMANTIC_CACHE_TTL_S", "3600").strip()
+    try:
+        ttl = float(raw)
+    except ValueError:
+        return 0.0  # нечисловое -> без истечения (spec)
+    return ttl if ttl > 0 else 0.0
+
+
+def build_semantic_cache() -> SemanticCache | None:
+    """Сборка кэша из env (бандл 3/3). None: SEMANTIC_CACHE_ENABLED пусто/false — выключено.
+
+    `SEMANTIC_CACHE_MODE` = inmemory | redis; порог (0, 1], TTL (0 — без истечения).
+    Объект создаётся в worker.main() один раз и переживает hot-reload пересборку.
+    """
+    enabled = os.environ.get("SEMANTIC_CACHE_ENABLED", "").strip()
+    if not enabled or enabled.lower() in ("0", "false", "no", "off"):
+        return None
+    threshold = _cache_threshold()
+    ttl_s = _cache_ttl()
+    mode = os.environ.get("SEMANTIC_CACHE_MODE", "inmemory").strip().lower()
+    if mode == "inmemory":
+        return InMemorySemanticCache(threshold=threshold, ttl_s=ttl_s)
+    if mode == "redis":
+        return RedisSemanticCache(
+            url=os.environ.get("QUERY_REDIS_URL", "redis://valkey:6379/0"),
+            threshold=threshold,
+            ttl_s=ttl_s,
+        )
+    raise ValueError(f"SEMANTIC_CACHE_MODE={mode!r}: допустимо inmemory|redis")
+
+
+def build_pipeline(
+    adapter_map: Mapping[str, str] | None = None,
+    semantic_cache: SemanticCache | None = None,
+) -> QueryPipeline:
+    """Сборка пайплайна: карта топологии (M3) > env/дефолт (M2); кэш передаётся явно."""
     adapters = build_adapters(adapter_map)
     return QueryPipeline(
         embedder=adapters.embedder,
@@ -40,6 +90,7 @@ def build_pipeline(adapter_map: Mapping[str, str] | None = None) -> QueryPipelin
         reranker=adapters.reranker,
         llm=adapters.llm,
         profile_loader=DomainProfileLoader(config_url=os.environ.get("CONFIG_URL", "")),
+        semantic_cache=semantic_cache,
     )
 
 

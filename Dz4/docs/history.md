@@ -1,6 +1,6 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v11 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна; A-2: честный контракт атомарности COMMIT — capability derivation atomic/best_effort + компенсация, ADR-024; решения по кэшу и ревизии данных)
+> **Версия:** v12 (реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker, semantic-cache; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна; A-2: честный контракт атомарности COMMIT — capability derivation atomic/best_effort + компенсация, ADR-024; Semantic Cache на Valkey, ADR-025; решения по кэшу и ревизии данных)
 > **Последнее обновление:** 2026-09-14
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
@@ -322,8 +322,8 @@ v6 — следующая итерация концепции и докумен�
    cross-encoder rerank (графовый чанк top-1); bge-m3/bge-reranker-base подключаются
    через `EMBEDDING_MODEL`/`RERANKER_MODEL` (веса ~2.3 ГБ — по требованию, шаг в Runbook).
 
-**Осталось в M3:** бандл 3/3 «add-semantic-cache» (Valkey-кэш семантических
-запросов).
+**Осталось в M3:** бандл 3/3 `add-semantic-cache` — реализован (см. Этап 11); в M3
+остался только низкоприоритетный хвост — native vector index (Neo4j HNSW, ADR-023 OQ2).
 
 **Закрытые хвосты вех (L1-01, L4-01), перед бандлом 2/3:**
 
@@ -543,6 +543,40 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
    обязательна до M5/M6): fingerprint «профиль домена + карта адаптеров + версия данных»
    на основе ADR-014-версий DocumentRegistry + topology-revision; не текущий техдолг,
    а отложенное архитектурное решение (deferred decision).
+
+---
+
+## Этап 11: Semantic Cache на Valkey (бандл 3/3) — закрытие M3
+
+**Дата:** 2026-09-14
+**Статус:** Активный код (прототип `prototype/`); бандл реализован, до коммита
+
+### Реализация (M3.3, ADR-025)
+
+1. **`retrieval/semantic_cache.py`** — `SemanticCache` (ABC, concrete `store()` = no-op для
+   «плохих» ответов по `should_cache_text`: пустой `text`, отказ LLM «контекста
+   недостаточно»), `CachedAnswer(text, sources)`, `InMemorySemanticCache`
+   (потокобезопасный bucket по domain, TTL-чистка, `stats()`, `clear()`),
+   `RedisSemanticCache` (HASH `query:sc:<domain>`, поле `sc:<sha256(repr(embedding))[:12]>`,
+   пайлоад JSON `{embedding,text,sources,ts}`, lazy-`import redis`, client-инъекция для
+   тестов, HDEL-чистка при сканировании).
+2. **QueryPipeline** — параметр `semantic_cache=None` (выкл = поведение M2); miss →
+   полный цикл + запись ответа, `done(cache_hit:false, cache_lookup_s)`; hit → статусы
+   `embedding` → `cache{hit:true}` → `done` без обращений к store/LLM, `token` не шлётся,
+   `generation_time_s`/`retrieval_time_s` = 0.
+3. **`query_service/runtime.py`** — `build_semantic_cache()` из env
+   (`SEMANTIC_CACHE_ENABLED`, `SEMANTIC_CACHE_MODE` redis|inmemory,
+   `SEMANTIC_CACHE_THRESHOLD` 0.85, `SEMANTIC_CACHE_TTL_S` 3600/0=∞, `QUERY_REDIS_URL`);
+   `build_pipeline(adapter_map, semantic_cache=...)`. **`worker.py`** — кэш собирается
+   один раз и передаётся и в initial, и в hot-reload lambda → переживает пересборку
+   адаптеров (топология).
+4. **Доки** — ADR-025, §1 `docs/03_retriever.md` (кэш-шаг 0 + допущение инвалидации),
+   `docs/demo_runbook.md` «Семантический кэш (M3.3)», статус M3 в
+   `docs/prototype_requirements.md`.
+5. **Верификация** — 259 тестов (`test_semantic_cache.py` — кэш, Redis-формат через
+   FakeRedis, TTL, «плохие» ответы; hit/miss в `test_retrieval_pipeline.py`;
+   hot-reload-preserve в `test_worker_hotreload.py`), `ruff check .` и `mypy src` чисто.
+   Коммит `0208c28`.
 
 ---
 

@@ -1,13 +1,15 @@
 """QueryPipeline — 7 шагов retrieval-цикла (docs/03_retriever.md, D3 design M2):
 
 1. embedding (DeterministicEmbedder, L4-01) → status: embedding
-2. graph ∥ vector — параллельно, независимые оси (L1-04). Графовая ось отключается
+2. semantic cache (бандл 3/3, add-semantic-cache): hit → status: cache{hit:true} → done
+   (без store/LLM, без token); miss → обычный цикл + store() перед done
+3. graph ∥ vector — параллельно, независимые оси (L1-04). Графовая ось отключается
    флагом `graph_search_enabled` (profile.retrieval, env `RETRIEVAL_GRAPH_ENABLED`)
    → status: graph{enabled}, vector
-3. rerank (NoOp) → status: rerank
-4. Context Assembly (context.py, L3-03/L3-04)
-5. LLM streaming (OpenAICompatibleAdapter / FakeLLM) → status: llm, token*
-6. done — {text, sources, generation_time_s, retrieval_time_s, total_time_s}
+4. rerank (NoOp) → status: rerank
+5. Context Assembly (context.py, L3-03/L3-04)
+6. LLM streaming (OpenAICompatibleAdapter / FakeLLM) → status: llm, token*
+7. done — {text, sources, generation_time_s, retrieval_time_s, total_time_s[, cache_hit, cache_lookup_s]}
 
 emit(event_type, payload) — обратный вызов воркера (публикует события конверта ADR-016).
 """
@@ -30,6 +32,7 @@ from graphrag_proto.retrieval.adapters.base import (
 from graphrag_proto.retrieval.context import CONTEXT_TOKEN_LIMIT, ContextAssembly
 from graphrag_proto.retrieval.profile import DomainProfileLoader, ProfileError
 from graphrag_proto.retrieval.retrievers import GraphRetriever, VectorRetriever
+from graphrag_proto.retrieval.semantic_cache import CachedAnswer, SemanticCache
 
 Emit = Callable[[str, dict[str, Any]], None]
 
@@ -80,6 +83,7 @@ class QueryPipeline:
         max_graph_nodes: int = 5,
         max_vector_chunks: int = 5,
         executor: ThreadPoolExecutor | None = None,
+        semantic_cache: SemanticCache | None = None,
     ) -> None:
         self._embedder = embedder
         self._graph_store = graph_store
@@ -90,6 +94,9 @@ class QueryPipeline:
         self._max_graph_nodes = max_graph_nodes
         self._max_vector_chunks = max_vector_chunks
         self._executor = executor or ThreadPoolExecutor(max_workers=2, thread_name_prefix="query-pipeline")
+        # Semantic Cache (бандл 3/3): None — выключено (поведение M2/M3, backward-compat).
+        self._semantic_cache = semantic_cache
+        self._cache_threshold = semantic_cache.threshold if semantic_cache is not None else 0.0
 
     def shutdown(self) -> None:
         """Закрытие общего executor'а (вызывается при замене пайплайна/остановке воркера)."""
@@ -101,6 +108,26 @@ class QueryPipeline:
         emit("status", {"stage": "embedding"})
         active = domain or self._profiles.active_domain()
         embedding = self._embedder.embed(query, active)
+
+        # Semantic Cache (бандл 3/3): hit — до store/LLM, без token-событий и обращений к осям.
+        cache_lookup_s = 0.0
+        if self._semantic_cache is not None:
+            cache_started = time.monotonic()
+            cached = self._semantic_cache.lookup(embedding, self._cache_threshold, active)
+            cache_lookup_s = round(time.monotonic() - cache_started, 3)
+            if cached is not None:
+                emit("status", {"stage": "cache", "hit": True})
+                cached_done: dict[str, Any] = {
+                    "text": cached.text,
+                    "sources": cached.sources,
+                    "cache_hit": True,
+                    "cache_lookup_s": cache_lookup_s,
+                    "generation_time_s": 0.0,
+                    "retrieval_time_s": 0.0,
+                    "total_time_s": round(time.monotonic() - total_started, 3),
+                }
+                emit("done", cached_done)
+                return cached_done
 
         profile = self._load_profile(active)
         enabled = graph_search_enabled(profile)
@@ -138,13 +165,24 @@ class QueryPipeline:
         text = "".join(parts)
         generation_s = round(time.monotonic() - started, 3)
 
-        done = {
+        sources = build_sources(body_chunks)
+        if self._semantic_cache is not None:
+            # store() сам отклоняет «плохие» ответы (пустой text, отказ LLM) — решение 2026-09-13.
+            self._semantic_cache.store(
+                embedding,
+                CachedAnswer(text=text, sources=sources),
+                active,
+            )
+        done: dict[str, Any] = {
             "text": text,
-            "sources": build_sources(body_chunks),
+            "sources": sources,
             "generation_time_s": generation_s,
             "retrieval_time_s": retrieval_s,
             "total_time_s": round(time.monotonic() - total_started, 3),
         }
+        if self._semantic_cache is not None:
+            done["cache_hit"] = False
+            done["cache_lookup_s"] = cache_lookup_s
         emit("done", done)
         return done
 

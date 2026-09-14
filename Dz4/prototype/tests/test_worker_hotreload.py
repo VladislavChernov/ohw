@@ -117,6 +117,18 @@ def test_poll_interval_zero_disables_rebuilder(tmp_path: Path) -> None:
     assert worker._pipeline_rebuilder is None
 
 
+def test_build_pipeline_preserves_semantic_cache_object() -> None:
+    """Бандл 3/3: build_pipeline с semantic_cache= переживает hot-reload — объект общий."""
+    from graphrag_proto.query_service.runtime import build_pipeline
+    from graphrag_proto.retrieval.semantic_cache import InMemorySemanticCache
+
+    cache = InMemorySemanticCache(threshold=0.9, ttl_s=300)
+    p1 = build_pipeline(adapter_map=None, semantic_cache=cache)
+    p2 = build_pipeline(adapter_map=None, semantic_cache=cache)
+    # один и тот же объект — записи сохраняются между пересборками
+    assert p1._semantic_cache is p2._semantic_cache is cache
+
+
 def test_loop_exponential_backoff_on_transport_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

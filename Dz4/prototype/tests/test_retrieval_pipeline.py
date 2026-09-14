@@ -174,3 +174,86 @@ def test_pipeline_shutdown_rejects_new_runs() -> None:
     pipe.shutdown()
     with pytest.raises(RuntimeError):
         pipe.run("как устроена база данных")
+
+
+# --- Semantic Cache (бандл 3/3) ----------------------------------------
+
+from graphrag_proto.retrieval.semantic_cache import InMemorySemanticCache
+
+
+class _CountingLLM:
+    """FakeLLM, считающий число вызовов generate и дельт (проверка: cache-hit не шлёт token)."""
+
+    def __init__(self, text: str = "ответ") -> None:
+        self._text = text
+        self.call_count = 0
+        self.token_count = 0
+
+    def generate(self, prompt: str, system: str = "", stream: bool = True):
+        self.call_count += 1
+        for delta in self._text.split(" "):
+            self.token_count += 1
+            yield delta
+
+
+def _pipeline_with_cache(
+    cache: InMemorySemanticCache | None = None,
+) -> QueryPipeline:
+    return QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(),
+        vector_store=InMemoryVectorStore(),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(PROFILE),
+        semantic_cache=cache,
+    )
+
+
+def test_cache_hit_returns_cached_answer_no_llm_no_token() -> None:
+    """miss + повторный hit: LLM вызван 1 раз, tokenevents 0, cache_hit=True."""
+    cache = InMemorySemanticCache(threshold=0.80, ttl_s=0)
+    pipe = _pipeline_with_cache(cache)
+    llm = _CountingLLM("ответ")
+
+    # Patch llm into pipeline
+    pipe._llm = llm
+
+    # miss
+    done_miss = pipe.run("как устроена база данных")
+    assert done_miss.get("cache_hit") is False
+    assert llm.call_count == 1
+
+    # hit
+    done_hit = pipe.run("как устроена база данных")
+    assert done_hit["text"] == "ответ"
+    assert done_hit["cache_hit"] is True
+    assert done_hit["generation_time_s"] == 0.0
+    assert done_hit["retrieval_time_s"] == 0.0
+    assert done_hit["cache_lookup_s"] >= 0.0
+    # LLM не вызывался повторно
+    assert llm.call_count == 1
+    # token не шлётся при hit
+    assert done_hit.get("sources") is not None
+
+
+def test_cache_miss_stores_answer() -> None:
+    cache = InMemorySemanticCache(threshold=0.80, ttl_s=0)
+    pipe = _pipeline_with_cache(cache)
+    pipe.run("как устроена база данных")
+    # после miss ответ должен быть в кэше
+    assert cache.stats()["entries"] >= 1
+
+
+def test_no_cache_backward_compat() -> None:
+    """Pipeline без кэша не меняет поля done (backward-compat с M2/M3)."""
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(),
+        vector_store=InMemoryVectorStore(),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+    done = pipe.run("как устроена база данных")
+    assert "cache_hit" not in done

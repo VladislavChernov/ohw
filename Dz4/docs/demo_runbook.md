@@ -259,6 +259,58 @@ Query Worker подхватит карту через `TOPOLOGY_POLL_INTERVAL` �
 (`RuntimeError` в пайплайне/запросе), а не тихий fallback — ось эмбеддингов не
 ломается молча. Модель не загрузилась → 503 на эндпоинте.
 
+## Семантический кэш (M3.3)
+
+Бандл 3/3 добавил кэш ответов по семантической близости эмбеддинга запроса
+(ADR-025). Хранилище — Valkey/Redis HASH `query:sc:<domain>`; порог косинусной
+близости и TTL — env Query-воркера.
+
+### Включение
+
+```bash
+# минимально: Redis-режим (Valkey уже есть в стеке)
+SEMANTIC_CACHE_ENABLED=true docker compose --profile config --profile graph --profile llm up -d query-worker
+
+# или in-memory на воркере (без внешней зависимости)
+SEMANTIC_CACHE_ENABLED=true SEMANTIC_CACHE_MODE=inmemory docker compose --profile config --profile graph --profile llm up -d query-worker
+```
+
+Параметры (Query Worker):
+
+| Env | Дефолт | Смысл |
+|-----|--------|-------|
+| `SEMANTIC_CACHE_ENABLED` | пусто (выкл) | `true` включает кэш |
+| `SEMANTIC_CACHE_MODE` | `redis` | `redis` / `inmemory` |
+| `SEMANTIC_CACHE_THRESHOLD` | `0.85` | cos-близость запроса к записи для hit; `(0, 1]` |
+| `SEMANTIC_CACHE_TTL_S` | `3600` | срок жизни записи; `0` = бессрочно |
+| `QUERY_REDIS_URL` | `redis://valkey:6379/0` | подключение к Redis/Valkey |
+
+При `SEMANTIC_CACHE_ENABLED` unset поведение Query API идентично M2
+(backward-compat): поля `cache_hit`/`cache_lookup_s` в `done` отсутствуют.
+
+### Сценарий hit/miss
+
+1. Первый запрос: `status embedding` → (retrieval) → `token*` → `done` с `cache_hit:false`
+   и `cache_lookup_s`; ответ записан в кэш.
+2. Повторный близкий запрос (cos ≥ порог): `status embedding` → `status cache{hit:true}`
+   → `done` с `cache_hit:true`, `cache_lookup_s`, `generation_time_s: 0`, `token` не шлётся
+   (LLM не вызывался).
+3. Разбег в `cache_lookup_s` против `retrieval_time_s + generation_time_s` первого прогона —
+   видно в UI/логах e2e.
+
+### Ручная очистка
+
+```bash
+# сброс кэша домена (через redis-cli в контейнере valkey)
+docker compose exec valkey redis-cli DEL "query:sc:it"
+
+# полный сброс
+docker compose exec valkey sh -c 'redis-cli --scan --pattern "query:sc:*" | xargs -r redis-cli del'
+```
+
+Плановый путь инвалидации по ревизии данных (epoch-bump `query:sc:<rev>:<domain>`) —
+на M4/M5 (ADR-025, п. 3); COMMIT индексации кэш не чистит.
+
 ## Ограничения демо (до M3)
 
 - **Эмбеддинги и LLM — детерминированные заглушки** (`deterministic`, FakeLLM):

@@ -135,7 +135,7 @@ Dz4/
 > | M0 — Инфраструктура | ✅ закрыта | `9225b3a` | Compose+профили, Config :8001, Glossary :8003, Neo4j+llama.cpp |
 > | M1 — Ingestion Pipeline | ✅ закрыта | `55914ff` | Ingestion API :8002, 9 этапов INGEST→COMMIT, DocumentReader (ADR-021) |
 > | M2 — Query API async + Retriever | ✅ закрыта | `a9c36f3`, `b7558ca`, `93b96c3` | Query :8000+SSE, Worker+Valkey (ADR-023), граф∥вектор+Context Assembly, demo-ui+e2e, тумблер граф-оси |
-> | M3 — Адаптеры и runtime-переключение | 🚧 в работе | `dfb7e9f`, `81490af`; бандл 2/3 — до коммита | Бандл 2/3 `add-real-embeddings-reranker` реализован (Embeddings :8004 bge-m3, Reranker :8006 bge-reranker-base, адаптеры, EmbedStage на Embedder, live mock + real-прогон MiniLM/CE); далее `add-semantic-cache` (бандл 3/3) |
+> | M3 — Адаптеры и runtime-переключение | 🚧 в работе | `dfb7e9f`, `81490af`, `0208c28` | Бандлы 2/3 и 3/3 реализованы и закоммичены: `add-real-embeddings-reranker` (Embeddings :8004 bge-m3, Reranker :8006 bge-reranker-base, адаптеры, EmbedStage на Embedder, live mock + real-прогон MiniLM/CE) и `add-semantic-cache` (Valkey-кэш семантических ответов, hit/miss + `cache_hit`/`cache_lookup_s`; A-2 — честный контракт атомарности COMMIT) |
 > | M4 — Eval и гейт готовности | ⬜ не начата | — | — |
 > | M5 — MCP-шлюз и UI | ⬜ не начата | — | — |
 > | M6 — Внешние источники (коннекторы) | ⬜ запланирована | — | План-бандл `add-source-connectors`; гайд `docs/connectors_guide.md`; реализация — по потребности, вне скоупа M3–M5 |
@@ -197,6 +197,20 @@ Dz4/
 - [ ] Native vector index (Neo4j HNSW `db.index.vector.queryNodes`) вместо Cypher cosine — низкий
       приоритет, требуется при росте числа чанков (ADR-023 OQ2); реализация внутри `Neo4jVectorStore`,
       ядро (ABC) не меняется.
+
+### Веха 3-хвосты — Semantic Cache (бандл 3/3, M3.3)
+- [x] `SemanticCache` ABC + `CachedAnswer`; `InMemorySemanticCache` (cos-порог, TTL, `stats()`, `clear()`).
+- [x] `RedisSemanticCache`: HASH `query:sc:<domain>`, поле `sc:<sha256[:12]>`, JSON
+      `{embedding,text,sources,ts}`, lazy-`redis`, TTL-чистка HDEL (ADR-025).
+- [x] QueryPipeline: `semantic_cache` параметр (None = выкл, поведение M2); hit → `cache{hit:true}` +
+      `done(cache_hit:true, token нет, LLM не вызывался)`; miss → полный цикл + запись в кэш.
+- [x] Env-конфигурация: `SEMANTIC_CACHE_ENABLED/MODE/THRESHOLD/TTL_S`, `QUERY_REDIS_URL`; сборка
+      один раз в `worker.main()` — переживает hot-reload адаптеров (топология).
+- [x] «Плохие» ответы не кэшируются (`should_cache_text`: пустой `text`, отказ LLM «контекста
+      недостаточно»); допущение инвалидации TTL+`clear()`, planned upgrade — epoch-bump
+      `query:sc:<rev>:<domain>` (Веха 4-хвост), зафиксировано ADR-025.
+- [x] Тесты: `tests/test_semantic_cache.py`, кэш-hit/miss в `test_retrieval_pipeline.py`,
+      hot-reload-preserve в `test_worker_hotreload.py`; коммит `0208c28`.
 
 ### Веха 4 — Eval и гейт готовности
 - [ ] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (мин. 50 вопросов/домен для базового среза).
