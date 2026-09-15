@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -22,6 +23,8 @@ from datetime import UTC, datetime
 from typing import Any
 
 from graphrag_proto.query_service.models import Event, Task
+
+_LOG = logging.getLogger("graphrag_proto.query_service.task_queue")
 
 STREAM_TASKS = "query:tasks"
 GROUP_WORKERS = "query-workers"
@@ -56,11 +59,16 @@ class TaskQueue(ABC):
         """Забор задачи воркером (блокирующий на короткий интервал; None — пусто)."""
 
     @abstractmethod
-    def ack(self, task_id: str, entry_id: str | None = None) -> None:
-        """Подтверждение успешной обработки."""
+    def ack(self, task_id: str, worker_id: str | None = None, entry_id: str | None = None) -> None:
+        """Подтверждение успешной обработки.
+
+        Fencing (S2, ревью №7): `worker_id` — владелец, завершающий обработку;
+        реализация обязана игнорировать ack от НЕ текущего владельца задачи
+        (InMemory — по ownership, Redis — по PEL: XACK чужого entry_id = no-op).
+        """
 
     @abstractmethod
-    def fail(self, task_id: str, error: str, entry_id: str | None = None) -> None:
+    def fail(self, task_id: str, error: str, worker_id: str | None = None, entry_id: str | None = None) -> None:
         """Отметка сбоя (ack с флагом fail; статус пишет TaskStore)."""
 
     @abstractmethod
@@ -115,7 +123,7 @@ class InMemoryTaskQueue(TaskQueue):
         self._cond = threading.Condition()
         self._channels: dict[str, _MemoryChannel] = {}
         self._cancelled: set[str] = set()
-        self._inflight: dict[str, tuple[Task, float]] = {}
+        self._inflight: dict[str, tuple[Task, float, str]] = {}
 
     def depth(self) -> int:
         """Потребленные (claim) + ожидающие в очереди задачи."""
@@ -143,28 +151,52 @@ class InMemoryTaskQueue(TaskQueue):
                 task = self._queue.pop(0)
                 if task.task_id in self._cancelled:
                     continue
-                self._inflight[task.task_id] = (task, time.monotonic())
+                self._inflight[task.task_id] = (task, time.monotonic(), worker_id)
                 return task
             self._cond.wait(timeout=timeout_s)
             while self._queue:
                 task = self._queue.pop(0)
                 if task.task_id not in self._cancelled:
-                    self._inflight[task.task_id] = (task, time.monotonic())
+                    self._inflight[task.task_id] = (task, time.monotonic(), worker_id)
                     return task
             return None
 
-    def ack(self, task_id: str, entry_id: str | None = None) -> None:
+    def ack(self, task_id: str, worker_id: str | None = None, entry_id: str | None = None) -> None:
         with self._cond:
+            cur = self._inflight.get(task_id)
+            if cur is None:
+                return
+            _task, _claimed_at, owner = cur
+            if worker_id is not None and owner != worker_id:
+                _LOG.warning(
+                    "stale ack для %s от %r (владелец %r) — игнорируется (fencing)",
+                    task_id,
+                    worker_id,
+                    owner,
+                )
+                return
             self._inflight.pop(task_id, None)
 
-    def fail(self, task_id: str, error: str, entry_id: str | None = None) -> None:
+    def fail(self, task_id: str, error: str, worker_id: str | None = None, entry_id: str | None = None) -> None:
         with self._cond:
+            cur = self._inflight.get(task_id)
+            if cur is None:
+                return
+            _task, _claimed_at, owner = cur
+            if worker_id is not None and owner != worker_id:
+                _LOG.warning(
+                    "stale ack для %s от %r (владелец %r) — игнорируется (fencing)",
+                    task_id,
+                    worker_id,
+                    owner,
+                )
+                return
             self._inflight.pop(task_id, None)
 
     def reclaim(self, worker_id: str, min_idle_s: float = 60.0) -> None:
         with self._cond:
             now = time.monotonic()
-            stale = [task for task, claimed_at in self._inflight.values() if now - claimed_at >= min_idle_s]
+            stale = [task for task, claimed_at, _owner in self._inflight.values() if now - claimed_at >= min_idle_s]
             for task in stale:
                 self._inflight.pop(task.task_id, None)
                 if task.task_id not in self._cancelled:
@@ -244,7 +276,12 @@ class RedisStreamTaskQueue(TaskQueue):
         if self._client is None:
             import redis
 
-            self._client = redis.Redis.from_url(self._redis_url, decode_responses=False)
+            self._client = redis.Redis.from_url(
+                self._redis_url,
+                decode_responses=False,
+                socket_timeout=2,
+                socket_connect_timeout=2,
+            )
             self._ensure_group()
         return self._client
 
@@ -282,13 +319,15 @@ class RedisStreamTaskQueue(TaskQueue):
                     return task
             return None
 
-    def ack(self, task_id: str, entry_id: str | None = None) -> None:
+    def ack(self, task_id: str, worker_id: str | None = None, entry_id: str | None = None) -> None:
+        # Fencing — через PEL Redis Streams: XACK чужого/уже xacity entry_id возвращает 0
+        # и не влияет на очередь; worker_id как явный параметр зарезервирован для контракта.
         if entry_id:
             self._r().xack(self._stream, self._group, entry_id)
 
-    def fail(self, task_id: str, error: str, entry_id: str | None = None) -> None:
+    def fail(self, task_id: str, error: str, worker_id: str | None = None, entry_id: str | None = None) -> None:
         self.publish(task_id, "error", {"code": "pipeline_error", "message": error})
-        self.ack(task_id, entry_id)
+        self.ack(task_id, worker_id, entry_id)
 
     def reclaim(self, worker_id: str, min_idle_s: float = 60.0) -> None:
         client = self._r()

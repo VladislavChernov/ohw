@@ -638,10 +638,12 @@ retrieval + LLM (деньги/латентность). Кэш по embedding (co
    в `lookup` → miss (запрос идёт полным циклом), в `store` → no-op; кэш не роняет
    пользовательский запрос (закрыто замечание команд ревью R6-4/R6-7, S3).
 2. **`clear()` (реализовано)**: SCAN (match `query:sc:*`) + DEL — полный сброс кэша без
-   опоры на in-process счётчики; работает даже после рестарта/чужих записей. `stats()`
-   считает `entries` через HLEN (реальное состояние Redis), `hits`/`misses` — инкремент.
+   опоры на in-process счётчики; покрывает и записи, и meta-ключи счётчиков. `stats()`
+   считает `entries` через HLEN (реальное состояние Redis), `hits`/`misses` — из HASH
+   `query:sc:<domain>:meta` (shared-счётчики, HINCRBY; закрыто S2 ревью №7: переживают
+   рестарт/несколько воркеров, никаких in-process накопителей).
    (закрыто R6-5, R6-8; добавлены тесты `test_redis_clear_removes_all_keys`,
-   `test_redis_stats_uses_hlen`).
+   `test_redis_stats_uses_hlen`, `test_redis_shared_counters_persist_across_restart`).
 3. **Epoch-bump (план, не реализуется в M3)**: пространство ключей `query:sc:<rev>:<domain>`;
    ревизия данных (Веха 4-хвост) при bump атомарно переводит запросы на новый префикс,
    старый кэш умирает по TTL сам. Отменяет ручные акты в пункте 2, но требует механизма

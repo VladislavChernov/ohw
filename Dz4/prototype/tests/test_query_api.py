@@ -163,3 +163,41 @@ def test_worker_failure_publishes_error_and_fails_store(tmp_path: Path) -> None:
     error_events = [p for t, p in events if t == "error"]
     assert error_events, "воркер должен опубликовать error-событие"
     assert error_events[0]["message"] == "эмбеддер упал"
+
+
+def test_worker_skips_reclaimed_task_already_terminal(tmp_path: Path) -> None:
+    """S2 fencing: W1 завис после commit, задача reclaim'нута и заявлена W2 —
+    возрождённая W2 видит терминальный статус и НЕ гоняет пайплайн повторно.
+    """
+    queue = InMemoryTaskQueue()
+    store = TaskStore(tmp_path / "fence.sqlite")
+    worker = make_worker(queue, store)
+
+    store.create("q_fence", "it", "вопрос")
+    queue.submit(Task(task_id="q_fence", domain="it", query="вопрос"))
+    assert queue.claim("w1") is not None
+    store.mark_succeeded("q_fence")  # W1 завершил commit (ack ещё не получен)
+    queue.reclaim("w2", min_idle_s=0.0)  # появился в очереди заново
+
+    assert worker.process_one() is True  # W2 claim -> терминальный статус -> skip + ack
+    assert store.get("q_fence")["status"] == "succeeded"
+    assert queue.depth() == 0
+    # Канал не создан — пайплайн не запускался → ни status/token/done событий
+    assert "q_fence" not in queue._channels
+
+
+def test_inmemory_stale_ack_after_reclaim_ignored() -> None:
+    """S2 fencing: stale ack от не-владельца — no-op (задача остаётся за владельцем)."""
+    queue = InMemoryTaskQueue()
+    queue.submit(Task(task_id="q_fence", domain="it", query="a"))
+    queue.claim("w1")
+    queue.reclaim("w2", min_idle_s=0.0)
+    queue.claim("w2")
+
+    queue.ack("q_fence", worker_id="w1")  # stale
+    assert queue.depth() == 1
+    queue.fail("q_fence", "err", worker_id="w1")  # stale
+    assert queue.depth() == 1
+
+    queue.ack("q_fence", worker_id="w2")  # владелец
+    assert queue.depth() == 0

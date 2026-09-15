@@ -7,6 +7,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from graphrag_proto.query_service.models import Task, new_task_id
 from graphrag_proto.query_service.store import (
     STATUS_CANCELLED,
@@ -186,6 +188,9 @@ class _FakeRedisClient:
         self.xautoclaim_kwargs = dict(kwargs)
         return ["query:tasks", self._entries, "0-0"]
 
+    def xgroup_create(self, stream: str, group: str, id: str = "0", mkstream: bool = True) -> None:
+        pass
+
     def xack(self, stream: str, group: str, entry_id: str) -> None:
         self.acks.append(entry_id)
 
@@ -204,6 +209,23 @@ def test_redis_reclaim_requeues_orphaned_pel() -> None:
     assert queue._client.acks == ["1720000000000-0"]
     assert len(queue._client.xadded) == 1
     assert queue._client.xadded[0]["task_id"] == "q_1"
+
+
+def test_redis_queue_client_socket_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Блокер ревью №7: клиент очереди не должен висеть вечно — socket_timeout=2s."""
+    import redis as redis_mod
+
+    captured: dict[str, Any] = {}
+
+    def fake_from_url(url: str, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _FakeRedisClient([])
+
+    monkeypatch.setattr(redis_mod.Redis, "from_url", fake_from_url)
+    queue = RedisStreamTaskQueue(redis_url="redis://test:6379/0")
+    queue._r()
+    assert captured["socket_timeout"] == 2
+    assert captured["socket_connect_timeout"] == 2
 
 
 def test_serialization_roundtrip() -> None:

@@ -26,7 +26,11 @@ from graphrag_proto.retrieval.adapters.base import (
 from graphrag_proto.retrieval.adapters.bge import BgeM3ServiceAdapter, BgeRerankerAdapter
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
-from graphrag_proto.retrieval.adapters.llm import FakeLLM, OpenAICompatibleAdapter
+from graphrag_proto.retrieval.adapters.llm import (
+    DEFAULT_TIMEOUT_S,
+    FakeLLM,
+    OpenAICompatibleAdapter,
+)
 from graphrag_proto.retrieval.adapters.neo4j import Neo4jGraphStore, Neo4jVectorStore
 from graphrag_proto.retrieval.adapters.reranker import NoOpRerankerAdapter
 
@@ -144,6 +148,7 @@ def _build_llm(kind: str) -> LLMInference:
             model=_env("LLM_MODEL", "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"),
             temperature=_env_float("LLM_TEMPERATURE", 0.3),
             max_tokens=_env_int("LLM_MAX_TOKENS", 2048),
+            timeout_s=_env_float("LLM_TIMEOUT_S", DEFAULT_TIMEOUT_S),
         )
     raise ValueError(f"llm={kind!r}: допустимо {', '.join(ADAPTER_CATALOG[SLOT_LLM])}")
 

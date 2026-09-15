@@ -20,7 +20,12 @@ M6 (коннекторы).
 - `stats()` — HLEN (реальное состояние Redis, а не in-process кэш);
 - соединение: `socket_timeout=2s` (fail-fast, не блокирует поток надолго);
 - поле: `sc:<sha256(repr(embedding))>` (полный 64-символьный hex, нет коллизий 48-бит);
-- EXPIRE на HASH = TTL при каждом store (S4: брошенный домен не держит ключ вечно).
+- EXPIRE на HASH = TTL при каждом store (S4: брошенный домен не держит ключ вечно);
+- shared-счётчики hit/miss (ревью №7 §2.1): живут в Valkey — HASH ``query:sc:<domain>:meta``
+  с полями `hits`/`misses` (HINCRBY), НЕ в памяти процесса -> stats() агрегируют HGETALL
+  по доменам и переживают рестарт/несколько воркеров (этап B — sink в /metrics).
+  Сбой-пути (lookup при недоступной Valkey) счётчик не увеличивают: агрегировать негде,
+  фиксируется как допущение.
 """
 
 from __future__ import annotations
@@ -39,6 +44,7 @@ _DEFAULT_THRESHOLD = 0.85
 _DEFAULT_TTL_S = 3600.0
 _REDIS_DEFAULT_URL = "redis://valkey:6379/0"
 _KEY_PREFIX = "query:sc"
+_META_SUFFIX = ":meta"
 
 # Явный отказ LLM по DEFAULT_SYSTEM_PROMPT («Если контекста недостаточно — так и скажи»).
 _REFUSAL_MARKERS = (
@@ -207,8 +213,8 @@ class RedisSemanticCache(SemanticCache):
 
     Сканирование — HGETALL + линейный косинус (объём прототипа мал,
     зафиксировано в spec); просроченные записи — lazy HDEL.
-    ``clear()`` использует SCAN + DEL (работает независимо от in-process
-    счётчиков).  ``stats()`` читает HLEN из Redis.
+    ``clear()`` использует SCAN + DEL (покрывает и записи, и meta-счётчики);
+    ``stats()`` читает HLEN/HGETALL из Valkey — никаких in-process счётчиков.
     """
 
     mode = "redis"
@@ -224,9 +230,6 @@ class RedisSemanticCache(SemanticCache):
         self.ttl_s = float(ttl_s)
         self._url = url
         self._client = client
-        self._lock = threading.Lock()
-        self._hits = 0
-        self._misses = 0
 
     def _redis(self) -> Any:
         if self._client is None:
@@ -240,6 +243,17 @@ class RedisSemanticCache(SemanticCache):
     @staticmethod
     def _key(domain: str) -> str:
         return f"{_KEY_PREFIX}:{domain}"
+
+    @staticmethod
+    def _meta_key(domain: str) -> str:
+        return f"{_KEY_PREFIX}:{domain}{_META_SUFFIX}"
+
+    def _bump(self, domain: str, metric: str) -> None:
+        """Shared-счётчик в Valkey (HINCRBY); сбой — молчаливый пропуск (fail-open)."""
+        try:
+            self._redis().hincrby(self._meta_key(domain), metric, 1)
+        except (ConnectionError, TimeoutError, OSError):
+            pass
 
     @staticmethod
     def _field(embedding: list[float]) -> str:
@@ -262,20 +276,17 @@ class RedisSemanticCache(SemanticCache):
 
     def lookup(self, embedding: list[float], threshold: float, domain: str = "") -> CachedAnswer | None:
         if _is_blank_embedding(embedding):
-            with self._lock:
-                self._misses += 1
+            self._bump(domain, "misses")
             return None
         try:
             client = self._redis()
             key = self._key(domain)
             raw = client.hgetall(key)
         except (ConnectionError, TimeoutError, OSError):
-            with self._lock:
-                self._misses += 1
+            self._bump(domain, "misses")
             return None
         if not isinstance(raw, Mapping) or not raw:
-            with self._lock:
-                self._misses += 1
+            self._bump(domain, "misses")
             return None
 
         now = time.time()
@@ -307,12 +318,11 @@ class RedisSemanticCache(SemanticCache):
                 client.hdel(key, *stale)
             except (ConnectionError, TimeoutError, OSError):
                 pass
-        with self._lock:
-            if best is None:
-                self._misses += 1
-                return None
-            self._hits += 1
-            return best
+        if best is None:
+            self._bump(domain, "misses")
+            return None
+        self._bump(domain, "hits")
+        return best
 
     def _store(self, embedding: list[float], answer: CachedAnswer, domain: str) -> None:
         try:
@@ -327,12 +337,19 @@ class RedisSemanticCache(SemanticCache):
 
     def stats(self) -> dict[str, int]:
         entries = 0
+        hits = 0
+        misses = 0
         try:
             client = self._redis()
             cursor = 0
             while True:
                 cursor, keys = client.scan(cursor=cursor, match=f"{_KEY_PREFIX}:*", count=100)
                 for key in keys:
+                    if key.endswith(_META_SUFFIX):
+                        meta = client.hgetall(key)
+                        hits += int(meta.get("hits") or 0)
+                        misses += int(meta.get("misses") or 0)
+                        continue
                     try:
                         entries += client.hlen(key)
                     except (ConnectionError, TimeoutError, OSError):
@@ -341,14 +358,10 @@ class RedisSemanticCache(SemanticCache):
                     break
         except (ConnectionError, TimeoutError, OSError):
             pass
-        with self._lock:
-            return {
-                "entries": entries,
-                "hits": self._hits,
-                "misses": self._misses,
-            }
+        return {"entries": entries, "hits": hits, "misses": misses}
 
     def clear(self) -> None:
+        # SCAN ``query:sc:*`` покрывает и HASH-записи, и meta-ключи счётчиков.
         try:
             client = self._redis()
             cursor = 0
@@ -360,6 +373,3 @@ class RedisSemanticCache(SemanticCache):
                     break
         except (ConnectionError, TimeoutError, OSError):
             pass
-        with self._lock:
-            self._hits = 0
-            self._misses = 0

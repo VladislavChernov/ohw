@@ -58,6 +58,15 @@ class FakeRedis:
         self._deletes.append(key)
         return removed
 
+    def hincrby(self, key: str, field: str, amount: int) -> int:
+        if self._fail_next:
+            self._fail_next = False
+            raise ConnectionError("fake connection lost")
+        bucket = self._store.setdefault(key, {})
+        current = int(bucket.get(field, "0"))
+        bucket[field] = str(current + int(amount))
+        return current + int(amount)
+
     def hlen(self, key: str) -> int:
         return len(self._store.get(key, {}))
 
@@ -212,6 +221,37 @@ def test_redis_fail_open_on_store() -> None:
     fake._fail_next = True
     cache.store(_EMB_SIMILAR, _answer("should not crash"), domain="x")
     assert fake._store == {}
+
+
+def test_redis_shared_counters_persist_across_restart() -> None:
+    fake = FakeRedis()
+    cache1 = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache1.store(_EMB_SIMILAR, _answer("a"), domain="d1")
+    assert cache1.lookup(_EMB_SIMILAR, threshold=0.80, domain="d1") is not None
+    assert cache1.lookup(_EMB_PERP, threshold=0.80, domain="d1") is None
+    # «рестарт»: новый объект поверх той же Valkey — счётчики не теряются
+    cache2 = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    stats = cache2.stats()
+    assert stats == {"entries": 1, "hits": 1, "misses": 1}
+
+
+def test_redis_stats_excludes_meta_keys_from_entries() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="d1")
+    cache.lookup(_EMB_SIMILAR, threshold=0.80, domain="d1")  # hit -> meta key
+    assert cache.stats()["entries"] == 1  # НЕ 3 (meta hits/misses не записи)
+
+
+def test_redis_clear_removes_meta_keys() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="d1")
+    cache.lookup(_EMB_SIMILAR, threshold=0.80, domain="d1")
+    assert any(key.endswith(":meta") for key in fake._store)
+    cache.clear()
+    assert fake._store == {}
+    assert cache.stats() == {"entries": 0, "hits": 0, "misses": 0}
 
 
 # --- tests: should_cache_text (3.4) -----------------------------------

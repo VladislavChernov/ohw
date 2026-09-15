@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from graphrag_proto.query_service.store import TaskStore
+from graphrag_proto.query_service.store import TERMINAL, TaskStore
 from graphrag_proto.query_service.task_queue import TaskQueue
 from graphrag_proto.retrieval.adapters.topology_client import TopologyClient
 from graphrag_proto.retrieval.pipeline import QueryPipeline
@@ -70,6 +70,17 @@ class QueryWorker:
         task = self._queue.claim(self._worker_id)
         if task is None:
             return False
+        # S2 fencing (ревью №7): задача могла быть завершена другим воркером
+        # до reclaimed claim — пропускаем повторный прогон пайплайна.
+        existing = self._store.get(task.task_id)
+        if existing is not None and existing["status"] in TERMINAL:
+            _LOG.warning(
+                "task %s: статус %s (claim после завершения) — пропуск обработки, ack",
+                task.task_id,
+                existing["status"],
+            )
+            self._queue.ack(task.task_id, worker_id=self._worker_id, entry_id=task.entry_id)
+            return True
         self._store.mark_running(task.task_id)
 
         def emit(event_type: str, payload: dict[str, Any]) -> None:
@@ -80,14 +91,21 @@ class QueryWorker:
         except Exception as exc:  # noqa: BLE001 - разнородные сбои пайплайна
             emit("error", {"code": "pipeline_error", "message": str(exc)})
             self._store.mark_failed(task.task_id, str(exc))
-            self._queue.ack(task.task_id, entry_id=task.entry_id)
+            self._queue.ack(task.task_id, worker_id=self._worker_id, entry_id=task.entry_id)
             return True
         if self._queue.is_cancelled(task.task_id):
             self._store.mark_cancelled(task.task_id)
-            self._queue.ack(task.task_id, entry_id=task.entry_id)
+            self._queue.ack(task.task_id, worker_id=self._worker_id, entry_id=task.entry_id)
             return True
-        self._store.mark_succeeded(task.task_id)
-        self._queue.ack(task.task_id, entry_id=task.entry_id)
+        committed = self._store.mark_succeeded(task.task_id)
+        if committed:
+            self._queue.ack(task.task_id, worker_id=self._worker_id, entry_id=task.entry_id)
+        else:
+            _LOG.warning(
+                "task %s: mark_succeeded=%s (другой воркер завершил) — ack пропущен",
+                task.task_id,
+                committed,
+            )
         return True
 
     def loop(self, idle_sleep_s: float = 0.2) -> None:

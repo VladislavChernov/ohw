@@ -113,6 +113,14 @@ def test_build_llm_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(build_llm(), FakeLLM)
 
 
+def test_build_llm_timeout_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_ADAPTER", "openai")
+    monkeypatch.setenv("LLM_TIMEOUT_S", "13.5")
+    llm = build_llm()
+    assert isinstance(llm, OpenAICompatibleAdapter)
+    assert llm._timeout_s == 13.5
+
+
 def test_unknown_env_provider_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VECTOR_STORE", "pinecone")
     with pytest.raises(ValueError, match="vector_store"):
