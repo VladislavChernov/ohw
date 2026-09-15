@@ -200,7 +200,7 @@ Dz4/
 
 ### Веха 3-хвосты — Semantic Cache (бандл 3/3, M3.3)
 - [x] `SemanticCache` ABC + `CachedAnswer`; `InMemorySemanticCache` (cos-порог, TTL, `stats()`, `clear()`).
-- [x] `RedisSemanticCache`: HASH `query:sc:<domain>`, поле `sc:<sha256[:12]>`, JSON
+- [x] `RedisSemanticCache`: HASH `query:sc:<domain>`, поле `sc:<sha256(repr(embedding))>` (полный digest, обновлено 2026-09-14), JSON
       `{embedding,text,sources,ts}`, lazy-`redis`, TTL-чистка HDEL (ADR-025).
 - [x] QueryPipeline: `semantic_cache` параметр (None = выкл, поведение M2); hit → `cache{hit:true}` +
       `done(cache_hit:true, token нет, LLM не вызывался)`; miss → полный цикл + запись в кэш.

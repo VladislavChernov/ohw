@@ -51,7 +51,7 @@ Hit: `max cosine(embedding, stored_embedding) >= threshold` (по живому T
 - lazy `import redis`; `Redis.from_url(QUERY_REDIS_URL, decode_responses=True)`,
   дефолт `redis://valkey:6379/0` (общий с очередью ADR-023).
 - Ключ: `query:sc:<domain>`, тип `HASH`.
-- Поле: `sc:<sha256(repr(embedding))[:12]>`.
+- Поле: `sc:<sha256(repr(embedding))[:12]>` → обновлено 2026-09-14: полный `sc:<sha256(repr(embedding)).hexdigest()>` (48-битные коллизии исключены).
 - Значение: JSON `{"embedding": [...], "text": "...", "sources": [...], "ts": <epoch_s>}`.
 - `lookup`: `HGETALL` + линейный скан + косинус; просроченные — `lazy HDEL`.
 - Ограничение масштаба: прототипный объём мал, скан допустим (документируем).

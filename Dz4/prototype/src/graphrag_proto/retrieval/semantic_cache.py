@@ -12,6 +12,14 @@ M6 (коннекторы).
 
 «Плохие» ответы не кэшируются: пустой `text`, явный отказ LLM («контекста
 недостаточно»), сбой пайплайна -> `store()` no-op (решение по свежести).
+
+Безопасность при сбое Valkey (2026-09-14, замечания команд ревью R6-4/SC-3/S3):
+- `lookup` при ConnectionError/TimeoutError → miss (fail-open, запрос идёт полным циклом);
+- `store` при ConnectionError/TimeoutError → no-op;
+- `clear()` — SCAN + DEL (не зависит от in-process счётчиков);
+- `stats()` — HLEN (реальное состояние Redis, а не in-process кэш);
+- соединение: `socket_timeout=2s` (fail-fast, не блокирует поток надолго);
+- поле: `sc:<sha256(repr(embedding))>` (полный 64-символьный hex, нет коллизий 48-бит).
 """
 
 from __future__ import annotations
@@ -189,11 +197,17 @@ def _best_alive(
 
 
 class RedisSemanticCache(SemanticCache):
-    """Valkey/Redis (ADR-023): HASH `query:sc:<domain>`, поле `sc:<sha256[:12]>`.
+    """Valkey/Redis (ADR-023): HASH ``query:sc:<domain>``, поле ``sc:<sha256>``.
 
-    Ленивое подключение к `redis`; `client` можно подменить фейком в тестах.
-    Сканирование — HGETALL + линейный косинус (объём прототипа мал, зафиксировано
-    в spec); просроченные записи — lazy HDEL.
+    Ленивое подключение к ``redis`` с ``socket_timeout=2s`` (fail-fast);
+    ``client`` можно подменить фейком в тестах.  При сбое подключения /
+    команды — fail-open: ``lookup`` → ``None``, ``store`` → no-op
+    (сбой кэша не должен ломать пользовательский запрос).
+
+    Сканирование — HGETALL + линейный косинус (объём прототипа мал,
+    зафиксировано в spec); просроченные записи — lazy HDEL.
+    ``clear()`` использует SCAN + DEL (работает независимо от in-process
+    счётчиков).  ``stats()`` читает HLEN из Redis.
     """
 
     mode = "redis"
@@ -210,7 +224,6 @@ class RedisSemanticCache(SemanticCache):
         self._url = url
         self._client = client
         self._lock = threading.Lock()
-        self._counts: dict[str, int] = {}
         self._hits = 0
         self._misses = 0
 
@@ -218,7 +231,9 @@ class RedisSemanticCache(SemanticCache):
         if self._client is None:
             from redis import Redis  # ленивый импорт — redis не обязателен для тестов/демо
 
-            self._client = Redis.from_url(self._url, decode_responses=True)
+            self._client = Redis.from_url(
+                self._url, decode_responses=True, socket_timeout=2
+            )
         return self._client
 
     @staticmethod
@@ -228,7 +243,7 @@ class RedisSemanticCache(SemanticCache):
     @staticmethod
     def _field(embedding: list[float]) -> str:
         digest = hashlib.sha256(repr(embedding).encode("utf-8")).hexdigest()
-        return f"sc:{digest[:12]}"
+        return f"sc:{digest}"
 
     @staticmethod
     def _payload(
@@ -249,9 +264,14 @@ class RedisSemanticCache(SemanticCache):
             with self._lock:
                 self._misses += 1
             return None
-        client = self._redis()
-        key = self._key(domain)
-        raw = client.hgetall(key)
+        try:
+            client = self._redis()
+            key = self._key(domain)
+            raw = client.hgetall(key)
+        except (ConnectionError, TimeoutError, OSError):
+            with self._lock:
+                self._misses += 1
+            return None
         if not isinstance(raw, Mapping) or not raw:
             with self._lock:
                 self._misses += 1
@@ -281,10 +301,12 @@ class RedisSemanticCache(SemanticCache):
                 best = CachedAnswer(text=str(record.get("text") or ""), sources=sources)
                 best_cos = cos
 
-        with self._lock:
-            if stale:
+        if stale:
+            try:
                 client.hdel(key, *stale)
-                self._counts[domain] = max(0, self._counts.get(domain, 0) - len(stale))
+            except (ConnectionError, TimeoutError, OSError):
+                pass
+        with self._lock:
             if best is None:
                 self._misses += 1
                 return None
@@ -292,26 +314,48 @@ class RedisSemanticCache(SemanticCache):
             return best
 
     def _store(self, embedding: list[float], answer: CachedAnswer, domain: str) -> None:
-        client = self._redis()
-        field = self._field(embedding)
-        client.hset(self._key(domain), field, self._payload(embedding, answer, time.time()))
-        with self._lock:
-            self._counts[domain] = self._counts.get(domain, 0) + 1
+        try:
+            client = self._redis()
+            field = self._field(embedding)
+            client.hset(self._key(domain), field, self._payload(embedding, answer, time.time()))
+        except (ConnectionError, TimeoutError, OSError):
+            pass
 
     def stats(self) -> dict[str, int]:
+        entries = 0
+        try:
+            client = self._redis()
+            cursor = 0
+            while True:
+                cursor, keys = client.scan(cursor=cursor, match=f"{_KEY_PREFIX}:*", count=100)
+                for key in keys:
+                    try:
+                        entries += client.hlen(key)
+                    except (ConnectionError, TimeoutError, OSError):
+                        pass
+                if cursor == 0:
+                    break
+        except (ConnectionError, TimeoutError, OSError):
+            pass
         with self._lock:
             return {
-                "entries": sum(self._counts.values()),
+                "entries": entries,
                 "hits": self._hits,
                 "misses": self._misses,
             }
 
     def clear(self) -> None:
-        with self._lock:
+        try:
             client = self._redis()
-            for domain, count in list(self._counts.items()):
-                if count > 0:
-                    client.delete(self._key(domain))
-            self._counts.clear()
+            cursor = 0
+            while True:
+                cursor, keys = client.scan(cursor=cursor, match=f"{_KEY_PREFIX}:*", count=100)
+                if keys:
+                    client.delete(*keys)
+                if cursor == 0:
+                    break
+        except (ConnectionError, TimeoutError, OSError):
+            pass
+        with self._lock:
             self._hits = 0
             self._misses = 0

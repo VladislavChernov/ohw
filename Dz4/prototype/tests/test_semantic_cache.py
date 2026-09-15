@@ -1,6 +1,7 @@
 """Semantic Cache: hit/miss/порог/TTL/stats/clear, плохие ответы, Redis-формат."""
 from __future__ import annotations
 
+import fnmatch
 import json
 import time
 
@@ -30,11 +31,18 @@ class FakeRedis:
     def __init__(self) -> None:
         self._store: dict[str, dict[str, str]] = {}
         self._deletes: list[str] = []
+        self._fail_next: bool = False  # имитация ConnectionError
 
     def hgetall(self, key: str) -> dict[str, str]:
+        if self._fail_next:
+            self._fail_next = False
+            raise ConnectionError("fake connection lost")
         return dict(self._store.get(key, {}))
 
     def hset(self, key: str, field: str, value: str) -> int:
+        if self._fail_next:
+            self._fail_next = False
+            raise ConnectionError("fake connection lost")
         bucket = self._store.setdefault(key, {})
         is_new = field not in bucket
         bucket[field] = value
@@ -46,9 +54,18 @@ class FakeRedis:
         self._deletes.append(key)
         return removed
 
-    def delete(self, key: str) -> None:
-        self._store.pop(key, None)
-        self._deletes.append(key)
+    def hlen(self, key: str) -> int:
+        return len(self._store.get(key, {}))
+
+    def delete(self, *keys: str) -> None:
+        for key in keys:
+            self._store.pop(key, None)
+            self._deletes.append(key)
+
+    def scan(self, cursor: int = 0, match: str = "*", count: int = 100) -> tuple[int, list[str]]:
+        all_keys = list(self._store.keys())
+        matched = [k for k in all_keys if fnmatch.fnmatch(k, match)]
+        return 0, matched
 
 
 # --- tests: inmemory --------------------------------------------------
@@ -138,6 +155,45 @@ def test_redis_poor_answer_no_store() -> None:
         domain="x",
     )
     assert fake._store.get("query:sc:x", {}) == {}
+
+
+def test_redis_clear_removes_all_keys() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="d1")
+    cache.store(_EMB_PERP, _answer("b"), domain="d2")
+    assert len(fake._store) == 2
+    cache.clear()
+    assert len(fake._store) == 0
+    assert cache.stats() == {"entries": 0, "hits": 0, "misses": 0}
+
+
+def test_redis_stats_uses_hlen() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="d1")
+    cache.store(_EMB_PERP, _answer("b"), domain="d1")
+    cache.store(_EMB_SIMILAR, _answer("c"), domain="d2")
+    stats = cache.stats()
+    assert stats["entries"] == 3
+
+
+def test_redis_fail_open_on_lookup() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("ok"), domain="x")
+    fake._fail_next = True
+    result = cache.lookup(_EMB_SIMILAR, threshold=0.80, domain="x")
+    assert result is None
+    assert cache.stats()["misses"] == 1
+
+
+def test_redis_fail_open_on_store() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    fake._fail_next = True
+    cache.store(_EMB_SIMILAR, _answer("should not crash"), domain="x")
+    assert fake._store == {}
 
 
 # --- tests: should_cache_text (3.4) -----------------------------------

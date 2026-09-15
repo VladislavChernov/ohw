@@ -41,7 +41,7 @@ class SemanticCache(ABC):
 - Ленивый импорт `redis`; клиент `Redis.from_url(QUERY_REDIS_URL,
   decode_responses=True)`, дефолт `redis://valkey:6379/0`.
 - Ключ: `query:sc:<domain>` (domain = активный домен или `""`); тип `HASH`.
-- Поле: `sc:<sha256(repr(embedding)).hexdigest()[:12]>`.
+- Поле: `sc:<sha256(repr(embedding)).hexdigest()>` (полный digest, обновлено 2026-09-14).
 - Значение: `json.dumps({"embedding": [...], "text": ..., "sources": [...], "ts": ...})`.
 - Сканирование и чистка: `HGETALL` → фильтр по TTL → `HDEL` просроченных → косинус.
 - Масштаб: линейный скан оправдан для прототипа.

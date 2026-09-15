@@ -11,9 +11,10 @@
 
 - [x] 2.1. `retrieval/semantic_cache.py`: `SemanticCache` (ABC) + `CachedAnswer`;
       `InMemorySemanticCache` (cos-порог, TTL, `stats()`, `clear()`).
-- [x] 2.2. `RedisSemanticCache`: хэш `query:sc:<domain>`, поле `sc:<sha256[:12]>`,
-      JSON `{embedding,text,sources,ts}`; lazy-`import redis`, TTL-чистка (HDEL при
-      сканировании); дефолт `QUERY_REDIS_URL=redis://valkey:6379/0`.
+- [x] 2.2. `RedisSemanticCache`: хэш `query:sc:<domain>`, поле `sc:<sha256>` (полный digest, обновлено 2026-09-14),
+      JSON `{embedding,text,sources,ts}`; lazy-`import redis`, `socket_timeout=2s`,
+      fail-open (lookup → miss, store → no-op), `clear()` SCAN+DEL, `stats()` HLEN;
+      TTL-чистка (HDEL при сканировании); дефолт `QUERY_REDIS_URL=redis://valkey:6379/0`.
 - [x] 2.3. `QueryPipeline`: параметр `semantic_cache: SemanticCache | None = None`
       (None = выключено, поведение M2); miss → обычный цикл + `store()`;
       hit → статусы `embedding`→`cache{hit:true}`→`done` + `cache_hit`/`cache_lookup_s`,
