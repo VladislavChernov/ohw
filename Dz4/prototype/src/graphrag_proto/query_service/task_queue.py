@@ -92,6 +92,15 @@ class TaskQueue(ABC):
         и её обработку забирает следующий claim.
         """
 
+    def depth(self) -> int:
+        """Очередь необработанных задач (pending + inflight); 0 = пусто.
+
+        Для `RedisStreamTaskQueue`: XLEN основного стрима (все записи, не только
+        необработанные) — прототипный upper bound; детальный расчёт (XLEN - acked)
+        требует отдельного счётчика.
+        """
+        return 0
+
 
 class _MemoryChannel:
     def __init__(self) -> None:
@@ -107,6 +116,10 @@ class InMemoryTaskQueue(TaskQueue):
         self._channels: dict[str, _MemoryChannel] = {}
         self._cancelled: set[str] = set()
         self._inflight: dict[str, tuple[Task, float]] = {}
+
+    def depth(self) -> int:
+        """Потребленные (claim) + ожидающие в очереди задачи."""
+        return len(self._queue) + len(self._inflight)
 
     def _channel(self, task_id: str) -> _MemoryChannel:
         with self._cond:

@@ -32,6 +32,7 @@ class FakeRedis:
         self._store: dict[str, dict[str, str]] = {}
         self._deletes: list[str] = []
         self._fail_next: bool = False  # имитация ConnectionError
+        self._ttl: dict[str, int] = {}  # EXPIRE-таймауты ключей
 
     def hgetall(self, key: str) -> dict[str, str]:
         if self._fail_next:
@@ -47,6 +48,9 @@ class FakeRedis:
         is_new = field not in bucket
         bucket[field] = value
         return int(is_new)
+
+    def expire(self, key: str, ttl: int) -> None:
+        self._ttl[key] = ttl
 
     def hdel(self, key: str, *fields: str) -> int:
         bucket = self._store.get(key, {})
@@ -176,6 +180,20 @@ def test_redis_stats_uses_hlen() -> None:
     cache.store(_EMB_SIMILAR, _answer("c"), domain="d2")
     stats = cache.stats()
     assert stats["entries"] == 3
+
+
+def test_redis_expire_set_on_store() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=45, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="d1")
+    assert fake._ttl.get("query:sc:d1") == 45
+
+
+def test_redis_no_expire_when_ttl_zero() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="d1")
+    assert fake._ttl == {}
 
 
 def test_redis_fail_open_on_lookup() -> None:

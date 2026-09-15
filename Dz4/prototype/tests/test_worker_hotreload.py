@@ -94,6 +94,7 @@ def test_loop_polls_rebuilder_and_swaps_pipeline(tmp_path: Path) -> None:
         pipeline="P0",
         poll_interval_s=0.001,
         pipeline_rebuilder=rebuilder,
+        metrics_interval_s=0.0,  # отключаем снапшот чтобы не засорял лог
     )
     worker_ref["w"] = worker
     with pytest.raises(_StopAfter):
@@ -113,6 +114,7 @@ def test_poll_interval_zero_disables_rebuilder(tmp_path: Path) -> None:
         pipeline=object(),
         poll_interval_s=0,
         pipeline_rebuilder=rebuilder,
+        metrics_interval_s=0.0,
     )
     assert worker._pipeline_rebuilder is None
 
@@ -166,7 +168,116 @@ def test_loop_exponential_backoff_on_transport_failure(
         backoff_base_s=1.0,
         backoff_max_s=30.0,
         reclaim_interval_s=0.0,
+        metrics_interval_s=0.0,
     )
     with pytest.raises(_StopAfter):
         worker.loop(idle_sleep_s=0.001)
     assert delays == [1.0, 2.0, 4.0]
+
+
+def test_loop_counts_topology_poll_failures(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls = {"n": 0}
+
+    def rebuilder() -> None:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise _StopAfter()
+        raise RuntimeError("topology down")
+
+    worker = QueryWorker(
+        queue=InMemoryTaskQueue(),
+        store=TaskStore(tmp_path / "topo_fail.sqlite"),
+        pipeline=object(),
+        poll_interval_s=0.001,
+        pipeline_rebuilder=rebuilder,
+        reclaim_interval_s=0.0,
+        metrics_interval_s=0.0,
+    )
+    with caplog.at_level("ERROR", logger="graphrag_proto.query_service.worker"), pytest.raises(
+        _StopAfter
+    ):
+        worker.loop(idle_sleep_s=0.001)
+    records = [r for r in caplog.records if "topology poll failed" in r.getMessage()]
+    assert [r.getMessage() for r in records] == [
+        "topology poll failed (1 consecutive)",
+        "topology poll failed (2 consecutive)",
+    ]
+
+
+def test_snapshot_fields_present(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    from graphrag_proto.retrieval.semantic_cache import InMemorySemanticCache
+
+    calls = {"n": 0}
+    cache = InMemorySemanticCache(threshold=0.85, ttl_s=0)
+
+    class _StopAfter(BaseException):
+        pass
+
+    def rebuilder() -> None:
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise _StopAfter()
+
+    worker = QueryWorker(
+        queue=InMemoryTaskQueue(),
+        store=TaskStore(tmp_path / "snap.sqlite"),
+        pipeline=type("_Pipeline", (), {"_semantic_cache": cache})(),
+        poll_interval_s=0.001,
+        pipeline_rebuilder=rebuilder,
+        reclaim_interval_s=0.0,
+        metrics_interval_s=0.001,
+    )
+    from graphrag_proto.query_service.models import Task
+
+    worker._queue.submit(Task(task_id="q_snap1", domain="it", query="test query"))
+    with caplog.at_level("INFO", logger="graphrag_proto.query_service.worker"), pytest.raises(
+        _StopAfter
+    ):
+        worker.loop(idle_sleep_s=0.001)
+    snapshot_msgs = [r.getMessage() for r in caplog.records if "trigger_metrics snapshot" in r.getMessage()]
+    assert len(snapshot_msgs) >= 1
+    import json
+
+    snapshot = json.loads(snapshot_msgs[-1].split("trigger_metrics snapshot ", 1)[1])
+    assert "topology_poll_errors_total" in snapshot
+    assert snapshot["topology_poll_errors_total"] == 0
+    assert snapshot["queue_depth"] == 1
+    assert snapshot["domain"] == "*"
+
+
+def test_poll_error_counter_in_snapshot(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls = {"n": 0}
+    snap_data: list[dict[str, Any]] = []
+
+    class _StopAfter(BaseException):
+        pass
+
+    def rebuilder() -> None:
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise _StopAfter()
+        raise RuntimeError("topology down")
+
+    worker = QueryWorker(
+        queue=InMemoryTaskQueue(),
+        store=TaskStore(tmp_path / "snap_err.sqlite"),
+        pipeline=object(),
+        poll_interval_s=0.001,
+        pipeline_rebuilder=rebuilder,
+        reclaim_interval_s=0.0,
+        metrics_interval_s=0.001,
+    )
+    import json
+
+    with caplog.at_level("INFO", logger="graphrag_proto.query_service.worker"), pytest.raises(
+        _StopAfter
+    ):
+        worker.loop(idle_sleep_s=0.001)
+    for msg in (r.getMessage() for r in caplog.records if "trigger_metrics snapshot" in r.getMessage()):
+        snap_data.append(json.loads(msg.split("trigger_metrics snapshot ", 1)[1]))
+    assert len(snap_data) >= 1
+    assert snap_data[-1]["topology_poll_errors_total"] == 2

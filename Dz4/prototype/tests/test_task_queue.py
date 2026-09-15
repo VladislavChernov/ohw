@@ -101,6 +101,18 @@ def test_inmemory_queue_fifo_claim() -> None:
     assert queue.claim("w1") is None
 
 
+def test_inmemory_queue_depth() -> None:
+    queue = InMemoryTaskQueue()
+    assert queue.depth() == 0
+    queue.submit(Task(task_id="q_1", domain="it", query="a"))
+    queue.submit(Task(task_id="q_2", domain="it", query="b"))
+    assert queue.depth() == 2
+    queue.claim("w1")
+    assert queue.depth() == 2  # pending 1 (q_2) + inflight 1 (q_1)
+    queue.ack("q_1")
+    assert queue.depth() == 1
+
+
 def test_inmemory_queue_cancel_skips_claim_and_sets_flag() -> None:
     queue = InMemoryTaskQueue()
     queue.submit(Task(task_id="q_1", domain="it", query="a"))

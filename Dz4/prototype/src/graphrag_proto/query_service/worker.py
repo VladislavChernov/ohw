@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -38,6 +39,7 @@ class QueryWorker:
         backoff_max_s: float = 30.0,
         reclaim_timeout_s: float = 60.0,
         reclaim_interval_s: float = 10.0,
+        metrics_interval_s: float = 30.0,
     ) -> None:
         self._queue = queue
         self._store = store
@@ -49,6 +51,7 @@ class QueryWorker:
         self._backoff_max_s = max(self._backoff_base_s, backoff_max_s)
         self._reclaim_timeout_s = max(1.0, reclaim_timeout_s)
         self._reclaim_interval_s = max(0.0, reclaim_interval_s)
+        self._metrics_interval_s = max(0.0, metrics_interval_s)
 
     def set_pipeline(self, pipeline: QueryPipeline) -> None:
         """Замена пайплайна после hot-reload (вызывается между итерациями цикла).
@@ -90,13 +93,19 @@ class QueryWorker:
     def loop(self, idle_sleep_s: float = 0.2) -> None:
         next_poll = 0.0
         next_reclaim = 0.0
+        next_metrics = 0.0
         failures = 0
+        topology_failures = 0
         while True:
             if self._pipeline_rebuilder is not None and time.monotonic() >= next_poll:
                 try:
                     self._pipeline_rebuilder()
+                    topology_failures = 0
                 except Exception:  # noqa: BLE001 - опрос топологии не роняет воркер
-                    _LOG.exception("topology poll failed")
+                    topology_failures += 1
+                    _LOG.error(
+                        "topology poll failed (%d consecutive)", topology_failures, exc_info=True
+                    )
                 next_poll = time.monotonic() + self._poll_interval_s
             if self._reclaim_interval_s > 0 and time.monotonic() >= next_reclaim:
                 try:
@@ -104,6 +113,9 @@ class QueryWorker:
                 except Exception:  # noqa: BLE001 - reclaim терпим к транспорту
                     _LOG.warning("reclaim failed", exc_info=True)
                 next_reclaim = time.monotonic() + self._reclaim_interval_s
+            if self._metrics_interval_s > 0 and time.monotonic() >= next_metrics:
+                self._log_metrics_snapshot(topology_failures)
+                next_metrics = time.monotonic() + self._metrics_interval_s
             process = False
             try:
                 process = self.process_one()
@@ -125,6 +137,27 @@ class QueryWorker:
             if not process:
                 time.sleep(idle_sleep_s)
 
+    def _log_metrics_snapshot(self, topology_poll_errors_total: int) -> None:
+        """Этап A метрик: JSON-строка в лог (structlog/Loki-совместимый формат)."""
+        payload: dict[str, Any] = {
+            "domain": "*",
+            "topology_poll_errors_total": topology_poll_errors_total,
+        }
+        try:
+            payload["queue_depth"] = self._queue.depth()
+        except Exception:  # noqa: BLE001 - снапшот не роняет воркер
+            payload["queue_depth"] = -1
+        cache = getattr(self._pipeline, "_semantic_cache", None)
+        if cache is not None:
+            try:
+                stats = cache.stats()
+                payload["cache_entries"] = stats.get("entries", 0)
+                payload["cache_hits"] = stats.get("hits", 0)
+                payload["cache_misses"] = stats.get("misses", 0)
+            except Exception:  # noqa: BLE001 - снапшот не роняет воркер
+                _LOG.warning("metrics snapshot: cache stats недоступны", exc_info=True)
+        _LOG.info("trigger_metrics snapshot %s", json.dumps(payload, ensure_ascii=False))
+
 
 def _topology_rebuilder(
     client: TopologyClient,
@@ -143,7 +176,7 @@ def _topology_rebuilder(
         if revision is None or revision == last_revision:
             return
         last_revision = revision
-        print(f"[topology] revision {revision}: пересборка pipeline без рестарта")
+        _LOG.info("topology revision %s: пересборка pipeline без рестарта", revision)
         on_reload(client.adapters_map())
 
     return rebuild
@@ -182,6 +215,7 @@ def main() -> None:
         backoff_max_s=float(os.environ.get("WORKER_BACKOFF_MAX_S", "30")),
         reclaim_timeout_s=float(os.environ.get("TASK_RECLAIM_TIMEOUT_S", "60")),
         reclaim_interval_s=float(os.environ.get("TASK_RECLAIM_INTERVAL_S", "10")),
+        metrics_interval_s=float(os.environ.get("METRICS_SNAPSHOT_INTERVAL_S", "30")),
         pipeline_rebuilder=_topology_rebuilder(
             client,
             on_reload=lambda adapter_map: worker.set_pipeline(

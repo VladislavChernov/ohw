@@ -74,6 +74,15 @@
       Prometheus -> Сбор метрик по порту /metrics -> Grafana  
       DCGM Exporter -> Мониторинг VRAM и температуры GPU
 
+Статус реализации (2026-09-15):
+- **Этап A (реализован)** — JSON-снапшот из `worker.loop()`:
+  `trigger_metrics snapshot {"domain":"*", "queue_depth":…, "topology_poll_errors_total":…, "cache_*":…}`
+  (env `METRICS_SNAPSHOT_INTERVAL_S`, дефолт 30 c; `0` = выключено) — всё в structlog/Loki,
+  без новых зависимостей. Сбой топологии больше не глотается: логирует счётчик
+  `topology poll failed (N consecutive)`.
+- **Этап B (задел, фаза 2)** — Prometheus-экспортеры `/metrics` на query+ingestion
+  (`prometheus_client`), профиль `monitoring` запускается после их реализации.
+
 Ключевые бизнес-метрики в Prometheus (все содержат обязательный лейбл {domain}):
 
 - `graphrag_query_total{status, domain}` — Счетчик поисковых запросов
@@ -117,11 +126,33 @@
 | Векторное хранилище  | Neo4j (native)    | Qdrant (отдельно) | Qdrant (кластер)    |
 | Конфиг-хранилище     | SQLite            | Postgres          | etcd (Apache 2.0)   |
 | Глоссарий            | YAML + SQLite     | Postgres          | Postgres            |
-| Кэш                  | Нет               | Valkey (Redis)    | Valkey (кластер)    |
+| Кэш                  | Valkey (semantic cache, ADR-025, M3.3) | Valkey (Redis) | Valkey (кластер)    |
+| Query-воркеры        | 1 (ThreadPoolExecutor(2) в пайплайне) | 2–4 (требуют fencing reclaim + таймауты зависимостей + fail-open кэша — ревью №7 S2) | N + автоскейлинг по `queue_depth` |
 | Очередь ingestion    | Синхронно         | Redis / RabbitMQ  | Kafka               |
 | Модель LLM           | Qwen 2.5 Coder 7B Abliterate q4_K_M (1 GPU)   | Qwen 14B (1 GPU)  | Qwen 72B (multi-GPU)|
 | Модель эмбеддингов   | bge-m3 (1 GPU)    | bge-m3 (1 GPU)    | bge-m3 (отдельный)  |
-| GPU                  | 1 (поэтапно)      | 2 (параллельно)   | N (автоскейлинг)    |
+| GPU                  | 1 (поэтапно)      | 2 (параллельно)\* | N (автоскейлинг)    |
+
+> \* Требует переквалификации L4-01 из инварианта в ограничение среды (ADR-027);
+> до принятия ADR стадия формально конфликтует с инвариантом.
+>
+> **Триггеры перехода между стадиями** (пороги — эвристики, калибруются по замерам;
+> механизм важнее чисел: порог → действие → владелец):
+>
+> | Триггер | Порог (пример) | Действие |
+> |---|---|---|
+> | T1 — очередь растёт | `queue_depth > 10` устойчиво ИЛИ p95 `queue_wait > 30 с` | 2-й query-воркер (после предусловий строки «Query-воркеры») |
+> | T2 — LLM доминирует | p95 `llm_inference_seconds` > 70% времени запроса | вынос LLM на отдельный хост/GPU (конфигурация адаптера, ADR-022; ADR-027 снимает конфликт с гейтингом) |
+> | T3 — кэш деградировал | p95 `cache_lookup_seconds` > 10% времени запроса ИЛИ > 500 записей | per-key записи вместо HGETALL-скана HASH (ревью №7 S3) |
+> | T4 — RAM кэша | память HASH-ов > X% лимита Valkey | EXPIRE + cap/LRU (S4) |
+> | T5 — ingestion ждёт GPU | джобы ждут гейтинга > Y минут | 2-я GPU / вынос эмбеддера (требует ADR-027) |
+>
+> **Предусловие триггеров:** экспорт метрик (`query_duration` по стадиям,
+> `queue_depth`, `llm_inference_seconds`, `cache_hit_rate`/`cache_lookup_seconds`,
+> `topology_poll_errors_total`). Реализована «Этап A»-часть: JSON-снапшот
+> `trigger_metrics snapshot {...}` из `worker.loop()` (env
+> `METRICS_SNAPSHOT_INTERVAL_S`, дефолт 30 с; поллер-счётчик ошибок включён).
+> Prometheus `/metrics` (Этап B) — фаза 2 / задел.
 
 ---
 

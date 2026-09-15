@@ -19,7 +19,8 @@ M6 (коннекторы).
 - `clear()` — SCAN + DEL (не зависит от in-process счётчиков);
 - `stats()` — HLEN (реальное состояние Redis, а не in-process кэш);
 - соединение: `socket_timeout=2s` (fail-fast, не блокирует поток надолго);
-- поле: `sc:<sha256(repr(embedding))>` (полный 64-символьный hex, нет коллизий 48-бит).
+- поле: `sc:<sha256(repr(embedding))>` (полный 64-символьный hex, нет коллизий 48-бит);
+- EXPIRE на HASH = TTL при каждом store (S4: брошенный домен не держит ключ вечно).
 """
 
 from __future__ import annotations
@@ -317,7 +318,10 @@ class RedisSemanticCache(SemanticCache):
         try:
             client = self._redis()
             field = self._field(embedding)
-            client.hset(self._key(domain), field, self._payload(embedding, answer, time.time()))
+            key = self._key(domain)
+            client.hset(key, field, self._payload(embedding, answer, time.time()))
+            if self.ttl_s > 0:
+                client.expire(key, math.ceil(self.ttl_s))
         except (ConnectionError, TimeoutError, OSError):
             pass
 
