@@ -287,6 +287,16 @@ def create_app(
             )
         return {"domain": domain, "source_url": source_url, "status": STATUS_DELETED}
 
+    @app.get("/api/v1/ingestion/revision", dependencies=[Depends(require_key)])
+    def get_revision(domain: str | None = None) -> dict[str, Any]:
+        """Ревизия данных домена (ADR-026, Веха 4-хвост)."""
+        if not domain:
+            raise HTTPException(status_code=422, detail="query-параметр domain обязателен")
+        return {
+            "revision": registry.data_revision(domain),
+            "updated_at": registry.data_revision_updated_at(domain),
+        }
+
     return app
 
 

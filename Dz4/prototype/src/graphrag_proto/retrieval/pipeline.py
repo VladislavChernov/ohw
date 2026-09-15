@@ -9,9 +9,11 @@
 4. rerank (NoOp) → status: rerank
 5. Context Assembly (context.py, L3-03/L3-04)
 6. LLM streaming (OpenAICompatibleAdapter / FakeLLM) → status: llm, token*
-7. done — {text, sources, generation_time_s, retrieval_time_s, total_time_s[, cache_hit, cache_lookup_s]}
+7. done — {text, sources, generation_time_s, retrieval_time_s, total_time_s, revision[, cache_hit, cache_lookup_s]}
 
 emit(event_type, payload) — обратный вызов воркера (публикует события конверта ADR-016).
+`revision` — fingerprint ревизии данных домена (ADR-026): в любом исходе (в т.ч.
+cache-hit и при генерации) — «по каким данным собран ответ», срез для Eval (ADR-015).
 """
 
 from __future__ import annotations
@@ -102,7 +104,19 @@ class QueryPipeline:
         """Закрытие общего executor'а (вызывается при замене пайплайна/остановке воркера)."""
         self._executor.shutdown(wait=False)
 
-    def run(self, query: str, domain: str | None = None, emit: Emit | None = None) -> dict[str, Any]:
+    def run(
+        self,
+        query: str,
+        domain: str | None = None,
+        emit: Emit | None = None,
+        revision: str | None = None,
+    ) -> dict[str, Any]:
+        """Полный retrieval-цикл; `revision` — ревизия данных домена (ADR-026).
+
+        Ревизия участвует в epoch-bump кэша и попадает в `done.revision` как
+        fingerprint среза для Eval (ADR-015). Hit эпохи `revision` означает, что
+        ответ собран по данным именно этой ревизии — одна ревизия в одном ответе.
+        """
         emit = emit or _noop_emit
         total_started = time.monotonic()
         emit("status", {"stage": "embedding"})
@@ -113,7 +127,9 @@ class QueryPipeline:
         cache_lookup_s = 0.0
         if self._semantic_cache is not None:
             cache_started = time.monotonic()
-            cached = self._semantic_cache.lookup(embedding, self._cache_threshold, active)
+            cached = self._semantic_cache.lookup(
+                embedding, self._cache_threshold, active, revision=revision
+            )
             cache_lookup_s = round(time.monotonic() - cache_started, 3)
             if cached is not None:
                 emit("status", {"stage": "cache", "hit": True})
@@ -125,6 +141,7 @@ class QueryPipeline:
                     "generation_time_s": 0.0,
                     "retrieval_time_s": 0.0,
                     "total_time_s": round(time.monotonic() - total_started, 3),
+                    "revision": revision,
                 }
                 emit("done", cached_done)
                 return cached_done
@@ -172,6 +189,7 @@ class QueryPipeline:
                 embedding,
                 CachedAnswer(text=text, sources=sources),
                 active,
+                revision=revision,
             )
         done: dict[str, Any] = {
             "text": text,
@@ -179,6 +197,7 @@ class QueryPipeline:
             "generation_time_s": generation_s,
             "retrieval_time_s": retrieval_s,
             "total_time_s": round(time.monotonic() - total_started, 3),
+            "revision": revision,
         }
         if self._semantic_cache is not None:
             done["cache_hit"] = False

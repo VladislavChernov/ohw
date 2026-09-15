@@ -8,6 +8,7 @@ ADR-014: идентичность источника — (domain, source_url) в
 from __future__ import annotations
 
 import builtins
+import hashlib
 import threading
 from datetime import UTC
 from pathlib import Path
@@ -131,6 +132,38 @@ class DocumentRegistry:
             )
             self._conn.commit()
             return True
+
+    def data_revision(self, domain: str) -> str | None:
+        """Ревизия данных домена — fingerprint активного сета (ADR-026).
+
+        ``sha256`` над отсортированными ``content_hash`` активных документов
+        домена. Идемпотентен: повторный INGEST того же ``content_hash`` (no-op,
+        ADR-014) не меняет отпечаток; добавление/изменение/soft-delete меняет.
+        ``None`` — активных документов у домена нет.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT content_hash FROM documents "
+                "WHERE domain = ? AND status = ?",
+                (domain, STATUS_ACTIVE),
+            ).fetchall()
+        if not rows:
+            return None
+        digest = hashlib.sha256()
+        for content_hash in sorted({row[0] for row in rows}):
+            digest.update(content_hash.encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def data_revision_updated_at(self, domain: str) -> str | None:
+        """Максимальный ``created_at`` активных документов домена (или None)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(created_at) FROM documents "
+                "WHERE domain = ? AND status = ?",
+                (domain, STATUS_ACTIVE),
+            ).fetchone()
+        return row[0] if row and row[0] is not None else None
 
 
 class JobStore:

@@ -1,6 +1,6 @@
 # Документация: Инварианты платформы
 
-> **Версия:** v8 (итерация поверх базы v5; L2-07 → planned, L4-04 → partial, L4-01 → переквалифицирован ADR-027)
+> **Версия:** v9 (итерация поверх базы v5; L2-07 → реализован (ADR-026, Веха 4-хвост), L4-04 → partial, L4-01 → переквалифицирован ADR-027)
 > **Последнее обновление:** 2026-09-15
 >
 > Единый сводный перечень инвариантов — утверждений, которые обязаны выполняться во **всех**
@@ -32,7 +32,7 @@
 | L2-04 | Графовая и векторная оси связаны по ключу `chunk_id`; запись узлов/рёбер и эмбеддингов коммитится атомарно **в пределах одного движка** (атомарная пара: обе оси `consistency_capability()=="atomic"` и общий `engine_key()`); разнородные пары — best-effort c компенсацией (сбой второй оси → граф откатывается `delete_node`, джоба `failed` с пометкой «компенсировано») | CONCEPT §4.1 (COMMIT), ADR-013, ADR-024, `docs/data_model.md` §6, `openspec/changes/architecture-atomic-commit/spec.md` |
 | L2-05 | Удаление источника — soft delete: чанки снимаются с поиска, сущности сохраняются, пока имеют активные `source_ids`; физическое удаление — только фоновый cleanup по retention | ADR-014, `docs/operations_requirements.md` §2 |
 | L2-06 | Идемпотентность INGEST: повторная загрузка неизменённого `source_url` (тот же content hash) — no-op, без плодования версий | ADR-014 |
-| L2-07 | **Bounded staleness (query-контур):** *(planned, Веха 4-хвост)* ответ конструируется из данных не старее ревизии `R<domain>`; ревизия = fingerprint активного сета DocumentRegistry (`sha256(sorted content_hash)`, ADR-026). Query-контур знает текущую `R<domain>` (поллер `GET /revision`), кэшированные записи старой эпохи умирают по TTL, «свежесть ответа = свежесть данных» только при совпадении ревизий | ADR-026, `docs/prototype_requirements.md` §Веха 4-хвост, `learning/data_revision_analytics.md` |
+| L2-07 | **Bounded staleness (query-контур):** ответ конструируется из данных не старее ревизии `R<domain>`; ревизия = fingerprint активного сета DocumentRegistry (`sha256(sorted content_hash)`, ADR-026). Query-контур знает текущую `R<domain>` (поллер `GET /revision`), кэшированные записи старой эпохи умирают по TTL, «свежесть ответа = свежесть данных» только при совпадении ревизий | ADR-026, `docs/prototype_requirements.md` §Веха 4-хвост, `learning/data_revision_analytics.md` |
 
 ## L3. Процессы (ingestion / retrieval)
 
@@ -51,7 +51,7 @@
 | L4-01 | Доступ к LLM-инференсу — только через контракт `LLMInference`; ядро не знает физического размещения модели (локальный GPU, отдельный хост, внешний endpoint). Совместное размещение моделей (эмбеддер + LLM на одном GPU → гейтинг по фазам) — ограничение среды развертывания, фиксируется в прототипных доках, а не инвариантом | CONCEPT §2.2, ADR-022, ADR-027, `docs/06` §5 (риск №1) |
 | L4-02 | Фоновые задачи (cleanup, retention, reconciliation) не выполняются в hot-path обработки запросов | ADR-014, `docs/operations_requirements.md` §2–§3 |
 | L4-03 | Смена активного домена и адаптеров не требует перезапуска контейнеров (runtime config) | CONCEPT §6, `docs/04` |
-| L4-04 | **Метрики:** *(partial — этап A реализован, Prometheus /metrics — этап B/фаза 2)* все сервисы публикуют метрики с обязательным лейблом `{domain}`; структура метрик фиксирована. Этап A: `trigger_metrics snapshot {...}` из `worker.loop()` (env `METRICS_SNAPSHOT_INTERVAL_S`, дефолт 30 c; поля `domain="*"`, `queue_depth`, `oldest_pending_s` (задел), `topology_poll_errors_total`, `cache_*`); поллер ошибок топологии логирует счётчик `(N consecutive)` вместо глотания | `docs/06` §2 |
+| L4-04 | **Метрики:** *(partial — этап A реализован, Prometheus /metrics — этап B/фаза 2)* все сервисы публикуют метрики с обязательным лейблом `{domain}`; структура метрик фиксирована. Этап A: `trigger_metrics snapshot {...}` из `worker.loop()` (env `METRICS_SNAPSHOT_INTERVAL_S`, дефолт 30 c; поля `domain="*"`, `queue_depth`, `oldest_pending_s` (задел), `topology_poll_errors_total`, `revision_poll_errors_total`, `revisions` (известные ревизии доменов), `cache_*`); поллер ошибок топологии и ревизий логирует счётчик вместо глотания | `docs/06` §2 |
 | L4-05 | Восстановление из бэкапа должно соответствовать целевым RPO/RTO, зафиксированным в эксплу.требованиях | `docs/operations_requirements.md` §1 |
 
 ## L5. Безопасность и качество

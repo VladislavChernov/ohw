@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from graphrag_proto.query_service.revision_client import RevisionClient
 from graphrag_proto.query_service.store import TERMINAL, TaskStore
 from graphrag_proto.query_service.task_queue import TaskQueue
 from graphrag_proto.retrieval.adapters.topology_client import TopologyClient
@@ -35,6 +36,7 @@ class QueryWorker:
         worker_id: str = "worker-1",
         poll_interval_s: float = 5.0,
         pipeline_rebuilder: Callable[[], None] | None = None,
+        revisions: RevisionClient | None = None,
         backoff_base_s: float = 1.0,
         backoff_max_s: float = 30.0,
         reclaim_timeout_s: float = 60.0,
@@ -47,6 +49,7 @@ class QueryWorker:
         self._worker_id = worker_id
         self._poll_interval_s = max(0.0, poll_interval_s)
         self._pipeline_rebuilder = pipeline_rebuilder if self._poll_interval_s > 0 else None
+        self._revisions = revisions
         self._backoff_base_s = max(0.1, backoff_base_s)
         self._backoff_max_s = max(self._backoff_base_s, backoff_max_s)
         self._reclaim_timeout_s = max(1.0, reclaim_timeout_s)
@@ -87,7 +90,8 @@ class QueryWorker:
             self._queue.publish(task.task_id, event_type, payload)
 
         try:
-            self._pipeline.run(task.query, task.domain or None, emit)
+            revision = self._revisions.revision(task.domain) if self._revisions is not None else None
+            self._pipeline.run(task.query, task.domain or None, emit, revision=revision)
         except Exception as exc:  # noqa: BLE001 - разнородные сбои пайплайна
             emit("error", {"code": "pipeline_error", "message": str(exc)})
             self._store.mark_failed(task.task_id, str(exc))
@@ -161,6 +165,11 @@ class QueryWorker:
             "domain": "*",
             "topology_poll_errors_total": topology_poll_errors_total,
         }
+        if self._revisions is not None:
+            # S6/ревью №7: ошибки поллера ревизий не молчат; оператор видит
+            # свежесть данных (известные ревизии доменов).
+            payload["revision_poll_errors_total"] = self._revisions.revision_poll_errors_total
+            payload["revisions"] = self._revisions.known_revisions()
         try:
             payload["queue_depth"] = self._queue.depth()
         except Exception:  # noqa: BLE001 - снапшот не роняет воркер
@@ -222,6 +231,10 @@ def main() -> None:
     initial_map = client.adapters_map() if client is not None else None
     pipeline = build_pipeline(adapter_map=initial_map, semantic_cache=semantic_cache)
 
+    # Ревизии данных (ADR-026): fail-open, окно REVISION_POLL_INTERVAL_S;
+    # переживает hot-reload — живёт на воркере, не на пайплайне.
+    revisions = RevisionClient.from_env()
+
     poll_interval_s = float(os.environ.get("TOPOLOGY_POLL_INTERVAL", "5"))
     worker = QueryWorker(
         queue=queue,
@@ -229,6 +242,7 @@ def main() -> None:
         pipeline=pipeline,
         worker_id=worker_id,
         poll_interval_s=poll_interval_s,
+        revisions=revisions,
         backoff_base_s=float(os.environ.get("WORKER_BACKOFF_BASE_S", "1")),
         backoff_max_s=float(os.environ.get("WORKER_BACKOFF_MAX_S", "30")),
         reclaim_timeout_s=float(os.environ.get("TASK_RECLAIM_TIMEOUT_S", "60")),

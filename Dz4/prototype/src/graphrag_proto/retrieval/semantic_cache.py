@@ -4,11 +4,13 @@
 эмбеддинг косинусно близок (>= порога) к закэшированному, получает `done` из кэша
 без graph/vector/rerank/context/LLM и без `token`-событий.
 
-Свежесть (зафиксированное допущение, решение 2026-09-13): только TTL + `clear()`;
-COMMIT не инвалидирует кэш (нет catalog-revision в контуре запроса). Planned upgrade
-path — epoch-bump ключа `query:sc:<rev>:<domain>` — зафиксирован в spec бандла, не
-реализован. Моменты пересмотра допущения: M4 (Eval), M5 (конфигуратор профилей),
-M6 (коннекторы).
+Свежесть (ADR-026, Веха 4-хвост): epoch-bump ключа по ревизии данных домена —
+`query:sc:<rev>:<domain>` (`revision=None` → эпоха по умолчанию `query:sc:<domain>`,
+M3-поведение, обратная совместимость) — плюс TTL + `clear()`. COMMIT не
+инвалидирует кэш напрямую (прямой инвалидации по источникам нет): bump ревизии
+переводит поиск на новый слой, старый дочищается TTL. Ревизия приходит в
+lookup/store из query-контура (RevisionClient). Моменты пересмотра: M5
+(конфигуратор профилей), M6 (коннекторы).
 
 «Плохие» ответы не кэшируются: пустой `text`, явный отказ LLM («контекста
 недостаточно»), сбой пайплайна -> `store()` no-op (решение по свежести).
@@ -21,9 +23,10 @@ M6 (коннекторы).
 - соединение: `socket_timeout=2s` (fail-fast, не блокирует поток надолго);
 - поле: `sc:<sha256(repr(embedding))>` (полный 64-символьный hex, нет коллизий 48-бит);
 - EXPIRE на HASH = TTL при каждом store (S4: брошенный домен не держит ключ вечно);
-- shared-счётчики hit/miss (ревью №7 §2.1): живут в Valkey — HASH ``query:sc:<domain>:meta``
-  с полями `hits`/`misses` (HINCRBY), НЕ в памяти процесса -> stats() агрегируют HGETALL
-  по доменам и переживают рестарт/несколько воркеров (этап B — sink в /metrics).
+- shared-счётчики hit/miss (ревью №7 §2.1): живут в Valkey — HASH
+  ``query:sc:<rev>:<domain>:meta`` (ревизия None → ``query:sc:<domain>:meta``)
+  с полями `hits`/`misses` (HINCRBY), НЕ в памяти процесса -> stats() агрегируют
+  HGETALL по доменам и переживают рестарт/несколько воркеров (этап B — sink в /metrics).
   Сбой-пути (lookup при недоступной Valkey) счётчик не увеличивают: агрегировать негде,
   фиксируется как допущение.
 """
@@ -98,20 +101,36 @@ class SemanticCache(ABC):
     threshold: float
     ttl_s: float
 
-    def store(self, embedding: list[float], answer: CachedAnswer, domain: str = "") -> None:
+    def store(
+        self,
+        embedding: list[float],
+        answer: CachedAnswer,
+        domain: str = "",
+        revision: str | None = None,
+    ) -> None:
         """Запись ответа. No-op для «плохих» ответов (should_cache_text)."""
         if not should_cache_text(answer.text):
             return
-        self._store(embedding, answer, domain)
+        self._store(embedding, answer, domain, revision)
 
     @abstractmethod
     def lookup(
-        self, embedding: list[float], threshold: float, domain: str = ""
+        self,
+        embedding: list[float],
+        threshold: float,
+        domain: str = "",
+        revision: str | None = None,
     ) -> CachedAnswer | None:
         """Ответ с максимальным косинусом среди живых записей >= threshold; иначе None."""
 
     @abstractmethod
-    def _store(self, embedding: list[float], answer: CachedAnswer, domain: str) -> None:
+    def _store(
+        self,
+        embedding: list[float],
+        answer: CachedAnswer,
+        domain: str,
+        revision: str | None,
+    ) -> None:
         """Реализация записи (после проверки should_cache_text)."""
 
     @abstractmethod
@@ -141,18 +160,24 @@ class InMemorySemanticCache(SemanticCache):
         self.threshold = float(threshold)
         self.ttl_s = float(ttl_s)
         self._lock = threading.Lock()
-        self._bucket: dict[str, list[_InMemoryEntry]] = {}
+        self._bucket: dict[tuple[str, str | None], list[_InMemoryEntry]] = {}
         self._hits = 0
         self._misses = 0
 
-    def lookup(self, embedding: list[float], threshold: float, domain: str = "") -> CachedAnswer | None:
+    def lookup(
+        self,
+        embedding: list[float],
+        threshold: float,
+        domain: str = "",
+        revision: str | None = None,
+    ) -> CachedAnswer | None:
         if _is_blank_embedding(embedding):
             with self._lock:
                 self._misses += 1
             return None
         with self._lock:
-            alive = _trim_expired(self._bucket.get(domain, []), self.ttl_s)
-            self._bucket[domain] = alive
+            alive = _trim_expired(self._bucket.get((domain, revision), []), self.ttl_s)
+            self._bucket[(domain, revision)] = alive
             best = _best_alive(alive, embedding, threshold)
             if best is None:
                 self._misses += 1
@@ -160,9 +185,15 @@ class InMemorySemanticCache(SemanticCache):
             self._hits += 1
             return best.answer
 
-    def _store(self, embedding: list[float], answer: CachedAnswer, domain: str) -> None:
+    def _store(
+        self,
+        embedding: list[float],
+        answer: CachedAnswer,
+        domain: str,
+        revision: str | None,
+    ) -> None:
         with self._lock:
-            self._bucket.setdefault(domain, []).append(
+            self._bucket.setdefault((domain, revision), []).append(
                 _InMemoryEntry(list(embedding), answer, time.time())
             )
 
@@ -241,17 +272,19 @@ class RedisSemanticCache(SemanticCache):
         return self._client
 
     @staticmethod
-    def _key(domain: str) -> str:
+    def _key(domain: str, revision: str | None = None) -> str:
+        if revision:
+            return f"{_KEY_PREFIX}:{revision}:{domain}"
         return f"{_KEY_PREFIX}:{domain}"
 
     @staticmethod
-    def _meta_key(domain: str) -> str:
-        return f"{_KEY_PREFIX}:{domain}{_META_SUFFIX}"
+    def _meta_key(domain: str, revision: str | None = None) -> str:
+        return f"{RedisSemanticCache._key(domain, revision)}{_META_SUFFIX}"
 
-    def _bump(self, domain: str, metric: str) -> None:
+    def _bump(self, domain: str, metric: str, revision: str | None = None) -> None:
         """Shared-счётчик в Valkey (HINCRBY); сбой — молчаливый пропуск (fail-open)."""
         try:
-            self._redis().hincrby(self._meta_key(domain), metric, 1)
+            self._redis().hincrby(self._meta_key(domain, revision), metric, 1)
         except (ConnectionError, TimeoutError, OSError):
             pass
 
@@ -274,19 +307,25 @@ class RedisSemanticCache(SemanticCache):
             ensure_ascii=False,
         )
 
-    def lookup(self, embedding: list[float], threshold: float, domain: str = "") -> CachedAnswer | None:
+    def lookup(
+        self,
+        embedding: list[float],
+        threshold: float,
+        domain: str = "",
+        revision: str | None = None,
+    ) -> CachedAnswer | None:
         if _is_blank_embedding(embedding):
-            self._bump(domain, "misses")
+            self._bump(domain, "misses", revision)
             return None
         try:
             client = self._redis()
-            key = self._key(domain)
+            key = self._key(domain, revision)
             raw = client.hgetall(key)
         except (ConnectionError, TimeoutError, OSError):
-            self._bump(domain, "misses")
+            self._bump(domain, "misses", revision)
             return None
         if not isinstance(raw, Mapping) or not raw:
-            self._bump(domain, "misses")
+            self._bump(domain, "misses", revision)
             return None
 
         now = time.time()
@@ -319,16 +358,22 @@ class RedisSemanticCache(SemanticCache):
             except (ConnectionError, TimeoutError, OSError):
                 pass
         if best is None:
-            self._bump(domain, "misses")
+            self._bump(domain, "misses", revision)
             return None
-        self._bump(domain, "hits")
+        self._bump(domain, "hits", revision)
         return best
 
-    def _store(self, embedding: list[float], answer: CachedAnswer, domain: str) -> None:
+    def _store(
+        self,
+        embedding: list[float],
+        answer: CachedAnswer,
+        domain: str,
+        revision: str | None,
+    ) -> None:
         try:
             client = self._redis()
             field = self._field(embedding)
-            key = self._key(domain)
+            key = self._key(domain, revision)
             client.hset(key, field, self._payload(embedding, answer, time.time()))
             if self.ttl_s > 0:
                 client.expire(key, math.ceil(self.ttl_s))

@@ -582,6 +582,43 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
 
 ---
 
+## Этап 12: Ревизия данных в query-контуре — Веха 4-хвост (ADR-026, закрытие ревью №5–№7)
+
+**Дата:** 2026-09-15
+**Статус:** Реализовано (прототип `prototype/`, openspec-бандл `data-revision-query-context`)
+
+Закрывает замечания ревью №5 (SC-13: нумерация L2-04/L2-07), №6 (R6-1/R6-2/R6-3),
+№7 (S6: поллер ревизий не молчит; вывод 3: оператор видит известные ревизии).
+
+### Реализация (ADR-026)
+
+1. **Ingestion** — `DocumentRegistry.data_revision(domain) -> str | None`: fingerprint
+   `sha256(sorted(content_hash активных документов))`, идемпотентен (no-op upsert не
+   меняет, soft-delete меняет) + `data_revision_updated_at`; endpoint
+   `GET /api/v1/ingestion/revision?domain=` (X-API-Key, L5-01; 422 без domain); тесты
+   `test_ingestion_revision.py` (8 passed).
+2. **Semantic Cache** — `lookup/store(..., revision=None)`: InMemory бакет
+   `(domain, revision)` (старые эпохи умирают по TTL); Redis ключ
+   `query:sc:<rev>:<domain>` (без rev — `query:sc:<domain>`, мета — `...:<domain>:meta`),
+   epoch-bump на смене ревизии; 27 тестов.
+3. **QueryPipeline** — `run(..., revision=None)` → `done.revision` (str|None) в любом
+   исходе (miss/hit/генерация) — срез «по каким данным собран ответ» для Eval (ADR-015).
+4. **Query worker** — `RevisionClient` (поллер «по потребности», пер-доменный кэш, окно
+   `REVISION_POLL_INTERVAL_S` дефолт 5 с, 0 = M3-поведение; fail-open: сбой → последняя
+   известная ревизия, с берём ничего = None; каждый сбой полла инкрементирует
+   `revision_poll_errors_total` — S6); `process_one` запрашивает
+   `revisions.revision(task.domain)`; снапшот метрик дополнен `revision_poll_errors_total`
+   и `revisions` (известные ревизии доменов) — видимость свежести оператору.
+5. **Доки** — `prototype_requirements.md` (чеклист Вехи 4-хвост), `invariants.md` L2-07
+   реализован, L4-04 снапшот, ADR-026 → реализовано, `learning/data_revision_analytics.md`
+   (нумерация L2-04/L2-07 выровнена).
+
+**Верификация** — `test_ingestion_revision.py`, `test_semantic_cache.py`,
+`test_retrieval_pipeline.py` (revision в done, epoch-bump), `test_revision_client.py`,
+`test_query_api.py` (передача rev в пайплайн, снапшот метрик); ruff/mypy чисто.
+
+---
+
 ## Связи с другими документами
 
 | Документ                        | Связано с                        | Тип связи           |

@@ -254,6 +254,63 @@ def test_redis_clear_removes_meta_keys() -> None:
     assert cache.stats() == {"entries": 0, "hits": 0, "misses": 0}
 
 
+# --- tests: epoch-bump по ревизии (ADR-026) --------------------------
+
+def test_inmemory_epoch_bump() -> None:
+    cache = InMemorySemanticCache(threshold=0.85, ttl_s=0)
+    cache.store(_EMB_SIMILAR, _answer("по старой эпохе"), domain="it", revision="revA")
+    assert cache.lookup(_EMB_SIMILAR, threshold=0.85, domain="it", revision="revA") is not None
+    assert cache.lookup(_EMB_SIMILAR, threshold=0.85, domain="it", revision="revB") is None
+
+
+def test_inmemory_revision_none_isolated_from_revision() -> None:
+    cache = InMemorySemanticCache(threshold=0.85, ttl_s=0)
+    cache.store(_EMB_SIMILAR, _answer("по умолчанию"), domain="it")
+    cache.store(_EMB_SIMILAR, _answer("по ревизии"), domain="it", revision="revA")
+    assert cache.lookup(_EMB_SIMILAR, threshold=0.85, domain="it").text == "по умолчанию"
+    assert cache.lookup(_EMB_SIMILAR, threshold=0.85, domain="it", revision="revA").text == "по ревизии"
+
+
+def test_inmemory_per_domain_revision_isolated() -> None:
+    cache = InMemorySemanticCache(threshold=0.85, ttl_s=0)
+    cache.store(_EMB_SIMILAR, _answer("it"), domain="it", revision="revA")
+    assert cache.lookup(_EMB_SIMILAR, threshold=0.85, domain="legal", revision="revA") is None
+
+
+def test_redis_key_revision_prefix() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="it", revision="revA")
+    assert "query:sc:revA:it" in fake._store
+    assert "query:sc:it" not in fake._store  # None-эпоха не создаётся под rev
+
+
+def test_redis_revision_none_backward_compat() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="it")
+    assert "query:sc:it" in fake._store
+    assert cache.lookup(_EMB_SIMILAR, threshold=0.80, domain="it") is not None
+
+
+def test_redis_revision_epoch_bump_miss() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="it", revision="revA")
+    # та же похожая запись под НЕй ревизией — промах (старый слой не читается)
+    assert cache.lookup(_EMB_PERP, threshold=0.80, domain="it", revision="revB") is None
+
+
+def test_redis_stats_after_epoch_bump() -> None:
+    fake = FakeRedis()
+    cache = RedisSemanticCache(url="redis://fake:0", threshold=0.80, ttl_s=0, client=fake)
+    cache.store(_EMB_SIMILAR, _answer("a"), domain="it", revision="revA")
+    cache.store(_EMB_SIMILAR, _answer("b"), domain="it", revision="revB")
+    assert cache.stats()["entries"] == 2
+    cache.lookup(_EMB_SIMILAR, threshold=0.80, domain="it", revision="revA")  # hit
+    assert cache.stats()["hits"] == 1
+
+
 # --- tests: should_cache_text (3.4) -----------------------------------
 
 def test_should_cache_text_rejects_empty() -> None:

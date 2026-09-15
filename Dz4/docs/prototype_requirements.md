@@ -223,7 +223,7 @@ Dz4/
 
 Решение, отложенное на обсуждении свежести семантического кэша (2026-09-13). Суть — не
 «инвалидация кэша», а экспорт уже существующих версий в query-контур, чтобы у «актуального
-контекста ответа» появился fingerprint. Взаимодействие с концепцией: L2-04 получает явный
+контекста ответа» появился fingerprint. Взаимодействие с концепцией: L2-07 получает явный
 **bounded staleness** (окно согласования ingestion→query), ADR-014/topology-revision
 экспортируются (без параллельной модели ревизии), Eval (ADR-015) фиксирует ревизию знаний
 в срезе. До появления вехи кэш живёт на TTL + ручной сброс (допущение зафиксировано в
@@ -242,15 +242,15 @@ Dz4/
 - **Доставка — `GET /api/v1/ingestion/revision?domain=` + поллер в worker**
   (по аналогии с `_topology_rebuilder`, задержка = интервал полла).
 
-- [ ] Экспонировать версии DocumentRegistry (ADR-014) + topology-revision в query-контур;
+- [x] Экспонировать версии DocumentRegistry (ADR-014) + topology-revision в query-контур;
       fingerprint «профиль домена + карта адаптеров + версия данных» — переиспользование
       ADR-014/topology, без новой параллельной модели.
-- [ ] Реализовать `DocumentRegistry.data_revision(domain) -> str | None` (sha256 активных
+- [x] Реализовать `DocumentRegistry.data_revision(domain) -> str | None` (sha256 активных
       `content_hash`) + endpoint `GET /api/v1/ingestion/revision?domain=` (X-API-Key).
-- [ ] Query-контур: поллер ревизии (аналог `_topology_rebuilder`), текущая `rev<domain>`
+- [x] Query-контур: поллер ревизии (аналог `_topology_rebuilder`), текущая `rev<domain>`
       в lookup/store; кэш-объект один (ADR-025), старые эпохи умирают по TTL.
-- [ ] Семантический кэш: ключ `query:sc:<rev>:<domain>` (epoch-bump префикс в поле HASH).
-- [ ] `docs/invariants.md` L2-04: зафиксировать bounded staleness явно
+- [x] Семантический кэш: ключ `query:sc:<rev>:<domain>` (epoch-bump префикс в поле HASH).
+- [x] `docs/invariants.md` L2-07: зафиксировать bounded staleness явно
       (текущая трактовка подразумевает «свежесть ансвера = свежесть данных»).
 - [ ] M4-Eval: воспроизводимый срез фиксирует ревизию знаний (ADR-015).
 

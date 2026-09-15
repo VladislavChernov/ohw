@@ -201,3 +201,58 @@ def test_inmemory_stale_ack_after_reclaim_ignored() -> None:
 
     queue.ack("q_fence", worker_id="w2")  # владелец
     assert queue.depth() == 0
+
+
+class _StubRevisions:
+    """Дубль RevisionClient: фиксированные ревизии и счётчик сбоев поллера."""
+
+    def __init__(self) -> None:
+        self.revision_poll_errors_total = 0
+        self._known = {"it": "revA", "cpp": "revB"}
+
+    def revision(self, domain: str) -> str | None:
+        return self._known.get(domain)
+
+    def known_revisions(self) -> dict[str, str | None]:
+        return dict(self._known)
+
+
+def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
+    """Воркер запрашивает `revisions.revision(task.domain)` и передаёт в run()."""
+    queue = InMemoryTaskQueue()
+    store = TaskStore(tmp_path / "rev.sqlite")
+    seen: dict[str, str | None] = {}
+
+    class CapturingPipeline:
+        def run(self, query: str, domain: str | None, emit, revision: str | None = None):
+            seen["revision"] = revision
+            return {"text": "ok", "revision": revision}
+
+    store.create("q_rev", "it", "вопрос")
+    queue.submit(Task(task_id="q_rev", domain="it", query="вопрос"))
+    worker = QueryWorker(
+        queue=queue,
+        store=store,
+        pipeline=CapturingPipeline(),  # type: ignore[arg-type]
+        revisions=_StubRevisions(),
+    )
+    assert worker.process_one() is True
+    assert store.get("q_rev")["status"] == "succeeded"
+    assert seen == {"revision": "revA"}
+
+
+def test_worker_metrics_snapshot_includes_revisions(tmp_path: Path, caplog) -> None:
+    queue = InMemoryTaskQueue()
+    store = TaskStore(tmp_path / "m.sqlite")
+    worker = QueryWorker(
+        queue=queue,
+        store=store,
+        pipeline=make_worker(queue, store)._pipeline,
+        revisions=_StubRevisions(),
+    )
+    with caplog.at_level("INFO"):
+        worker._log_metrics_snapshot(topology_poll_errors_total=2)
+    snapshot = caplog.messages[-1]
+    assert '"topology_poll_errors_total": 2' in snapshot
+    assert '"revision_poll_errors_total": 0' in snapshot
+    assert '"revisions": {"it": "revA", "cpp": "revB"}' in snapshot

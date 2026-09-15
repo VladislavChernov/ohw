@@ -257,3 +257,38 @@ def test_no_cache_backward_compat() -> None:
     )
     done = pipe.run("как устроена база данных")
     assert "cache_hit" not in done
+
+
+# --- Ревизия данных в query-контуре (ADR-026) ------------------------
+
+def test_done_carries_revision_on_generate() -> None:
+    cache = InMemorySemanticCache(threshold=0.80, ttl_s=0)
+    pipe = _pipeline_with_cache(cache)
+    done = pipe.run("как устроена база данных", revision="revA")
+    assert done["revision"] == "revA"
+    assert done["cache_hit"] is False
+
+
+def test_done_carries_revision_on_hit() -> None:
+    cache = InMemorySemanticCache(threshold=0.80, ttl_s=0)
+    pipe = _pipeline_with_cache(cache)
+    pipe.run("как устроена база данных", revision="revA")
+    done_hit = pipe.run("как устроена база данных", revision="revA")
+    assert done_hit["cache_hit"] is True
+    assert done_hit["revision"] == "revA"
+
+
+def test_done_revision_defaults_none() -> None:
+    pipe = _pipeline_with_cache()
+    done = pipe.run("как устроена база данных")
+    assert done["revision"] is None
+
+
+def test_epoch_bump_hit_only_same_revision() -> None:
+    cache = InMemorySemanticCache(threshold=0.80, ttl_s=0)
+    pipe = _pipeline_with_cache(cache)
+    pipe.run("как устроена база данных", revision="revA")
+    # bump: та же формулировка под новой ревизией -> miss -> полный цикл
+    done_bump = pipe.run("как устроена база данных", revision="revB")
+    assert done_bump["cache_hit"] is False
+    assert done_bump["revision"] == "revB"
