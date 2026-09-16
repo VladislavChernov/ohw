@@ -1,23 +1,36 @@
-# Dz4: Мультиязычная Платформа Enterprise GraphRAG (v6 — итерация поверх базы v5)
-================================================================================
+# Dz4: Гибридная RAG
 
-Гибридная (графовая + векторная) RAG-платформа корпоративного уровня. 
-Предназначена для семантического поиска, анализа контрактов и выявления логических 
-противоречий в документации без использования внешних API. 
+Учебный прототип доменно-агностичной RAG-системы: графовый и векторный поиск
+в Neo4j, генерация ответа локальной LLM через llama.cpp, стриминг и источники.
+Предметная область задаётся YAML-профилем и глоссарием (`it`, `library`, `cinema`).
+Технологии изолированы адаптерами; это валидационный контур, не production-система.
+Архитектурная концепция описывает также возможности, ещё не реализованные в прототипе.
 
-Движок является полностью доменно-агностичным. Настройка на конкретную предметную 
-область (ИТ, кино, литература) осуществляется динамической подгрузкой Domain Profile (YAML).
-Слой адаптеров изолирует ядро от конкретных технологий (Neo4j, Ollama, bge-m3).
+Реализованы Config/Glossary, девятиэтапный Ingestion с COMMIT в Neo4j,
+асинхронный Query (Valkey → worker → SSE), Streamlit-демо, Topology Orchestrator
+и расширяемые чанкеры, в том числе плагины через `graphrag.chunkers`.
 
----
+**Ограничения:** основной Compose использует `EMBEDDER=deterministic` и
+`RERANKER=noop`. Хэш-эмбеддинги позволяют проверить интеграцию, но не качество
+семантического поиска. Запуск профилей `embeddings`/`reranker` сам по себе
+не переключает адаптеры клиентов: нужна согласованная настройка индексации и
+поиска; при смене эмбеддера существующие документы необходимо переиндексировать.
+Демо загружает txt/md; бинарная загрузка PDF через этот API не предусмотрена.
+Topology UI и конфигуратор — задел; monitoring в Compose закомментирован.
 
-## 1. Минимальные системные требования
---------------------------------------------------------------------------------
-* **ОС:** Linux (Ubuntu 22.04+), macOS (M1/M2/M3), Windows 11 (через WSL2).
-* **CPU:** Минимум 4 ядра (рекомендуется 8 ядер для эффективного реранкинга).
-* **RAM (Системная ОЗУ):** Строго от 16 ГБ. (Neo4j зажат в лимит 1.5 ГБ JVM).
-* **GPU (Видеопамять):** NVIDIA RTX 2070 Super и выше (Минимум 8 ГБ VRAM).
-* **Зависимости:** Docker Engine v24.0+, Docker Compose v2.20+, Python 3.11+ (slim).
+## 1. Требования и окружение
+
+- Docker Engine 24+ / Compose v2.20+, доступ к Docker daemon и BuildKit.
+- Для штатного CUDA-контура: Linux или Windows с WSL2, совместимый драйвер NVIDIA
+  и поддержка GPU в Docker (NVIDIA Container Toolkit на Linux).
+  На macOS данный CUDA Compose не запускается без изменения конфигурации.
+- Ориентир для демо: 16+ ГБ RAM и 8+ ГБ VRAM, не гарантия запуска любого профиля.
+  Потребление зависит от контекста LLM и одновременно загруженных моделей.
+  Heap Neo4j ограничен 1G, page cache — 512M; это не лимит всей памяти контейнера.
+- Интернет нужен для получения образов, зависимостей и весов при сборке.
+  Генерация в штатном демо выполняется локально, без внешнего LLM-API.
+- Для разработки: Python 3.11+ и uv либо dev-образ `ohw-python:3.13`;
+  для запуска собранных сервисов Python на хосте не требуется.
 
 ---
 
@@ -33,7 +46,7 @@
 | [docs/02_pipeline_and_normalizer.md](./docs/02_pipeline_and_normalizer.md) | Регламент Ingestion Pipeline и Normalizer v3 |
 | [docs/03_retriever.md](./docs/03_retriever.md) | Стратегия ретривера и слияния контекста |
 | [docs/04_services_config.md](./docs/04_services_config.md) | Конфигурация сервисов и Runtime API |
-| [docs/05_adr_log.md](./docs/05_adr_log.md) | Журнал архитектурных решений (ADR-001 - ADR-020) |
+| [docs/05_adr_log.md](./docs/05_adr_log.md) | Журнал архитектурных решений (ADR) |
 | [docs/06_operations_and_risks.md](./docs/06_operations_and_risks.md) | Operations, масштабирование и матрица рисков |
 | [docs/glossary.md](./docs/glossary.md) | Глоссарий терминов |
 | [docs/api_reference.md](./docs/api_reference.md) | API Reference: контракты Query / Config / Ingestion / Glossary |
@@ -56,7 +69,7 @@
 2. [02. Регламент Ingestion Pipeline и Normalizer v3](./docs/02_pipeline_and_normalizer.md) — 9 этапов загрузки, контекстная канонизация Big-O и валидатор.
 3. [03. Стратегия Ретривера и Слияния контекста](./docs/03_retriever.md) — 7 шагов цикла генерации, реранкер и вытеснение лимитов токенов.
 4. [04. Конфигурация Сервисов и Рантайм API](./docs/04_services_config.md) — изолированная сеть ohw_net, эндпоинты Config Service и глоссарии.
-5. [05. Журнал архитектурных решений (ADR)](./docs/05_adr_log.md) — обоснование выбора стека и платформенного подхода (ADR-001 - ADR-020).
+5. [05. Журнал архитектурных решений (ADR)](./docs/05_adr_log.md) — обоснование выбора стека и платформенного подхода.
 6. [06. Регламент Operations, Масштабирования и Рисков](./docs/06_operations_and_risks.md) — неймспейсы конфигов, метрики Prometheus, Docker-профили и матрица рисков.
 
 ---
@@ -64,8 +77,12 @@
 ## 3. Быстрый старт и развертывание
 --------------------------------------------------------------------------------
 
-### Шаг 1: Проверка окружения и прав доступа
-Для запуска требуются права локального администратора (`sudo` на Linux) и поддержка CUDA.
+Команды ниже — для Bash (Linux/WSL). Проект в этой рабочей среде расположен
+в `d:\Otus\ohw\Dz4`, в WSL — `/mnt/d/Otus/ohw/Dz4`.
+В другой копии репозитория замените абсолютные пути.
+
+### Шаг 1: Проверка окружения
+Требуются доступ к Docker daemon и поддержка NVIDIA GPU для полного демо.
 ```bash
 # Проверка версий Docker
 docker --version
@@ -77,20 +94,21 @@ docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi
 
 ### Шаг 2: Запуск базовой инфраструктуры
 ```bash
-# Запуск конфигурационных сервисов и СУБД Neo4j
-docker compose --file prototype/infra/compose.yaml --profile config --profile graph up -d
+# Config/Glossary и Neo4j — этот контур не требует GPU
+docker compose --file /mnt/d/Otus/ohw/Dz4/prototype/infra/compose.yaml --profile config --profile graph up -d --build --wait
 
-# Проверка успешности запуска контейнеров
-docker compose --file prototype/infra/compose.yaml ps
+# Проверка статуса контейнеров
+docker compose --file /mnt/d/Otus/ohw/Dz4/prototype/infra/compose.yaml --profile config --profile graph ps
 ```
 
 ### Шаг 3: Остановка сервисов
 ```bash
-# Остановка с сохранением скачанных моделей и весов в volumes
-docker compose --file prototype/infra/compose.yaml --profile config --profile graph down
+# Остановка базового контура с сохранением данных
+docker compose --file /mnt/d/Otus/ohw/Dz4/prototype/infra/compose.yaml --profile config --profile graph down
 
-# Полная очистка окружения (удаление всех контейнеров проекта)
-docker compose --file prototype/infra/compose.yaml down --remove-orphans
+# Остановка полного демо с сохранением данных
+docker compose --file /mnt/d/Otus/ohw/Dz4/prototype/infra/compose.yaml --profile config --profile graph --profile ingestion --profile llm down
+# Для опциональных сервисов добавьте их профили. down -v УДАЛЯЕТ данные volumes.
 ```
 
 > Артефакты прототипа (compose, профили доменов, глоссарии, инфраструктура) живут
@@ -104,51 +122,107 @@ docker compose --file prototype/infra/compose.yaml down --remove-orphans
 ответа и `sources` → soft-delete документа. Инструкция — [docs/demo_runbook.md](./docs/demo_runbook.md).
 
 ```bash
-# полный стек: config + graph + ingestion + llm (llm-профиль: valkey, query-api, query-worker, llama.cpp, demo-ui)
-docker compose --profile config --profile graph --profile ingestion --profile llm up -d --wait
+# У ingestion-api нет build-секции в Compose: подготовьте образ отдельно
+docker build --file /mnt/d/Otus/ohw/Dz4/prototype/Dockerfile --tag ohw/ingestion-service:prototype /mnt/d/Otus/ohw/Dz4/prototype
+# Остальные образы приложений и LLM собираются через --build
+docker compose --file /mnt/d/Otus/ohw/Dz4/prototype/infra/compose.yaml --profile config --profile graph --profile ingestion --profile llm up -d --build --wait
 
 # UI: http://localhost:8503
-# автоматизированный сквозной прогон (сбрасывает volumes — предусловие детерминизма)
-bash prototype/infra/scripts/run_demo_e2e.sh
+# Тесты и прямой запуск e2e описаны в README прототипа.
 ```
 
 ---
+
+### Сервисы и модель
+
+| Сервис | Порт хоста | Профиль Compose |
+|---|---|---|
+| Config / Glossary | 8001 / 8003 | `config` |
+| Neo4j HTTP / Bolt | 7474 / 7687 | `graph` |
+| Ingestion API | 8002 | `ingestion` |
+| Query API / worker | 8000 / без порта | `llm` |
+| Valkey / llama.cpp / Demo UI | 6379 / 8080 / 8503 | `llm` |
+| Topology Orchestrator | 8005 | `topology`, опционально |
+| BGE-M3 embeddings | 8004 | `embeddings`, опционально, GPU |
+| BGE reranker | 8006 | `reranker`, опционально, CPU |
+
+LLM-образ `ohw/llm:prototype` уже собирается Compose из
+[Dockerfile.llm](./prototype/Dockerfile.llm). При сборке загружается
+`Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf` из
+`bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF`.
+Закреплена commit-ревизия HF, проверяется SHA-256; runtime —
+`ghcr.io/ggml-org/llama.cpp:server-cuda-b10853`.
+**Локальный GGUF и bind-mount модели не требуются**: веса внутри образа.
+Это не отменяет mounts/volumes профилей и данных остальных сервисов.
+
+При сохранённом действительном build-кэше повторная загрузка весов обычно
+не требуется; полная пересборка может снова потребовать сеть.
+Для смены модели согласуйте `HF_REPO`, `HF_REVISION`, `HF_FILE`, `HF_SHA256`
+(build-args) и путь `--model` в Compose. BuildKit-secret для HF-токена
+текущим Dockerfile не подключён, поддержка приватных моделей не готова.
+Контекст LLM — 8192; `--n-gpu-layers 99` запрашивает размещение слоёв на GPU.
+
+**Безопасность:** тестовые значения `GRAPH_AUTH_API_KEY=changeme` и
+`NEO4J_PASSWORD=graphrag` замените секретами в окружении перед использованием
+вне изолированного демо. Порты опубликованы не только на loopback;
+llama.cpp и Valkey не защищены API-ключом приложений. Не выставляйте стек
+в недоверенную сеть: необходима отдельная настройка сетевого доступа и защиты.
+
+### Настройки и проверка
+
+- `INGEST_CHUNKER`: `sliding_window` (по умолчанию), `structure_aware`,
+  интеграции `langchain`/`llamaindex` и entry-point плагины.
+  Внешние библиотеки/плагины требуют установки; размер окна/перекрытие —
+  `INGEST_CHUNK_SIZE=512`, `INGEST_CHUNK_OVERLAP=64` (слова).
+  См. [руководство по чанкерам](./docs/chunkers_guide.md).
+- `RETRIEVAL_GRAPH_ENABLED=true|false` переключает графовую ось Query Worker.
+- Профиль `topology` добавляет API переключения адаптеров; Query Worker
+  опрашивает ревизию и пересобирает pipeline. Это не автоматическая
+  перенастройка уже сохранённых векторов или всех клиентов.
+
+Тесты, линт, типизация и прямой запуск e2e — в
+[README прототипа](./prototype/README.md).
+E2E-скрипт сейчас вычисляет ошибочный вложенный путь `prototype/prototype`
+и рассчитан на удаление volumes по умолчанию. До исправления используйте
+pytest напрямую против отдельного тестового стека; команды запуска из
+runbook следует сверять с этим README.
 
 ## 4. Управление доменами (API Спецификация)
 --------------------------------------------------------------------------------
 Рантайм-переключение предметной области выполняется через Config Service (Порт `8001`).
 
-### Пример 1: Валидация нового профиля домена
-* **Запрос:** `POST http://localhost:8001/api/v1/config/domain/validate`
-* **Тело запроса:** Контент файла `prototype/domain_profiles/domain_profile.library.yaml`
+Запросы требуют `X-API-Key`. Примеры для Bash используют ключ из окружения
+или тестовое значение `changeme`.
 
-### Пример 2: Активация домена
-* **Запрос:** `POST http://localhost:8001/api/v1/config/domain/activate`
-* **Тело запроса:** `{"profile": "library"}`
-* **Успешный ответ (Код 200 OK):**
-```json
-{
-  "status": "activated",
-  "active_domain": "library",
-  "previous_domain": "it",
-  "loaded_at": "2026-09-04T22:50:00Z"
-}
+```bash
+KEY="${GRAPH_AUTH_API_KEY:-changeme}"
+curl -sS -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/yaml' --data-binary @/mnt/d/Otus/ohw/Dz4/prototype/domain_profiles/domain_profile.library.yaml http://localhost:8001/api/v1/config/domain/validate
+# Валидный профиль: {"valid":true,"errors":[]}
+
+curl -sS -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' -d '{"domain":"library"}' http://localhost:8001/api/v1/config/domain/activate
+# HTTP 200: {"domain":"library","activated":true}
 ```
 
-### Коды возможных ошибок API:
-* `400 Bad Request` — Ошибка синтаксиса YAML-профиля или нарушение уникальности `unique_key`.
-* `422 Unprocessable Entity` — Ошибка валидации онтологии: связи в `edge_types` (from/to) ссылаются на несуществующие типы узлов.
-* `500 Internal Server Error` — Сбой подключения к графовой СУБД при попытке наката constraints.
+Валидация структуры возвращает HTTP 200 с `valid` и `errors`, даже если профиль
+невалиден. HTTP 400 — сломанный YAML или не-маппинг; 401 — неверный/отсутствующий
+ключ; 404 — профиль не найден; 422 при активации — отсутствующее поле `domain`,
+невалидный профиль или несовпадение `profile.name` с доменом.
+Активация сохраняется в SQLite Config Service; она не накатывает constraints Neo4j.
 
 ---
 
 ## 5. Troubleshooting (Устранение неполадок)
 --------------------------------------------------------------------------------
-* **Проблема:** Контейнер Neo4j падает сразу после старта с кодом `137`.
-  * *Причина:* Защитник системы (OOM Killer) принудительно убивает процесс из-за нехватки ОЗУ.
-  * *Решение:* Закройте тяжелые локальные приложения (браузеры, IDE) либо уменьшите параметры памяти JVM в `prototype/infra/compose.yaml`.
-* **Проблема:** Модели долго качаются или пайплайн выдает таймаут сети.
-  * *Решение:* Убедитесь, что контейнеры находятся в сети `ohw_net`. Логируйте статус загрузки моделей через `docker logs ohw-ollama`.
+- **Docker daemon недоступен:** запустите Docker Engine / Docker Desktop с Linux-контейнерами.
+- **Neo4j завершается с 137:** проверьте `docker inspect ohw-neo4j` и поле
+  `State.OOMKilled`, затем доступную RAM и лимиты JVM. Код 137 сам по себе
+  не доказывает нехватку памяти.
+- **LLM не готова:** `docker logs ohw-llm`; проверьте VRAM и доступность GPU.
+  Ошибки скачивания HF/SHA-256 видны в журнале сборки, не runtime-логе.
+- **Образ ingestion-service отсутствует:** выполните отдельный `docker build`
+  из раздела демо — у сервиса нет build-секции.
+- **Ответ пустой или нерелевантный:** проверьте статус INGEST, домен и источники;
+  штатный `deterministic`-эмбеддер не оценивает семантическую близость.
 
 ---
 
