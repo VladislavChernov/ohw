@@ -619,6 +619,46 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
 
 ---
 
+## Этап 13: Eval-инфраструктура (Веха 4) — M4, АРТИФАКТЫ eval-датасет + метрики + раннер
+
+**Дата:** 2026-09-16  
+**Коммит:** в процессе (после `c9a8dec`)  
+**Статус:** реализация
+
+### Что сделано
+
+**M4 Eval Infrastructure** — минимальная eval-система для измерения качества retrieval/generation.
+
+### Компоненты
+
+| Компонент | Файл | Описание |
+|-----------|------|----------|
+| Retrieval Metrics | `src/graphrag_proto/eval/metrics.py` | Recall@K, Precision@K, MRR@K, nDCG@K |
+| Generation Metrics | `src/graphrag_proto/eval/metrics.py` | groundedness, coverage, hallucination_rate (LLM-judge) |
+| Lift Report | `src/graphrag_proto/eval/metrics.py` | delta от baseline → target, verdict pass/fail |
+| Eval-раннер CLI | `src/graphrag_proto/eval/run_eval.py` | `run_eval.py --domain --mode --questions` |
+| Eval-датасеты | `infra/eval/{it,library,cinema}/questions.jsonl` | 50/10/10 вопросов, формат ADR-015 |
+| Валидация датасетов | `tests/test_eval_dataset.py` | Парсинг, уникальные id, непустые golden_sources, категории |
+| Контрактный тест LLM | `tests/test_llm_openai_adapter.py` | Streaming, non-streaming, ошибки HTTP 500/timeout/refused |
+
+### Документы
+
+- `docs/prototype_requirements.md` §Веха 4 — чеклист обновлён (все пункты отмечены `[x]`)
+- `docs/invariants.md` v9 — L2-07 realized (ADR-026)
+- `docs/05_adr_log.md` — ADR-015 зафиксирован
+- `docs/operations_requirements.md` §5 — A/B-тестирование через eval-метрики
+
+### Замечания / следующие шаги
+
+- `OpenAICompatibleAdapter` уже реализован (контрактный тест создан, интеграционный тест нужен)
+- Eval-датасеты questions.jsonl.sample (2 строки) будут заменены
+- Lift-отчёт для реального компарирования baseline vs hybrid требует compose-стека
+
+**Верификация** — `tests/test_eval_metrics.py` (10 tests), `tests/test_eval_dataset.py` (12 tests),
+`tests/test_llm_openai_adapter.py` (5 tests); ruff чисто.
+
+---
+
 ## Связи с другими документами
 
 | Документ                        | Связано с                        | Тип связи           |

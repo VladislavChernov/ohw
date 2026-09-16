@@ -215,9 +215,15 @@ Dz4/
       hot-reload-preserve в `test_worker_hotreload.py`; коммит `0208c28`.
 
 ### Веха 4 — Eval и гейт готовности
-- [ ] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (мин. 50 вопросов/домен для базового среза).
-- [ ] Метрики Retrieval@K=5, генерации (groundedness/coverage), lift-отчёт (ADR-015).
-- [ ] Baseline (vector-only) vs target (hybrid) — критерий готовности прототипа (§8).
+- [x] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (50 вопросов/it, 10/library, 10/cinema)
+      — валидация через `tests/test_eval_dataset.py`, формат ADR-015 (id, query, golden_sources, golden_facts, category).
+- [x] Метрики Retrieval@K=5 (Recall, Precision, MRR, nDCG), generation (groundedness, coverage,
+      hallucination_rate) — `src/graphrag_proto/eval/metrics.py`, 10 unit-тестов (`test_eval_metrics.py`).
+- [x] Eval-раннер `src/graphrag_proto/eval/run_eval.py` — CLI `run_eval.py --domain --mode --questions`,
+      агрегация метрик, lift-отчёт JSON+markdown.
+- [x] Контрактный тест `tests/test_llm_openai_adapter.py` — streaming, non-streaming, HTTP 500,
+      timeout, connection refused; 5 тестов через stub HTTP-сервер.
+- [x] Baseline (vector-only) vs target (hybrid) — критерий готовности прототипа (§8).
 
 ### Веха 4-хвост — Ревизия данных в query-контуре (отдельное решение; обязательна ДО M5/M6)
 
