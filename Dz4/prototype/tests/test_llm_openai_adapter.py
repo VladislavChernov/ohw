@@ -126,3 +126,27 @@ def test_connection_refused_raises_runtime_error() -> None:
     llm = OpenAICompatibleAdapter("http://127.0.0.1:59999", model="test", timeout_s=1)
     with pytest.raises(RuntimeError, match="LLM недоступен"):
         list(llm.generate("вопрос"))
+
+
+# --- factory wiring (LLM_ADAPTER=openai + LLM_BASE_URL) ----------------
+
+def test_factory_openai_adapter_hits_stub(monkeypatch: Any) -> None:
+    """LLM_ADAPTER=openai + LLM_BASE_URL собирают OpenAICompatibleAdapter против стаб-сервера."""
+    sse = (
+        'data: {"choices":[{"delta":{"content":"factory"}}]}\n'
+        'data: {"choices":[{"delta":{"content":" ok"}}]}\n'
+        "data: [DONE]\n"
+    )
+    handler = _make_handler({"/v1/chat/completions": (200, sse)})
+    server, port = _start_server(handler)
+    try:
+        from graphrag_proto.retrieval.adapters.factory import build_llm
+
+        monkeypatch.setenv("LLM_ADAPTER", "openai")
+        monkeypatch.setenv("LLM_BASE_URL", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("LLM_MODEL", "stub-model")
+        llm = build_llm()
+        deltas = list(llm.generate("вопрос"))
+        assert deltas == ["factory", " ok"]
+    finally:
+        server.shutdown()

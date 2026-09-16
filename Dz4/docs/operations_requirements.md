@@ -55,6 +55,8 @@
 
 - Смена модели/промпта выполняется через runtime config (`namespace: adapters`, `extraction`, `llm`).
 - Сравнение качества — методология `docs/05_adr_log.md` ADR-015 (eval-датасет, метрики, lift-отчёт).
+- Выход eval-скрипта `prototype/infra/eval/run_eval.py` (lift_report.json/lift_report.md) —
+  обязательный артефакт выпуска: baseline vs target на той же ревизии знаний.
 - Требование выпуска: groundedness и coverage не ниже baseline при допустимой задержке (ADR-015,
   «валютное» правило). После выпуска — мониторинг задержки и ошибок на живом трафике.
 
