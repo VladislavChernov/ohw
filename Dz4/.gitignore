@@ -12,3 +12,7 @@ QA_review/
 
 # Runtime data (SQLite прототипа, локальные прогоны)
 prototype/runtime/
+prototype/reports/
+
+# Eval pilot: локальный snapshot корпуса и квитанции загрузки (генерируются, не публикуются)
+prototype/infra/eval/pilots/docs-review/snapshot/

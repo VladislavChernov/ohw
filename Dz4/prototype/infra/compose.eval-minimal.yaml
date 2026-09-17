@@ -1,0 +1,209 @@
+# Standalone stack: do NOT merge with compose.yaml or compose.eval.yaml.
+# Six long-running services + one opt-in, one-shot runner; no fixed container names.
+name: ohw-eval-minimal
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-client-env: &client-env
+  AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+  X_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+  CONFIG_URL: http://config-service:8001
+  GLOSSARY_URL: http://glossary-service:8003
+  DOMAIN_PROFILES_DIR: /profiles
+  NAMESPACES_PATH: /config/namespaces.yaml
+  GRAPH_STORE: neo4j
+  VECTOR_STORE: neo4j
+  NEO4J_URI: bolt://neo4j:7687
+  NEO4J_USER: neo4j
+  NEO4J_PASSWORD: ${NEO4J_PASSWORD:-graphrag}
+  EMBEDDER: bge_m3_service
+  EMBEDDINGS_URL: http://embeddings-service:8004
+  EMBEDDING_MODEL: bge-m3
+  EMBEDDING_DIMENSIONS: "1024"
+  EMBEDDINGS_TIMEOUT_S: "300"
+  RERANKER: noop
+  SEMANTIC_CACHE_ENABLED: "false"
+
+services:
+  config-service:
+    <<: *logging
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/eval-service:prototype
+    command: ["graphrag-config"]
+    environment:
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+      CONFIG_DB_PATH: /data/config.sqlite
+      DOMAIN_PROFILES_DIR: /profiles
+      NAMESPACES_PATH: /config/namespaces.yaml
+    volumes:
+      - config_data:/data
+      - ../domain_profiles:/profiles:ro
+      - ./config:/config:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  glossary-service:
+    <<: *logging
+    image: ohw/eval-service:prototype
+    command: ["graphrag-glossary"]
+    environment:
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+      CONFIG_URL: http://config-service:8001
+      DOMAIN_PROFILES_DIR: /profiles
+    volumes:
+      - ../domain_profiles:/profiles:ro
+    depends_on:
+      config-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    <<: *logging
+    image: neo4j:5.26-community
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-graphrag}
+      NEO4J_server_memory_heap_max__size: "1G"
+      NEO4J_server_memory_pagecache_size: "512M"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD:-graphrag}", "RETURN 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  embeddings-service:
+    <<: *logging
+    build:
+      context: ..
+      dockerfile: Dockerfile.embeddings
+    image: ohw/embeddings-service:prototype
+    command: ["graphrag-embeddings"]
+    environment:
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSIONS: "1024"
+      EMBEDDINGS_MOCK: "false"
+      EMBEDDINGS_DEVICE: cpu
+      HF_HOME: /models/huggingface
+    volumes:
+      - models_data:/models
+    healthcheck:
+      # Health is not a model warmup; use the upload preflight before ingestion.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  ingestion-api:
+    <<: *logging
+    image: ohw/eval-service:prototype
+    command: ["graphrag-ingestion"]
+    environment:
+      <<: *client-env
+      INGESTION_DB_PATH: /data/ingestion.sqlite
+      INGESTION_UPLOAD_DIR: /data/uploads
+      INGEST_MAX_CONCURRENT: "1"
+      INGEST_CHUNKER: sliding_window
+      INGEST_CHUNK_SIZE: "512"
+      INGEST_CHUNK_OVERLAP: "64"
+    volumes:
+      - ingestion_data:/data
+      - ../domain_profiles:/profiles:ro
+      - ./config:/config:ro
+    depends_on:
+      config-service:
+        condition: service_healthy
+      glossary-service:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      embeddings-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health', timeout=2)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  llm:
+    <<: *logging
+    build:
+      context: ..
+      dockerfile: Dockerfile.llm
+    image: ohw/llm:prototype
+    command:
+      - "--model"
+      - "/models/Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "${LLM_CTX_SIZE:-16384}"
+      - "--n-gpu-layers"
+      - "${LLM_NGPU_LAYERS:-99}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  eval-runner:
+    <<: *logging
+    image: ohw/eval-service:prototype
+    profiles: ["eval"]
+    working_dir: /app
+    environment:
+      <<: *client-env
+      INGESTION_URL: http://ingestion-api:8002
+      LLM_ADAPTER: openai
+      EVAL_LLM_ADAPTER: openai
+      LLM_BASE_URL: http://llm:8080
+      LLM_MODEL: qwen2.5-coder-7b-instruct-abliterated-q4_k_m
+      LLM_TEMPERATURE: "0"
+      LLM_TIMEOUT_S: "300"
+    volumes:
+      - ./eval:/app/infra/eval:ro
+      - ./config:/config:ro
+      - ../domain_profiles:/profiles:ro
+      - ../reports:/reports
+      # Пилотный датасет поставляется с репозиторием; хост-путь переопределяется env.
+      - ${EVAL_PILOT_HOST_DIR:-./eval/pilots/docs-review}:/proposal:ro
+    depends_on:
+      ingestion-api:
+        condition: service_healthy
+      llm:
+        condition: service_healthy
+    # Safe default: explicit dataset/mode required for any actual evaluation.
+    command: ["python", "/app/infra/eval/run_eval.py", "--help"]
+
+volumes:
+  config_data:
+  ingestion_data:
+  neo4j_data:
+  models_data:

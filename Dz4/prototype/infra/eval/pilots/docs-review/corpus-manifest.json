@@ -1,0 +1,14 @@
+{
+  "corpus_version": "dz4-docs-review-pilot-v1",
+  "as_of": "2026-09-17",
+  "domain": "it",
+  "documents": [
+    {"path": "README.md", "source_url": "README.md", "document_type": "overview"},
+    {"path": "docs/invariants.md", "source_url": "docs/invariants.md", "document_type": "spec"},
+    {"path": "docs/03_retriever.md", "source_url": "docs/03_retriever.md", "document_type": "spec"},
+    {"path": "docs/05_adr_log.md", "source_url": "docs/05_adr_log.md", "document_type": "decision"},
+    {"path": "review/2026-09-14_team-senior-plus_review-05_semantic-cache.md", "source_url": "review/2026-09-14_team-senior-plus_review-05_semantic-cache.md", "document_type": "historical_review"},
+    {"path": "review/2026-09-16_cline_review-08_docker-compose.md", "source_url": "review/2026-09-16_cline_review-08_docker-compose.md", "document_type": "historical_review"},
+    {"path": "prototype/reports/run_eval_1789651539/lift_report.json", "source_url": "prototype/reports/run_eval_1789651539/lift_report.json", "document_type": "measurement", "render": "json_markdown"}
+  ]
+}

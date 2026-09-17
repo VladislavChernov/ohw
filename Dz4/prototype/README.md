@@ -79,6 +79,15 @@ uv run --no-sync python /mnt/d/Otus/ohw/Dz4/prototype/infra/eval/run_eval.py --h
 без `--file`. По замыслу скрипт удаляет volumes перед прогоном;
 его `--down` тоже удаляет volumes. При обновлении README скрипт не менялся.
 
+## Минимальный eval-контур
+
+Самостоятельный Compose: `prototype/infra/compose.eval-minimal.yaml`.
+Шесть сервисов и одноразовый runner, без UI/очереди/worker; отдельные volumes.
+Инструкция: [README-minimal](./infra/eval/README-minimal.md).
+Пилотный датасет по документации и историческим ревью:
+[infra/eval/pilots/docs-review](./infra/eval/pilots/docs-review/README.md).
+Это прямой pipeline-eval, не e2e и не исправление известных ограничений метрик.
+
 ## Структура
 
 Основные каталоги и файлы (сокращённая схема):
