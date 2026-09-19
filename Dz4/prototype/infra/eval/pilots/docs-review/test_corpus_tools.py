@@ -1,8 +1,8 @@
 """Offline tests: no Docker, HTTP calls or model downloads."""
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import corpus_tools as tools

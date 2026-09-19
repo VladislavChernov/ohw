@@ -56,7 +56,7 @@
 | Глоссарий | YAML + SQLite | Postgres | Postgres | Glossary Service |
 | Кэш / очередь задач | — | Valkey (Redis) | Valkey (кластер) | Runtime Query Queue |
 | Очередь ingestion | синхронно | Redis / RabbitMQ | Kafka | Ingestion |
-| LLM | Qwen 2.5 7B (1 GPU) | Qwen 14B (1 GPU) | Qwen 72B (multi-GPU) | `LLMInference` |
+| LLM | Qwen 2.5 Coder 7B Abliterate (1 GPU, dev/demo; любая `/v1`-совместимая — через конфиг, ADR-022) | Qwen 14B (1 GPU) | Qwen 72B (multi-GPU) | `LLMInference` |
 | Embeddings | bge-m3 (1 GPU) | bge-m3 (1 GPU) | bge-m3 (отдельный) | `Embedder` |
 | Reranker | bge-reranker-base (CPU) | — | — | `Reranker` |
 | Оркестрация | Docker Compose | K3s | Managed K8s | — |
@@ -73,7 +73,7 @@
 | `topology` | Topology Orchestrator Service + Topology UI | по требованию оператора (ADR-019) |
 | `embeddings` | Embeddings Service (bge-m3) | фаза индексации |
 | `ingestion` | Ingestion API + скрипты пайплайна | поочерёдный захват GPU |
-| `llm` | Query API + Ollama (Qwen 7B) | фаза поиска |
+| `llm` | Query API + llama.cpp (Qwen 2.5 Coder 7B Abliterate q4_K_M) | фаза поиска |
 | `reranker` | bge-reranker-base (CPU) | опционально, фаза поиска |
 | `monitoring` | Prometheus + Grafana + Loki | **задел, отключён до фазы 2** (нет конфигурации/экспортов) |
 
@@ -84,7 +84,7 @@
 
 | Компонент | Версия/параметры | Лицензия источников |
 |-----------|------------------|---------------------|
-| Qwen 2.5 7B Instruct | LLM `extraction`/`llm` (temp 0.1/0.3) | Apache 2.0 |
+| Qwen 2.5 Coder 7B Abliterate | LLM `extraction`/`llm` (temp 0.1/0.3), GGUF q4_K_M; dev/demo, замена — через конфиг (ADR-022) | Apache 2.0 |
 | bge-m3 | Embeddings, 1024 dim | см. дистрибутив BGE |
 | bge-reranker-base | CPU-реранкер | см. дистрибутив BGE |
 | Neo4j Community | лимит JVM 1.5 ГБ (heap 1G, pagecache 512M) | GPLv3 |
@@ -96,7 +96,7 @@
 - **Сеть:** изолированная Docker-сеть `ohw_net`; сервисы общаются по именам контейнеров (`docs/04` §1).
 - **Volumes:** сохраняются веса LLM/моделей и индексы графа; `docker compose down` их не удаляет
   (README §3, шаг «Остановка»).
-- **GPU:** 1× NVIDIA RTX 2070 Super (8 ГБ VRAM); bge-m3 и Qwen 7B работают **поочерёдно**
+- **GPU:** 1× NVIDIA RTX 2070 Super (8 ГБ VRAM); bge-m3 и Qwen 2.5 Coder 7B Abliterate работают **поочерёдно**
   через compose-профили (риск №1 в `docs/06` §5). Минимальные требования — README §1.
 
 ## 7. Где что читать

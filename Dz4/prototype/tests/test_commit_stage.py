@@ -25,6 +25,7 @@ from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     _chunk_id,
     _entity_node_id,
     _source_node_id,
+    _with_commit_retry,
     soft_delete_source,
 )
 from graphrag_proto.ingestion_service.readers.registry import TxtReader
@@ -411,3 +412,97 @@ class _RecordingBatch:
     def delete_vectors(self, chunk_ids: list[str]) -> None:
         self._record("delete_vectors", chunk_ids)
         self._vector.delete_vectors(chunk_ids)
+
+
+# ---------------------------------------------------------------- ADR-028 (S2) retry
+
+class _TransientFakeStore:
+    """Фейк-хранилище: заданное число transient-сбоев, затем успех (2.5.1)."""
+
+    def __init__(self, fail_transient: int, *, transient: bool = True) -> None:
+        self._fail = fail_transient
+        self.calls = 0
+        self.transient = transient
+
+    def transient_aware(self) -> bool:
+        return True
+
+    def is_transient(self, exc: BaseException) -> bool:
+        return self.transient
+
+    def op(self) -> str:
+        self.calls += 1
+        if self.calls <= self._fail:
+            raise RuntimeError("Neo.TransientError.Transaction.DeadlockDetected")
+        return "ok"
+
+
+class _NonAwareStore:
+    """Хранилище без декларации transient-возможности (дефолт ABC)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def op(self) -> str:
+        self.calls += 1
+        raise RuntimeError("boom")
+
+
+def test_commit_retry_transient_until_success() -> None:
+    """2.5.1: transient-ошибки ретраятся; успех на N+1-й попытке."""
+    store = _TransientFakeStore(fail_transient=2)
+    result = _with_commit_retry([store], store.op, attempts=5, base_delay=0.0, jitter=0.0)
+    assert result == "ok"
+    assert store.calls == 3, "повтор до успеха: N transient + 1 успешная"
+
+
+def test_commit_retry_exhausts_attempts() -> None:
+    """2.5.1: transient-ошибки исчерпывают попытки → raise, вызовов == attempts."""
+    store = _TransientFakeStore(fail_transient=99)
+    with pytest.raises(RuntimeError):
+        _with_commit_retry([store], store.op, attempts=4, base_delay=0.0, jitter=0.0)
+    assert store.calls == 4
+
+
+def test_commit_retry_non_transient_no_retry() -> None:
+    """2.5.1: не-transient ошибка → failed без повторов."""
+    store = _TransientFakeStore(fail_transient=1, transient=False)
+    with pytest.raises(RuntimeError):
+        _with_commit_retry([store], store.op, attempts=5, base_delay=0.0, jitter=0.0)
+    assert store.calls == 1
+
+
+def test_commit_retry_ignores_store_without_declaration() -> None:
+    """2.5.1: хранилище без transient_aware() считается неповторимым."""
+    store = _NonAwareStore()
+    with pytest.raises(RuntimeError):
+        _with_commit_retry([store], store.op, attempts=3, base_delay=0.0, jitter=0.0)
+    assert store.calls == 1
+
+
+def test_calls_recorded_empty() -> None:
+    """Заглушка против пустых записей в _RecordingBatch (mypy/покрытие)."""
+    graph = _AtomicBatchGraph(InMemoryVectorStore())
+    assert graph.batch_calls == []
+
+
+def test_commit_plan_nodes_and_edges_sorted(tmp_path: Path) -> None:
+    """2.5.2 (ADR-028): порядок записи детерминирован — nodes по node_id,
+    edges по (from_id, to_id, type) — защита от deadlock-циклов."""
+    vector_axis = InMemoryVectorStore()
+    graph = _AtomicBatchGraph(vector_axis)
+    analyzer, _ = build_analyzer(tmp_path, graph, vector_axis)
+    src = tmp_path / "d.txt"
+    src.write_text("зигзаг алгоритм дедупликация кэш рёбра граф индекс данные\n", encoding="utf-8")
+    run_source(analyzer, src)
+
+    kinds = {kind for kind, _ in graph.batch_calls}
+    assert "upsert_nodes" in kinds and "upsert_edges" in kinds
+
+    nodes = next(arg for kind, arg in graph.batch_calls if kind == "upsert_nodes")
+    node_ids = [n["node_id"] for n in nodes]
+    assert node_ids == sorted(node_ids), "узлы пишутся в детерминированном порядке (node_id)"
+
+    edges = next(arg for kind, arg in graph.batch_calls if kind == "upsert_edges")
+    edge_keys = [(e["from_id"], e["to_id"], e["type"]) for e in edges]
+    assert edge_keys == sorted(edge_keys), "рёбра пишутся в детерминированном порядке"

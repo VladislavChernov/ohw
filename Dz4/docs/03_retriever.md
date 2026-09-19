@@ -18,7 +18,7 @@
 3. **Vector Retriever** — поиск топ-N релевантных текстовых чанков через **VectorStoreProvider** (vector_search). Обращается параллельно с Graph Retriever как независимая ось.
 4. **Reranker** — переранжирование чанков через **Reranker Adapter**. Базовая реализация: bge-reranker-base на CPU. Альтернатива: NoOpRerankerAdapter (отключён, возвращает входной массив без изменений). Выбор — через runtime config (namespace: adapters.reranker).
 5. **Context Assembly** — сборка итогового промпта (см. правила в п.2).
-6. **LLM Generation** — передача промпта и системных инструкций через **LLM Adapter** (Qwen 2.5 7B Instruct на GPU). Время генерации: от 3 до 10 сек.
+6. **LLM Generation** — передача промпта и системных инструкций через **LLM Adapter** (на прототипе llama.cpp + Qwen 2.5 Coder 7B Abliterate q4_K_M; модель и размещение — runtime config, ADR-022, L4-01). Время генерации: от 3 до 10 сек.
 7. **Response** — потоковый стриминг токенов ответа пользователю через SSE (Server-Sent Events) с выдачей списка источников (sources) и таймингов.
 
 > **Допущение инвалидации (ADR-025):** COMMIT индексации кэш не чистит — актуальность

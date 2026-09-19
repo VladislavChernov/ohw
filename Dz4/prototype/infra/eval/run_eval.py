@@ -9,6 +9,12 @@ Env:
     EVAL_LLM_ADAPTER=fake|openai — judge (defaults to fake = метрики-заглушки)
     RETRIEVAL_GRAPH_ENABLED=true|false — override graph axis
     INGESTION_URL, QUERY_URL, X_API_KEY — API endpoints
+
+Fail-fast (не тратим время на упавший стек):
+    Перед прогоном раннер health-пробами проверяет доступность контуров,
+    необходимых для сконфигурированных адаптеров; при падении обязательного —
+    отчёт в ``<out>/preflight.log`` и выход с кодом 1.
+    Все ожидания ограничены ``--wait-timeout`` (по умолчанию 300 с = 5 минут).
 """
 
 from __future__ import annotations
@@ -16,9 +22,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +40,9 @@ from graphrag_proto.eval.metrics import (
 INGESTION_URL = os.environ.get("INGESTION_URL", "http://localhost:8002")
 QUERY_URL = os.environ.get("QUERY_URL", "http://localhost:8000")
 X_API_KEY = os.environ.get("X_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
+
+DEFAULT_WAIT_TIMEOUT_S = 300.0
+DEFAULT_CONTOUR_TIMEOUT_S = 5.0
 
 
 def _api_headers() -> dict[str, str]:
@@ -57,26 +69,165 @@ def _get_json(url: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Preflight: fail-fast проверка доступности контуров (не ждём на упавший стек)
+# ---------------------------------------------------------------------------
+
+def _probe_http(base_url: str, timeout_s: float = DEFAULT_CONTOUR_TIMEOUT_S) -> tuple[bool, str]:
+    """Health-проба HTTP-сервиса (GET /health) с коротким таймаутом."""
+    url = f"{base_url.rstrip('/')}/health"
+    req = urllib.request.Request(url, headers=_api_headers(), method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            return resp.status == 200, f"HTTP {resp.status}"
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        return False, str(exc)
+
+
+def _probe_bolt(uri: str, timeout_s: float = DEFAULT_CONTOUR_TIMEOUT_S) -> tuple[bool, str]:
+    """TCP-проба bolt://host:port (Neo4j) с коротким таймаутом."""
+    try:
+        rest = uri.split("://", 1)[1]
+    except IndexError:
+        return False, f"невалидный bolt-URI: {uri!r}"
+    host, _, port_raw = rest.partition(":")
+    if not host:
+        return False, f"нет хоста в bolt-URI: {uri!r}"
+    try:
+        port: int = int(port_raw) if port_raw else 7687
+    except ValueError:
+        return False, f"невалидный порт в bolt-URI: {uri!r}"
+    try:
+        with socket.create_connection((host, port), timeout=timeout_s):
+            return True, f"TCP {host}:{port}"
+    except OSError as exc:
+        return False, str(exc)
+
+
+def required_contours() -> list[dict[str, Any]]:
+    """Контуры, нужные для сконфигурированных адаптеров (env): ingestion + backend'ы.
+
+    Всегда требуется Ingestion API (revision fetch). Neo4j/embeddings/reranker/llm
+    проверяются, только если соответствующий адаптер выбран env-переменными.
+    """
+    contours: list[dict[str, Any]] = [
+        {"name": "ingestion-api", "kind": "http", "target": INGESTION_URL},
+    ]
+    if os.environ.get("GRAPH_STORE", "inmemory") == "neo4j" or os.environ.get("VECTOR_STORE", "inmemory") == "neo4j":
+        contours.append({"name": "neo4j", "kind": "bolt", "target": os.environ.get("NEO4J_URI", "bolt://neo4j:7687")})
+    if os.environ.get("EMBEDDER", "deterministic") == "bge_m3_service":
+        contours.append({"name": "embeddings-service", "kind": "http", "target": os.environ.get("EMBEDDINGS_URL", "http://embeddings-service:8004")})
+    if os.environ.get("RERANKER", "noop") == "bge_reranker":
+        contours.append({"name": "reranker-service", "kind": "http", "target": os.environ.get("RERANKER_URL", "http://reranker:8006")})
+    if os.environ.get("LLM_ADAPTER", "openai") == "openai":
+        contours.append({"name": "llm", "kind": "http", "target": os.environ.get("LLM_BASE_URL", "http://llm:8080")})
+    return contours
+
+
+def preflight(out_dir: Path, timeout_s: float = DEFAULT_CONTOUR_TIMEOUT_S) -> bool:
+    """Проверить доступность контуров; результаты — в лог и в reports/preflight.log.
+
+    Возвращает True, если все обязательные контуры живы; False — прерывать прогон.
+    """
+    contours = required_contours()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / "preflight.log"
+
+    lines = [
+        f"# Preflight (fail-fast) {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}",
+        f"Ingestion URL: {INGESTION_URL} | Query URL: {QUERY_URL}",
+    ]
+    all_ok = True
+    for contour in contours:
+        name, kind, target = contour["name"], contour["kind"], contour["target"]
+        if kind == "http":
+            ok, detail = _probe_http(target, timeout_s)
+        else:
+            ok, detail = _probe_bolt(target, timeout_s)
+        status = "OK" if ok else "DOWN"
+        print(f"preflight: [{status}] {name} ({kind}) {target} — {detail}")
+        lines.append(f"{status}\t{name}\t{kind}\t{target}\t{detail}")
+        all_ok = all_ok and ok
+
+    verdict = "READY" if all_ok else "FAIL"
+    lines.append(f"verdict: {verdict}")
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"preflight: verdict={verdict}; отчёт: {log_path}")
+    return all_ok
+
+
+# ---------------------------------------------------------------------------
 # Corpus ingestion (through Ingestion API :8002)
 # ---------------------------------------------------------------------------
 
-def ingest_corpus(corpus_dir: Path, domain: str) -> int:
-    """Загрузить все .md файлы из corpus_dir в Ingestion API. Возвращает кол-во загруженных."""
-    count = 0
+def ingest_corpus(corpus_dir: Path, domain: str, source_prefix: str = "", max_wait_s: float = DEFAULT_WAIT_TIMEOUT_S) -> list[str]:
+    """Загрузить все .md из corpus_dir в Ingestion API (async). Возвращает job_id'ы.
+
+    Цикл 429 ограничен дедлайном max_wait_s: если слоты не освобождаются —
+    RuntimeError вместо бесконечного ожидания упавшего стека.
+    """
+    job_ids: list[str] = []
     for md_file in sorted(corpus_dir.rglob("*.md")):
-        source_url = str(md_file.relative_to(corpus_dir)).replace("\\", "/")
+        rel = str(md_file.relative_to(corpus_dir)).replace("\\", "/")
+        source_url = f"{source_prefix}/{rel}" if source_prefix else rel
         content = md_file.read_text(encoding="utf-8")
-        _post_json(
-            f"{INGESTION_URL}/api/v1/ingestion/documents",
-            {
-                "source_url": source_url,
-                "domain": domain,
-                "doc_type": "md",
-                "content": content,
-            },
-        )
-        count += 1
-    return count
+        body = {
+            "source_url": source_url,
+            "domain": domain,
+            "doc_type": "md",
+            "content": content,
+        }
+        deadline = time.monotonic() + max_wait_s
+        while True:
+            try:
+                resp = _post_json(
+                    f"{INGESTION_URL}/api/v1/ingestion/documents",
+                    body,
+                )
+                break
+            except RuntimeError as exc:
+                # 429: все слоты исполнения заняты — ждём и повторяем (async-пайплайн).
+                if "429" not in str(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"лимит ожидания слотов ingest ({max_wait_s:.0f}с) исчерпан для {source_url}"
+                    ) from exc
+                time.sleep(5.0)
+        job_id = resp.get("job_id")
+        if job_id:
+            job_ids.append(str(job_id))
+    return job_ids
+
+
+TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
+
+
+def wait_jobs(job_ids: list[str], poll_s: float = 5.0, timeout_s: float = DEFAULT_WAIT_TIMEOUT_S) -> dict[str, str]:
+    """Ждать завершения async-джобов ingestion (200 → task complete).
+
+    Дедлайн по умолчанию — 5 минут (не 30): упавший стек не должен «выжигать» время.
+    """
+    deadline = time.monotonic() + timeout_s
+    statuses: dict[str, str] = {}
+    while time.monotonic() < deadline and len(statuses) < len(job_ids):
+        for job_id in job_ids:
+            if job_id in statuses:
+                continue
+            try:
+                resp = _get_json(f"{INGESTION_URL}/api/v1/ingestion/jobs/{job_id}")
+            except RuntimeError:
+                continue
+            status = str(resp.get("status", ""))
+            if status in TERMINAL_JOB_STATUSES:
+                statuses[job_id] = status
+            if status == "failed":
+                raise RuntimeError(f"джоба {job_id} упала: {resp.get('error')}")
+        if len(statuses) < len(job_ids):
+            time.sleep(poll_s)
+    if len(statuses) < len(job_ids):
+        pending = [job_id for job_id in job_ids if job_id not in statuses]
+        raise TimeoutError(f"не дождались завершения джобов: {pending}")
+    return statuses
 
 
 # ---------------------------------------------------------------------------
@@ -111,22 +262,30 @@ def load_dataset(path: Path) -> list[dict[str, Any]]:
 # Pipeline builder with graph toggle
 # ---------------------------------------------------------------------------
 
-def build_eval_pipeline(graph_enabled: bool) -> Any:
-    """Собрать QueryPipeline с нужным toggling graph axis."""
-    # Напрямую импортируем runtime — не ленивый, нужен для сборки
-    from graphrag_proto.query_service.runtime import build_pipeline
+@contextmanager
+def graph_toggle(graph_enabled: bool) -> Iterator[Any]:
+    """Тумблер графовой оси: env живёт ВО ВРЕМЯ pipeline.run() (не при сборке).
 
-    # Для baseline отключаем graph через RETRIEVAL_GRAPH_ENABLED
+    `graph_search_enabled(profile)` читает `RETRIEVAL_GRAPH_ENABLED` в каждом
+    run() (pipeline.py:150), поэтому env должен быть выставлен на весь прогон,
+    а не только на момент построения пайплайна.
+    """
     old_val = os.environ.get("RETRIEVAL_GRAPH_ENABLED")
+    os.environ["RETRIEVAL_GRAPH_ENABLED"] = "true" if graph_enabled else "false"
     try:
-        os.environ["RETRIEVAL_GRAPH_ENABLED"] = "true" if graph_enabled else "false"
-        pipeline = build_pipeline()
+        yield
     finally:
         if old_val is None:
             os.environ.pop("RETRIEVAL_GRAPH_ENABLED", None)
         else:
             os.environ["RETRIEVAL_GRAPH_ENABLED"] = old_val
-    return pipeline
+
+
+def build_eval_pipeline() -> Any:
+    """Собрать QueryPipeline из env (runtime.build_pipeline)."""
+    from graphrag_proto.query_service.runtime import build_pipeline
+
+    return build_pipeline()
 
 
 # ---------------------------------------------------------------------------
@@ -230,25 +389,60 @@ def main() -> None:
     parser.add_argument("--corpus", help="Path to corpus dir (docs/*.md); skips ingestion if omitted")
     parser.add_argument("--dataset", required=True, help="Path to questions.jsonl")
     parser.add_argument("--out", default="reports/", help="Output directory")
+    parser.add_argument("--source-prefix", default="", help="Optional prefix for source_url (e.g. docs)")
+    parser.add_argument(
+        "--wait-timeout",
+        type=float,
+        default=DEFAULT_WAIT_TIMEOUT_S,
+        help="Максимум ожидания джобов/слотов ingest, сек (по умолч. 300 = 5 мин)",
+    )
+    parser.add_argument(
+        "--no-preflight",
+        action="store_true",
+        help="Пропустить fail-fast проверку доступности контуров",
+    )
     args = parser.parse_args()
+
+    # Единый лимит ожидания сети: если LLM_TIMEOUT_S не задан явно — 5 минут, не 600с.
+    os.environ.setdefault("LLM_TIMEOUT_S", str(DEFAULT_WAIT_TIMEOUT_S))
 
     dataset_path = Path(args.dataset)
     questions = load_dataset(dataset_path)
     out_dir = Path(args.out)
+
+    # 0. Preflight: fail-fast проверка контуров — упавший стек не «выжигает» время.
+    if not args.no_preflight and not preflight(out_dir):
+        print("preflight FAILED: обязательный контур недоступен — прогон прерван")
+        raise SystemExit(1)
+
     judge = build_judge()
+
+    # 1. Ingest корпуса (async) и ждём завершения — ревизия знаний до прогона.
+    if args.corpus:
+        corpus_dir = Path(args.corpus)
+        job_ids = ingest_corpus(corpus_dir, args.domain, args.source_prefix, max_wait_s=args.wait_timeout)
+        print(f"ingest: {len(job_ids)} документов поставлено, ждём завершения ...")
+        statuses = wait_jobs(job_ids, timeout_s=args.wait_timeout)
+        print(f"ingest: завершено ({len(statuses)}/{len(job_ids)})")
     revision = fetch_revision(args.domain)
+    print(f"revision: {revision}")
 
     def _run_mode(mode: str) -> dict[str, Any]:
-        graph_enabled = mode == "hybrid"
-        pipeline = build_eval_pipeline(graph_enabled)
-        results = [eval_question(q, pipeline, args.domain, revision, judge) for q in questions]
+        # UC12-01 fix: в режиме ``both`` baseline выключает граф, target — включает.
+        # Было: graph_enabled = mode == "hybrid"  →  в both оба режима выключали граф.
+        graph_enabled = mode in ("hybrid", "target")
+        pipeline = build_eval_pipeline()
+        with graph_toggle(graph_enabled):
+            results = [eval_question(q, pipeline, args.domain, revision, judge) for q in questions]
         return aggregate(results)
 
     modes = ["baseline", "target"] if args.mode == "both" else [args.mode]
     reports: dict[str, Any] = {}
     for mode in modes:
         key = "baseline" if mode == "baseline" else "target"
+        print(f"run: {key} ({len(questions)} вопросов) ...")
         reports[key] = _run_mode(mode)
+        print(f"run: {key} → {json.dumps(reports[key], ensure_ascii=False)}")
 
     report = lift_report(
         baseline=reports.get("baseline", {}),

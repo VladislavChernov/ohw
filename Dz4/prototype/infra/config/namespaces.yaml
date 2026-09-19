@@ -21,7 +21,7 @@ retrieval:
   similar_to_expansion: true
 
 extraction:
-  model: "qwen2.5:7b-instruct"
+  model: "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"
   temperature: 0.1
   max_tokens: 4096
 
@@ -34,7 +34,7 @@ normalizer:
   log_normalization: true
 
 llm:
-  model: "qwen2.5:7b-instruct"
+  model: "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"
   temperature: 0.3
   max_tokens: 2048
   context_window: 32768

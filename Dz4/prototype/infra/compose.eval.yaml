@@ -1,0 +1,28 @@
+# M5 eval override: реальный прогон run_eval.py против стека.
+# - ingestion-api + runner: EMBEDDER=bge_m3_service (1024-dim вектора Neo4j)
+# - embeddings-service: EMBEDDINGS_DEVICE=cpu (bge-m3 на CPU; LLM конфигурируется отдельно)
+# - llm: --n-gpu-layers из ${LLM_NGPU_LAYERS:-99} (вариант 2 = 0, CPU)
+services:
+  embeddings-service:
+    environment:
+      EMBEDDINGS_DEVICE: ${EMBEDDINGS_DEVICE:-cpu}
+
+  ingestion-api:
+    environment:
+      EMBEDDER: bge_m3_service
+      EMBEDDINGS_URL: http://embeddings-service:8004
+      EMBEDDINGS_TIMEOUT_S: 60
+      INGEST_MAX_CONCURRENT: 1
+
+  llm:
+    command:
+      - "--model"
+      - "/models/Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "16384"
+      - "--n-gpu-layers"
+      - "${LLM_NGPU_LAYERS:-99}"

@@ -41,6 +41,31 @@ def _log_error(exc_base: str, exc: Exception) -> RuntimeError:
     return RuntimeError(f"{exc_base}: {exc}")
 
 
+_def_transient_aware = True
+
+
+def _is_transient_exc(exc: BaseException) -> bool:
+    """Транзиент-классификация Neo4j (ADR-028): deadlock/перезапуск/сеть.
+
+    Развёртка цепочки причин (UC12-02): проверяется сам `exc` и его `__cause__`,
+    чтобы обёртки (`RuntimeError`/`CommitStageError` на границе адаптера и
+    CommitStage) не ломали классификацию. Циклы `__cause__` отсекаются.
+    Импорт вендорских исключений остаётся здесь — это граница адаптера (ADR-012),
+    ядро (L1-02) вендора не знает."""
+    try:
+        from neo4j.exceptions import ServiceUnavailable, TransientError
+    except ImportError:
+        return False
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (TransientError, ServiceUnavailable)):
+            return True
+        current = current.__cause__
+    return False
+
+
 class Neo4jGraphStore(GraphStoreProvider):
     """Графовая ось поверх Neo4j (ADR-013)."""
 
@@ -122,6 +147,15 @@ class Neo4jGraphStore(GraphStoreProvider):
 
     def engine_key(self) -> str:
         return f"neo4j:{self._uri}:{self._database or ''}"
+
+    # ----------------------------------------------------------------- ADR-028 transient
+
+    def transient_aware(self) -> bool:
+        """Neo4j — сетевое хранилище с deadlock/перезапусками: повторы допустимы."""
+        return True
+
+    def is_transient(self, exc: BaseException) -> bool:
+        return _is_transient_exc(exc)
 
     @contextmanager
     def atomic_batch(self) -> Any:
@@ -218,7 +252,9 @@ def _delete_node(runner: Any, node_id: str) -> None:
 
 
 def _upsert_nodes(runner: Any, nodes: list[dict[str, Any]]) -> None:
-    for node in nodes:
+    """Поштучный MERGE по node_id (ADR-028: сортировка входа — детерминированный
+    порядок захвата замков, защита от deadlock-циклов)."""
+    for node in sorted(nodes, key=lambda n: n["node_id"]):
         node_id = node["node_id"]
         for label in node.get("labels") or [ENTITY_LABEL]:
             _safe_type(label)
@@ -230,7 +266,8 @@ def _upsert_nodes(runner: Any, nodes: list[dict[str, Any]]) -> None:
 
 
 def _upsert_edges(runner: Any, edges: list[dict[str, Any]]) -> None:
-    for edge in edges:
+    """Поштучный MERGE рёбер (ADR-028: сортировка по from_id, to_id, type)."""
+    for edge in sorted(edges, key=lambda e: (e["from_id"], e["to_id"], e["type"])):
         rel_type = _safe_type(edge["type"])
         runner.run(
             f"MATCH (a {{node_id: $from}}) MATCH (b {{node_id: $to}}) "
@@ -307,6 +344,15 @@ class Neo4jVectorStore(VectorStoreProvider):
 
     def engine_key(self) -> str:
         return f"neo4j:{self._uri}:{self._database or ''}"
+
+    # ----------------------------------------------------------------- ADR-028 transient
+
+    def transient_aware(self) -> bool:
+        """Neo4j — сетевое хранилище: повторы transient допустимы."""
+        return True
+
+    def is_transient(self, exc: BaseException) -> bool:
+        return _is_transient_exc(exc)
 
     @contextmanager
     def transaction(self) -> Any:

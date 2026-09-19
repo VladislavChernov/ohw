@@ -161,7 +161,7 @@ curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8001/api/v1/config/
 
 ## GPU-гейтинг: поочерёдный запуск фаз (L4-01)
 
-bge-m3 / ingestion и llama.cpp (Qwen 7B) делят одну видеокарту RTX 2070 Super
+bge-m3 / ingestion и llama.cpp (Qwen 2.5 Coder 7B Abliterate q4_K_M) делят одну видеокарту RTX 2070 Super
 (8 ГБ VRAM). Риск №1 (`docs/06` §5) митигируется жёсткой поочерёдностью через
 Docker Compose Profiles — GPU-профили не поднимаются одновременно («семейство
 запуска»):

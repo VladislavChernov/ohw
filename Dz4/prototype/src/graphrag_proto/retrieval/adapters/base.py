@@ -118,6 +118,20 @@ class GraphStoreProvider(ABC):
         `transaction()`-контекстами (единый процесс/журнал)."""
         return None
 
+    def transient_aware(self) -> bool:
+        """True — хранилище может бросать transient-ошибки (сеть/deadlock),
+        которые имеют смысл ретраить (S1/S2, ADR-028). InMemory — False,
+        Neo4j (и сетевые) — True."""
+        return False
+
+    def is_transient(self, exc: BaseException) -> bool:
+        """Классификация ошибки как повторимой (ADR-028). Вызывается только если
+        `transient_aware()`. Ядро не импортирует вендорские пакеты (L1-02) —
+        ответственность на провайдере. Реализации могут разворачивать цепочку
+        `__cause__` (UC12-02): обёртки адаптеров/ядра не должны ломать
+        классификацию исходной вендор-специфичной ошибки."""
+        return False
+
 
 class VectorStoreProvider(ABC):
     """Векторная ось (ADR-013): косинусный поиск по единицам чанков."""
@@ -145,3 +159,11 @@ class VectorStoreProvider(ABC):
     def engine_key(self) -> str | None:
         """Ключ движка/инстанса БД (A-2). См. GraphStoreProvider."""
         return None
+
+    def transient_aware(self) -> bool:
+        """True — хранилище может бросать transient-ошибки (ADR-028). InMemory — False."""
+        return False
+
+    def is_transient(self, exc: BaseException) -> bool:
+        """Классификация ошибки как повторимой (ADR-028). См. GraphStoreProvider."""
+        return False

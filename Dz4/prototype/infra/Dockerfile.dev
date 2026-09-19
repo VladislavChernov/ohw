@@ -1,0 +1,11 @@
+# Dz4 dev/toolchain image: full runtime + dev deps (pytest, ruff, mypy).
+# Code (src/, tests/) is bind-mounted at run time, so no rebuild per edit.
+FROM ohw-python:3.13
+
+WORKDIR /app
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN uv sync --frozen && uv sync --frozen --all-groups
+
+ENV PYTHONPATH=/app/src
+CMD ["uv", "run", "--no-sync", "pytest", "-q"]

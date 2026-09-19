@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import random
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker, build_chunker_for
 from graphrag_proto.retrieval.adapters.base import Embedder, GraphStoreProvider, VectorStoreProvider
@@ -262,6 +265,57 @@ def _is_atomic_pair(graph: GraphStoreProvider, vector: VectorStoreProvider) -> b
     )
 
 
+# ------------------------------------------------------------------ ADR-028 retry
+# Чтение дефолтов из env — тесты инжектируют значения напрямую.
+N_RETRY_COMMIT = int(__import__("os").environ.get("N_RETRY_COMMIT", "3"))
+RETRY_BASE_S = float(__import__("os").environ.get("RETRY_BASE_S", "0.2"))
+RETRY_JITTER_S = float(__import__("os").environ.get("RETRY_JITTER_S", "0.1"))
+
+_log = logging.getLogger("graphrag_proto.orchestrator.commit_retry")
+
+T = TypeVar("T")
+
+
+def _with_commit_retry(
+    stores: list[Any],
+    fn: Callable[[], T],
+    *,
+    attempts: int = N_RETRY_COMMIT + 1,  # spec §2: N_RETRY_COMMIT — число повторов, итого N+1 попытка
+    base_delay: float = RETRY_BASE_S,
+    jitter: float = RETRY_JITTER_S,
+) -> T:
+    """Повтор transient-ошибок COMMIT до attempts попыток (ADR-028, S1/S2).
+
+    Стратегия: проверяем `transient_aware()` + `is_transient(exc)` на каждом
+    хранилище. При non-transient — немедленный raise без повтора.
+    ``attempts`` по умолчанию — ``N_RETRY_COMMIT + 1`` (спецификация
+    `concurrent-ingest-write-policy` §2 определяет N_RETRY как число повторов).
+    """
+    delay = base_delay
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except BaseException as exc:
+            transient = any(
+                getattr(s, "transient_aware", lambda: False)()
+                and getattr(s, "is_transient", lambda _: False)(exc)
+                for s in stores
+            )
+            if not transient or attempt == attempts - 1:
+                raise
+            _log.warning(
+                "transient COMMIT ошибка (попытка %d/%d), повтор через %.2fs: %s",
+                attempt + 1,
+                attempts,
+                delay,
+                exc,
+            )
+            time.sleep(delay + random.uniform(0, jitter))
+            delay *= 2
+    # unreachable, но mypy доволен
+    raise RuntimeError("_with_commit_retry: все попытки исчерпаны")
+
+
 def _apply_axes(
     nodes: list[dict[str, Any]],
     edges: list[dict[str, Any]],
@@ -388,10 +442,21 @@ class CommitStage(Stage):
         stale_chunks = graph.list_chunk_ids_of_source(source_id)
         written_chunk_ids = [meta["chunk_id"] for meta in ctx.chunks_meta]
 
+        # ADR-028: детерминированный порядок — защита от deadlock-циклов (S2, 2.3)
+        nodes.sort(key=lambda n: n["node_id"])
+        edges.sort(key=lambda e: (e["from_id"], e["to_id"], e["type"]))
+
+        stores = [graph, vector]
         if _is_atomic_pair(graph, vector):
-            self._write_atomic(graph, vector, nodes, edges, vectors, stale_chunks)
+            _with_commit_retry(
+                stores,
+                lambda: self._write_atomic(graph, vector, nodes, edges, vectors, stale_chunks),
+            )
             return
-        self._write_best_effort(graph, vector, nodes, edges, vectors, stale_chunks, written_chunk_ids)
+        # best_effort: ретраи и компенсация выполняются по осям внутри _write_best_effort
+        self._write_best_effort(
+            graph, vector, nodes, edges, vectors, stale_chunks, written_chunk_ids
+        )
 
     def _write_atomic(
         self,
@@ -428,35 +493,65 @@ class CommitStage(Stage):
     ) -> None:
         """best_effort-пара (A-2): commit графа, затем вектора.
 
-        Сбой первой оси — джоба failed без компенсации (ничего не записано). Сбой второй
-        оси — граф компенсируется: удаляются записанные чанки (`delete_node`), остаются
-        Source/Entity; ошибка пробрасывается как `CommitStageError(compensated=True)`.
-        Повтор той же джобы идемпотентен (L2-06): registry знает версию, контент
-        не изменился → write не выполняется.
+        ADR-028 §2 (UC12-02): каждая ось оборачивается в retry transient-ошибок
+        (`_with_commit_retry`). Компенсация выполняется **только после** того, как
+        повторы второй оси исчерпаны (transient) либо сбой второй оси не-transient
+        (повторов нет) — иначе граф и вектор остаются рассинхронизированными (L2-03).
+        Сбой первой оси — джоба failed без компенсации: транзакция графа откатилась,
+        вектор не менялся. Повтор той же джобы идемпотентен (L2-06): registry знает
+        версию, контент не изменился → write не выполняется.
         """
-        with graph.transaction() as graph_tx:
-            for chunk_id in stale_chunks:
-                graph_tx.delete_node(chunk_id)
-            graph_tx.upsert_nodes(nodes)
-            graph_tx.upsert_edges(edges)
-        try:
+
+        def _graph_axis() -> None:
+            with graph.transaction() as graph_tx:
+                for chunk_id in stale_chunks:
+                    graph_tx.delete_node(chunk_id)
+                graph_tx.upsert_nodes(nodes)
+                graph_tx.upsert_edges(edges)
+
+        def _vector_axis() -> None:
             with vector.transaction() as vector_tx:
                 vector_tx.delete_vectors(stale_chunks)
                 vector_tx.upsert_vectors(vectors)
-        except Exception as exc:
-            # компенсация обеих осей по полному следу джобы (stale + новые): граф уже
-            # коммичен, а векторная транзакция откатила и delete устаревших чанков,
-            # поэтому удалять надо и stale (старые эмбеддинги остались в векторе),
-            # и written (L2-03: без орфанов ни в одной из осей)
+
+        _with_commit_retry([graph], _graph_axis)
+        try:
+            _with_commit_retry([vector], _vector_axis)
+        except BaseException as exc:
             compensate_ids = sorted(set(stale_chunks) | set(written_chunk_ids))
-            for chunk_id in compensate_ids:
-                graph.delete_node(chunk_id)
-            vector.delete_vectors(compensate_ids)
+            _log.warning(
+                "COMMIT best_effort: вторая ось не записана после retry, компенсация "
+                "(удалено чанков: %d): %s",
+                len(compensate_ids),
+                exc,
+            )
+            _compensate(graph, vector, stale_chunks, written_chunk_ids)
             raise CommitStageError(
                 "COMMIT best_effort: сбой второй оси, граф компенсирован "
                 f"(удалено чанков: {len(compensate_ids)})",
                 compensated=True,
             ) from exc
+
+
+def _compensate(
+    graph: GraphStoreProvider,
+    vector: VectorStoreProvider,
+    stale_chunks: list[str],
+    written_chunk_ids: list[str],
+) -> None:
+    """Компенсация best_effort при окончательном отказе второй оси (UC12-02).
+
+    Вызывается из ``_write_best_effort`` только после того, как повторы второй оси
+    исчерпаны (transient) или сбой второй оси не-transient — то есть когда запись
+    гарантированно не состоится. Первая ось (граф) к этому моменту уже закоммичена,
+    поэтому обе оси приводятся к согласованному состоянию: удаляются все записанные
+    чанки (stale + новые), орфанов не остаётся ни в одной оси (L2-03).
+    """
+    compensate_ids = sorted(set(stale_chunks) | set(written_chunk_ids))
+    with graph.transaction() as gx:
+        for chunk_id in compensate_ids:
+            gx.delete_node(chunk_id)
+    vector.delete_vectors(compensate_ids)
 
 
 def soft_delete_source(
@@ -469,16 +564,21 @@ def soft_delete_source(
     """Soft-delete источника (L2-05): чанки снимаются с поиска, сущности остаются.
 
     Возвращает True, если источник имел активную версию и был помечен deleted.
+    ADR-028: запись оборачивается retry (transient-ошибки delete_vectors/транзакций).
     """
     if not registry.soft_delete(domain, source_url):
         return False
-    source_id = _source_node_id(domain, source_url)
-    chunk_ids = graph_store.list_chunk_ids_of_source(source_id)
-    with graph_store.transaction() as graph_tx, vector_store.transaction() as vector_tx:
-        for chunk_id in chunk_ids:
-            graph_tx.delete_node(chunk_id)
-        vector_tx.delete_vectors(chunk_ids)
-    return True
+
+    def _do_delete() -> bool:
+        source_id = _source_node_id(domain, source_url)
+        chunk_ids = graph_store.list_chunk_ids_of_source(source_id)
+        with graph_store.transaction() as graph_tx, vector_store.transaction() as vector_tx:
+            for chunk_id in chunk_ids:
+                graph_tx.delete_node(chunk_id)
+            vector_tx.delete_vectors(chunk_ids)
+        return True
+
+    return _with_commit_retry([graph_store, vector_store], _do_delete)
 
 
 class Analyzer:

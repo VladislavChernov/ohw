@@ -5,9 +5,9 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import time
 import urllib.request
+from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 
