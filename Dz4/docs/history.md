@@ -1,7 +1,7 @@
 # История разработки концепции GraphRAG
 
-> **Версия:** v13 (архивный срез `docs.zip` снят с дерева — восстановим из коммита `8a83c72`; реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker, semantic-cache; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна; A-2: честный контракт атомарности COMMIT — capability derivation atomic/best_effort + компенсация, ADR-024; Semantic Cache на Valkey, ADR-025; решения по кэшу и ревизии данных; P0-закрытие ревью: fail-open кэша, clear() SCAN+DEL, stats() HLEN, EXPIRE на HASH=TTL, полный sha256-ключ; L4-04 этап A: trigger_metrics snapshot + счётчик ошибок поллера топологии; ADR-027: L4-01 переквалифицирован — гейтинг = ограничение среды прототипа, инвариант = контракт LLMInference; S2 fencing query-воркеров: worker_id в ack/fail (InMemory ownership, Redis PEL), skip claim уже-терминальной задачи, commit-идемпотентность mark_succeeded; блокеры ревью №7: socket_timeout/connect_timeout у клиента Redis-очереди, LLM_TIMEOUT_S в фабрике адаптеров, shared-счётчики hit/miss кэша в Valkey (HINCRBY query:sc:<domain>:meta))
-> **Последнее обновление:** 2026-09-15
+> **Версия:** v14 (архивный срез `docs.zip` снят с дерева — восстановим из коммита `8a83c72`; реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker, semantic-cache; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна; A-2: честный контракт атомарности COMMIT — capability derivation atomic/best_effort + компенсация, ADR-024; Semantic Cache на Valkey, ADR-025; решения по кэшу и ревизии данных; P0-закрытие ревью: fail-open кэша, clear() SCAN+DEL, stats() HLEN, EXPIRE на HASH=TTL, полный sha256-ключ; L4-04 этап A: trigger_metrics snapshot + счётчик ошибок поллера топологии; ADR-027: L4-01 переквалифицирован — гейтинг = ограничение среды прототипа, инвариант = контракт LLMInference; S2 fencing query-воркеров: worker_id в ack/fail (InMemory ownership, Redis PEL), skip claim уже-терминальной задачи, commit-идемпотентность mark_succeeded; блокеры ревью №7: socket_timeout/connect_timeout у клиента Redis-очереди, LLM_TIMEOUT_S в фабрике адаптеров, shared-счётчики hit/miss кэша в Valkey (HINCRBY query:sc:<domain>:meta); M4 eval-инфраструктура (ADR-015): метрики + датасеты + раннер; ADR-028: политика конкурентной записи COMMIT — retry transient + детерминированный порядок (S1-обход M5 `INGEST_MAX_CONCURRENT=1` → S2 закрыт код+тесты+доки, L3-06))
+> **Последнее обновление:** 2026-09-19
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
 
@@ -659,6 +659,57 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
 
 ---
 
+## Этап 14: Политика конкурентной записи COMMIT (бандл `concurrent-ingest-write-policy`) — deadlock M5 и закрытие S2
+
+**Дата:** 2026-09-19  
+**Коммит:** `ca9aea9` (код+тесты), доки — в этом обновлении  
+**Статус:** S2 закрыт (контракт, retry-loop, сортировка, тесты, ADR-028, L3-06); live-приёмка M5
+с `INGEST_MAX_CONCURRENT=2` и S3 (очередь ingestion) — вне этого этапа
+
+### Находка (полный eval M5)
+
+`Neo.TransientError.Transaction.DeadlockDetected` при конкурентной записи COMMIT
+(`INGEST_MAX_CONCURRENT=2`). Концепция не декларировала политику конкурентной записи —
+зафиксирован пробел, сборка бандла `concurrent-ingest-write-policy` (спека §1–§3, стадии S1→S3).
+
+### Что сделано
+
+**S1 (мгновенный обход M5):** `INGEST_MAX_CONCURRENT=1` в `compose.eval.yaml` — ограничение
+среды (паттерн ADR-027), риск №7 в `docs/06` §5.
+
+**S2 (M5-хвост) — реализация:**
+- Контракт transient-классификации на провайдерах: `transient_aware()`/`is_transient(exc)`
+  (`retrieval/adapters/base.py`, L1-02); Neo4j — `TransientError` + `ServiceUnavailable`,
+  развёртка цепочки `__cause__` (`neo4j.py:_is_transient_exc`).
+- Retry-loop `_with_commit_retry`: `N_RETRY_COMMIT` повторов после первой попытки (всего N+1),
+  backoff `0.2*2^i + jitter(0.1)`; env-параметры валидируются fail-fast при старте;
+  non-transient — fail без повторов; компенсация best_effort — только после исчерпания retry
+  (UC12-02); причина ошибки сохраняется (`raise ... from exc`).
+- Детерминированный порядок записи: `CommitStage._write` + `_upsert_nodes`/`_upsert_edges`
+  сортируют по контрактным ключам (UC12-07; снижают вероятность deadlock, не исключают).
+- Согласованность soft-delete (UC12-06): `registry.rollback_soft_delete` при окончательном
+  отказе хранилищ; повторный `soft_delete_source` безопасен (L2-06).
+- Доки: ADR-028 (`docs/05_adr_log.md`), инвариант L3-06 (`docs/invariants.md` v10), риск №7
+  (`docs/06` §5), этот этап.
+
+### Верификация
+
+`tests/test_{commit_stage,retry_compensation,transient_classification}.py` —
+retry (N повторов → успех), non-transient без повторов, компенсация после исчерпания,
+`__cause__`, сортировка, env fail-fast (`N_RETRY_COMMIT=0/1/3`, отрицательные/нечисловые),
+`rollback_soft_delete`. Итог: **pytest 378 passed** (2 deselected e2e), **ruff** (src+tests)
+чисто, **mypy** чисто (dev-образ `ohw-python:3.13`).
+
+### Замечания / следующие шаги
+
+- Live-приёмка: полный прогон M5 с `INGEST_MAX_CONCURRENT=2` без deadlock (приёмка 1.3/2.6
+  бандла; требуется ВМ).
+- Интеграционный тест Neo4j-адаптера на реальном драйвере (2.5.7) — при доступном стеке.
+- S3: очередь ingestion (`docs/06` §4, стадия «Рост») — N воркеров пишут по правилам ADR-028;
+  single-writer — при необходимости. Инварианты не меняются.
+
+---
+
 ## Связи с другими документами
 
 | Документ                        | Связано с                        | Тип связи           |
@@ -668,7 +719,7 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
 | docs/02_pipeline_and_normalizer.md    | CONCEPT.md §4           | Техническая детализация |
 | docs/03_retriever.md                  | CONCEPT.md §5           | Техническая детализация |
 | docs/04_services_config.md            | CONCEPT.md §6           | Техническая детализация |
-| docs/05_adr_log.md                    | CONCEPT.md §7           | Подробное обоснование (ADR-001 - ADR-024) |
+| docs/05_adr_log.md                    | CONCEPT.md §7           | Подробное обоснование (ADR-001 - ADR-028) |
 | docs/06_operations_and_risks.md       | CONCEPT.md §8           | Техническая детализация |
 | docs/adapters_specification.md        | CONCEPT.md §2, ADR-012/013 | Контракты интерфейсов |
 | docs/adapters_guide.md                | CONCEPT.md §2.5, docs/adapters_specification.md | Инструкция подключения внешних систем |

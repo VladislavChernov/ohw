@@ -752,3 +752,55 @@ OpenAI-совместимый endpoint (ADR-022) без изменения ко�
 не меняются — гейтинг остаётся рабочей процедурой прототипа.
 
 ---
+
+## ADR-028: Политика конкурентной записи COMMIT — retry transient + детерминированный порядок
+
+**Статус:** Draft (2026-09-19; порождено находкой полного eval M5 —
+`Neo.TransientError.Transaction.DeadlockDetected` при `INGEST_MAX_CONCURRENT=2`;
+бандл `concurrent-ingest-write-policy`, стадии S1→S2 закрыты, S3 — очередь ingestion)
+
+**Проблема:** концепция не декларировала, как конкурентные ingestion-джобы пишут в общий
+граф: при параллельном `MERGE` общих сущностей Neo4j фиксирует deadlock-циклы
+(transient-класс драйвера). Сигнал — deadlock-находка M5; временным обходом S1 стало
+`INGEST_MAX_CONCURRENT=1` (ограничение среды, паттерн ADR-027), что не является
+платформенным решением.
+
+**Решение:**
+1. `_write_atomic`, `_write_best_effort`, тело `soft_delete_source` оборачиваются в
+   `_with_commit_retry(stores, fn)`: `N_RETRY_COMMIT` — число **повторов** после первой
+   попытки (дефолт 3, всего `N_RETRY_COMMIT + 1`; `0` — ровно одна попытка); backoff
+   `0.2*2^i + jitter(0.1)`; env-параметры (`N_RETRY_COMMIT`, `RETRY_BASE_S`, `RETRY_JITTER_S`)
+   валидируются при старте fail-fast (отрицательные/нечисловые — ошибка конфигурации).
+2. Transient-классификация — через декларации провайдеров (`transient_aware()` +
+   `is_transient(exc)`, включая развёртку `__cause__`; контракт L1-02). Повтор только если
+   transient; non-transient — немедленный fail.
+3. **Компенсация best_effort — после исчерпания повторов, не на первом transient** (UC12-02);
+   причина ошибки сохраняется цепочкой `__cause__` (`raise ... from exc`) — обёртка
+   `CommitStageError` не ломает классификацию.
+4. **Детерминированный порядок записи** (UC12-07): `CommitStage._write` и `_upsert_nodes`/
+   `_upsert_edges` (neo4j.py) сортируют `nodes`/`edges` по контрактным ключам
+   (`node_id`, `(from_id, to_id, type)`). Порядок **снижает вероятность** deadlock-циклов,
+   но не исключает их — retry остаётся обязательным (см. L3-06).
+5. **Согласованность soft-delete** (§2а спеки, UC12-06): при окончательном отказе удаления
+   в хранилищах реестр возвращается в `active` компенсирующим действием
+   `registry.rollback_soft_delete`; повторный вызов после частичного удаления безопасен
+   (идемпотентность L2-06).
+6. Границы: **без 2PC** (ADR-024), без single-writer на S2; очередь ingestion (S3,
+   `docs/06` §4) — N воркеров пишут по правилам этого решения.
+
+**Последствия:**
+- + Конкурентная запись становится честно наблюдаемой и восстанавливаемой: транзиентные
+  deadlock/сеть ретраятся с backoff, компенсация — только после исчерпания повторов.
+- + Soft-delete не оставляет рассинхрон «реестр deleted при живых данных осей».
+- + Инвариант L3-06 фиксирует контракт без ложного заявления «deadlock невозможен».
+- - Нагрузка на движок при повторах (ограничена `N_RETRY_COMMIT`, работаем с транзиентами).
+- - Формально не закрывает все источники deadlock (другие операции движка) — не заявляем.
+
+**Затрагиваемые компоненты:** `retrieval/adapters/{base,neo4j,inmemory}.py` (контракт
+transient), `ingestion_service/pipeline/orchestrator.py` (retry-loop, сортировка,
+компенсации), `ingestion_service/storage/registry.py` (`rollback_soft_delete`),
+`tests/test_{commit_stage,retry_compensation,transient_classification}.py`,
+`docs/invariants.md` (L3-06), `docs/06_operations_and_risks.md` (§5 риск №7), `docs/history.md`
+(Этап 14), `openspec/changes/concurrent-ingest-write-policy/*`.
+
+---
