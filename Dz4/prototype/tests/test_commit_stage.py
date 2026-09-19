@@ -175,6 +175,110 @@ def test_soft_delete_source_removes_chunks_keeps_entities(tmp_path: Path) -> Non
     assert soft_delete_source(registry, graph, vector, "it", "src://d.txt") is False
 
 
+def test_registry_rollback_soft_delete_roundtrip(tmp_path: Path) -> None:
+    """2.5.5 (UC12-06): rollback_soft_delete возвращает deleted-версию в active."""
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    analyzer, registry = build_analyzer(tmp_path, graph, vector)
+    src = tmp_path / "d.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    run_source(analyzer, src)
+
+    assert registry.soft_delete("it", "src://d.txt") is True
+    assert registry.latest_active("it", "src://d.txt") is None
+
+    assert registry.rollback_soft_delete("it", "src://d.txt") is True
+    latest = registry.latest_active("it", "src://d.txt")
+    assert latest is not None and latest["status"] == "active" and latest["version"] == 1
+
+    # второй rollback — no-op: deleted-записей не осталось
+    assert registry.rollback_soft_delete("it", "src://d.txt") is False
+
+
+def test_soft_delete_source_rolls_back_registry_when_stores_deny(tmp_path: Path) -> None:
+    """2.5.5 (UC12-06): окончательный отказ удаления в хранилищах → реестр снова
+    active, данные остались; повторная джоба проходит полный путь (L2-06)."""
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    analyzer, registry = build_analyzer(tmp_path, graph, vector)
+    src = tmp_path / "d.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    run_source(analyzer, src)
+    source_id = _source_node_id("it", "src://d.txt")
+    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    assert chunk_ids
+
+    class DenyingGraph(InMemoryGraphStore):
+        """Чанки берёт из реального графа, но отказывает в удалении."""
+
+        def __init__(self, real: InMemoryGraphStore) -> None:
+            super().__init__()
+            self._real = real
+
+        def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
+            return self._real.list_chunk_ids_of_source(source_id)
+
+        def delete_node(self, node_id: str) -> bool:
+            raise RuntimeError("хранилище отказывает в удалении")
+
+    with pytest.raises(RuntimeError, match="удалении"):
+        soft_delete_source(registry, DenyingGraph(graph), vector, "it", "src://d.txt")
+
+    # реестр компенсирован: документ снова active (не рассинхронизирован с осями)
+    latest = registry.latest_active("it", "src://d.txt")
+    assert latest is not None and latest["status"] == "active"
+    # данные на месте — удаление не применилось ни к одной оси
+    assert graph.list_chunk_ids_of_source(source_id) == chunk_ids
+    assert len(vector._vectors) == len(chunk_ids)
+
+    # повторная джоба проходит полный путь: реестр -> хранилища -> True
+    assert soft_delete_source(registry, graph, vector, "it", "src://d.txt") is True
+    assert registry.latest_active("it", "src://d.txt") is None
+    assert graph.list_chunk_ids_of_source(source_id) == []
+    assert not vector._vectors
+
+
+def test_soft_delete_source_repeat_after_partial_delete_full_path(tmp_path: Path) -> None:
+    """2.5.5 (UC12-06): сбой на середине удаления (частичное удаление) — реестр
+    откатывается в active, повторная попытка безопасна (идемпотентность L2-06)."""
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    analyzer, registry = build_analyzer(tmp_path, graph, vector)
+    src = tmp_path / "d.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    run_source(analyzer, src)
+    source_id = _source_node_id("it", "src://d.txt")
+    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    assert chunk_ids
+
+    class FailAfterPartialDeleteVector(InMemoryVectorStore):
+        """Удаляет первый чанк из реальной оси, затем падает (non-transient)."""
+
+        def __init__(self, real: InMemoryVectorStore) -> None:
+            super().__init__()
+            self._real = real
+            self.calls = 0
+
+        def delete_vectors(self, items: list[str]) -> None:
+            self.calls += 1
+            if items:
+                # частичное применение «вне журнала транзакции» + сбой движка
+                self._real._vectors.pop(items[0], None)
+            raise RuntimeError("сбой на середине удаления")
+
+    fail_vector = FailAfterPartialDeleteVector(vector)
+    with pytest.raises(RuntimeError, match="середине"):
+        soft_delete_source(registry, graph, fail_vector, "it", "src://d.txt")
+
+    # реестр компенсирован в active; граф не тронут; из вектора убран один чанк
+    latest = registry.latest_active("it", "src://d.txt")
+    assert latest is not None and latest["status"] == "active"
+    assert len(vector._vectors) == len(chunk_ids) - 1, "один вектор-чанк удалён до сбоя"
+
+    # повторный вызов проходит полный путь: остаток удаляется идемпотентно (L2-06)
+    assert soft_delete_source(registry, graph, vector, "it", "src://d.txt") is True
+    assert registry.latest_active("it", "src://d.txt") is None
+    assert graph.list_chunk_ids_of_source(source_id) == []
+    assert not vector._vectors
+
+
 def test_chunk_id_deterministic() -> None:
     assert _chunk_id("src://d.txt", 0) == _chunk_id("src://d.txt", 0)
     assert _chunk_id("src://d.txt", 0) != _chunk_id("src://d.txt", 1)

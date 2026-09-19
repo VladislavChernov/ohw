@@ -20,6 +20,7 @@ from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     CommitStage,
     CommitStageError,
     _compensate,
+    _parse_retry_env,
     _with_commit_retry,
 )
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
@@ -152,6 +153,63 @@ def test_attempts_equal_n_retry_commit_plus_one() -> None:
         _with_commit_retry([store], fn, attempts=N_RETRY_COMMIT + 1)
     assert N_RETRY_COMMIT == 3, f"дефолт спеки — 3 повтора, в коде: {N_RETRY_COMMIT}"
     assert attempts == N_RETRY_COMMIT + 1, f"ожидали {N_RETRY_COMMIT + 1} попыток, {attempts}"
+
+
+def test_zero_retries_single_attempt() -> None:
+    """`N_RETRY_COMMIT=0` → ровно одна попытка, без повторов (спека §2)."""
+    store = FakeTransientVector(fail_times=99)
+    attempts = 0
+
+    def fn() -> None:
+        nonlocal attempts
+        attempts += 1
+        store.upsert_vectors(VECTORS)
+
+    with pytest.raises(TransientError):
+        _with_commit_retry([store], fn, attempts=0 + 1)
+    assert attempts == 1, f"N_RETRY_COMMIT=0 даёт одну попытку, получено: {attempts}"
+
+
+# ------------------------------------------------ 2.5.1-env: fail-fast при старте (UC12-03)
+
+
+def test_parse_retry_env_defaults() -> None:
+    """Дефолты спеки: N_RETRY_COMMIT=3, base=0.2, jitter=0.1."""
+    assert _parse_retry_env({}) == (3, 0.2, 0.1)
+
+
+def test_parse_retry_env_zero_retries_valid() -> None:
+    """`N_RETRY_COMMIT=0` — валидная конфигурация (ровно одна попытка)."""
+    assert _parse_retry_env({"N_RETRY_COMMIT": "0"}) == (0, 0.2, 0.1)
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"N_RETRY_COMMIT": "-1"},
+        {"N_RETRY_COMMIT": "abc"},
+        {"N_RETRY_COMMIT": ""},
+        {"RETRY_BASE_S": "-0.1"},
+        {"RETRY_BASE_S": "не число"},
+        {"RETRY_JITTER_S": "-2"},
+        {"RETRY_JITTER_S": "nan?"},
+    ],
+)
+def test_parse_retry_env_negative_or_non_numeric_fails_fast(env: dict[str, str]) -> None:
+    """Отрицательные и нечисловые env-значения — ошибка конфигурации (fail-fast)."""
+    with pytest.raises(ValueError):
+        _parse_retry_env(env)
+
+
+def test_commit_retry_attempts_below_one_rejected() -> None:
+    """`attempts < 1` — ошибка валидации (N_RETRY_COMMIT >= 0 семантически)."""
+    store = FakeTransientVector(fail_times=0)
+
+    def fn() -> None:
+        store.upsert_vectors(VECTORS)
+
+    with pytest.raises(ValueError, match="attempts"):
+        _with_commit_retry([store], fn, attempts=0)
 
 
 # ------------------------------------------------- 2.5.3: момент компенсации best_effort

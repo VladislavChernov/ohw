@@ -11,10 +11,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import random
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -175,7 +176,6 @@ class NormalizeStage(Stage):
     def run(self, ctx: PipelineContext) -> None:
         if not self._glossary_url:
             return
-        import os
         import urllib.request
 
         headers = {"Content-Type": "application/json"}
@@ -266,14 +266,54 @@ def _is_atomic_pair(graph: GraphStoreProvider, vector: VectorStoreProvider) -> b
 
 
 # ------------------------------------------------------------------ ADR-028 retry
-# Чтение дефолтов из env — тесты инжектируют значения напрямую.
-N_RETRY_COMMIT = int(__import__("os").environ.get("N_RETRY_COMMIT", "3"))
-RETRY_BASE_S = float(__import__("os").environ.get("RETRY_BASE_S", "0.2"))
-RETRY_JITTER_S = float(__import__("os").environ.get("RETRY_JITTER_S", "0.1"))
+# Чтение дефолтов из env — тесты инжектируют значения напрямую в _with_commit_retry,
+# валидация env (fail-fast) проверяется через _parse_retry_env.
 
 _log = logging.getLogger("graphrag_proto.orchestrator.commit_retry")
 
 T = TypeVar("T")
+
+
+def _retry_param_int(name: str, raw: object, *, min_value: int) -> int:
+    if not isinstance(raw, str):
+        raise TypeError(f"{name}: ожидалось целое число, получено {raw!r}")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name}: ожидалось целое число, получено {raw!r}") from exc
+    if value < min_value:
+        raise ValueError(f"{name}: не может быть меньше {min_value}, получено {value}")
+    return value
+
+
+def _retry_param_float(name: str, raw: object, *, min_value: float = 0.0) -> float:
+    if not isinstance(raw, str):
+        raise TypeError(f"{name}: ожидалось число, получено {raw!r}")
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name}: ожидалось число, получено {raw!r}") from exc
+    if value < min_value:
+        raise ValueError(f"{name}: не может быть меньше {min_value}, получено {value}")
+    return value
+
+
+def _parse_retry_env(env: Mapping[str, str] | None = None) -> tuple[int, float, float]:
+    """Чтение и fail-fast-валидация env-параметров retry (ADR-028, спека §2).
+
+    ``N_RETRY_COMMIT`` — число повторов после первой попытки (дефолт 3; ``0`` —
+    ровно одна попытка). ``RETRY_BASE_S``/``RETRY_JITTER_S`` — задержки backoff
+    (дефолты 0.2 / 0.1 c). Нечисловые и отрицательные значения — ``ValueError``
+    (fail-fast при старте), а не молчаливый дефолт (UC12-03).
+    """
+    src = os.environ if env is None else env
+    n_retry = _retry_param_int("N_RETRY_COMMIT", src.get("N_RETRY_COMMIT", "3"), min_value=0)
+    base = _retry_param_float("RETRY_BASE_S", src.get("RETRY_BASE_S", "0.2"))
+    jitter = _retry_param_float("RETRY_JITTER_S", src.get("RETRY_JITTER_S", "0.1"))
+    return n_retry, base, jitter
+
+
+N_RETRY_COMMIT, RETRY_BASE_S, RETRY_JITTER_S = _parse_retry_env()
 
 
 def _with_commit_retry(
@@ -291,6 +331,10 @@ def _with_commit_retry(
     ``attempts`` по умолчанию — ``N_RETRY_COMMIT + 1`` (спецификация
     `concurrent-ingest-write-policy` §2 определяет N_RETRY как число повторов).
     """
+    if attempts < 1:
+        raise ValueError(
+            f"attempts должен быть >= 1 (N_RETRY_COMMIT >= 0), получено {attempts}"
+        )
     delay = base_delay
     for attempt in range(attempts):
         try:
@@ -564,7 +608,12 @@ def soft_delete_source(
     """Soft-delete источника (L2-05): чанки снимаются с поиска, сущности остаются.
 
     Возвращает True, если источник имел активную версию и был помечен deleted.
-    ADR-028: запись оборачивается retry (transient-ошибки delete_vectors/транзакций).
+    ADR-028: запись оборачивается retry (transient-ошибки delete_vectors/транзакций);
+    при ОКОНЧАТЕЛЬНОМ отказе удаления в хранилищах реестр возвращается в active
+    компенсирующим действием `rollback_soft_delete` (UC12-06, spec §2а) — джоба
+    failed не оставляет рассинхрон «реестр deleted, данные в осях остались».
+    Повторный вызов после частичного удаления безопасен: удаление идемпотентно
+    (L2-06), `list_chunk_ids_of_source` вернёт остаток.
     """
     if not registry.soft_delete(domain, source_url):
         return False
@@ -578,7 +627,20 @@ def soft_delete_source(
             vector_tx.delete_vectors(chunk_ids)
         return True
 
-    return _with_commit_retry([graph_store, vector_store], _do_delete)
+    try:
+        return _with_commit_retry([graph_store, vector_store], _do_delete)
+    # BLE001 исключён намеренно: прерывание (KeyboardInterrupt/SystemExit) тоже
+    # выравнивает оси — прецедент зафиксирован в review-13 для best-effort.
+    except BaseException as exc:
+        rolled_back = registry.rollback_soft_delete(domain, source_url)
+        _log.warning(
+            "soft-delete источника %s не применён после retry; реестр возвращён "
+            "в active (rollback_soft_delete=%s): %s",
+            source_url,
+            rolled_back,
+            exc,
+        )
+        raise
 
 
 class Analyzer:

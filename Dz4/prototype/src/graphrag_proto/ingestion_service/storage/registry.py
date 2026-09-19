@@ -133,6 +133,30 @@ class DocumentRegistry:
             self._conn.commit()
             return True
 
+    def rollback_soft_delete(self, domain: str, source_url: str) -> bool:
+        """Откат soft-delete: последняя deleted-версия возвращается в active.
+
+        UC12-06 (ADR-028, spec §2а): компенсирующее действие при окончательном
+        отказе удаления в хранилищах — реестр не остаётся в статусе deleted при
+        живых данных осей; повторная джоба проходит полный путь (L2-06).
+        Возвращает True, если deleted → active переведена запись, иначе False.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT doc_id FROM documents "
+                "WHERE domain = ? AND source_url = ? AND status = ? "
+                "ORDER BY version DESC LIMIT 1",
+                (domain, source_url, STATUS_DELETED),
+            ).fetchone()
+            if not row:
+                return False
+            self._conn.execute(
+                "UPDATE documents SET status = ? WHERE doc_id = ?",
+                (STATUS_ACTIVE, row[0]),
+            )
+            self._conn.commit()
+            return True
+
     def data_revision(self, domain: str) -> str | None:
         """Ревизия данных домена — fingerprint активного сета (ADR-026).
 

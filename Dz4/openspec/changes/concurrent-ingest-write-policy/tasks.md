@@ -16,39 +16,52 @@
 
 ### 2.1. Контракт transient-классификации
 
-- [ ] 2.1.1. `retrieval/adapters/base.py`: `transient_aware() -> bool` (дефолт False) и
+- [x] 2.1.1. `retrieval/adapters/base.py`: `transient_aware() -> bool` (дефолт False) и
       `is_transient(exc) -> bool` на `GraphStoreProvider`/`VectorStoreProvider`;
       docstring-контракт (ядро не импортирует вендорские пакеты, L1-02).
-- [ ] 2.1.2. `neo4j.py`: `Neo4jGraphStore`/`Neo4jVectorStore` — `transient_aware()->True`,
+      Выполнено в `c21236e`: `base.py` — дефолты обоих провайдеров.
+- [x] 2.1.2. `neo4j.py`: `Neo4jGraphStore`/`Neo4jVectorStore` — `transient_aware()->True`,
       `is_transient()` по `neo4j.exceptions.{TransientError, ServiceUnavailable}`;
       `inmemory.py` — дефолт ABC.
+      Выполнено в `c21236e`: `neo4j.py:_is_transient_exc` (защита от циклов),
+      оба класса; InMemory — дефолты ABC.
 
 ### 2.2. Retry-loop в CommitStage
 
 > Ревизия 2026-09-17 по ревью №12 (UC12-02/03/06): уточнены задачи.
 
-- [ ] 2.2.1. `orchestrator.py`: `_with_commit_retry(stores, fn)` — `N_RETRY_COMMIT`
+- [x] 2.2.1. `orchestrator.py`: `_with_commit_retry(stores, fn)` — `N_RETRY_COMMIT`
       повторов после первой попытки (всего N+1; `0` — ровно одна попытка),
       backoff `0.2*2^i + jitter(0.1)`, transient-классификация через декларации
       провайдеров; env-параметры валидируются (отрицательные/нечисловые — fail-fast).
-- [ ] 2.2.2. Обернуть `_write_atomic`, `_write_best_effort`, тело `soft_delete_source`;
+      Выполнено в `c21236e`: `_with_commit_retry` + дефолты из env; этот проход —
+      fail-fast-валидация `_parse_retry_env` (нечисловые/отрицательные/пустые —
+      `ValueError`, `N_RETRY_COMMIT=0` валиден), guard `attempts < 1` в
+      `_with_commit_retry`; тесты ниже в 2.5.1 (подпункт env).
+- [x] 2.2.2. Обернуть `_write_atomic`, `_write_best_effort`, тело `soft_delete_source`;
       компенсация best_effort — только после исчерпания повторов (UC12-02: путь
       «транзиент сбой второй оси» не должен компенсироваться до retry).
-- [ ] 2.2.3. Логирование transient-повторов с номером попытки (наблюдаемость, L4-04 паттерн).
+      Выполнено в `c21236e`: обе оси обёрнуты, `_compensate` — после исчерпания.
+- [x] 2.2.3. Логирование transient-повторов с номером попытки (наблюдаемость, L4-04 паттерн).
+      Выполнено в `c21236e`: `_log.warning` внутри `_with_commit_retry`.
 - [x] 2.2.4. Сохранение причины ошибки (UC12-02): `raise ... from exc` во всех обёртках;
       `is_transient` neo4j-адаптера проверяет `exc` и его `__cause__`.
       Выполнено: `neo4j.py:_is_transient_exc` разворачивает цепочку `__cause__`
       (с защитой от циклов); документирован контракт в `base.py`. Тесты 2.5.4
       зелёные, ruff/mypy чисто.
-- [ ] 2.2.5. Согласованность soft-delete (UC12-06): `registry.rollback_soft_delete`
+- [x] 2.2.5. Согласованность soft-delete (UC12-06): `registry.rollback_soft_delete`
       (новый метод реестра) при окончательном отказе удаления; повторный вызов
       `soft_delete_source` после частичного удаления — безопасен.
+      Выполнено: `registry.py:rollback_soft_delete` (последняя deleted-версия →
+      active, no-op иначе); `soft_delete_source` откатывает реестр на `BaseException`
+      (тот же контур компенсации, что и best-effort, review-13); тесты 2.5.5 зелёные.
 
 ### 2.3. Детерминированный порядок записи
 
-- [ ] 2.3.1. `CommitStage._write`: `nodes.sort(node_id)`, `edges.sort(from_id, to_id, type)`.
-- [ ] 2.3.2. `_upsert_nodes`/`_upsert_edges` (neo4j.py) — контрактная сортировка входящего
-      списка (двойная страховка).
+- [x] 2.3.1. `CommitStage._write`: `nodes.sort(node_id)`, `edges.sort(from_id, to_id, type)`.
+      Выполнено в `c21236e`: `orchestrator.py:_write`.
+- [x] 2.3.2. `_upsert_nodes`/`_upsert_edges` (neo4j.py) — контрактная сортировка входящего
+      списка (двойная страховка). Выполнено в `c21236e`.
 
 ### 2.4. Инварианты, ADR, доки
 
@@ -64,12 +77,16 @@
 
 ### 2.5. Тесты
 
-- [ ] 2.5.1. Unit: фейк-store бросает transient N раз → retry, на N+1 — успех
-      (verify вызовы = N повторов); не-transient — failed без повторов;
-      `N_RETRY_COMMIT=0` — ровно одна попытка; отрицательные/нечисловые env — fail-fast.
-- [ ] 2.5.2. Unit: порядок вызовов `upsert_nodes`/`upsert_edges` отсортирован
+- [x] 2.5.1. Unit: фейк-store бросает transient N раз → retry, на N+1 — успех
+      (verify вызовы = N повторов); не-transient — failed без повторов.
+      Выполнено в `c21236e` (`test_commit_stage.py` + `test_retry_compensation.py`).
+      Подпункт env добит: `_parse_retry_env` — дефолты `{}`→(3, 0.2, 0.1),
+      `N_RETRY_COMMIT=0` валиден (ровно одна попытка), отрицательные/нечисловые/
+      пустые значения → `ValueError` (fail-fast), `attempts=0` → `ValueError`.
+- [x] 2.5.2. Unit: порядок вызовов `upsert_nodes`/`upsert_edges` отсортирован
       по `node_id` и `(from_id, to_id, type)` (mock-провайдер, событийная запись).
-- [ ] 2.5.3. Unit: компенсация best_effort выполняется только после исчерпания retry
+      Выполнено в `c21236e`: `test_commit_plan_nodes_and_edges_sorted`.
+- [x] 2.5.3. Unit: компенсация best_effort выполняется только после исчерпания retry
       (UC12-02: transient второй оси на 1-й попытке → повтор → успех без компенсации;
       исчерпание → компенсация; non-transient → немедленный отказ; сбой самой
       компенсации не маскирует исходную причину). Также: transient-сбой ПЕРВОЙ оси
@@ -79,11 +96,18 @@
       Решение (review-13): перехват `BaseException` в `_write_best_effort` —
       НАМЕРЕННЫЙ: прерывание (Ctrl+C) тоже приводит к компенсации, чтобы оси
       не остались рассинхронизированными (L2-03).
-- [ ] 2.5.4. Unit (UC12-02): `__cause__` обёрнутой ошибки классифицируется как
-      transient на границе адаптера.
-- [ ] 2.5.5. Unit (UC12-06): окончательный отказ удаления → `rollback_soft_delete`
+      Выполнено в `c21236e` (`test_retry_compensation.py`).
+- [x] 2.5.4. Unit (UC12-02): `__cause__` обёрнутой ошибки классифицируется как
+      transient на границе адаптера. Выполнено в `c21236e` (`test_transient_classification.py`).
+- [x] 2.5.5. Unit (UC12-06): окончательный отказ удаления → `rollback_soft_delete`
       вызван, реестр снова активен; повторный `soft_delete_source` проходит полный путь.
-- [ ] 2.5.6. `uv run pytest -q` зелёно; `uv run ruff check .`, `uv run mypy src` чисто.
+      Выполнено (`test_commit_stage.py`): roundtrip soft_delete→rollback_soft_delete,
+      отказ хранилища → реестр active + данные на месте + повторный полный путь,
+      частичное удаление при сбое → откат + идемпотентный повтор.
+- [x] 2.5.6. `uv run pytest -q` зелёно; `uv run ruff check .`, `uv run mypy src` чисто.
+      Выполнено в dev-образе: pytest 378 passed (2 deselected e2e), ruff src+tests
+      чисто (в gitignored `prototype/reports/*` — 4 предсуществующих замечания на
+      артефактах, не входящих в репозиторий), mypy — без замечаний.
 - [ ] 2.5.7. Интеграция: контрактные тесты Neo4j-адаптера — transient-классификация
       на реальном драйвере (если доступен стек).
 
