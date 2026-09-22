@@ -12,7 +12,7 @@ services:
       EMBEDDER: bge_m3_service
       EMBEDDINGS_URL: http://embeddings-service:8004
       EMBEDDINGS_TIMEOUT_S: 60
-      INGEST_MAX_CONCURRENT: 1
+      INGEST_MAX_CONCURRENT: 2
 
   llm:
     command:
