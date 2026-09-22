@@ -1,0 +1,182 @@
+# Архитектурное решение: Переработка конвейера ингеста под схему «Облако тегов + Столицы» (Dz4)
+
+## 1. Концепция решения
+В текущей реализации прототипа M1-M2 графовая ось вырождена: `ExtractStage` собирает случайные слова >= 5 символов, записывает их под плоской меткой `Entity` и никак не связывает их с узлами `Chunk` (только текстовое свойство `source_ids`).
+
+Предлагается перейти к схеме разреженного облака тегов вокруг **«Столиц»**:
+1. **Столица (Главный хаб)** = существующий узел `Source` (документ-источник).
+2. **Мясо** = существующий узел `Chunk` (кусок текста с детерминированным `chunk_id`).
+3. **Облако тегов** = узлы `Tag` с двойной меткой: общей `Tag` и доменной из онтологии (`Requirement`, `Concept`, `Contract`), извлекаемые строго по словарю `domain_profile.it.yaml`.
+
+### Новая топология графа:
+- `(Source) -[:CONTAINS]-> (Chunk)` — Столица содержит свои чанки.
+- `(Source) -[:HAS_TAG]-> (Tag)` — Столица агрегирует темы (теги) документа.
+- `(Chunk) -[:TAGGED_WITH]-> (Tag)` — Конкретный чанк жестко привязан к тегу на уровне ребер.
+
+---
+
+## 2. Шаг 1: Рефакторинг `ExtractStage` (Извлечение тегов по онтологии)
+Файл: `prototype/src/graphrag_proto/pipeline/stages.py` (или `orchestrator.py`)
+
+Вместо примитивного распила на слова, мы сопоставляем текст чанков со словарем сущностей, валидных для `ontology.node_types` из активного профиля домена. Каждое совпадение маркируется конкретным `chunk_id`.
+
+```python
+class ExtractStage(Stage):
+    name = 'EXTRACT'
+
+    def run(self, ctx: PipelineContext) -> None:
+        # 1. Получаем валидные типы из активного Domain Profile (Requirement, Concept, Contract)
+        valid_types = [nt['type'] for nt in ctx.domain_profile.ontology.node_types]
+        
+        # 2. Детерминированный маппинг ключевых слов для прототипа (замена M1-заглушки)
+        # Ключ — термин в нижнем регистре, значение — его тип из онтологии профиля
+        ontology_vocabulary = {
+            "oauth": "Concept",
+            "jwt": "Concept",
+            "threadpoolexecutor": "Concept",
+            "contract": "Contract",
+            "requirement": "Requirement",
+            "cypher": "Concept",
+            "reranker": "Concept",
+            "token": "Concept"
+        }
+
+        ctx.entities = []
+
+        # 3. Сканируем чанки и фиксируем привязку Сущность <-> Chunk_ID
+        for idx, chunk_text in enumerate(ctx.chunks):
+            chunk_id = ctx.chunks_meta[idx]['chunk_id']
+            # Очистка токенов до чистых букв
+            words = [w.lower() for w in chunk_text.split() if w.isalpha()]
+            
+            for word in words:
+                if word in ontology_vocabulary:
+                    node_type = ontology_vocabulary[word]
+                    
+                    # Сохраняем сущность со сквозным chunk_id
+                    ctx.entities.append({
+                        'name': word.capitalize(),
+                        'canonical': word.capitalize(),
+                        'type': node_type,
+                        'source': ctx.source_url,
+                        'chunk_id': chunk_id  # Линия связи, которой не было в M1-M2
+                    })
+```
+
+---
+
+## 3. Шаг 2: Рефакторинг `CommitStage._write` (Запись структуры в граф)
+Файл: `prototype/src/graphrag_proto/pipeline/orchestrator.py` (метод `_write`)
+
+Перестраиваем сборку списков `nodes` и `edges` перед отправкой транзакции в `GraphStore`.
+
+```python
+def _write(self, doc, ctx: PipelineContext):
+    source_id = ctx.source_id  # src:{domain}:{source_url}
+    domain = ctx.domain
+    source_url = ctx.source_url
+    
+    # 1. Узел-Столица (Source) — маркер явного центра тяжести подграфа
+    nodes = [{
+        'node_id': source_id,
+        'labels': ['Source'],
+        'properties': {
+            'source_url': source_url,
+            'domain': domain,
+            'doc_type': doc.doc_type,
+            'is_capital': True  # Метка для кастомных эвристик ретривера
+        }
+    }]
+    
+    # 2. Узлы Чанков (Мясо) — остаются детерминированными
+    for meta in ctx.chunks_meta:
+        chunk_id = meta['chunk_id']
+        text = ctx.chunks[meta['index']]
+        nodes.append({
+            'node_id': chunk_id,
+            'labels': ['Chunk'],
+            'properties': {
+                'chunk_id': chunk_id,
+                'text': text,
+                'source_url': source_url,
+                'domain': domain,
+                'index': meta['index'],
+            }
+        })
+        
+    # 3. Узлы Тегов с двойной меткой (вместо безликой константы Entity)
+    # Группируем и дедуплицируем теги на уровне всего документа
+    unique_tags = {}
+    for ent in ctx.entities:
+        tag_key = f"tag:{domain}:{ent['canonical'].lower()}"
+        if tag_key not in unique_tags:
+            unique_tags[tag_key] = {
+                'node_id': tag_key,
+                'labels': ['Tag', ent['type']],  # Двойная метка: общая Tag + тип из онтологии
+                'properties': {
+                    'canonical_name': ent['canonical'],
+                    'name': ent['name'],
+                    'source_ids': [source_url]
+                }
+            }
+    nodes.extend(unique_tags.values())
+    
+    # Запись всех материализованных узлов в базу
+    self._graph_store.upsert_nodes(nodes)
+    
+    # --- СБОРКА РЕБЕР (СВЯЗЕЙ) ---
+    edges = []
+    
+    # Связь 1: Столица -[CONTAINS]-> Чанк (Физический состав документа)
+    for meta in ctx.chunks_meta:
+        edges.append({
+            'from_id': source_id,
+            'to_id': meta['chunk_id'],
+            'type': 'CONTAINS',
+            'properties': {}
+        })
+        
+    # Связь 2: Столица -[HAS_TAG]-> Тег (Тематический профиль документа)
+    for tag_key in unique_tags.keys():
+        edges.append({
+            'from_id': source_id,
+            'to_id': tag_key,
+            'type': 'HAS_TAG',
+            'properties': {}
+        })
+        
+    # Связь 3: Чанк -[TAGGED_WITH]-> Тег (Локальная семантическая привязка фрагмента)
+    for ent in ctx.entities:
+        tag_key = f"tag:{domain}:{ent['canonical'].lower()}"
+        edges.append({
+            'from_id': ent['chunk_id'],  # chunk_id, переданный из ExtractStage
+            'to_id': tag_key,
+            'type': 'TAGGED_WITH',
+            'properties': {}
+        })
+        
+    # Запись всех ребер в базу
+    self._graph_store.upsert_edges(edges)
+```
+
+---
+
+## 4. Почему рантайм оживает автоматически без изменения Cypher?
+Ваш текущий Cypher-шаблон в `GraphRetriever` спроектирован так:
+```cypher
+MATCH (n)
+WHERE any(t IN $terms WHERE toLower(n.canonical_name) CONTAINS toLower(t) ...)
+OPTIONAL MATCH (n)-[r]-(m)
+WHERE m:{node_labels}
+RETURN n, m, type(r) AS rel_type
+```
+
+### Как это отработает теперь:
+1. `MATCH (n)` находит узел `Tag` (например, `canonical_name: "OAuth"`), который теперь обладает двойной меткой `['Tag', 'Concept']`.
+2. `OPTIONAL MATCH` проверяет соседей по `node_labels`. Так как в вашем IT-профиле прописано `node_labels: "Requirement|Concept|Contract"`, а также в граф пишутся узлы с этими метками (`ent['type']`), Cypher успешно проходит по ребрам `HAS_TAG` до Столицы (`Source`) и по ребрам `TAGGED_WITH` до других сущностей и Чанков, если их метки пересекаются с фильтром.
+3. В `ContextAssembly` метод `render_skeleton` превращает структуру в лаконичный текст:
+   ```text
+   Concept:OAuth ~[HAS_TAG]~ Source:oauth_doc
+   Concept:OAuth ~[TAGGED_WITH]~ Chunk:chk_a1b2c3d
+   ```
+4. LLM получает жестко скоординированную карту домена, где «мясо» (векторные чанки) идеально совпадает со структурными маркерами графовой оси по общему `chunk_id`.

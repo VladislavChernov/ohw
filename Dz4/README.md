@@ -60,6 +60,7 @@ Topology UI и конфигуратор — задел; monitoring в Compose з
 | [docs/operations_requirements.md](./docs/operations_requirements.md) | Эксплуатационные требования (бэкап, retention, reconciliation, аудит, A/B) |
 | [docs/invariants.md](./docs/invariants.md) | Инварианты платформы: обязательные контракты по слоям (L1–L5) |
 | [docs/prototype_requirements.md](./docs/prototype_requirements.md) | Требования к прототипу: цель, границы, стек, вехи, eval-гейт |
+| [docs/test_plan.md](./docs/test_plan.md) | План испытаний прототипа: уровни метрик, артефакты прогона, режимы, границы измерения |
 | [docs/web_layer_replacement.md](./docs/web_layer_replacement.md) | Как менять веб-слой (Query API Gateway) без переделки ядра |
 | [docs/demo_runbook.md](./docs/demo_runbook.md) | Runbook демо-контура: подъём стека, UI `:8503`, сценарии в браузере, прогон e2e |
 | [docs/demo_user_guide.md](./docs/demo_user_guide.md) | Руководство пользователя демо: требования, скачивание, запуск, сценарий, устройство |

@@ -170,6 +170,20 @@
 | 5 | Логические противоречия и галлюцинации ЛЛМ на этапе Extraction | Работа LLM (по умолчанию Qwen 2.5 Coder 7B Abliterate) на низкой температуре (0.1) + тотальная семантическая проверка графа Cypher-запросами в Validator v2 до сохранения изменений |
 | 6 | Vendor lock-in — привязка к конкретному поставщику инфраструктуры (новое в v5) | Слой адаптеров (ADR-012) позволяет заменить любой компонент инфраструктуры через runtime config без переписывания ядра |
 
+> **Риск №8 (открыт, находка M5-прогона 2026-09-19, бандл `eval-graph-contribution-experiment`):**
+> **рассинхрон доменной онтологии и графа.** Типы `Requirement|Concept|Contract` объявлены
+> только декларативно в Domain Profile (`ontology.node_types`), но нигде в графе не
+> материализуются: `POST /api/v1/config/domain/activate` делает лишь `set_active_profile`
+> (`config_service/app.py:124`) и не создаёт constraints, которые обещают `docs/01 §3`,
+> `docs/data_model.md §1/§75` и инвариант L2-01; ingestion пишет только `Source|Entity|Chunk`
+> без рёбер у сущностей (`orchestrator.py:429/442/470-472`). Следствие: Cypher графовой оси
+> (`retrievers.py:82-90`, соседи по меткам онтологии) всегда матчит пустое множество,
+> warning `label does not exist` в логах, граф-ось вырождена, уникальность канонических
+> узлов (`unique_key`) не гарантируется. Митигация: предусловие стадии «вклад графа» —
+> типизированный EXTRACT/COMMIT по онтологии + `GraphStoreProvider.ensure_schema`
+> (constraints по `unique_key`, идемпотентно); ADR-029. Эксперимент без этого измерит
+> заглушку.
+>
 > **Риск №7 (S1-обход, закрыт S2 — ADR-028):** `Neo4j deadlock` при конкурентной записи
 > COMMIT (`INGEST_MAX_CONCURRENT>1`, находка полного eval M5 — `TransientError.DeadlockDetected`).
 > S1-обход на время M5: `INGEST_MAX_CONCURRENT=1` в `compose.eval.yaml` (ограничение среды,

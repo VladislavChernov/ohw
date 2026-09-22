@@ -119,7 +119,7 @@ services:
       <<: *client-env
       INGESTION_DB_PATH: /data/ingestion.sqlite
       INGESTION_UPLOAD_DIR: /data/uploads
-      INGEST_MAX_CONCURRENT: "1"
+      INGEST_MAX_CONCURRENT: "${INGEST_MAX_CONCURRENT:-2}"
       INGEST_CHUNKER: sliding_window
       INGEST_CHUNK_SIZE: "512"
       INGEST_CHUNK_OVERLAP: "64"
