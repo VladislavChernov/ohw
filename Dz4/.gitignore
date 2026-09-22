@@ -9,6 +9,7 @@ __pycache__/
 # Локальные артефакты процесса (не публикуются)
 review/
 QA_review/
+Ingest/analitic/
 
 # Runtime data (SQLite прототипа, локальные прогоны)
 prototype/runtime/
