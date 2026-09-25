@@ -143,7 +143,7 @@ https://en.wikipedia.org/wiki/Content-addressable_storage
 
 Раздел «Uses»: файловые системы (IPFS), Git, репликация данных.
 
-**Для чего:** ясно понять, что наш `sha256(активных content_hash)` — это
+**Для чего:** ясно понять, что наш `sha256(пары source_url + content_hash)` — это
 мини-CAS, и почему он идемпотентен.
 
 ### Wikipedia: Merkle tree

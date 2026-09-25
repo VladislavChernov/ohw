@@ -11,11 +11,15 @@
 | [dz1](dz1/) | Учебная LLM на одном слое самовнимания (SelfAttention) | реализовано |
 | [dz2](dz2/) | CLI-утилита генерации тест-кейсов/чек-листов/тест-планов через ollama LLM | реализовано |
 | [dz3](dz3/) | Генератор API-автотестов через LLM: simple — pytest-код; advanced — JSON-план + своё детерминированное ядро | simple — реализовано; advanced — реализовано (E2E в Docker прогнана: 16 сценариев, см. dz3/README) |
-| [Dz4](Dz4/) | Гибридная RAG: граф Neo4j + векторный поиск + локальная LLM; учебный прототип | Config/Glossary/Ingestion/Query, UI `:8503`, Topology Orchestrator и расширяемые чанкеры; минимальный eval-контур и пилотный датасет — `Dz4/prototype/infra/eval/`; ограничения и запуск — в [README](Dz4/README.md) |
+| [Dz4](Dz4/) | Vector-first RAG с опциональной offline graph projection; доменно-агностичный учебный прототип | Config/Glossary, Ingestion, асинхронный Query (Valkey → worker → SSE), Streamlit-демо `:8503`, Topology Orchestrator, offline projection с lease и compare-and-set; eval-контур с послойными артефактами прогона — `Dz4/prototype/infra/eval/`; 18 OpenSpec-бандлов, 9 закрыты; ограничения и запуск — в [README](Dz4/README.md) |
 | [light-llm-engine](light-llm-engine/) | Движок запросов к локальной LLM (ollama): файл из `input/` → ответ модели → `output/`; запуск в Docker | реализовано |
 
 Каждое задание имеет собственный стек и `.devcontainer/`. Открывайте нужную
 папку в VS Code как корневую (`Открыть папку → ohw/dzN`).
+
+Каталог `learning/` — личные методички по теме проекта (RAG, кэширование, LLM-as-judge,
+тест-планы). Это справочные материалы для работы, а не исходники и не часть контура
+Dz4; новые файлы каталога не публикуются.
 
 ## Переиспользуемые сервисы и общий код
 
