@@ -14,7 +14,7 @@
       `eval-graph-contribution-experiment` как superseded, не удаляя историю.
 - [x] 1.3. Обновить eval-документацию: baseline vector-only, target vector + bounded graph
       expansion/boost; manifest/QA trace фиксируют seeds, paths, depth, boost и fallback.
-- [x] 1.4. Синхронизировать `learning`-методички: vector-first examples и exercises, краткие
+- [x] 1.4. Разобраны vector-first examples и exercises, отработан
       справочники heavy graph и parallel-axis, явные Target/Runtime/Planned статусы.
 - [x] 1.5. Зафиксировать два lifecycle графа: inline enrichment после vector commit и отдельный
       offline enrichment/rebuild; readiness/revision не должны менять vector-only baseline.
