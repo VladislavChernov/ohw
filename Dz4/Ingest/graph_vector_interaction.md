@@ -1,6 +1,14 @@
 # Взаимодействие графа и вектора в Dz4 — ответы на три вопроса
 
-> Источники: CONCEPT.md v5.0, ADR-013, `prototype/src/graphrag_proto/retrieval/retrievers.py`, `context.py`, `orchestrator.py`, `neo4j.py`, `docs/data_model.md §6`, `docs/03_retriever.md`, `eval-graph-contribution-experiment/design.md`.
+> **Superseded 2026-09-25:** этот разбор описывает старый graph-first/typed контур.
+> Актуальная линия — vector-only baseline и optional graph experiment из
+> `add-lightweight-context-graph`; GraphRetriever.query и skeleton-first путь не являются
+> обязательным runtime.
+>
+> Источники исторического разбора: CONCEPT.md v5.0, ADR-013,
+> `prototype/src/graphrag_proto/retrieval/retrievers.py`, `context.py`, `orchestrator.py`,
+> `neo4j.py`, `docs/data_model.md §6`, `docs/03_retriever.md`,
+> `eval-graph-contribution-experiment/design.md`.
 
 ---
 
