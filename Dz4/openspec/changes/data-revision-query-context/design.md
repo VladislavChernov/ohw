@@ -3,7 +3,7 @@
 ## Контекст
 
 ADR-026 (Accepted) зафиксировал три решения: по-доменная гранулярность; источник —
-fingerprint активного сета DocumentRegistry (`sha256(sorted(content_hash))`); доставка —
+fingerprint активного сета DocumentRegistry (`sha256(sorted((source_url, content_hash)))`); доставка —
 `GET /api/v1/ingestion/revision?domain=` + поллер в worker. Ниже — конкретные
 строительные блоки прототипа и границы гарантии.
 
@@ -11,7 +11,7 @@ fingerprint активного сета DocumentRegistry (`sha256(sorted(content
 
 ```
 Ingestion (DocumentRegistry.upsert/soft_delete)
-   └─ data_revision(domain) = sha256(sorted active content_hash)
+   └─ data_revision(domain) = sha256(sorted (source_url, content_hash) active rows)
    └─ GET /api/v1/ingestion/revision?domain=   (X-API-Key)
 
 Query Worker (loop)

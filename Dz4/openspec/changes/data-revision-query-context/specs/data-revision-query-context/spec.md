@@ -3,8 +3,8 @@
 ## Ingestion
 
 `DocumentRegistry.data_revision(domain: str) -> str | None`:
-- hash: `sha256` над конкатенацией `content_hash` активных документов домена
-  (`status = active`), отсортированных по возрастанию (байт-порядок);
+- hash: `sha256` над конкатенацией пар `(source_url, content_hash)` активных документов
+  домена (`status = active`), отсортированных по возрастанию (байт-порядок);
 - `None`, если активных документов у домена нет;
 - идемпотентен: повторный INGEST без изменения `content_hash` (no-op, ADR-014) не
   меняет результат; изменение/добавление/soft-delete — меняет.

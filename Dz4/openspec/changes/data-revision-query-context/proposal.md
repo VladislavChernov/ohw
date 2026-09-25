@@ -14,7 +14,7 @@
 ## Что делаем
 
 - Ingestion: `DocumentRegistry.data_revision(domain) -> str | None` —
-  `sha256(sorted(content_hash ОБ активных документов домена))`; идемпотентен (no-op
+  `sha256(sorted((source_url, content_hash) активных документов домена))`; идемпотентен (no-op
   INGEST не меняет), честен к коллекции источников, переиспользует поля ADR-014.
 - Ingestion: `GET /api/v1/ingestion/revision?domain=` (X-API-Key, L5-01)
   → `{"revision": <hex|None>, "updated_at": <макс created_at активных|None>}`.
