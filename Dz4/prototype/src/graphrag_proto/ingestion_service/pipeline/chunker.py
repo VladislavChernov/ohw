@@ -22,8 +22,15 @@ from graphrag_proto.plugin_registry import (
     load_plugin,
 )
 
+# Последний резерв настроек чанкинга: применяется только если значение не задано
+# ни env, ни профилем домена, ни namespaces.yaml. Декларативный источник —
+# секция `chunking` Domain Profile (`ctx.profile.chunking`, Стадия 7; полный
+# динамический конфигуратор — Стадия 8, BLG-02).
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 64
+DEFAULT_STRATEGY = "sliding_window"
+DEFAULT_LANGCHAIN_SPLITTER = "recursive"
+DEFAULT_LLAMAINDEX_PARSER = "sentence"
 
 MARKDOWN_HEADER = re.compile(r"^\s{0,3}#{1,6}\s+.*$")
 
@@ -265,47 +272,68 @@ def _fetch_profile(domain: str, config_url: str) -> dict[str, object]:
     return payload if isinstance(payload, dict) else {}
 
 
-def _strategy_values(domain: str = "", config_url: str = "") -> dict[str, str | int]:
-    """Настройки чанкинга с per-field precedence: env > профиль домена > namespaces > дефолты.
+def _profile_chunking(profile: object) -> dict[str, object]:
+    """Секция `chunking` профиля домена (или пустой dict, если её нет)."""
+    if not isinstance(profile, dict):
+        return {}
+    section = profile.get("chunking")
+    return section if isinstance(section, dict) else {}
 
-    Каждое поле берётся из самого специфичного источника, где оно задано:
-    - env: `INGEST_CHUNKER`, `INGEST_CHUNK_SIZE`, `INGEST_CHUNK_OVERLAP`;
-    - профиль домена: секция `chunking` (Config Service, если config_url задан);
-    - namespaces.yaml: секция `chunking`;
-    - иначе — исторические значения M1 (512/64, sliding_window).
+
+def _settings_from_sources(profile_section: object) -> dict[str, str | int]:
+    """Настройки чанкинга: env > секция профиля > namespaces > константы кода.
+
+    Каждое поле берётся из самого специфичного источника, где оно задано
+    (fill-if-empty). Профиль передаётся снаружи уже загруженным — HTTP-запросов
+    здесь нет (декларативное чтение `ctx.profile.chunking`, Стадия 7).
+
+    Поля: `strategy`, `chunk_size`, `overlap`, `langchain_splitter`,
+    `llamaindex_parser`; env-перекрытия: `INGEST_CHUNKER`, `INGEST_CHUNK_SIZE`,
+    `INGEST_CHUNK_OVERLAP`, `INGEST_LANGCHAIN_SPLITTER`, `INGEST_LLAMAINDEX_PARSER`.
     """
     ns = _namespaces_chunking()
-    profile = _fetch_profile(domain, config_url) if config_url else {}
-    if isinstance(profile, dict):
-        profile_section = profile.get("chunking")
-    else:
-        profile_section = {}
-    # источники от более специфичного к менее: env(значения выше) > профиль > namespaces.
-    # поле заполняется из первого источника, где оно задано (fill-if-empty).
+    sections = [s for s in (profile_section, ns) if isinstance(s, dict)]
     strategy = _env("INGEST_CHUNKER", "").strip().lower()
     chunk_size = _env_int("INGEST_CHUNK_SIZE", 0)
     overlap = _env_int("INGEST_CHUNK_OVERLAP", -1)
-    for section in (profile_section if isinstance(profile_section, dict) else {}, ns):
+    langchain_splitter = _env("INGEST_LANGCHAIN_SPLITTER", "").strip().lower()
+    llamaindex_parser = _env("INGEST_LLAMAINDEX_PARSER", "").strip().lower()
+    for section in sections:
         if not strategy and section.get("strategy"):
             strategy = str(section["strategy"]).strip().lower()
         if not chunk_size and section.get("chunk_size"):
             chunk_size = int(str(section["chunk_size"]))
         if overlap < 0 and section.get("overlap") is not None:
             overlap = int(str(section["overlap"]))
+        if not langchain_splitter and section.get("langchain_splitter"):
+            langchain_splitter = str(section["langchain_splitter"]).strip().lower()
+        if not llamaindex_parser and section.get("llamaindex_parser"):
+            llamaindex_parser = str(section["llamaindex_parser"]).strip().lower()
+    return {
+        "strategy": strategy or DEFAULT_STRATEGY,
+        "chunk_size": chunk_size or DEFAULT_CHUNK_SIZE,
+        "overlap": overlap if overlap >= 0 else DEFAULT_CHUNK_OVERLAP,
+        "langchain_splitter": langchain_splitter or DEFAULT_LANGCHAIN_SPLITTER,
+        "llamaindex_parser": llamaindex_parser or DEFAULT_LLAMAINDEX_PARSER,
+    }
 
-    if not strategy:
-        strategy = "sliding_window"
-    if not chunk_size:
-        chunk_size = DEFAULT_CHUNK_SIZE
-    if overlap < 0:
-        overlap = DEFAULT_CHUNK_OVERLAP
-    return {"strategy": strategy, "chunk_size": chunk_size, "overlap": overlap}
+
+def _strategy_values(domain: str = "", config_url: str = "") -> dict[str, str | int]:
+    """Настройки чанкинга с запросом профиля в Config Service (историческая точка).
+
+    Precedence: env > профиль домена (HTTP) > namespaces > константы. Per-job путь
+    без лишнего запроса — `build_chunker_from_profile(ctx.profile)`.
+    """
+    profile = _fetch_profile(domain, config_url) if config_url else {}
+    return _settings_from_sources(_profile_chunking(profile))
 
 
 def _build_chunker(
     strategy: str,
     chunk_size: int,
     overlap: int,
+    langchain_splitter: str = DEFAULT_LANGCHAIN_SPLITTER,
+    llamaindex_parser: str = DEFAULT_LLAMAINDEX_PARSER,
 ) -> Chunker:
     strategy = strategy.strip().lower()
     if strategy == "sliding_window":
@@ -314,13 +342,13 @@ def _build_chunker(
         return StructureAwareChunker(chunk_size=chunk_size, overlap=overlap)
     if strategy == "langchain":
         return LangChainChunker(
-            splitter=_env("INGEST_LANGCHAIN_SPLITTER", "recursive"),
+            splitter=langchain_splitter,
             chunk_size=chunk_size,
             chunk_overlap=overlap,
         )
     if strategy == "llamaindex":
         return LlamaIndexChunker(
-            parser=_env("INGEST_LLAMAINDEX_PARSER", "sentence"),
+            parser=llamaindex_parser,
             chunk_size=chunk_size,
         )
     chunker = _build_chunker_from_plugin(strategy, chunk_size=chunk_size, overlap=overlap)
@@ -359,32 +387,43 @@ def _build_chunker_from_plugin(
     return chunker
 
 
-def build_chunker() -> Chunker:
-    """Сборка chunker'а текущего процесса (env/namespaces-дефолты; профиль не тянется).
-
-    Используется на старте (без доменного контекста) — историческая точка входа;
-    per-job резолвер с профилем — `build_chunker_for`.
-    """
-    settings = _strategy_values()
+def _chunker_from_settings(settings: dict[str, str | int]) -> Chunker:
+    """Сборка chunker'а из разрешённых настроек (единая точка для всех входов)."""
     return _build_chunker(
         str(settings["strategy"]),
         int(settings["chunk_size"]),
         int(settings["overlap"]),
+        str(settings["langchain_splitter"]),
+        str(settings["llamaindex_parser"]),
     )
+
+
+def build_chunker() -> Chunker:
+    """Сборка chunker'а текущего процесса (env/namespaces; профиль не тянется).
+
+    Используется на старте (без доменного контекста) — историческая точка входа;
+    декларативный per-job путь — `build_chunker_from_profile(ctx.profile)`.
+    """
+    return _chunker_from_settings(_settings_from_sources({}))
+
+
+def build_chunker_from_profile(profile: object) -> Chunker:
+    """Chunker по секции `chunking` уже загруженного профиля домена (без HTTP).
+
+    Стадия 7: оркестратор передаёт `ctx.profile` (профиль загружается один раз на
+    джобу), поэтому все параметры стратегий читаются декларативно из профиля, а не
+    из кода. Пустой профиль → env → namespaces → константы (offline/тесты).
+    """
+    return _chunker_from_settings(_settings_from_sources(_profile_chunking(profile)))
 
 
 def build_chunker_for(domain: str, config_url: str | None = None) -> Chunker:
-    """Per-job резолвер: env > профиль домена > namespaces > дефолты (вариант 3).
+    """Per-job резолвер с HTTP-запросом профиля: env > профиль > namespaces > дефолты.
 
     `domain` — целевой домен джобы; `config_url` — Config Service (base URL).
-    При `None` (вызов из ChunkStage) берётся из env `CONFIG_URL`; при пустом
-    значении (тесты) профиль не опрашивается.
+    При `None` берётся из env `CONFIG_URL`; при пустом значении (тесты) профиль
+    не опрашивается.
     """
     if config_url is None:
         config_url = os.environ.get("CONFIG_URL", "")
-    settings = _strategy_values(domain=domain, config_url=config_url)
-    return _build_chunker(
-        str(settings["strategy"]),
-        int(settings["chunk_size"]),
-        int(settings["overlap"]),
-    )
+    return _chunker_from_settings(_strategy_values(domain=domain, config_url=config_url))

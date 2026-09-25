@@ -69,6 +69,14 @@ def test_data_revision_noop_keep_and_delete_changes(tmp_path: Path) -> None:
     assert registry.data_revision("it") == before
 
 
+def test_data_revision_includes_source_identity(tmp_path: Path) -> None:
+    registry_a = DocumentRegistry(tmp_path / "a.db")
+    registry_a.upsert(_doc("it", "src://a.txt", "same-hash"))
+    registry_b = DocumentRegistry(tmp_path / "b.db")
+    registry_b.upsert(_doc("it", "other/a.txt", "same-hash"))
+    assert registry_a.data_revision("it") != registry_b.data_revision("it")
+
+
 def test_data_revision_isolated_per_domain(tmp_path: Path) -> None:
     registry = DocumentRegistry(tmp_path / "r.db")
     registry.upsert(_doc("it", "src://a.txt", "hash-a"))

@@ -127,6 +127,24 @@ def test_stats_and_clear() -> None:
     assert cache.stats() == {"entries": 0, "hits": 0, "misses": 0}
 
 
+def test_redis_cache_client_has_bounded_pool(monkeypatch) -> None:
+    import redis as redis_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_from_url(url: str, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(redis_mod.Redis, "from_url", fake_from_url)
+    RedisSemanticCache(url="redis://test:6379/0")._redis()
+
+    assert captured["socket_timeout"] == 2
+    assert captured["socket_connect_timeout"] == 2
+    assert captured["max_connections"] == 32
+    assert captured["retry_on_timeout"] is False
+
+
 # --- tests: redis (fake) ----------------------------------------------
 
 def test_redis_format_key_field_json_hdel() -> None:

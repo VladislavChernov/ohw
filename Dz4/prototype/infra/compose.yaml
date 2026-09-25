@@ -30,7 +30,7 @@ services:
       context: ..
       dockerfile: Dockerfile
     image: ohw/config-service:prototype
-    profiles: ["config"]
+    profiles: ["config", "projection"]
     container_name: ohw-config
     networks: [ohw_net]
     ports: ["8001:8001"]
@@ -89,7 +89,7 @@ services:
   # Neo4j Community. Работает ВСЕГДА. JVM ограничена (риск №2, v7 §8.4).
   neo4j:
     image: neo4j:5.26-community
-    profiles: ["graph"]
+    profiles: ["graph", "projection"]
     container_name: ohw-neo4j
     networks: [ohw_net]
     ports:
@@ -117,7 +117,7 @@ services:
       dockerfile: Dockerfile
     image: ohw/topology-orchestrator:prototype
     command: ["graphrag-topology"]
-    profiles: ["topology"]
+    profiles: ["topology", "projection"]
     container_name: ohw-topology
     networks: [ohw_net]
     ports: ["8005:8005"]
@@ -193,7 +193,7 @@ services:
   ingestion-api:
     image: ohw/ingestion-service:prototype
     command: ["graphrag-ingestion"]
-    profiles: ["ingestion"]
+    profiles: ["ingestion", "projection"]
     container_name: ohw-ingestion
     depends_on:
       - config-service
@@ -204,6 +204,10 @@ services:
     environment:
       CONFIG_URL: http://config-service:8001
       GLOSSARY_URL: http://glossary-service:8003
+      INGESTION_DB_PATH: /data/ingestion.sqlite
+      INGESTION_UPLOAD_DIR: /data/uploads
+      PROJECTION_STATE_DB_PATH: /var/lib/graphrag/projection/projection.db
+      PROJECTION_CONFIG_FINGERPRINT: ${PROJECTION_CONFIG_FINGERPRINT:-default}
       GRAPH_STORE: neo4j
       VECTOR_STORE: neo4j
       EMBEDDER: deterministic
@@ -217,7 +221,9 @@ services:
       INGEST_MAX_CONCURRENT: ${INGEST_MAX_CONCURRENT:-2}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
+      - ingestion_data:/data
       - ../domain_profiles:/profiles:ro
+      - projection_data:/var/lib/graphrag/projection
     healthcheck:
       test:
         - "CMD"
@@ -229,6 +235,41 @@ services:
       retries: 5
       start_period: 10s
     <<: [*gpu, *logging]
+
+  # --------------------------------------------------------------- projection
+  # One-shot offline graph rebuild; запускается через `docker compose run`.
+  # Lease берётся из projection.lease_seconds в topology/Configurator.
+  projection:
+    image: ohw/ingestion-service:prototype
+    profiles: ["projection"]
+    command: ["graphrag-projection", "--help"]
+    depends_on:
+      - config-service
+      - neo4j
+      - ingestion-api
+      - topology-orchestrator
+    networks: [ohw_net]
+    environment:
+      CONFIG_URL: http://config-service:8001
+      INFRA_TOPOLOGY_PATH: /topology/infra_topology.yaml
+      PROJECTION_CONFIG_PATH: /topology/infra_topology.yaml
+      TOPOLOGY_URL: ${TOPOLOGY_URL:-http://topology-orchestrator:8005}
+      PROJECTION_STATE_DB_PATH: /var/lib/graphrag/projection/projection.db
+      INGESTION_DB_PATH: /data/ingestion.sqlite
+      GRAPH_STORE: neo4j
+      VECTOR_STORE: neo4j
+      EMBEDDER: deterministic
+      RERANKER: noop
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-graphrag}
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
+      - ../domain_profiles:/profiles:ro
+      - ingestion_data:/data
+      - projection_data:/var/lib/graphrag/projection
+    <<: *logging
 
   # --------------------------------------------------------------------- llm
   # Query API + Query Worker + valkey (Task Queue) + llama.cpp server.
@@ -267,6 +308,7 @@ services:
     environment:
       CONFIG_URL: http://config-service:8001
       DOMAIN_PROFILES_DIR: /profiles
+      INFRA_TOPOLOGY_PATH: /topology/infra_topology.yaml
       GRAPH_STORE: neo4j
       VECTOR_STORE: neo4j
       EMBEDDER: deterministic
@@ -274,11 +316,13 @@ services:
       LLM_ADAPTER: openai
       LLM_BASE_URL: http://llm:8080
       QUERY_QUEUE: redis
-      QUERY_REDIS_URL: redis://valkey:6379/0
+      QUERY_REDIS_URL: ${QUERY_REDIS_URL:-}
       QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
+      TOPOLOGY_URL: ${TOPOLOGY_URL:-http://topology-orchestrator:8005}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
       - ../domain_profiles:/profiles:ro
+      - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
       - query_data:/data
     healthcheck:
       test:
@@ -309,6 +353,7 @@ services:
     environment:
       CONFIG_URL: http://config-service:8001
       DOMAIN_PROFILES_DIR: /profiles
+      INFRA_TOPOLOGY_PATH: /topology/infra_topology.yaml
       GRAPH_STORE: neo4j
       VECTOR_STORE: neo4j
       EMBEDDER: deterministic
@@ -316,7 +361,7 @@ services:
       LLM_ADAPTER: openai
       LLM_BASE_URL: http://llm:8080
       QUERY_QUEUE: redis
-      QUERY_REDIS_URL: redis://valkey:6379/0
+      QUERY_REDIS_URL: ${QUERY_REDIS_URL:-}
       QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
       RETRIEVAL_GRAPH_ENABLED: ${RETRIEVAL_GRAPH_ENABLED:-true}
       SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-}
@@ -325,10 +370,14 @@ services:
       SEMANTIC_CACHE_TTL_S: ${SEMANTIC_CACHE_TTL_S:-3600}
       TOPOLOGY_URL: ${TOPOLOGY_URL:-http://topology-orchestrator:8005}
       TOPOLOGY_POLL_INTERVAL: ${TOPOLOGY_POLL_INTERVAL:-5}
+      PROJECTION_STATE_DB_PATH: /var/lib/graphrag/projection/projection.db
+      PROJECTION_CONFIG_FINGERPRINT: ${PROJECTION_CONFIG_FINGERPRINT:-default}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
       - ../domain_profiles:/profiles:ro
+      - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
       - query_data:/data
+      - projection_data:/var/lib/graphrag/projection
     <<: *logging
 
   # --------------------------------------------------------------- demo-ui
@@ -483,9 +532,11 @@ networks:
 
 volumes:
   config_data:
+  ingestion_data:
   neo4j_data:
   models_data:
   valkey_data:
   query_data:
+  projection_data:
   topology_data:
   ollama_data:  # задел (модели Ollama); веса LLM — внутри образа ohw/llm (Dockerfile.llm)

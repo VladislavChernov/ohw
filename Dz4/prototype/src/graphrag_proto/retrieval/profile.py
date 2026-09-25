@@ -37,10 +37,17 @@ def _config_headers() -> dict[str, str]:
 class DomainProfileLoader:
     """Источник профилей: Config Service (remote) -> локальный YAML (fallback)."""
 
-    def __init__(self, config_url: str = "", profiles_dir: Path | None = None, default: str = DEFAULT_DOMAIN) -> None:
+    def __init__(
+        self,
+        config_url: str = "",
+        profiles_dir: Path | None = None,
+        default: str = DEFAULT_DOMAIN,
+        strict: bool = False,
+    ) -> None:
         self._config_url = config_url.rstrip("/") if config_url else ""
         self._profiles_dir = profiles_dir or _profiles_dir()
         self._default = default
+        self._strict = strict
 
     def active_domain(self) -> str:
         if self._config_url:
@@ -51,11 +58,17 @@ class DomainProfileLoader:
                 )
                 with urllib.request.urlopen(request, timeout=3) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
-                domain = data.get("domain")
-                if isinstance(domain, str) and _is_safe_domain(domain) and domain:
-                    return domain
-            except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
-                pass
+                if isinstance(data, dict):
+                    domain = data.get("domain")
+                    if isinstance(domain, str) and _is_safe_domain(domain) and domain:
+                        return domain
+                if self._strict:
+                    raise ProfileError("Config Service вернул некорректный active domain")
+            except ProfileError:
+                raise
+            except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
+                if self._strict:
+                    raise ProfileError("не удалось получить активный домен из Config Service") from exc
         return self._default
 
     def load(self, domain: str | None = None) -> dict[str, Any]:
@@ -72,8 +85,15 @@ class DomainProfileLoader:
                     data = json.loads(resp.read().decode("utf-8"))
                 if isinstance(data, dict):
                     return data
-            except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError):
-                pass
+                if self._strict:
+                    raise ProfileError(f"профиль домена {domain!r} из Config Service не является mapping")
+            except ProfileError:
+                raise
+            except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
+                if self._strict:
+                    raise ProfileError(
+                        f"не удалось получить профиль домена {domain!r} из Config Service"
+                    ) from exc
         path = self._profiles_dir / f"domain_profile.{domain}.yaml"
         if not path.is_file():
             raise ProfileError(f"профиль '{domain}' не найден")

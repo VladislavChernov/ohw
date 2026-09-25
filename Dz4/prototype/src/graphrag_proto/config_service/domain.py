@@ -5,14 +5,15 @@ from typing import Any
 
 import yaml
 
-MANDATORY_SECTIONS = (
-    "profile",
+MANDATORY_SECTIONS = ("profile",)
+OPTIONAL_MAPPING_SECTIONS = (
     "ontology",
     "extraction",
     "validation",
     "canonicalization",
     "chunking",
     "context_assembly",
+    "glossary",
 )
 
 
@@ -36,10 +37,13 @@ def validate_profile(data: dict[str, Any]) -> list[str]:
     for section in MANDATORY_SECTIONS:
         if section not in data:
             errors.append(f"отсутствует секция '{section}'")
+    for section in OPTIONAL_MAPPING_SECTIONS:
+        if section in data and not isinstance(data[section], dict):
+            errors.append(f"{section}: должен быть маппинг")
     ontology = data.get("ontology")
     if isinstance(ontology, dict):
         for key in ("node_types", "edge_types"):
-            if not isinstance(ontology.get(key), list):
+            if key in ontology and not isinstance(ontology[key], list):
                 errors.append(f"ontology.{key}: должен быть список")
     glossary = data.get("glossary")
     if glossary is not None:

@@ -104,6 +104,21 @@ def test_loop_polls_rebuilder_and_swaps_pipeline(tmp_path: Path) -> None:
     assert worker._pipeline == "P3"
 
 
+def test_reclaim_timeout_cannot_be_shorter_than_llm_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LLM_TIMEOUT_S", "120")
+    worker = QueryWorker(
+        queue=InMemoryTaskQueue(),
+        store=TaskStore(tmp_path / "reclaim.sqlite"),
+        pipeline=object(),
+        poll_interval_s=0.0,
+        metrics_interval_s=0.0,
+    )
+
+    assert worker._reclaim_timeout_s >= 150.0
+
+
 def test_poll_interval_zero_disables_rebuilder(tmp_path: Path) -> None:
     def rebuilder() -> None:  # pragma: no cover - не должен вызываться
         raise AssertionError("rebuilder вызван при poll_interval_s=0")

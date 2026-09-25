@@ -1,14 +1,29 @@
 # План испытаний прототипа
 
+> **Корректирующая модель:** baseline = vector-only; optional graph experiment = vector search →
+> bounded sparse graph expansion → boost. `axis=graph|vector` остаётся для attribution, но graph
+> получает seeds из vector metadata и запускается только после готовности inline/offline projection.
+> Missing или stale graph — degraded baseline, а не успешный experiment.
+
 Регламент проверки прототипа: что измеряем, чем измеряем и как читать результат.
 Документ отвечает на вопрос «как мы узнаём, что система работает и что именно даёт граф».
 Теория измерения (история, формулы, слепые зоны метрик) — в
 `D:\Otus\ohw\learning\prototype_test_plan_learning.md`.
-Работы по эксперименту — бандл `openspec/changes/eval-graph-contribution-experiment/`.
+Работы по baseline и optional graph experiment — бандл
+`openspec/changes/add-lightweight-context-graph/`.
+Lifecycle offline projection — `openspec/changes/add-offline-graph-projection/`.
 Запуск стенда — `prototype/infra/eval/README-minimal.md`.
 
 **Область:** валидационный контур прототипа (вехи M1–M5 и далее).
 **Не входит:** нагрузочное тестирование, production-приёмка, оценка «красоты» ответа сама по себе.
+
+## 0.1. Projection lifecycle gate
+
+Перед paired eval проверяются stored-тесты `ProjectionStateStore` и `OfflineProjectionJob`:
+claim/lease, idempotent rebuild, metadata-only backfill, partial failure и domain isolation.
+Query gate проверяет `missing`, `stale`, `degraded`, `failed` и `ready` state; только ready
+projection с актуальной revision может быть graph-success. Cache key и QA record сохраняют
+`projection_status`/`projection_revision`. Live Neo4j и paired eval остаются отдельным этапом.
 
 ---
 
@@ -71,10 +86,11 @@
 
 ---
 
-## 4. Метрики уровня 3 (вклад осей)
+## 4. Метрики уровня 3 (вклад graph experiment)
 
-Отвечают на вопрос «нужен ли граф». Считаются по `retrieved[].axis` — признаку оси,
-проставленному при сборке `sources`. Без него атрибуция невозможна.
+Отвечают на вопрос «нужен ли graph expansion». В experiment vector seeds и graph paths
+извлекаются из `qa_log`/trace; `axis=graph|vector` сохраняется для attribution. Если projection
+не готова, результат не включается в paired graph comparison.
 
 | Метрика | Смысл |
 |---|---|
@@ -109,10 +125,52 @@
 
 | Слой | Артефакт | Обязателен | Что отвечает |
 |---|---|---|---|
-| **1. Условия** | `run_manifest.json` | всегда | Что именно сравнивалось (ревизия, компоненты, режим, `run_id`) |
-| **2. Пары** | `qa_log.jsonl` (append) | всегда | Что система нашла и ответила по каждому вопросу |
-| **3. Агрегат** | `lift_report.json` + `.md` | всегда | Итоговые метрики и вердикт гейта |
-| **4. Трасса** | `trace.jsonl` | по требованию | Как данные шли внутри одного вопроса |
+| **0. Условия корпуса** | `<out>/ingest_report.json` | при `--corpus` | Попер-документное время экстракции и no-op-признак: даёт оценку стоимости полного корпуса |
+| **1. Условия** | `<out>/run_manifest.json` | всегда | Что именно сравнивалось (ревизия, корпус, компоненты, режим, `run_id`) |
+| **2. Пары** | `<out>/qa_log.jsonl` (append) | всегда | Что система нашла и ответила по каждому вопросу |
+| **3. Агрегат** | `<out>/lift_report.json` + `.md` | всегда | Итоговые метрики и вердикт гейта |
+| **4. Трасса** | `<out>/trace.jsonl` | по требованию | Как данные шли внутри одного вопроса |
+| **5. Паспорт** | `<out>/PASSPORT.md` + `command.txt` + `qa_review.md` | всегда | Условия human-readable, команда воспроизведения, разбор пар для чтения глазами |
+| **6. Ресурсы** | `<out>/resources.json`, `logs/*.log` | через wrapper | Пик RAM/VRAM и логи сервисов (иначе умирают вместе с `prune`) |
+| **7. Сбой** | `<out>/failures.jsonl` | всегда | Вопросы с ошибками: прогон не теряется из-за одного сбоя |
+
+Слои 0 и 6 добавлены вместе с поддержкой **усечённых прогонов** (см. §0.2): без
+попер-документного времени нельзя оценить полный корпус, а без пика ресурсов
+нельзя понять, уложится ли стенд в память.
+
+### 5.0 Усечённый корпус: `golden_coverage`
+
+На прогоне с 3 документами у большинства вопросов эталонные источники
+(`golden_sources`) отсутствуют в базе, поэтому `recall@5` низкий **не из-за
+качества системы, а из-за усечения**. Манифест несёт `golden_coverage` —
+долю вопросов, у которых все эталонные источники лежат в загруженном корпусе;
+`PASSPORT.md` поднимает явное предупреждение при значении ниже 0.5.
+
+`corpus_documents` и `corpus_limit` входят в инварианты парности: прогон на
+3 документах машино получает `verdict: invalid` при сравнении с прогоном на 8
+и не может быть выдан за парный. Дополнительно `graph_axis_active` отделяет
+«граф дал результат» от «граф был готов, но ничего не дал» — без него режим
+без судьи выдаёт `verdict: n/a` в обоих случаях.
+
+### 5.0.1 План прогона (resource-bounded)
+
+Полный корпус на 16 ГБ ОЗУ не помещается: предыдущий прогон завершился
+`exit 137` (OOM) на всех сервисах, лимит памяти Docker VM — 11.68 ГБ. Поэтому
+ ingesting идёт ступенчато, каждая ступень — самостоятельный паспорт:
+
+1. **3 документа, `--retrieval-only`** — проверка «стенд встаёт и не OOM».
+   Ожидаемо: `graph_axis_active=false`, низкий `golden_coverage`. ~20–32 мин.
+2. **+5 документов (те же 3 как no-op)** — проверка гипотезы no-op и оценка
+   стоимости одного «холодного» документа. `ingest_report.json` покажет
+   near-zero время у no-op документов.
+3. **полный корпус, `--no-judge`** — пары для ручного разбора. ~1.5–3.5 ч.
+4. Судья — только после чистых 1–3 (до ~41 LLM-вызова на вопрос).
+
+Ступени 1–2 дают две независимые оценки «холодного» документа
+(`t_cold(3)/3` и `t_cold(5)/5`), по которым экстраполируется полный корпус.
+Ограничение: стоимость экстракции зависит от **размера** документа
+(`05_adr_log.md` — 79.6 КБ против 3.5 КБ у `03_retriever.md`), поэтому среднее
+по счётчику не годится — нужен ряд «документ → секунды» из `ingest_report.json`.
 
 ### 5.1 Манифест (`run_manifest.json`)
 
@@ -122,10 +180,16 @@
 | Группа | Поля |
 |---|---|
 | Данные | `revision`, `domain`, наборы вопросов, `revision_fingerprint` |
+| Корпус | `corpus`, `corpus_documents`, `corpus_documents_count`, `corpus_limit`, `golden_coverage` |
 | Компоненты | `embedder`, `dimensions`, `reranker`, `chunker`, `chunk_size`/`chunk_overlap` |
+| Projection | `config_fingerprint`, `state_db`, `lease_seconds` + источник значения |
 | Генерация | `llm_adapter`, `model`, `temperature`, `judge_adapter` |
 | Фактор | `mode`, `graph_enabled` |
-| Прочее | `run_id`, timestamp, версия кода |
+| Прочее | `run_id`, timestamp, версия кода, `code_tree` (dirty/clean + хеш состава изменений) |
+
+`code_commit` **не воспроизводит** состояние кода, если дерево грязное, поэтому
+`code_tree` обязателен и участвует в парности: прогон на `dirty:1234` и на
+`clean` не считаются парными.
 
 **Правило парности:** если два манифеста отличаются больше чем в одном поле —
 прогоны непарные, и разность метрик между ними **не** является вкладом компонента.
@@ -134,8 +198,8 @@
 
 Пишется построчно (append) — переживает падение в середине прогона.
 Обязательный минимум строки: `id`, `query`, `graph_enabled`, `revision`,
-`retrieved[]` **с признаком оси** (`axis = graph|vector`), `golden_sources`,
-`golden_facts`, метрики вопроса, `answer`, `timings`.
+`retrieved[]` с axis, `seed_chunk_ids`, `graph_paths`/depth/boost (для experiment),
+`golden_sources`, `golden_facts`, метрики вопроса, `answer`, `timings`.
 
 Не пишется: финальный промпт, тексты всех чанков, эмбеддинги (воспроизводятся
 из корпуса; в журнале — балласт).
@@ -154,8 +218,9 @@
 что вытеснено по лимиту контекста.
 
 Пайплайн уже эмитит события этапов (`embedding`, `cache`, `graph`, `vector`,
-`rerank`, `llm`), но раннер их не сохраняет. Подключение трассы — **расширение
-сверх базового плана испытаний**; включается, когда слой 2 не даёт ответа.
+`rerank`, `llm`); раннер сохраняет их в `<out>/trace.jsonl` при `--trace`. Трасса —
+**диагностика, а не измерение**; включается, когда слой 2 не даёт ответа, и не
+подменяет слои 1–3 (метрики от наличия трассы не зависят).
 
 ---
 
@@ -174,9 +239,10 @@
 
 ### 6.2 Парный прогон: главный сценарий
 
-Главный вопрос проекта («нужен ли граф») измеряется только парным прогоном на
-**одной ревизии**: `graph_enabled=true` против `graph_enabled=false`, различие
-манифестов ровно в одном поле.
+Главный вопрос проекта («нужен ли graph») измеряется только парным прогоном на
+**одной ревизии**: graph experiment с vector→graph expansion против vector-only baseline. Ветки
+должны иметь одинаковые corpus, chunking, embeddings, reranker, K и projection revision; различается
+только включение graph expansion. Offline projection должна быть явно готова до запуска.
 
 ### 6.3 Что нужно для валидного прогона
 
@@ -225,5 +291,5 @@
 | Нужен ли граф? | `recall_graph/vector`, `necessity`, `delta_recall` (парный прогон, без судьи) |
 | Можно ли это перепроверить? | Манифест + журнал пар + отчёт (обязательны всегда) |
 
-Работы по эксперименту — `openspec/changes/eval-graph-contribution-experiment/`.
+Работы по baseline и optional graph experiment — `openspec/changes/add-lightweight-context-graph/`.
 

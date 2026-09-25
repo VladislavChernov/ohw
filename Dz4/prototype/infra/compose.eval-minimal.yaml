@@ -119,12 +119,22 @@ services:
       <<: *client-env
       INGESTION_DB_PATH: /data/ingestion.sqlite
       INGESTION_UPLOAD_DIR: /data/uploads
+      PROJECTION_STATE_DB_PATH: /var/lib/graphrag/projection/projection.db
+      PROJECTION_CONFIG_FINGERPRINT: ${PROJECTION_CONFIG_FINGERPRINT:-default}
       INGEST_MAX_CONCURRENT: "${INGEST_MAX_CONCURRENT:-2}"
       INGEST_CHUNKER: sliding_window
       INGEST_CHUNK_SIZE: "512"
       INGEST_CHUNK_OVERLAP: "64"
+      # Graph EXTRACT по онтологии профиля (Requirement|Concept|Contract + рёбра):
+      # без флага извлечение детерминированное (Entity-слова), и настройки осей из
+      # domain_profile.yaml к графу не применяются (типизированные узлы не создаются).
+      EXTRACT_LLM: "true"
+      # EXTRACT генерирует полный JSON по документу — токенов по умолчанию (2048) мало.
+      LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-4096}"
+      LLM_TIMEOUT_S: "${LLM_TIMEOUT_S:-600}"
     volumes:
       - ingestion_data:/data
+      - projection_data:/var/lib/graphrag/projection
       - ../domain_profiles:/profiles:ro
       - ./config:/config:ro
     depends_on:
@@ -181,16 +191,24 @@ services:
     environment:
       <<: *client-env
       INGESTION_URL: http://ingestion-api:8002
+      PROJECTION_STATE_DB_PATH: /var/lib/graphrag/projection/projection.db
+      PROJECTION_CONFIG_FINGERPRINT: ${PROJECTION_CONFIG_FINGERPRINT:-default}
       LLM_ADAPTER: openai
       EVAL_LLM_ADAPTER: openai
       LLM_BASE_URL: http://llm:8080
       LLM_MODEL: qwen2.5-coder-7b-instruct-abliterated-q4_k_m
       LLM_TEMPERATURE: "0"
       LLM_TIMEOUT_S: "300"
+      RUN_CODE_COMMIT: "${RUN_CODE_COMMIT:?RUN_CODE_COMMIT must be provided by the host}"
+      # Таймаут HTTP-клиента eval-утилит (corpus_tools, run_eval): контекст LLM большой,
+      # опрос/генерация могут занимать минуты.
+      HTTP_CLIENT_TIMEOUT_S: "${HTTP_CLIENT_TIMEOUT_S:-600}"
     volumes:
       - ./eval:/app/infra/eval:ro
+      - ../..:/repo:ro
       - ./config:/config:ro
       - ../domain_profiles:/profiles:ro
+      - projection_data:/var/lib/graphrag/projection
       - ../reports:/reports
       # Пилотный датасет поставляется с репозиторием; хост-путь переопределяется env.
       - ${EVAL_PILOT_HOST_DIR:-./eval/pilots/docs-review}:/proposal:ro
@@ -205,5 +223,6 @@ services:
 volumes:
   config_data:
   ingestion_data:
+  projection_data:
   neo4j_data:
   models_data:

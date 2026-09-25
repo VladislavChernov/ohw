@@ -16,7 +16,9 @@
 - **Расширяемость:** Сторонние разработчики могут создавать свои адаптеры через entry_points.
 - **Снижение vendor lock-in:** Нет жёсткой привязки к конкретному поставщику.
 - **Выбор стека:** Подбор оптимальной конфигурации под задачу (лёгкая инсталляция, облачный LLM, замена хранилища).
-- **Разделение осей поиска (ISP):** Граф и вектор — независимые ABC-контракты, соединяющиеся только на этапе Context Assembly (см. ADR-013).
+- **Разделение baseline и experiment (ISP):** vector store обслуживает self-contained baseline,
+  graph adapter — только optional expansion; их результаты объединяются на optional fusion
+  стадии (см. ADR-013).
 
 ### 1.2. Архитектурная роль
 
@@ -25,11 +27,11 @@
 |                    ЯДРО СИСТЕМЫ (fixed)                   |
 |                                                           |
 |  Ingestion Pipeline                                       |
-|  Retriever                                                |
+|  Vector-only baseline + optional graph experiment         |
 |  Services                                                 |
 |                                                           |
 |  Вызывает методы интерфейсов:                              |
-|    graph_store.query()                                    |
+|    graph_store.expand()                                   |
 |    vector_store.vector_search()                           |
 |    llm.generate()                                         |
 |    embeddings.embed_batch()                               |
@@ -69,10 +71,13 @@
 
 Монолитный интерфейс `GraphStorage` **аннулирован** (ADR-013). В гибридной архитектуре граф знаний и векторные эмбеддинги — две принципиально разные операции (логический обход связей vs косинусный поиск), которые должны масштабироваться независимо. Поэтому хранилище разделено на две изолированные оси:
 
-- **`GraphStoreProvider`** — логические связи, обход графа, Cypher-запросы, накат constraint, операции над узлами/рёбрами.
+- **`GraphStoreProvider`** — generic context nodes/edges, bounded expansion и provenance; не содержит runtime ontology DDL.
 - **`VectorStoreProvider`** — исключительно семантический поиск чанков по сходству векторов и запись эмбеддингов.
 
-В прототипе обе реализации смотрят на Neo4j (native graph engine + native vector index). При росте системы `VectorStoreProvider` бесшовно заменяется на `QdrantVectorStore` без изменений графовой логики ядра.
+В прототипе обе реализации могут смотреть на Neo4j (native graph engine + native vector index).
+При этом graph adapter — optional experiment: vector-only baseline работает без него, а готовая
+projection может быть построена inline после ingest или offline replay. При росте системы
+`VectorStoreProvider` бесшовно заменяется на `QdrantVectorStore` без изменений baseline.
 
 ### 2.2. Контракт GraphStoreProvider (Abstract Base Class)
 
@@ -83,8 +88,16 @@ from typing import Any, Dict, List, Optional
 
 class GraphStoreProvider(ABC):
     @abstractmethod
-    def query(self, cypher: str, params: Optional[Dict] = None) -> List[Dict[str, Any]]:
-        """Выполнение графового Cypher-запроса (обход связей, расширение SIMILAR_TO)."""
+    def expand(
+        self,
+        context_ids: List[str],
+        *,
+        direction: str = "parent",
+        max_depth: int = 2,
+        max_fanout: int = 8,
+        max_nodes: int = 32,
+    ) -> List[Dict[str, Any]]:
+        """Bounded expansion от chunk context IDs; возвращает узлы, paths и provenance."""
         ...
 
     @abstractmethod
@@ -140,6 +153,10 @@ class VectorStoreProvider(ABC):
         """(M2) Снятие чанков с поиска — soft-delete (L2-05)."""
         ...
 
+    def update_vector_metadata(self, updates: List[Dict[str, Any]]) -> None:
+        """Backfill metadata без изменения embedding и vector body."""
+        ...
+
     def transaction(self) -> "VectorTx":
         """(M2) Атомарная запись пачки эмбеддингов (L2-04). По умолчанию — no-op (nullcontext)."""
         return nullcontext(self)
@@ -147,11 +164,11 @@ class VectorStoreProvider(ABC):
 
 ### 2.4. Реализации
 
-#### 2.4.1. Neo4jGraphStore (базовая, графовая ось)
+#### 2.4.1. Neo4jGraphStore (optional graph experiment backend)
 
 - **Драйвер:** Neo4j Bolt-драйвер (официальный).
 - **Язык запросов:** Cypher.
-- **Роль:** Обход связей, dotted traversal, накат unique constraints, операции узлов/рёбер.
+- **Роль:** Upsert generic context nodes/edges и bounded expansion; runtime DDL/constraints не вызываются.
 - **Конфигурация:**
   ```yaml
   adapters:
@@ -189,7 +206,7 @@ class VectorStoreProvider(ABC):
 - **Тип:** Только векторы + метаданные (без графа).
 - **Причина выбора:** Горизонтальное масштабирование векторного поиска на миллиардах векторов.
 - **Роль:** Полностью заменяет `Neo4jVectorStore` на фазе роста (ADR-001), **не затрагивая** `GraphStoreProvider`.
-- **Ограничение:** Графовые запросы не поддерживаются — при использовании данного адаптера графовая ось продолжает работать через `Neo4jGraphStore`/`MemgraphGraphStore`.
+- **Ограничение:** vector-only baseline не требует graph; optional experiment использует `Neo4jGraphStore`/`MemgraphGraphStore` отдельно.
 - **Конфигурация:**
   ```yaml
   adapters:
@@ -208,9 +225,12 @@ class VectorStoreProvider(ABC):
 
 ### 2.5. Ограничения и правила
 
-- В гибриде граф и вектор работают всегда в паре: `graph_store` + `vector_store` выбираются независимо в `namespace: adapters`.
+- В vector-only baseline graph adapter не требуется; `graph_store` и `vector_store` выбираются
+  независимо в `namespace: adapters`, а graph projection подключается только после `ready` state.
 - Смена хранилища достигается подключением адаптера своей оси (граф/вектор раздельно, ADR-013); перенос данных оси выполняет оператор инсталляции — вне ядра.
-- Векторная ось не отключает графовую: Qdrant замещает только `vector_search`/`upsert_vectors`, обход графа остаётся на `GraphStoreProvider`.
+- Векторная ось не отключает optional graph experiment: Qdrant замещает только
+  `vector_search`/`upsert_vectors`/`update_vector_metadata`, обход графа остаётся на
+  `GraphStoreProvider`.
 - Контрактные тесты обязательны для каждой реализации обоих интерфейсов (ADR-012).
 
 ### 2.6. Расширение M2: атомарная запись и soft-delete
@@ -241,11 +261,25 @@ else:
 |---|---|---|
 | `upsert_nodes` | узел | `node_id` (str), `labels` (list[str]), `properties` (dict) |
 | `upsert_edges` | ребро | `from_id` (str), `to_id` (str), `type` (str), `properties` (dict) |
-| `upsert_vectors` | вектор | `chunk_id` (str), `embedding` (list[float]), `metadata` (dict) |
+| `upsert_vectors` | вектор | `chunk_id` (str), `embedding` (list[float]), `metadata` (включая `context_ids`, `tag_ids`, custom enrichment fields) |
 | `vector_search` | hit | `chunk_id`, `score`, `embedding`, `metadata` |
 
-MERGE-семантика по `node_id`/`chunk_id` (идемпотентность). Node ID для ядра системы (M2): `src:{domain}:{source_url}` (Source), `ent:{domain}:{canonical_name}` (Entity), `chk:{digest12(source_url:index)}` (Chunk). Графовая и векторная оси связаны по `chunk_id` (общему для узла Chunk и записи вектора).
+MERGE-семантика по `node_id`/`chunk_id` (идемпотентность). Context node использует стабильный
+`tag_id`/`node_id`; `canonical_name` и aliases являются properties. `Source` и `Chunk` —
+технические anchors. `Chunk` получает `MENTIONS` от связанных ContextNode; текст хранится
+только в Chunk/vector. Произвольные properties и edge kinds сохраняются без whitelist.
 
 #### 2.6.3. Soft-delete (L2-05)
 
-`GraphStoreProvider.list_chunk_ids_of_source(source_id)` — чанки по ребру CONTAINS; `delete_node(chunk_id)` удаляет узел и инцидентные рёбра (в том числе CONTAINS); `VectorStoreProvider.delete_vectors(chunk_ids)` снимает те же чанки с поиска. Узлы Entity и Source при soft-delete **сохраняются** (историчность, ADR-014); эмиссия `SIMILAR_TO` при этом не затрагивается.
+`GraphStoreProvider.list_chunk_ids_of_source(source_id)` — чанки по ребру CONTAINS; `delete_node(chunk_id)` удаляет узел и инцидентные рёбра (в том числе CONTAINS); `VectorStoreProvider.delete_vectors(chunk_ids)` снимает те же чанки с поиска. Узлы Entity и Source при soft-delete **сохраняются**, но `source_ids`/`chunk_ids` удалённого источника очищаются, поэтому его evidence не попадает в graph-контекст; эмиссия `SIMILAR_TO` при этом не затрагивается.
+
+### 2.7. Projection state и offline backfill
+
+`ProjectionStateStore` хранит state отдельно от graph/vector adapters. Job key включает `domain`,
+`data_revision`, `projection_revision` и `config_fingerprint`; claim/lease, renew и compare-and-set
+защищают от конкурирующих rebuild writers. `projection.lease_seconds` настраивается через
+Topology Configurator; job продлевает lease после каждого source unit. `OfflineProjectionJob`
+получает `ProjectionUnit` от source provider, пишет generic nodes/edges и вызывает
+`update_vector_metadata` только для `context_ids`/`tag_ids`/projection metadata. Для backfill
+списки enrichment-полей заменяются, а не объединяются со старыми значениями. Ошибка graph или
+backfill переводит state в `degraded`/`failed`, но не удаляет vector body.

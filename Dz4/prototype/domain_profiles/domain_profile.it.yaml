@@ -9,19 +9,25 @@ profile:
   description: "ИТ-домен: требования, концепции, контракты (Requirement -> Concept -> Contract)"
   language: "ru"
   version: "1"
-  # Канонические узлы/рёбра загружаются в Neo4j через unique_key при активации.
+  # Канонические узлы/рёбра загружаются в Neo4j через COMMIT; constraints по
+  # unique_key создаются идемпотентным GraphStoreProvider.ensure_schema перед первым
+  # COMMIT домена (Config Service не имеет доступа к Neo4j).
 
 ontology:
+  # Вариант A (Стадия 7): идентичность доменных сущностей — canonical_name,
+  # нормализуемый единой функцией `orchestrator._identity_key`
+  # (NFKC + yo_fold + casefold + сжатие пробелов). `id` — необязательное
+  # бизнес-свойство источника, ключом склейки узлов НЕ является.
   node_types:
     - type: "Requirement"
-      unique_key: "id"
-      properties: ["id", "name", "text"]
+      unique_key: "canonical_name"
+      properties: ["canonical_name", "name", "id", "source_ids", "chunk_ids", "extractor_version", "variants"]
     - type: "Concept"
       unique_key: "canonical_name"
-      properties: ["canonical_name", "aliases", "description"]
+      properties: ["canonical_name", "aliases", "description", "source_ids", "chunk_ids", "extractor_version", "variants"]
     - type: "Contract"
-      unique_key: "id"
-      properties: ["id", "name", "category"]
+      unique_key: "canonical_name"
+      properties: ["canonical_name", "name", "id", "category", "source_ids", "chunk_ids", "extractor_version", "variants"]
   edge_types:
     - from: "Requirement"
       to: "Concept"
@@ -35,24 +41,56 @@ ontology:
     - from: "Concept"
       to: "Contract"
       type: "REFERENCES"
+  # Связка осей (L2-04): ребро Chunk -> доменная сущность строится Python-кодом на
+  # COMMIT из chunk_ids сущности; LLM это ребро не извлекает и не видит Chunk.
+  chunk_entity_edge: "MENTIONS"
 
 extraction:
+  llm_enabled: true
   prompt_template:
     id: "extract_it_v1"
-    system: "Извлеки сущности и связи из текста по доменной онтологии it."
+    system: "Извлеки сущности и связи из текста по доменной онтологии it. Тип нормируется по тексту документа, не по контексту вопроса. Текст документа не возвращай — только JSON с сущностями и связями."
     user: |
-      Формат вывода: JSON со списками requirements, concepts, contracts и
-      связей REQUIRES_CONSTRAINT / CONTRADICTS / SIMILAR_TO / REFERENCES.
-      Отвечай только JSON, без пояснений.
+      Извлеки из текста документа сущности и связи по доменной онтологии it.
+      Верни ТОЛЬКО валидный JSON-объект со списками requirements, concepts, contracts
+      и relationships. Элементы трёх первых списков — ОБЪЕКТЫ, не строки:
+
+      {
+        "requirements": [{"canonical_name": "требование", "name": "требование"}],
+        "concepts": [{"canonical_name": "индексирование", "aliases": ["индекс"]}],
+        "contracts": [{"canonical_name": "контракт API", "name": "контракт API"}]
+      }
+
+      Правила:
+      - Элементы трёх списков — ОБЪЕКТЫ, не строки. Обязательное поле — canonical_name
+        (каноническая форма имени сущности); необязательные: name (человекочитаемая форма),
+        id (идентификатор из текста, только если он там присутствует), aliases (синонимы),
+        description (Concept), category (Contract).
+      - Requirement — требования/правила, Concept — понятия и концепции, Contract —
+        контракты/API.
+      - Текст документа НЕ возвращай: поле text и любые цитаты/фрагменты чанка запрещены —
+        текст хранится отдельно и связывается с сущностью на стороне платформы.
+      - relationships — отдельный список связей. В полях from/to указывай ТОЛЬКО
+        canonical_name сущностей из списков выше; оба конца связи обязаны присутствовать
+        в этих списках.
+      - Допустимые type связей: REQUIRES_CONSTRAINT (Requirement→Concept),
+        CONTRADICTS (Requirement→Requirement), SIMILAR_TO (Concept→Concept),
+        REFERENCES (Concept→Contract). Других типов не придумывай.
+      - Если связей в тексте нет — верни "relationships": [].
+      - Отвечай только JSON, без пояснений и без markdown-fence.
   temperature: 0.1
   max_tokens: 4096
 
 validation:
+  # Правила декларативны: код их не исполняет (исполнение — Стадия 8, BLG-02).
+  # Ключ идентичности доменных сущностей — canonical_name (Вариант А, Стадия 7).
   rules:
-    - id: "req_must_have_id"
+    - id: "entity_must_have_canonical_name"
       severity: "error"
       cypher: |
-        MATCH (r:Requirement) WHERE r.id IS MISSING RETURN r
+        MATCH (n)
+        WHERE (n:Requirement OR n:Concept OR n:Contract) AND n.canonical_name IS NULL
+        RETURN n
     - id: "requires_constraint_no_target"
       severity: "warning"
       cypher: |
@@ -60,19 +98,28 @@ validation:
         WHERE c IS NULL RETURN r
 
 canonicalization:
-  # Слои трансформации для каждой категории узла (ADR-007).
+  # Слои трансформации ключа идентичности (ADR-007). Реализованы в коде единой
+  # функцией `orchestrator._identity_key`: unicode (NFKC) + yo_fold (ё→е) +
+  # trim_lower (casefold + сжатие пробелов). Слой glossary остаётся в NORMALIZE
+  # (разрешение синонимов через Glossary Service).
   nodes:
     Concept:
-      layers: ["unicode", "glossary", "trim_lower"]
+      layers: ["unicode", "yo_fold", "glossary", "trim_lower"]
     Requirement:
-      layers: ["trim_lower"]
+      layers: ["unicode", "yo_fold", "trim_lower"]
     Contract:
-      layers: ["trim_lower"]
+      layers: ["unicode", "yo_fold", "trim_lower"]
 
 chunking:
+  # Стадия 7: параметры стратегий читаются декларативно из этой секции
+  # (`ctx.profile.chunking` → build_chunker_from_profile). Полный динамический
+  # конфигуратор профилей — Стадия 8, BLG-02. Precedence: env > профиль >
+  # namespaces.yaml > константы кода (последний резерв для offline/тестов).
   strategy: "sliding_window"
   chunk_size: 512
   overlap: 64
+  langchain_splitter: "recursive"
+  llamaindex_parser: "sentence"
   chunk_size_by_type:
     default: 512
     # book/schema/poem — стратегии по типам источников (заполняется по факту)

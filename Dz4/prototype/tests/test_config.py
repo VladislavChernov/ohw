@@ -20,9 +20,9 @@ class _AuthedClient(TestClient):
         headers.setdefault("X-API-Key", API_KEY)
         return super().request(method, url, headers=headers, **kwargs)
 
+
 MINIMAL_PROFILE = {
     "profile": {"name": "it", "description": "тест", "language": "ru", "version": "1"},
-    "ontology": {"node_types": [], "edge_types": []},
     "extraction": {"prompt_template": {"id": "x"}, "temperature": 0.1, "max_tokens": 10},
     "validation": {"rules": []},
     "canonicalization": {"nodes": {}},
@@ -31,7 +31,7 @@ MINIMAL_PROFILE = {
 }
 
 VALID_YAML = yaml.safe_dump(MINIMAL_PROFILE)
-INVALID_YAML = yaml.safe_dump({"profile": {"name": "bad"}})  # нет обязательных секций
+INVALID_YAML = yaml.safe_dump({"extraction": {}})
 
 
 def make_profiles_dir(tmp_path: Path) -> Path:
@@ -84,7 +84,7 @@ def test_validate_invalid_profile(tmp_path: Path) -> None:
         )
     assert resp.status_code == 200
     assert resp.json()["valid"] is False
-    assert any("ontology" in e for e in resp.json()["errors"])
+    assert any("profile" in e for e in resp.json()["errors"])
 
 
 def test_validate_malformed_yaml_400(tmp_path: Path) -> None:

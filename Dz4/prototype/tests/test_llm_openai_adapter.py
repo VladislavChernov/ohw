@@ -69,6 +69,18 @@ def test_streaming_sse_deltas() -> None:
         server.shutdown()
 
 
+def test_streaming_total_deadline_stops_slow_token_stream() -> None:
+    class _SlowStream:
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"start"}}]}\n'
+            time.sleep(0.05)
+            yield b'data: {"choices":[{"delta":{"content":"late"}}]}\n'
+
+    adapter = OpenAICompatibleAdapter("http://127.0.0.1:1", model="test", timeout_s=0.01)
+    with pytest.raises(TimeoutError):
+        list(adapter._iter_stream(_SlowStream(), time.monotonic() + 0.01))
+
+
 # --- non-streaming ----------------------------------------------------
 
 def test_non_streaming_content() -> None:

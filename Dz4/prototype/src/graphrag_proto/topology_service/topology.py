@@ -1,7 +1,7 @@
 """Загрузка и валидация `infra_topology.yaml` (ADR-019, add-topology-adapters).
 
 Структура файла — docs/00 (топология): `version/environment/network/providers/
-endpoints/startup`. Провайдеры обязаны быть **реализованными** id каталога фабрики
+endpoints/redis/projection/startup`. Провайдеры обязаны быть **реализованными** id каталога фабрики
 (`retrieval/adapters/factory.py::ADAPTER_CATALOG`), иначе сервис не стартует:
 эффективная карта должны быть сборкой без прожект-значений.
 """
@@ -13,9 +13,20 @@ from typing import Any
 
 import yaml
 
+from graphrag_proto.projection_config import ProjectionConfigError, ProjectionSettings
+from graphrag_proto.redis_config import RedisConfigError, RedisSettings
 from graphrag_proto.topology_service.catalog import SLOT_ORDER, available_providers
 
-REQUIRED_TOP_KEYS = ("version", "environment", "network", "providers", "endpoints", "startup")
+REQUIRED_TOP_KEYS = (
+    "version",
+    "environment",
+    "network",
+    "providers",
+    "endpoints",
+    "redis",
+    "projection",
+    "startup",
+)
 
 
 class TopologyError(ValueError):
@@ -36,6 +47,22 @@ def load_topology(path: str | Path) -> dict[str, Any]:
     if not isinstance(providers, dict):
         raise TopologyError("поле providers должно быть маппингом")
 
+    redis = data.get("redis")
+    if not isinstance(redis, dict):
+        raise TopologyError("поле redis должно быть маппингом")
+    try:
+        RedisSettings.from_mapping(redis)
+    except RedisConfigError as exc:
+        raise TopologyError(f"redis: {exc}") from exc
+
+    projection = data.get("projection")
+    if not isinstance(projection, dict):
+        raise TopologyError("поле projection должно быть маппингом")
+    try:
+        ProjectionSettings.from_mapping(projection)
+    except ProjectionConfigError as exc:
+        raise TopologyError(f"projection: {exc}") from exc
+
     catalog = available_providers()
     for slot in SLOT_ORDER:
         value = providers.get(slot)
@@ -51,3 +78,11 @@ def base_providers(topology: dict[str, Any]) -> dict[str, str]:
     """Базовая карта адаптеров из providers (без override'ов)."""
     providers = topology["providers"]
     return {slot: str(providers[slot]).strip().lower() for slot in SLOT_ORDER}
+
+
+def base_redis(topology: dict[str, Any]) -> dict[str, Any]:
+    return RedisSettings.from_mapping(topology["redis"]).as_dict()
+
+
+def base_projection(topology: dict[str, Any]) -> dict[str, Any]:
+    return ProjectionSettings.from_mapping(topology["projection"]).as_dict()

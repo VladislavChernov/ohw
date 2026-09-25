@@ -37,7 +37,7 @@
 
 ---
 
-## 3. Adapters Management API (новое в v5)
+## 3. Runtime Config Management API (адаптеры, Redis, projection)
 
 Управление слоем адаптеров осуществляется через REST API без перезапуска контейнеров:
 
@@ -48,6 +48,70 @@
 Хост API — **Topology Orchestrator :8005** (ADR-019): управление топологией вынесено
 из Config Service в отдельный сервис с профилем `topology` (при неподнятом профиле
 воркер работает по env с fallback). Форматы запросов/ответов сохранены.
+
+### 3.1. Redis/Valkey runtime settings
+
+Источник настроек клиентов Redis — секция `redis` в `prototype/infra_topology.yaml`.
+Она одновременно является базой Topology Configurator; сервисы Query API/Worker
+читают файл при старте через `INFRA_TOPOLOGY_PATH`.
+
+Поля:
+
+- `url` — URL Valkey/Redis с базой;
+- `socket_timeout_s`, `socket_connect_timeout_s` — таймауты чтения и подключения;
+- `max_connections` — верхняя граница пула клиента;
+- `retry_on_timeout` — не использовать автоматический retry при timeout;
+- `health_check_interval_s` — интервал проверки соединения;
+- `read_block_ms` — блокирующий read блока очереди/SSE.
+
+Configurator API (`:8005`, требуется `X-API-Key`):
+
+- `GET /api/v1/config/redis` — effective settings и `revision`;
+- `PUT /api/v1/config/redis` — изменить любое подмножество полей; значения
+  валидируются, неизвестные поля и неверные типы дают `422`.
+
+Пример:
+
+```bash
+curl -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8005/api/v1/config/redis
+curl -X PUT -H "X-API-Key: $GRAPH_AUTH_API_KEY" -H 'Content-Type: application/json' \
+  http://localhost:8005/api/v1/config/redis \
+  -d '{"max_connections": 16, "socket_connect_timeout_s": 3}'
+```
+
+`QUERY_REDIS_URL`/`REDIS_URL` и `REDIS_*` — deployment overrides отдельных полей.
+Они имеют приоритет над YAML для процесса, который их запускает. Изменение
+через Configurator сохраняется в `topology_data`; уже запущенные Query API/Worker
+подхватывают его при перезапуске (hot reload применяется к адаптерам, не к
+пулу соединений).
+
+### 3.2. Offline projection lease policy
+
+`OfflineProjectionJob` — операторская job, а не адаптер Redis. В конфигураторе
+настраивается только lease-политика, а не класс `ProjectionStateStore`:
+
+- `projection.lease_seconds` — lease одного rebuild; default `300` секунд,
+  минимум `30`; job продлевает lease после каждого source unit;
+- при потере lease job не публикует терминальный state и может быть безопасно
+  повторён другим claimant;
+- значение фиксируется на момент запуска job; изменение применяется к следующему
+  rebuild, а hot reload относится к карте адаптеров.
+
+Configurator API (`:8005`, `X-API-Key`):
+
+- `GET /api/v1/config/projection` — effective policy и `revision`;
+- `PUT /api/v1/config/projection` — изменить `lease_seconds`; неверное значение
+  или неизвестное поле дают `422`.
+
+```bash
+curl -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8005/api/v1/config/projection
+curl -X PUT -H "X-API-Key: $GRAPH_AUTH_API_KEY" -H 'Content-Type: application/json' \
+  http://localhost:8005/api/v1/config/projection -d '{"lease_seconds": 300}'
+```
+
+Источник по умолчанию — секция `projection` в `prototype/infra_topology.yaml`;
+override Configurator сохраняется в `topology_data`. `PROJECTION_LEASE_SECONDS`
+— аварийный deployment override для процесса, CLI-флаг намеренно не используется.
 
 Примеры:
 
@@ -67,11 +131,15 @@ curl -H "X-API-Key: $GRAPH_AUTH_API_KEY" http://localhost:8005/api/v1/config/ada
 
 ## 4. Структура изолированных глоссарей
 
-**Роль Glossary Service (трансляция тегов):** лингвист/аналитик работает с привычной GUI-моделью «тегов» — синонимы и варианты записи для канонического термина (экран «Бизнес-онтология» конфигуратора, CONCEPT §6.4). Сервис скрывает технический формат и отдаёт графу канонический ряд (`canonical_name`). Авторинг ведётся через конфигуратор, а не напрямую в БД.
+**Роль Glossary Service (alias resolver):** сервис связывает варианты записи, синонимы и переводы с `tag_id`/`canonical_name` графа. Он optional для primitive ingest и не навязывает фиксированную ontology. AI может предлагать aliases/merge, но ручные tags имеют приоритет; неоднозначные кандидаты не объединяются молча.
 
-**Валидация уникальности:** по запросу `POST /api/v1/glossary/validate` сервис проверяет, что в рамках домена один тег не ведёт к двум каноническим терминам и наоборот, а также пересечение словаря с уже активированными профилями. Расширенная glossary-валидация через секцию `glossary` эндпоинта `POST /api/v1/config/domain/validate` в M0 не реализуется (config-validate проверяет структуру профиля) — запланирована на M1.
+**Валидация:** `POST /api/v1/glossary/validate` проверяет конфликты alias map, а не fixed node types.
 
 **ИИ-подсказки тегов (опция):** при новой экстракции агент может предлагать кандидатов-синонимов из корпуса документов, лингвист подтверждает или отклоняет. Не является обязательным для работы пайплайна.
+
+Graph projection — отдельный experiment: её можно строить inline после vector commit или
+идемпотентным offline replay; `ProjectionState` хранит readiness/revision и не является
+prerequisite для baseline.
 
 Glossary Service подгружает файл глоссария по активному домену (pull-модель: при запросе
 без `domain` сервис берёт активный профиль из Config Service: `GET /api/v1/config/domain/active`,
@@ -157,9 +225,14 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
   без установленного пакета выбранный адаптер даёт fail-fast при вызове.
 
 **namespace: storage**
-- `graph_store` ("neo4j") — графовая ось: Neo4jGraphStore / MemgraphGraphStore.
+- `graph_store` ("neo4j") — optional backend для graph experiment: Neo4jGraphStore / MemgraphGraphStore; baseline может работать без него.
 - `vector_store` ("neo4j") — векторная ось: Neo4jVectorStore / QdrantVectorStore.
 - `neo4j_uri` ("bolt://neo4j:7687")
+- `PROJECTION_STATE_DB_PATH` (`runtime/projection.db`) — SQLite state store offline projection jobs
+- `PROJECTION_CONFIG_FINGERPRINT` (`default`) — конфигурационный фактор projection revision
+
+**namespace: projection**
+- `lease_seconds` (300, минимум 30) — lease offline projection job; renew выполняется автоматически
 
 **namespace: auth**
 - `api_key` ("changeme")

@@ -5,6 +5,8 @@ REST-контур:
 - `GET  /api/v1/config/adapters`    — эффективная карта адаптеров + revision;
 - `PUT  /api/v1/config/adapters`    — переключение на лету (валидация по каталогу);
 - `GET  /api/v1/config/adapters/available` — реализованные провайдеры;
+- `GET/PUT /api/v1/config/redis` — Redis/Valkey runtime settings;
+- `GET/PUT /api/v1/config/projection` — offline projection lease policy;
 - `GET  /health`.
 Все эндпоинты кроме /health требуют `X-API-Key` (единый AUTH_API_KEY стека).
 """
@@ -17,11 +19,15 @@ from typing import Any
 
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
 
+from graphrag_proto.projection_config import ProjectionConfigError, ProjectionSettings
+from graphrag_proto.redis_config import RedisConfigError, RedisSettings
 from graphrag_proto.topology_service.catalog import SLOT_ORDER, available_providers, is_known
 from graphrag_proto.topology_service.store import TopologyStore
 from graphrag_proto.topology_service.topology import (
     TopologyError,
+    base_projection,
     base_providers,
+    base_redis,
     load_topology,
 )
 
@@ -49,6 +55,12 @@ def create_app(
         overrides = store.overrides()
         return {slot: overrides.get(slot, base_providers(topology)[slot]) for slot in SLOT_ORDER}
 
+    def effective_redis() -> dict[str, Any]:
+        return {**base_redis(topology), **store.redis_overrides()}
+
+    def effective_projection() -> dict[str, Any]:
+        return {**base_projection(topology), **store.projection_overrides()}
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
@@ -61,6 +73,8 @@ def create_app(
             "network": topology["network"],
             "providers": base_providers(topology),
             "endpoints": topology["endpoints"],
+            "redis": effective_redis(),
+            "projection": effective_projection(),
             "startup": topology["startup"],
             "revision": store.revision(),
         }
@@ -92,6 +106,47 @@ def create_app(
     @app.get("/api/v1/config/adapters/available", dependencies=[Depends(require_key)])
     def get_available() -> dict[str, Any]:
         return {"slots": available_providers()}
+
+    @app.get("/api/v1/config/redis", dependencies=[Depends(require_key)])
+    def get_redis() -> dict[str, Any]:
+        return {"revision": store.revision(), "redis": effective_redis()}
+
+    @app.put("/api/v1/config/redis", dependencies=[Depends(require_key)])
+    def put_redis(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+        allowed = set(RedisSettings().as_dict())
+        unknown = set(payload) - allowed
+        if unknown:
+            raise HTTPException(status_code=422, detail=f"неизвестные Redis поля: {sorted(unknown)}")
+        try:
+            normalized = RedisSettings.from_mapping({**effective_redis(), **payload}).as_dict()
+        except RedisConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        updates = {key: normalized[key] for key in payload}
+        revision = store.apply_redis_overrides(updates) if updates else store.revision()
+        return {"revision": revision, "redis": effective_redis()}
+
+    @app.get("/api/v1/config/projection", dependencies=[Depends(require_key)])
+    def get_projection() -> dict[str, Any]:
+        return {"revision": store.revision(), "projection": effective_projection()}
+
+    @app.put("/api/v1/config/projection", dependencies=[Depends(require_key)])
+    def put_projection(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+        allowed = set(ProjectionSettings().as_dict())
+        unknown = set(payload) - allowed
+        if unknown:
+            raise HTTPException(
+                status_code=422,
+                detail=f"неизвестные projection поля: {sorted(unknown)}",
+            )
+        try:
+            normalized = ProjectionSettings.from_mapping(
+                {**effective_projection(), **payload}
+            ).as_dict()
+        except ProjectionConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        updates = {key: normalized[key] for key in payload}
+        revision = store.apply_projection_overrides(updates) if updates else store.revision()
+        return {"revision": revision, "projection": effective_projection()}
 
     return app
 

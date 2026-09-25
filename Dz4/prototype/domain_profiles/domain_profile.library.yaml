@@ -29,6 +29,7 @@ ontology:
       type: "ADAPTED_INTO"
 
 extraction:
+  llm_enabled: false
   prompt_template:
     id: "extract_library_v1"
     system: "Извлеки сущности и связи по онтологии library (авторы, книги, жанры)."

@@ -10,6 +10,8 @@ from __future__ import annotations
 import builtins
 import hashlib
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ class DocumentRegistry:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path = db_path
         self._lock = threading.RLock()
+        self._source_locks: dict[tuple[str, str], threading.RLock] = {}
         self._conn = connect_sqlite(db_path)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS documents ("
@@ -48,6 +51,29 @@ class DocumentRegistry:
 
     def close(self) -> None:
         self._conn.close()
+
+    @contextmanager
+    def source_lock(self, domain: str, source_url: str) -> Iterator[None]:
+        key = (domain, source_url)
+        with self._lock:
+            lock = self._source_locks.setdefault(key, threading.RLock())
+        with lock:
+            yield
+
+    @contextmanager
+    def domain_lock(self, domain: str) -> Iterator[None]:
+        del domain
+        with self._lock:
+            yield
+
+    def active_source_count(self, domain: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(DISTINCT source_url) FROM documents "
+                "WHERE domain = ? AND status = ?",
+                (domain, STATUS_ACTIVE),
+            ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
 
     def current_version(self, domain: str, source_url: str) -> int:
         """Максимальная версия источника (0 — нет). Монотонные версии.
@@ -160,21 +186,46 @@ class DocumentRegistry:
     def data_revision(self, domain: str) -> str | None:
         """Ревизия данных домена — fingerprint активного сета (ADR-026).
 
-        ``sha256`` над отсортированными ``content_hash`` активных документов
-        домена. Идемпотентен: повторный INGEST того же ``content_hash`` (no-op,
-        ADR-014) не меняет отпечаток; добавление/изменение/soft-delete меняет.
-        ``None`` — активных документов у домена нет.
+        ``sha256`` над отсортированным набором пар ``(source_url, content_hash)``
+        активных документов домена. Идемпотентен: повторный INGEST того же источника
+        и ``content_hash`` (no-op, ADR-014) не меняет отпечаток; добавление/изменение/
+        soft-delete меняет. ``None`` — активных документов у домена нет.
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT content_hash FROM documents "
+                "SELECT source_url, content_hash FROM documents "
                 "WHERE domain = ? AND status = ?",
                 (domain, STATUS_ACTIVE),
             ).fetchall()
         if not rows:
             return None
         digest = hashlib.sha256()
-        for content_hash in sorted({row[0] for row in rows}):
+        for source_url, content_hash in sorted(set(rows)):
+            digest.update(source_url.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(content_hash.encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def data_revision_after(self, document: Document) -> str | None:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source_url, content_hash FROM documents "
+                "WHERE domain = ? AND status = ?",
+                (document.domain, STATUS_ACTIVE),
+            ).fetchall()
+        active = {
+            (str(source_url), str(content_hash))
+            for source_url, content_hash in rows
+            if str(source_url) != document.source_url
+        }
+        active.add((document.source_url, document.content_hash))
+        if not active:
+            return None
+        digest = hashlib.sha256()
+        for source_url, content_hash in sorted(active):
+            digest.update(source_url.encode("utf-8"))
+            digest.update(b"\0")
             digest.update(content_hash.encode("utf-8"))
             digest.update(b"\n")
         return digest.hexdigest()

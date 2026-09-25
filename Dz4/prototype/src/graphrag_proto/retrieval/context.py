@@ -69,14 +69,27 @@ class ContextAssembly:
 
     def assemble(self, skeleton_rows: list[dict[str, Any]], body_chunks: list[dict[str, Any]]) -> ContextResult:
         skeleton_parts = render_skeleton(skeleton_rows)
-        skeleton_text = "\n".join(skeleton_parts)
-        skeleton_tokens = estimate_tokens(skeleton_text)
+        skeleton_budget = max(1, self._max_tokens // 2)
+        selected_skeleton: list[str] = []
+        skeleton_tokens = 0
+        dropped = 0
+        for part in skeleton_parts:
+            tokens = estimate_tokens(part)
+            if skeleton_tokens + tokens <= skeleton_budget:
+                selected_skeleton.append(part)
+                skeleton_tokens += tokens
+                continue
+            available = skeleton_budget - skeleton_tokens
+            if available > 0:
+                selected_skeleton.append(" ".join(part.split()[:available]))
+                skeleton_tokens += available
+            dropped += 1
+        skeleton_text = "\n".join(selected_skeleton)
 
         ordered = sorted(body_chunks, key=lambda c: float(c.get("score") or 0.0), reverse=True)
         body_parts: list[str] = []
         body_tokens = 0
         remaining = self._max_tokens - skeleton_tokens
-        dropped = 0
         for chunk in ordered:
             rendered = render_body(chunk)
             tokens = estimate_tokens(rendered)
@@ -86,14 +99,14 @@ class ContextAssembly:
             body_parts.append(rendered)
             body_tokens += tokens
 
-        full = [skeleton_text] if skeleton_parts else []
+        full = [skeleton_text] if selected_skeleton else []
         if body_parts:
             full.append("\n".join(body_parts))
         text = "\n\n".join(full)
         return ContextResult(
             text=text,
             tokens=skeleton_tokens + body_tokens,
-            skeleton_count=len(skeleton_parts),
+            skeleton_count=len(selected_skeleton),
             body_count=len(body_parts),
             dropped=dropped,
         )

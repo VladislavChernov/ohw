@@ -42,10 +42,10 @@
 
 Только через Ingestion API (не Cypher вручную): Neo4j — Source/Chunk/Entity и векторы;
 SQLite ingestion (отдельный volume) — журнал джобов, DocumentRegistry, ревизия;
-SQLite config — активный домен `it`. Профили и глоссарий монтируются из `domain_profiles`
-(конфигурация, не корпус). Valkey не используется. EXTRACT детерминированный: проверяйте
-непустоту и содержательность графовых доказательств — девять стадий не означают
-полноценного извлечения онтологии.
+SQLite config — активный домен `it`. Профили и глоссарий монтируются из `domain_profiles` (конфигурация, не корпус). Valkey
+не используется. Режим EXTRACT задаётся runtime-конфигурацией; для pilot upload используйте
+явно выбранный профиль и проверяйте непустоту и содержательность графовых доказательств —
+девять стадий не означают полноценного извлечения онтологии.
 
 ## Порядок запуска
 
@@ -58,20 +58,20 @@ SQLite config — активный домен `it`. Профили и глосс
    `docker compose -p <project> -f compose.eval-minimal.yaml run --rm --no-deps eval-runner python /proposal/corpus_tools.py upload --out /reports/docs-review-upload.json`
 4. Проверить: 7 `succeeded` в receipt, ненулевую revision, Source/Chunk в Neo4j,
    отсутствие чужого корпуса; revision сверять до и после обеих веток.
-5. Запросы: раздельные `baseline`/`hybrid` — там же, в [../../README-minimal.md](../../README-minimal.md).
+5. Запросы: для этого пилота используйте `questions.jsonl`; полный graph-эксперимент с
+   `questions_graph.jsonl` запускается отдельной командой из [../../README-minimal.md](../../README-minimal.md).
    Snapshot в штатный `--corpus` не передавать: `source_url` станут `document-NN.md` и разметка сломается.
 
 ## Ограничения интерпретации
 
-- `both` текущего раннера содержит дефект: граф выключен в обеих ветках. Сравнивать только
-  раздельные прогоны; одиночные `verdict` не использовать как сравнительный гейт.
-- Retrieval-метрики считают только векторные `sources`; графовые доказательства в них не попадают.
-- Groundedness/coverage считаются по `golden_facts` через LLM-judge; `hallucination_rate = 1 − groundedness`;
-  judge использует тот же LLM без фиксации температуры.
-- Per-question ответы/тайминги не сохраняются; поля `rubric`/`evidence_policy`/`reasoning_type`
-  раннер игнорирует (предназначены для ручной проверки и будущего evaluator).
-- 10 вопросов — development-выборка, не статзначимая; положительные числа не доказывают пользу GraphRAG.
-
+- `both` разделяет vector-only `baseline` и vector→graph-expansion `target`; для сравнения
+  используйте одинаковые revision/chunking/embeddings/K и `run_manifest.json`.
+- `qa_log.jsonl` сохраняет seed chunk IDs, graph paths/depth/boost, provenance и компонентные
+  метрики; `trace.jsonl` появляется только с `--trace`.
+- Groundedness/coverage считаются через LLM-judge; в `--no-judge` и `--retrieval-only`
+  они не вычисляются.
+- 10 вопросов — development-выборка, не статзначимая; положительные числа не доказывают
+  пользу GraphRAG.
 ## Проверено автором
 
 Offline-тесты: 4 OK (WSL и одноразовый `python:3.11-slim` без сети); `check` OK —

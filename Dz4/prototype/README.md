@@ -1,10 +1,31 @@
 # Гибридная RAG — прототип (ДЗ4)
 
 Учебный прототип проекта «Гибридная RAG». Реализованы:
-Config Service (:8001), Glossary Service (:8003), Neo4j (профиль `graph`),
-Ingestion API (:8002, пайплайн 9 этапов + реальный COMMIT), Query API (:8000,
-асинхронный контур: очередь → воркер → SSE, ADR-023) и браузерный демо-контур
-UI (:8503).
+Config Service (:8001), Glossary/alias resolver (:8003), Neo4j (выбранный prototype backend,
+не обязательная архитектурная привязка), primitive Ingestion API (:8002), optional
+user/AI graph enrichment, offline `ProjectionState`/`OfflineProjectionJob`, Query API (:8000,
+vector-first hybrid retrieval с bounded graph expansion) и браузерный демо-контур UI (:8503).
+
+Projection state и offline job реализуют change
+`openspec/changes/add-offline-graph-projection/`: job key включает domain/data/projection/config
+revisions, claim/lease защищает rebuild, а backfill меняет только optional vector metadata.
+Query graph gate разрешает expansion только для `ready` state; остальные состояния дают
+vector-only fallback с degraded marker. Redis/Valkey pool и таймауты берутся из секции `redis`
+файла `infra_topology.yaml`; lease offline projection — из секции `projection`
+(`lease_seconds`, default 300). Topology Configurator показывает и меняет их через
+`GET/PUT /api/v1/config/redis` и `GET/PUT /api/v1/config/projection`. После runtime-изменения
+через API перезапустите Query API/Worker.
+
+Операторский rebuild запускается отдельной командой `graphrag-projection`; `--units` принимает
+JSONL с `domain`, `source_url`, `nodes`, `edges` и `vector_metadata`, а повторяемый
+`--stale-source-url` удаляет anchors/provenance удалённых источников. Состояние и результат
+публикуются через `PROJECTION_STATE_DB_PATH`; `--config-fingerprint` должен совпадать с query
+worker. Lease не передаётся CLI-флагом: он берётся из projection-конфига и обновляется
+Configurator'ом.
+
+Точный Compose-вызов (после поднятия ingestion/query и сбора актуальной
+`data_revision`) приведён в `../docs/demo_runbook.md`; units-файл передаётся
+read-only через `-v`, а retention дополнительно сверяется с DocumentRegistry.
 
 ## Окружение
 
@@ -29,6 +50,21 @@ uv run --no-sync pytest -q
 uv run --no-sync ruff check
 uv run --no-sync mypy
 ```
+
+### Live-проверки против внешних сервисов
+
+Маркер `live` (Neo4j/Redis) по умолчанию пропускается — в обычном `pytest -q`
+этих тестов нет. Live Neo4j parity projection-цикла запускается так:
+
+```bash
+docker compose -f infra/compose.yaml --profile graph up -d --wait neo4j
+NEO4J_LIVE_URI=bolt://localhost:7687 NEO4J_LIVE_PASSWORD=graphrag \
+  uv run --no-sync pytest -m live tests/test_live_projection_neo4j_parity.py
+```
+
+Тесты изолированы доменом и префиксом `lp13://` и чистят за собой только свои
+данные. Полный paired eval с LLM-судьёй — отдельная процедура, см.
+[infra/eval/README-minimal.md](infra/eval/README-minimal.md).
 
 Compose задаёт runtime-пути через окружение; при отдельном запуске сервисов
 значения по умолчанию зависят от CWD. Для типизации предпочтителен Python 3.13
@@ -97,7 +133,7 @@ d:\Otus\ohw\Dz4\prototype\
 ├── src/graphrag_proto/
 │   ├── config_service/      # Domain Profiles, SQLite, настройки
 │   ├── glossary_service/    # Глоссарии и канонические имена
-│   ├── ingestion_service/   # Девять этапов, COMMIT в Neo4j, чанкеры
+│   ├── ingestion_service/   # Primitive ingest, optional enrichment, commit в adapters
 │   ├── query_service/       # Очередь, worker, SSE
 │   ├── topology_service/    # Карта адаптеров и runtime overrides
 │   ├── embeddings_service/  # BGE-M3

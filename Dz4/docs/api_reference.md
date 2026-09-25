@@ -143,48 +143,47 @@ Query API Gateway совмещает роль **MCP-шлюза** для авто
 | GET | `/api/v1/config/adapters` | Текущие адаптеры (значения ключей осей) |
 | PUT | `/api/v1/config/adapters` | Смена адаптера на лету; тело — ключ оси → реализация, например `{"vector_store": "qdrant"}` |
 | GET | `/api/v1/config/adapters/available` | Список доступных адаптеров (включая сторонние плагины) |
+| GET | `/api/v1/config/redis` | Эффективные Redis/Valkey settings из Topology Configurator (`redis` в `infra_topology.yaml`) |
+| PUT | `/api/v1/config/redis` | Изменение Redis pool/timeout settings; невалидное поле/значение — `422`; применяется после рестарта Query-контура |
+| GET | `/api/v1/config/projection` | Эффективная lease-политика offline projection (`projection.lease_seconds`) |
+| PUT | `/api/v1/config/projection` | Изменение `lease_seconds`; минимум 30, неверное значение — `422`; действует со следующего rebuild |
 
 ---
 
 ## 5. Ingestion API (:8002) — контракт (ADR-018)
 
-Приём документов и управление фоновыми джобами индексации (9 этапов пайплайна,
-`docs/02_pipeline_and_normalizer.md` §1: INGEST → CHUNK → EMBED → EXTRACT → NORMALIZE →
-DEDUP → CONTRACT → VALIDATE → COMMIT).
+Приём документов и управление фоновыми джобами индексации. Primitive ingest выполняет
+обязательные document/chunk/embed/register операции; graph enrichment (`tags`, `links`, AI)
+опционален и не является отдельным gate.
 
 | Метод | Путь | Назначение |
 |-------|------|------------|
-| POST | `/api/v1/ingestion/documents` | Загрузка файла (`.txt` / `.md` / `.pdf`; `.json` — вне скоупа M1, ADR-021) или URL; метаданные: `source_url`, `domain`, `doc_type`. Ответ `202` — `{job_id, status, created_at}` |
+| POST | `/api/v1/ingestion/documents` | Загрузка документа; обязательны `source_url`, `domain`, `doc_type`; optional `tags`, `links`, `metadata`. Ответ `202` — `{job_id, status, created_at}` |
 | GET | `/api/v1/ingestion/jobs` | Список джоб индексации (пагинация: `page`, `page_size`) |
 | GET | `/api/v1/ingestion/jobs/{job_id}` | Статус джобы: `{job_id, status, stage}` |
 | DELETE | `/api/v1/ingestion/jobs/{job_id}` | Отмена джобы (освобождение GPU) |
-| DELETE | `/api/v1/ingestion/documents?domain=&source_url=` | Soft-delete источника (L2-05, ADR-014): чанки снимаются с поиска, сущности сохраняются пока есть активные `source_ids`; `200` — удалён, `404` — не найден |
+| DELETE | `/api/v1/ingestion/documents?domain=&source_url=` | Soft-delete источника: чанки снимаются с поиска, context nodes сохраняются при активном provenance |
 
-Жизненный цикл джобы: `queued → running (stage: INGEST|CHUNK|EMBED|EXTRACT|NORMALIZE|DEDUP|CONTRACT|VALIDATE|COMMIT) → succeeded | failed | cancelled`.
+Жизненный цикл джобы: `queued → running → succeeded | failed | cancelled`; optional enrichment
+имеет degraded/quarantine status и не превращает primitive ingest в failure. Offline graph
+rebuild запускается отдельной operator job-командой и не является обязательным публичным API
+этапа baseline.
 
-**Выход этапа INGEST — канонический документ (ADR-021):** `Document { source_id,
-source_url, domain, doc_type, content_hash, blocks: [{type, page, order, data}] }`,
-где `content_hash` — sha256 по нормализованному каноническому виду (источник-независим),
-`type: text|code|image`. Пайплайн ниже работает только с этим представлением.
-
-> Контракт и жизненный цикл джоб формально зафиксированы в `docs/05_adr_log.md` ADR-018;
-> правила версионирования/удаления источников — ADR-014; контракт канонического документа — ADR-021.
+**Выход INGEST:** canonical `Document { source_id, source_url, domain, doc_type, content_hash,
+blocks }`; graph enrichment и vector metadata — отдельные проекции.
 
 ---
 
 ## 6. Glossary API (:8003) — внутренний протокол
 
-Сервис используется пайплайном (слой 2 канонизации) и ретривером (resolve терминов), см. `docs/00` §1.
+Glossary Service — optional alias resolver; он связывает варианты/переводы с `tag_id` и
+предпочтительным `canonical_name`, но не превращается в обязательную ontology validation.
 
 | Метод | Путь | Назначение |
 |-------|------|------------|
-| GET | `/api/v1/glossary/{domain}` | Словарь (`glossary.{profile}.yaml`); домена нет — `404` |
-| POST | `/api/v1/glossary/resolve` | Трансляция тега в канонический ряд: `{"term": "lg"}` → `{"canonical_name": "log", "variants": ["log", "lg", "ln"]}`. Домен — поле `domain` (опционально); иначе активный профиль по `GET /api/v1/config/domain/active` (fallback `it`) |
-| POST | `/api/v1/glossary/validate` | Проверка уникальности словаря: `{"domain"?}` → `{"valid", "duplicates"}` |
-
-> Расширенная glossary-валидация через `POST /api/v1/config/domain/validate`
-> (секция `glossary`) — **запланирована (M1)**; в M0 config-validate проверяет
-> только структуру профиля, уникальность тегов — `POST /api/v1/glossary/validate`.
+| GET | `/api/v1/glossary/{domain}` | Словарь алиасов и multilingual variants; домена нет — `404` |
+| POST | `/api/v1/glossary/resolve` | Разрешение alias: `{"term": "Быстрая сортировка", "domain": "it"}` → `{tag_id, canonical_name, variants, confidence}`; неоднозначность возвращается без silent merge |
+| POST | `/api/v1/glossary/validate` | Проверка конфликтов alias map: `{"domain"?}` → `{valid, conflicts}` |
 
 ---
 

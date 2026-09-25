@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from graphrag_proto.query_service.models import Event, Task
+from graphrag_proto.redis_config import RedisSettings, load_redis_settings
 
 _LOG = logging.getLogger("graphrag_proto.query_service.task_queue")
 
@@ -263,11 +264,15 @@ class RedisStreamTaskQueue(TaskQueue):
 
     def __init__(
         self,
-        redis_url: str = "redis://valkey:6379/0",
+        redis_url: str | None = None,
         stream: str = STREAM_TASKS,
         group: str = GROUP_WORKERS,
+        settings: RedisSettings | None = None,
     ) -> None:
-        self._redis_url = redis_url
+        self._settings = settings or load_redis_settings()
+        if redis_url is not None:
+            self._settings = replace(self._settings, url=redis_url)
+        self._redis_url = self._settings.url
         self._stream = stream
         self._group = group
         self._client: Any = None
@@ -278,9 +283,7 @@ class RedisStreamTaskQueue(TaskQueue):
 
             self._client = redis.Redis.from_url(
                 self._redis_url,
-                decode_responses=False,
-                socket_timeout=2,
-                socket_connect_timeout=2,
+                **self._settings.client_kwargs(decode_responses=False),
             )
             self._ensure_group()
         return self._client
@@ -307,7 +310,13 @@ class RedisStreamTaskQueue(TaskQueue):
     def claim(self, worker_id: str) -> Task | None:
         client = self._r()
         while True:
-            result = client.xreadgroup(groupname=self._group, consumername=worker_id, count=1, block=1000, streams={self._stream: ">"})
+            result = client.xreadgroup(
+                groupname=self._group,
+                consumername=worker_id,
+                count=1,
+                block=self._settings.read_block_ms,
+                streams={self._stream: ">"},
+            )
             if not result:
                 return None
             for _stream, entries in result:
@@ -363,10 +372,31 @@ class RedisStreamTaskQueue(TaskQueue):
                 return
         last_heartbeat = time.monotonic()
         while True:
-            if last is None:
-                result = client.xread(count=100, block=2000, streams={key: "$"})
-            else:
-                result = client.xread(count=100, block=2000, streams={key: last})
+            try:
+                if last is None:
+                    result = client.xread(
+                        count=100,
+                        block=self._settings.read_block_ms,
+                        streams={key: "$"},
+                    )
+                else:
+                    result = client.xread(
+                        count=100,
+                        block=self._settings.read_block_ms,
+                        streams={key: last},
+                    )
+            except Exception:  # noqa: BLE001
+                now = time.monotonic()
+                if now - last_heartbeat >= heartbeat_interval_s:
+                    yield Event(
+                        type="heartbeat",
+                        task_id=task_id,
+                        ts=datetime.now(UTC).isoformat(timespec="seconds"),
+                        payload={},
+                    )
+                    last_heartbeat = now
+                time.sleep(0.05)
+                continue
             if not result:
                 now = time.monotonic()
                 if now - last_heartbeat >= heartbeat_interval_s:

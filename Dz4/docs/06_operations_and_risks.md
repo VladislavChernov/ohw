@@ -46,7 +46,7 @@
 - `batch_size` (32)
 
 **namespace: storage**
-- `graph_store` ("neo4j") — графовая ось: Neo4jGraphStore / MemgraphGraphStore.
+- `graph_store` ("neo4j") — optional backend для graph experiment: Neo4jGraphStore / MemgraphGraphStore; baseline может работать без него.
 - `vector_store` ("neo4j") — векторная ось: Neo4jVectorStore / QdrantVectorStore.
 - `neo4j_uri` ("bolt://neo4j:7687")
 
@@ -96,6 +96,10 @@
 - `graphrag_canonicalization_fallback_total{domain}` — Счетчик вызовов ЛЛМ-fallback
 - `graphrag_domain_switch_total` — Метрика частоты смены доменов
 - `graphrag_adapter_switch_total{adapter_type}` — Метрика смены адаптеров (новое в v5)
+- `graphrag_projection_job_total{domain,status}` — запуски и результаты offline projection jobs
+- `graphrag_projection_state_total{domain,status}` — состояния `ready/degraded/stale/failed`
+- `graphrag_projection_sources_total{domain,result}` — обработанные, skipped и failed sources
+- `graphrag_projection_fallback_total{domain,reason}` — vector-only fallback из-за readiness/stale/error
 
 ---
 
@@ -155,6 +159,43 @@
 > `METRICS_SNAPSHOT_INTERVAL_S`, дефолт 30 с; поллер-счётчик ошибок включён).
 > Prometheus `/metrics` (Этап B) — фаза 2 / задел.
 
+### 4.1. Lifecycle graph/vector-проекций
+
+Graph и vector остаются независимыми адаптерами. Offline projection job хранит
+`ProjectionState` в domain scope, использует lease/claim, projection revision и
+config fingerprint; он backfill-ит только optional vector metadata. Ошибка job переводит
+state в `degraded`/`failed` и оставляет vector baseline доступным. Query включает graph
+experiment только для `ready` state с актуальной data revision; `stale`, `pending`,
+`degraded`, `failed` и missing state дают degraded vector-only fallback.
+
+Полный transactional outbox, dual-generation и автоматическая миграция старой typed-базы
+остаются на **M6-Growth / pre-connectors**. До этой стадии offline rebuild не обещает
+неограниченную координацию writers, а профиль загруженного корпуса считается неизменным.
+
+Redis-клиенты очереди и semantic cache используют значения секции `redis` из
+`prototype/infra_topology.yaml`: явный ограниченный pool (`max_connections=32`),
+`socket_connect_timeout=2s`, `socket_timeout=2s` и `retry_on_timeout=false`. Эти
+же поля доступны в Topology Configurator через `GET/PUT /api/v1/config/redis`;
+после изменения через API Query API/Worker перезапускаются, а hot reload применяется
+к карте адаптеров. Долгий LLM-ответ ограничивается общим deadline из `LLM_TIMEOUT_S`;
+`QueryWorker` не возвращает задачу в reclaim раньше `LLM_TIMEOUT_S + 30s`, поэтому
+длинный поток не создаёт ложный «deadlock» и дубли. Жёсткого обрыва ровно на
+120 секундах в runtime нет: 120 с — контракт SSE e2e, а не неявный таймаут Redis
+или пула.
+
+Offline projection lease настраивается отдельно в `projection.lease_seconds`
+секции `infra_topology.yaml` или через `GET/PUT /api/v1/config/projection`; default
+`300s`, минимум `30s`, CLI-флаг отсутствует. Job продлевает lease после каждого
+source unit, а потеря fence оставляет state без ложного `ready`.
+
+Live Neo4j parity (LP-13) прогоняется маркером `live`
+(`tests/test_live_projection_neo4j_parity.py`) и по умолчанию пропускается.
+Проверка уже находила дефекты, невидимые на InMemory: вычитание списков
+(`list - list`) и `NOT value IN $list` в Cypher Neo4j 5 невалидны и падают с
+`Cannot subtract List from List`. В адаптере используется list comprehension с
+`any(...)`; изменение затрагивает и ingest-путь, поэтому live-маркер обязателен
+перед приёмкой изменений `_upsert_nodes`/`_upsert_edges`/`update_vector_metadata`.
+
 ---
 
 ## 5. Матрица критических рисков
@@ -170,19 +211,15 @@
 | 5 | Логические противоречия и галлюцинации ЛЛМ на этапе Extraction | Работа LLM (по умолчанию Qwen 2.5 Coder 7B Abliterate) на низкой температуре (0.1) + тотальная семантическая проверка графа Cypher-запросами в Validator v2 до сохранения изменений |
 | 6 | Vendor lock-in — привязка к конкретному поставщику инфраструктуры (новое в v5) | Слой адаптеров (ADR-012) позволяет заменить любой компонент инфраструктуры через runtime config без переписывания ядра |
 
-> **Риск №8 (открыт, находка M5-прогона 2026-09-19, бандл `eval-graph-contribution-experiment`):**
-> **рассинхрон доменной онтологии и графа.** Типы `Requirement|Concept|Contract` объявлены
-> только декларативно в Domain Profile (`ontology.node_types`), но нигде в графе не
-> материализуются: `POST /api/v1/config/domain/activate` делает лишь `set_active_profile`
-> (`config_service/app.py:124`) и не создаёт constraints, которые обещают `docs/01 §3`,
-> `docs/data_model.md §1/§75` и инвариант L2-01; ingestion пишет только `Source|Entity|Chunk`
-> без рёбер у сущностей (`orchestrator.py:429/442/470-472`). Следствие: Cypher графовой оси
-> (`retrievers.py:82-90`, соседи по меткам онтологии) всегда матчит пустое множество,
-> warning `label does not exist` в логах, граф-ось вырождена, уникальность канонических
-> узлов (`unique_key`) не гарантируется. Митигация: предусловие стадии «вклад графа» —
-> типизированный EXTRACT/COMMIT по онтологии + `GraphStoreProvider.ensure_schema`
-> (constraints по `unique_key`, идемпотентно); ADR-029. Эксперимент без этого измерит
-> заглушку.
+> **Риск №8 (исторический, superseded 2026-09-25):** typed-ontology mismatch и отсутствие
+> runtime DDL больше не являются целевым риском. Corrective change
+> `add-lightweight-context-graph` переводит ingest на primitive optional enrichment и
+> убирает обязательные labels/constraints. Старые записи и typed-данные в Neo4j не удаляются
+> автоматически; их cleanup — отдельная migration.
+>
+> **Риск graph experiment:** offline projection может отставать от vector baseline или быть
+> частично построена. Это не failed ingest: query помечает такой запуск degraded и возвращает
+> vector-only result; readiness/projection revision фиксируются в manifest и trace.
 >
 > **Риск №7 (S1-обход, закрыт S2 — ADR-028):** `Neo4j deadlock` при конкурентной записи
 > COMMIT (`INGEST_MAX_CONCURRENT>1`, находка полного eval M5 — `TransientError.DeadlockDetected`).

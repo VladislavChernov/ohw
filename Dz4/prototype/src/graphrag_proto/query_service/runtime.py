@@ -6,12 +6,17 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
+from graphrag_proto.ingestion_service.projection import (
+    ProjectionStateStore,
+    try_build_projection_state_store,
+)
 from graphrag_proto.query_service.store import TaskStore
 from graphrag_proto.query_service.task_queue import (
     InMemoryTaskQueue,
     RedisStreamTaskQueue,
     TaskQueue,
 )
+from graphrag_proto.redis_config import load_redis_settings
 from graphrag_proto.retrieval.adapters.factory import build_adapters
 from graphrag_proto.retrieval.pipeline import QueryPipeline
 from graphrag_proto.retrieval.profile import DomainProfileLoader
@@ -29,7 +34,7 @@ def build_store(db_path: str | None = None) -> TaskStore:
 def build_queue() -> TaskQueue:
     kind = os.environ.get("QUERY_QUEUE", "inmemory").strip().lower()
     if kind == "redis":
-        return RedisStreamTaskQueue(redis_url=os.environ.get("QUERY_REDIS_URL", "redis://valkey:6379/0"))
+        return RedisStreamTaskQueue(settings=load_redis_settings())
     if kind in ("inmemory", ""):
         return InMemoryTaskQueue()
     raise ValueError(f"QUERY_QUEUE={kind!r}: допустимо redis|inmemory")
@@ -70,7 +75,7 @@ def build_semantic_cache() -> SemanticCache | None:
         return InMemorySemanticCache(threshold=threshold, ttl_s=ttl_s)
     if mode == "redis":
         return RedisSemanticCache(
-            url=os.environ.get("QUERY_REDIS_URL", "redis://valkey:6379/0"),
+            settings=load_redis_settings(),
             threshold=threshold,
             ttl_s=ttl_s,
         )
@@ -80,17 +85,28 @@ def build_semantic_cache() -> SemanticCache | None:
 def build_pipeline(
     adapter_map: Mapping[str, str] | None = None,
     semantic_cache: SemanticCache | None = None,
+    strict_profile: bool = False,
+    projection_state_store: ProjectionStateStore | None = None,
 ) -> QueryPipeline:
     """Сборка пайплайна: карта топологии (M3) > env/дефолт (M2); кэш передаётся явно."""
     adapters = build_adapters(adapter_map)
+    state_store = projection_state_store or try_build_projection_state_store()
+    config_fingerprint = os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
     return QueryPipeline(
         embedder=adapters.embedder,
         graph_store=adapters.graph_store,
         vector_store=adapters.vector_store,
         reranker=adapters.reranker,
         llm=adapters.llm,
-        profile_loader=DomainProfileLoader(config_url=os.environ.get("CONFIG_URL", "")),
+        profile_loader=DomainProfileLoader(
+            config_url=os.environ.get("CONFIG_URL", ""),
+            strict=strict_profile,
+        ),
         semantic_cache=semantic_cache,
+        strict_profile=strict_profile,
+        projection_state_store=state_store,
+        projection_config_fingerprint=config_fingerprint,
+        projection_state_required=True,
     )
 
 

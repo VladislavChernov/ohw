@@ -226,6 +226,26 @@ def test_redis_queue_client_socket_timeout(monkeypatch: pytest.MonkeyPatch) -> N
     queue._r()
     assert captured["socket_timeout"] == 2
     assert captured["socket_connect_timeout"] == 2
+    assert captured["max_connections"] == 32
+    assert captured["retry_on_timeout"] is False
+
+
+class _TimeoutEventsRedis(_FakeRedisClient):
+    def xrange(self, key: str, min: str = "-", max: str = "+") -> list[Any]:
+        return []
+
+    def xread(self, **kwargs: Any) -> list[Any]:
+        raise TimeoutError("temporary redis timeout")
+
+
+def test_redis_events_transport_timeout_yields_heartbeat() -> None:
+    queue = RedisStreamTaskQueue(redis_url="redis://test:6379/0")
+    queue._client = _TimeoutEventsRedis([])
+    stream = queue.events("q_timeout", heartbeat_interval_s=0.01)
+
+    event = next(stream)
+
+    assert event.type == "heartbeat"
 
 
 def test_serialization_roundtrip() -> None:

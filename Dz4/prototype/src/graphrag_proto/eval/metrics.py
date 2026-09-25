@@ -19,7 +19,14 @@ def retrieval_metrics(retrieved: list[str], golden: set[str], k: int = 5) -> dic
 
     retrieved — упорядоченный список source_url из done["sources"].
     golden — множество релевантных source_url.
+
+    Дубли source_url между осями (один источник принесён и графовой, и векторной
+    осью, т.к. build_sources дедуплицирует по паре (source_url, axis)) устраняются
+    здесь по первому вхождению: метрика считается по уникальным URL, иначе Recall/
+    Precision/nDCG способны превысить 1.0 и сместить target-ветку (design.md §2,
+    задача 2.3 «смешение осей корректно дедуплицируется»).
     """
+    retrieved = list(dict.fromkeys(retrieved))
     top = retrieved[:k]
     relev = [url for url in top if url in golden]
     count = len(relev)
@@ -112,17 +119,72 @@ def generation_metrics(
     }
 
 
+def graph_contribution(
+    retrieved_graph: list[str],
+    retrieved_vector: list[str],
+    golden: set[str],
+    *,
+    golden_graph_evidence: bool,
+) -> dict[str, Any]:
+    """Вклад графовой оси (design.md §3): вычислительная метрика, без judge.
+
+    По одному вопросу: упорядоченные списки source_url по осям (`axis=graph` /
+    `axis=vector` из `done.sources`). Срез целевых вопросов — те, где
+    `golden_graph_evidence=True`; на остальных вклад «не измеряем»
+    (`mode="not_measured"`, necessity/delta обнулены — design.md:79 «не
+    интерпретировать»).
+
+    - recall_graph / recall_vector — Recall по golden в пределах оси;
+    - evidence_recall_graph — Recall графовой оси на графовом срезе;
+    - necessity — доля golden-источников, покрытых только графовой осью;
+    - delta_recall — recall(обе оси) − recall(vector-only) по срезу.
+    """
+
+    def _recall(covered: set[str]) -> float:
+        return len(covered & golden) / len(golden) if golden else 0.0
+
+    graph_set = set(retrieved_graph)
+    vector_set = set(retrieved_vector)
+    recall_graph = _recall(graph_set)
+    recall_vector = _recall(vector_set)
+    recall_hybrid = _recall(graph_set | vector_set)
+    delta_recall = recall_hybrid - recall_vector
+    if not golden_graph_evidence:
+        return {
+            "recall_graph": round(recall_graph, 4),
+            "recall_vector": round(recall_vector, 4),
+            "evidence_recall_graph": None,
+            "necessity": 0.0,
+            "delta_recall": 0.0,
+            "mode": "not_measured",
+        }
+    graph_only = (graph_set - vector_set) & golden
+    necessity = len(graph_only) / len(golden) if golden else 0.0
+    return {
+        "recall_graph": round(recall_graph, 4),
+        "recall_vector": round(recall_vector, 4),
+        "evidence_recall_graph": round(recall_graph, 4),
+        "necessity": round(necessity, 4),
+        "delta_recall": round(delta_recall, 4),
+        "mode": "measured",
+    }
+
+
 def lift_report(
     baseline: dict[str, Any],
     target: dict[str, Any],
     revision: str | None = None,
+    *,
+    judge_active: bool = True,
 ) -> dict[str, Any]:
     """Lift-отчёт ADR-015: delta и verdict (валютное правило).
 
     baseline/target — агрегированные метрики одного прогона:
-    {"retrieval": {...}, "generation": {...}, "metadata": {...}}.
+    {"retrieval": {...}, "generation": {...}, "graph_contribution": {...}}.
     Verdict: pass, если target.groundedness >= baseline.groundedness И
-    target.coverage >= baseline.coverage.
+    target.coverage >= baseline.coverage. Без судьи (`judge_active=False`,
+    --no-judge/--retrieval-only) verdict = "n/a": groundedness/coverage не
+    вычислены, валютное правило неприменимо (design.md §6).
     """
     gen_b = baseline.get("generation", {})
     gen_t = target.get("generation", {})
@@ -132,15 +194,28 @@ def lift_report(
             return float(val)
         return 0.0
 
+    def _gc(mode: dict[str, Any], key: str) -> float:
+        return _safe((mode.get("graph_contribution") or {}).get(key))
+
     delta = {
         "recall_at_k": _safe(target.get("retrieval", {}).get("recall_at_k"))
         - _safe(baseline.get("retrieval", {}).get("recall_at_k")),
         "groundedness": _safe(gen_t.get("groundedness")) - _safe(gen_b.get("groundedness")),
         "coverage": _safe(gen_t.get("coverage")) - _safe(gen_b.get("coverage")),
+        "necessity": _gc(target, "necessity") - _gc(baseline, "necessity"),
+        "delta_recall": _gc(target, "delta_recall") - _gc(baseline, "delta_recall"),
+        "evidence_recall_graph": _gc(target, "evidence_recall_graph")
+        - _gc(baseline, "evidence_recall_graph"),
     }
 
-    # Валютное правило ADR-015
-    verdict = "pass" if delta["groundedness"] >= 0 and delta["coverage"] >= 0 else "fail"
+    target_graph = target.get("graph_contribution") or {}
+    degraded_questions = target_graph.get("degraded_questions", 0)
+    if isinstance(degraded_questions, (int, float)) and degraded_questions > 0:
+        verdict = "invalid"
+    elif not judge_active:
+        verdict = "n/a"
+    else:
+        verdict = "pass" if delta["groundedness"] >= 0 and delta["coverage"] >= 0 else "fail"
 
     return {
         "baseline": baseline,

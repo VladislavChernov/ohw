@@ -224,6 +224,9 @@ def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
     seen: dict[str, str | None] = {}
 
     class CapturingPipeline:
+        def active_domain(self) -> str:
+            return "it"
+
         def run(self, query: str, domain: str | None, emit, revision: str | None = None):
             seen["revision"] = revision
             return {"text": "ok", "revision": revision}
@@ -239,6 +242,32 @@ def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
     assert worker.process_one() is True
     assert store.get("q_rev")["status"] == "succeeded"
     assert seen == {"revision": "revA"}
+
+
+def test_worker_resolves_active_domain_before_revision_lookup(tmp_path: Path) -> None:
+    queue = InMemoryTaskQueue()
+    store = TaskStore(tmp_path / "active-rev.sqlite")
+    seen: dict[str, object] = {}
+
+    class CapturingPipeline:
+        def active_domain(self) -> str:
+            return "it"
+
+        def run(self, query: str, domain: str | None, emit, revision: str | None = None):
+            seen["domain"] = domain
+            seen["revision"] = revision
+            return {"text": "ok", "revision": revision}
+
+    store.create("q_active", "", "вопрос")
+    queue.submit(Task(task_id="q_active", domain="", query="вопрос"))
+    worker = QueryWorker(
+        queue=queue,
+        store=store,
+        pipeline=CapturingPipeline(),
+        revisions=_StubRevisions(),
+    )
+    assert worker.process_one() is True
+    assert seen == {"domain": "it", "revision": "revA"}
 
 
 def test_worker_metrics_snapshot_includes_revisions(tmp_path: Path, caplog) -> None:

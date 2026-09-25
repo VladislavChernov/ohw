@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
@@ -53,9 +54,10 @@ class OpenAICompatibleAdapter(LLMInference):
             method="POST",
         )
         try:
+            deadline = time.monotonic() + self._timeout_s if self._timeout_s > 0 else None
             with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
                 if stream:
-                    yield from self._iter_stream(resp)
+                    yield from self._iter_stream(resp, deadline)
                 else:
                     payload = json.loads(resp.read().decode("utf-8"))
                     content = payload["choices"][0]["message"]["content"]
@@ -66,8 +68,10 @@ class OpenAICompatibleAdapter(LLMInference):
             raise RuntimeError(f"LLM недоступен ({self._base_url}): {exc}") from exc
 
     @staticmethod
-    def _iter_stream(resp: Any) -> Iterator[str]:
+    def _iter_stream(resp: Any, deadline: float | None = None) -> Iterator[str]:
         for raw_line in resp:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("LLM stream timeout")
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):
                 continue
@@ -99,9 +103,15 @@ class FakeLLM(LLMInference):
     не теряют пробелов).
     """
 
-    def __init__(self, text: str = "Ответ прототипа: детерминированный фейк без LLM.", by_words: bool = True) -> None:
+    def __init__(
+        self,
+        text: str = "Ответ прототипа: детерминированный фейк без LLM.",
+        by_words: bool = True,
+        is_fake: bool = True,
+    ) -> None:
         self._text = text
         self._deltas = re.split(r"(\s+)", text) if (by_words and text) else [text]
+        self.is_fake = is_fake
 
     def generate(self, prompt: str, system: str = "", stream: bool = True) -> Iterator[str]:
         yield from self._deltas

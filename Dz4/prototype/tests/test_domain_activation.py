@@ -20,26 +20,24 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from graphrag_proto.glossary_service.app import create_app as create_glossary_app
-from graphrag_proto.retrieval.profile import DomainProfileLoader
+from graphrag_proto.retrieval.profile import DomainProfileLoader, ProfileError
 
 IT_PROFILE: dict[str, Any] = {
     "profile": {"name": "it"},
-    "ontology": {"node_types": [{"type": "Requirement"}]},
     "context_assembly": {"max_tokens": 4096},
 }
 
 LIBRARY_PROFILE: dict[str, Any] = {
     "profile": {"name": "library"},
-    "ontology": {"node_types": [{"type": "Author"}]},
     "context_assembly": {"max_tokens": 2048},
 }
 
 CINEMA_PROFILE: dict[str, Any] = {
     "profile": {"name": "cinema"},
-    "ontology": {"node_types": [{"type": "Film"}]},
     "context_assembly": {"max_tokens": 2048},
 }
 
@@ -121,12 +119,28 @@ def test_loader_falls_back_when_config_unreachable(tmp_path: Path) -> None:
     profiles = tmp_path / "domain_profiles"
     profiles.mkdir()
     (profiles / "domain_profile.it.yaml").write_text(
-        "profile:\n  name: it\nontology:\n  node_types: [{type: Requirement}]\n",
+        "profile:\n  name: it\ncontext_assembly:\n  max_tokens: 4096\n",
         encoding="utf-8",
     )
     loader = DomainProfileLoader(config_url="http://127.0.0.1:1", profiles_dir=profiles)
     assert loader.active_domain() == "it"
     assert loader.load()["profile"]["name"] == "it"
+
+
+def test_loader_strict_does_not_fall_back_when_config_unreachable(tmp_path: Path) -> None:
+    profiles = tmp_path / "domain_profiles"
+    profiles.mkdir()
+    (profiles / "domain_profile.it.yaml").write_text(
+        "profile:\n  name: it\ncontext_assembly:\n  max_tokens: 4096\n",
+        encoding="utf-8",
+    )
+    loader = DomainProfileLoader(
+        config_url="http://127.0.0.1:1",
+        profiles_dir=profiles,
+        strict=True,
+    )
+    with pytest.raises(ProfileError):
+        loader.load("it")
 
 
 def test_glossary_resolves_via_active_domain(tmp_path: Path) -> None:

@@ -1,20 +1,26 @@
 # Dz4: Гибридная RAG
 
 Учебный прототип доменно-агностичной RAG-системы: графовый и векторный поиск
-в Neo4j, генерация ответа локальной LLM через llama.cpp, стриминг и источники.
+через независимые адаптеры (Neo4j — выбранный backend прототипа, не обязательная
+архитектурная привязка), генерация ответа локальной LLM через llama.cpp, стриминг и источники.
 Предметная область задаётся YAML-профилем и глоссарием (`it`, `library`, `cinema`).
 Технологии изолированы адаптерами; это валидационный контур, не production-система.
 Архитектурная концепция описывает также возможности, ещё не реализованные в прототипе.
 
-Реализованы Config/Glossary, девятиэтапный Ingestion с COMMIT в Neo4j,
-асинхронный Query (Valkey → worker → SSE), Streamlit-демо, Topology Orchestrator
-и расширяемые чанкеры, в том числе плагины через `graphrag.chunkers`.
+Реализованы Config/Glossary, primitive Ingestion с optional graph enrichment,
+асинхронный Query (Valkey → worker → SSE), vector-first hybrid retrieval,
+Streamlit-демо, Topology Orchestrator и расширяемые чанкеры. Redis/Valkey и offline projection
+настраиваются через Topology Configurator (`/api/v1/config/redis` и
+`/api/v1/config/projection`); lease projection по умолчанию 300 секунд.
 
 **Ограничения:** основной Compose использует `EMBEDDER=deterministic` и
 `RERANKER=noop`. Хэш-эмбеддинги позволяют проверить интеграцию, но не качество
 семантического поиска. Запуск профилей `embeddings`/`reranker` сам по себе
 не переключает адаптеры клиентов: нужна согласованная настройка индексации и
 поиска; при смене эмбеддера существующие документы необходимо переиндексировать.
+Полноценные outbox, dual-generation и автоматическая переиндексация после смены
+профиля/онтологии отложены на M6-Growth / pre-connectors; до этого этапа профиль
+загруженного корпуса считается неизменным.
 Демо загружает txt/md; бинарная загрузка PDF через этот API не предусмотрена.
 Topology UI и конфигуратор — задел; monitoring в Compose закомментирован.
 
@@ -67,7 +73,7 @@ Topology UI и конфигуратор — задел; monitoring в Compose з
 
 **Архитектурная концепция (6 документов):**
 1. [01. Онтология и Спецификация Domain Profile](./docs/01_ontology_and_domain_profile.md) — описание узлов, связей и YAML-конфигуратора.
-2. [02. Регламент Ingestion Pipeline и Normalizer v3](./docs/02_pipeline_and_normalizer.md) — 9 этапов загрузки, контекстная канонизация Big-O и валидатор.
+2. [02. Регламент Primitive Ingestion и optional enrichment](./docs/02_pipeline_and_normalizer.md) — документ, chunks, vectors и разреженный context graph.
 3. [03. Стратегия Ретривера и Слияния контекста](./docs/03_retriever.md) — 7 шагов цикла генерации, реранкер и вытеснение лимитов токенов.
 4. [04. Конфигурация Сервисов и Рантайм API](./docs/04_services_config.md) — изолированная сеть ohw_net, эндпоинты Config Service и глоссарии.
 5. [05. Журнал архитектурных решений (ADR)](./docs/05_adr_log.md) — обоснование выбора стека и платформенного подхода.

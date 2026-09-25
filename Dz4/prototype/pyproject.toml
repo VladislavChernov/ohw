@@ -23,6 +23,7 @@ dependencies = [
 graphrag-config = "graphrag_proto.config_service.app:main"
 graphrag-glossary = "graphrag_proto.glossary_service.app:main"
 graphrag-ingestion = "graphrag_proto.ingestion_service.app:main"
+graphrag-projection = "graphrag_proto.ingestion_service.projection:main"
 graphrag-query-api = "graphrag_proto.query_service.app:main"
 graphrag-query-worker = "graphrag_proto.query_service.worker:main"
 graphrag-demo-ui = "graphrag_proto.demo_ui.cli:main"
@@ -46,6 +47,7 @@ testpaths = ["tests"]
 addopts = "-m 'not e2e'"
 markers = [
     "e2e: сквозной прогон против живого стека (запускать через infra/scripts/run_demo_e2e.sh)",
+    "live: проверка против живого внешнего сервиса (Neo4j/Redis); по умолчанию пропускается",
 ]
 
 [tool.ruff]

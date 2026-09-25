@@ -15,13 +15,14 @@ S6/`topology_poll_errors_total` ревью №7) — деградация не �
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
-from typing import Any
 
 import requests
 
-_INGESTION_DEFAULT_URL = "http://ingestion:8002"
+_INGESTION_DEFAULT_URL = "http://ingestion-api:8002"
+_REVISION_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 class RevisionClient:
@@ -64,11 +65,17 @@ class RevisionClient:
             timeout=self._timeout_s,
         )
         response.raise_for_status()
-        body: dict[str, Any] = response.json()
+        body = response.json()
+        if not isinstance(body, dict):
+            raise TypeError(f"неожиданный ответ revision: {body!r}")
+        if "revision" not in body:
+            raise KeyError("revision отсутствует в ответе")
         revision = body.get("revision")
         updated_at = body.get("updated_at")
-        if revision is not None and not isinstance(revision, str):
-            raise TypeError(f"неожиданная revision: {revision!r}")
+        if revision is not None and (
+            not isinstance(revision, str) or not _REVISION_RE.fullmatch(revision)
+        ):
+            raise ValueError(f"неожиданная revision: {revision!r}")
         if updated_at is not None and not isinstance(updated_at, str):
             raise TypeError(f"неожиданный updated_at: {updated_at!r}")
         return revision, updated_at

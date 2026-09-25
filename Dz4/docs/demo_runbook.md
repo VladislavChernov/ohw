@@ -124,6 +124,55 @@ worker после следующего `TOPOLOGY_POLL_INTERVAL` работает
 LLM_BASE_URL) всегда из env. Возврат к исходной оси — `PUT` со значением из
 `infra_topology.yaml` (revision растёт) или сброс override'ов топологии.
 
+## Offline projection: lease в конфигураторе
+
+Offline rebuild не имеет CLI-настройки lease. Оператор меняет политику через
+Topology Configurator (`:8005`), а job читает effective значение при старте:
+
+```bash
+# текущая политика
+curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" \
+  http://localhost:8005/api/v1/config/projection
+
+# default 300s; минимум 30s
+curl -s -X PUT http://localhost:8005/api/v1/config/projection \
+  -H "X-API-Key: $GRAPH_AUTH_API_KEY" -H "Content-Type: application/json" \
+  -d '{"lease_seconds": 300}'
+```
+
+Изменение сохраняется в `topology_data` и применяется к следующему rebuild;
+уже запущенный job сохраняет lease, с которым начал. Renew выполняется после
+каждого source unit, поэтому длинный rebuild не обязан укладываться в один
+таймаут. Если lease потерян, state не публикует ложный `ready`; повторите job.
+
+Фактический запуск в Compose (единица `projection` использует те же
+`ingestion_data`/`projection_data`, что и ingestion/query):
+
+```bash
+# сперва поднять базовый стек и узнать актуальную data revision
+revision=$(curl -s -H "X-API-Key: $GRAPH_AUTH_API_KEY" \
+  "http://localhost:8002/api/v1/ingestion/revision?domain=it" | jq -r .revision)
+
+# JSONL с units монтируется оператором в /units
+docker compose --profile projection run --rm \
+  -v "D:/projection/units.jsonl:/units/units.jsonl:ro" \
+  projection graphrag-projection \
+  --units /units/units.jsonl --domain it --data-revision "$revision"
+```
+
+В блоке выше используется `jq`; в PowerShell замените подстановку на
+`$revision = (curl.exe -s -H "X-API-Key: $env:GRAPH_AUTH_API_KEY" "http://localhost:8002/api/v1/ingestion/revision?domain=it" | jq -r .revision)`
+и переносы строк — на backtick.
+
+В `units.jsonl` каждая запись должна иметь `domain`, `source_url`, `nodes`,
+`edges` и `vector_metadata`; `--stale-source-url` разрешён только для источника,
+которого уже нет среди active documents в registry.
+
+CLI требует `INGESTION_DB_PATH`, указывающий на существующую базу ingestion, и
+сверяет её `data_revision` домена с `--data-revision`: при расхождении job не
+стартует (exit `2`). Это защита от удаления живого источника из-за пустого или
+устаревшего registry.
+
 ## Домен: активация it → library → cinema (L1-01)
 
 Переключение активного домена — рантайм (`POST /api/v1/config/domain/activate`), без
@@ -308,8 +357,8 @@ docker compose exec valkey redis-cli DEL "query:sc:it"
 docker compose exec valkey sh -c 'redis-cli --scan --pattern "query:sc:*" | xargs -r redis-cli del'
 ```
 
-Плановый путь инвалидации по ревизии данных (epoch-bump `query:sc:<rev>:<domain>`) —
-на M4/M5 (ADR-025, п. 3); COMMIT индексации кэш не чистит.
+Инвалидация по ревизии данных реализована epoch-bump `query:sc:<rev>:<domain>` через
+`RevisionClient`; COMMIT индексации кэш напрямую не чистит.
 
 ## Ограничения демо (до M3)
 

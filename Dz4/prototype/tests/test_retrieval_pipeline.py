@@ -4,23 +4,29 @@
 
 from __future__ import annotations
 
-import threading
-import time
 from typing import Any
 
 import pytest
 
-from graphrag_proto.retrieval.adapters.base import GraphStoreProvider
+from graphrag_proto.retrieval.adapters.base import GraphStoreProvider, Reranker
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryVectorStore
 from graphrag_proto.retrieval.adapters.llm import FakeLLM
 from graphrag_proto.retrieval.adapters.reranker import NoOpRerankerAdapter
 from graphrag_proto.retrieval.pipeline import QueryPipeline, graph_search_enabled
-from graphrag_proto.retrieval.profile import DomainProfileLoader
+from graphrag_proto.retrieval.profile import DomainProfileLoader, ProfileError
+from graphrag_proto.retrieval.semantic_cache import InMemorySemanticCache
 
 PROFILE: dict[str, Any] = {
-    "ontology": {"node_types": [{"type": "Concept"}]},
-    "retrieval": {"graph_search_enabled": True, "cypher_template": "MATCH (n) RETURN n"},
+    "profile": {"name": "it"},
+    "retrieval": {
+        "graph_search_enabled": True,
+        "expansion_direction": "parent",
+        "max_depth": 2,
+        "max_fanout": 4,
+        "max_graph_nodes": 8,
+        "graph_boost": 0.2,
+    },
     "context_assembly": {"max_tokens": 4096},
 }
 
@@ -38,14 +44,57 @@ class _StubLoader(DomainProfileLoader):
 
 
 class _CountingGraphStore(GraphStoreProvider):
-    """Р“СЂР°С„РѕРІС‹Р№ РґРІРѕР№РЅРёРє, СЃС‡РёС‚Р°СЋС‰РёР№ РѕР±СЂР°С‰РµРЅРёСЏ Рє query()."""
+    def __init__(
+        self,
+        expansion_rows: list[dict[str, Any]] | None = None,
+        events: list[str] | None = None,
+    ) -> None:
+        self.expansion_calls: list[tuple[list[str], dict[str, Any]]] = []
+        self.events = events if events is not None else []
+        self._expansion_rows = expansion_rows if expansion_rows is not None else [
+            {
+                "node_id": "tag:it:parent",
+                "canonical_name": "Parent",
+                "path": ["tag:it:first", "tag:it:parent"],
+                "depth": 1,
+                "kind": "parent",
+                "origin": "user",
+                "confidence": 0.9,
+                "source_ids": ["src://graph"],
+                "chunk_ids": ["chk:graph"],
+                "domain": "it",
+            }
+        ]
 
-    def __init__(self) -> None:
-        self.queries: list[tuple[str, dict[str, Any] | None]] = []
+    def expand(
+        self,
+        context_ids: list[str],
+        *,
+        direction: str = "parent",
+        max_depth: int = 2,
+        max_fanout: int = 8,
+        max_nodes: int = 32,
+    ) -> list[dict[str, Any]]:
+        self.events.append("expand")
+        self.expansion_calls.append(
+            (
+                list(context_ids),
+                {
+                    "direction": direction,
+                    "max_depth": max_depth,
+                    "max_fanout": max_fanout,
+                    "max_nodes": max_nodes,
+                },
+            )
+        )
+        return [dict(row) for row in self._expansion_rows]
 
-    def query(self, cypher: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        self.queries.append((cypher, params))
-        return []
+    def query(
+        self,
+        cypher: str,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        raise AssertionError("graph query must not run")
 
     def upsert_nodes(self, nodes: list[dict[str, Any]]) -> None:
         return None
@@ -63,20 +112,77 @@ class _CountingGraphStore(GraphStoreProvider):
         return []
 
 
-def _pipeline(profile: dict[str, Any], graph: GraphStoreProvider) -> QueryPipeline:
+class _FixedReranker(Reranker):
+    def __init__(self, scores: list[float]) -> None:
+        self._scores = scores
+
+    def rerank(self, query: str, chunks: list[dict[str, Any]]) -> list[float]:
+        return list(self._scores)
+
+
+class _RecordingVectorStore(InMemoryVectorStore):
+    def __init__(
+        self,
+        rows: list[dict[str, Any]],
+        events: list[str] | None = None,
+    ) -> None:
+        super().__init__()
+        self.rows = rows
+        self.events = events if events is not None else []
+        self.calls: list[tuple[list[float], int, str | None]] = []
+
+    def vector_search(
+        self,
+        embedding: list[float],
+        top_k: int = 5,
+        domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        self.events.append("vector")
+        self.calls.append((embedding, top_k, domain))
+        return [dict(row) for row in self.rows[:top_k]]
+
+
+def _vector_rows() -> list[dict[str, Any]]:
+    return [
+        {
+            "chunk_id": "chk:first",
+            "score": 0.9,
+            "text": "first",
+            "source_url": "src://first",
+            "domain": "it",
+            "context_ids": ["tag:it:first"],
+            "custom": {"language": "en"},
+        },
+        {
+            "chunk_id": "chk:second",
+            "score": 0.8,
+            "text": "second",
+            "source_url": "src://second",
+            "domain": "it",
+            "tag_ids": ["tag:it:second"],
+        },
+    ]
+
+
+def _pipeline(
+    profile: dict[str, Any],
+    graph: GraphStoreProvider,
+    vector_store: InMemoryVectorStore | None = None,
+) -> QueryPipeline:
     return QueryPipeline(
         embedder=DeterministicEmbedder(),
         graph_store=graph,
-        vector_store=InMemoryVectorStore(),
+        vector_store=vector_store or InMemoryVectorStore(),
         reranker=NoOpRerankerAdapter(),
         llm=FakeLLM(text="РѕС‚РІРµС‚"),
         profile_loader=_StubLoader(profile),
     )
 
 
-def test_graph_search_enabled_default_true() -> None:
-    assert graph_search_enabled({"retrieval": {}})
-    assert graph_search_enabled({})
+def test_graph_search_experiment_disabled_by_default() -> None:
+    assert not graph_search_enabled({"retrieval": {}})
+    assert not graph_search_enabled({})
+    assert graph_search_enabled({"retrieval": {"graph_search_enabled": True}})
     assert not graph_search_enabled({"retrieval": {"graph_search_enabled": False}})
 
 
@@ -94,66 +200,85 @@ def test_graph_search_enabled_env_overrides_profile(monkeypatch: pytest.MonkeyPa
     assert graph_search_enabled(profile_on)
 
 
-def test_pipeline_disabled_skips_graph_store() -> None:
-    profile: dict[str, Any] = {
-        **PROFILE,
-        "retrieval": {**PROFILE["retrieval"], "graph_search_enabled": False},
-    }
+class _BrokenProfileLoader(DomainProfileLoader):
+    def load(self, domain: str | None = None) -> dict[str, Any]:
+        raise ProfileError("profile unavailable")
+
+
+def test_strict_pipeline_fails_on_profile_error() -> None:
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(),
+        vector_store=InMemoryVectorStore(),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_BrokenProfileLoader(),
+        strict_profile=True,
+    )
+    with pytest.raises(ProfileError):
+        pipe.run("база данных", domain="it", generate=False)
+
+
+def test_strict_pipeline_accepts_profile_without_ontology() -> None:
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(
+            {
+                "profile": {"name": "it"},
+                "retrieval": {"graph_search_enabled": False},
+            }
+        ),
+        strict_profile=True,
+    )
+
+    done = pipe.run("seed", domain="it", generate=False)
+
+    assert done["text"] == ""
+    assert done["graph_degraded"] is False
+
+
+def test_strict_pipeline_accepts_bounded_expansion_config() -> None:
     graph = _CountingGraphStore()
-    events: list[tuple[str, dict[str, Any]]] = []
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(
+            {
+                "profile": {"name": "it"},
+                "retrieval": {
+                    "graph_search_enabled": True,
+                    "expansion_direction": "related",
+                    "max_depth": 1,
+                    "max_fanout": 2,
+                    "max_graph_nodes": 3,
+                },
+            }
+        ),
+        strict_profile=True,
+    )
 
-    done = _pipeline(profile, graph).run("РєР°Рє СѓСЃС‚СЂРѕРµРЅР° Р±Р°Р·Р° РґР°РЅРЅС‹С…", emit=lambda t, p: events.append((t, p)))
+    done = pipe.run("seed", domain="it", generate=False)
 
-    assert graph.queries == []
-    assert ("status", {"stage": "graph", "enabled": False}) in events
-    assert done["retrieval_time_s"] >= 0.0
-    assert done["total_time_s"] >= done["retrieval_time_s"]
-
-
-def test_pipeline_enabled_calls_graph_store() -> None:
-    graph = _CountingGraphStore()
-    events: list[tuple[str, dict[str, Any]]] = []
-
-    _pipeline(PROFILE, graph).run("РєР°Рє СѓСЃС‚СЂРѕРµРЅР° Р±Р°Р·Р° РґР°РЅРЅС‹С…", emit=lambda t, p: events.append((t, p)))
-
-    assert len(graph.queries) == 1
-    assert ("status", {"stage": "graph", "enabled": True}) in events
-
-
-def test_pipeline_env_disabled_overrides_profile(monkeypatch: pytest.MonkeyPatch) -> None:
-    graph = _CountingGraphStore()
-    monkeypatch.setenv("RETRIEVAL_GRAPH_ENABLED", "false")
-
-    _pipeline(PROFILE, graph).run("как устроена база данных")
-
-    assert graph.queries == []
-
-
-class _ThreadRecordingVectorStore(InMemoryVectorStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.threads: list[int] = []
-
-    def vector_search(self, embedding: list[float], top_k: int = 5) -> list[dict[str, Any]]:
-        time.sleep(0.05)
-        self.threads.append(threading.get_ident())
-        return super().vector_search(embedding, top_k)
+    assert graph.expansion_calls == [
+        (
+            ["tag:it:first", "tag:it:second"],
+            {"direction": "related", "max_depth": 1, "max_fanout": 2, "max_nodes": 3},
+        )
+    ]
+    assert done["graph_degraded"] is False
 
 
-class _ThreadRecordingGraphStore(_CountingGraphStore):
-    def __init__(self) -> None:
-        super().__init__()
-        self.threads: list[int] = []
-
-    def query(self, cypher: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        time.sleep(0.05)
-        self.threads.append(threading.get_ident())
-        return super().query(cypher, params)
-
-
-def test_pipeline_reuses_shared_executor() -> None:
-    graph = _ThreadRecordingGraphStore()
-    vector = _ThreadRecordingVectorStore()
+def test_empty_graph_projection_is_degraded_and_not_cached() -> None:
+    cache = InMemorySemanticCache(threshold=0.80, ttl_s=0)
+    graph = _CountingGraphStore(expansion_rows=[])
+    vector = _RecordingVectorStore(_vector_rows())
     pipe = QueryPipeline(
         embedder=DeterministicEmbedder(),
         graph_store=graph,
@@ -161,12 +286,174 @@ def test_pipeline_reuses_shared_executor() -> None:
         reranker=NoOpRerankerAdapter(),
         llm=FakeLLM(text="ответ"),
         profile_loader=_StubLoader(PROFILE),
+        semantic_cache=cache,
     )
-    pipe.run("как устроена база данных")
-    pipe.run("как устроена база данных")
-    threads = set(graph.threads) | set(vector.threads)
-    assert len(threads) == 2  # один общий пул на оба прогона вместо потока на каждый run
-    pipe.shutdown()
+
+    first = pipe.run("seed", trace=True)
+    assert first["graph_degraded"] is True
+    assert first["trace"][1]["reason"] == "empty_projection"
+    assert cache.stats()["entries"] == 0
+
+    pipe.run("seed")
+    assert cache.stats()["entries"] == 0
+
+
+def test_graph_boost_is_applied_after_external_reranker() -> None:
+    graph = _CountingGraphStore(
+        expansion_rows=[
+            {
+                "node_id": "tag:it:first",
+                "canonical_name": "First",
+                "path": ["tag:it:first"],
+                "depth": 0,
+                "kind": "parent",
+                "source_ids": ["src://first"],
+                "domain": "it",
+            }
+        ]
+    )
+    vector = _RecordingVectorStore(_vector_rows())
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=vector,
+        reranker=_FixedReranker([0.1, 0.9]),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    done = pipe.run("seed", generate=False, trace=True)
+
+    rerank = next(event for event in done["trace"] if event.get("stage") == "rerank")
+    scores = {item["chunk_id"]: item["after"] for item in rerank["scores"]}
+    assert scores["chk:first"] == pytest.approx(0.3)
+    assert scores["chk:second"] == pytest.approx(0.9)
+
+
+def test_pipeline_disabled_preserves_vector_baseline() -> None:
+    profile: dict[str, Any] = {
+        **PROFILE,
+        "retrieval": {**PROFILE["retrieval"], "graph_search_enabled": False},
+    }
+    graph = _CountingGraphStore()
+    vector = _RecordingVectorStore(_vector_rows())
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    done = _pipeline(profile, graph, vector).run(
+        "seed",
+        emit=lambda t, p: events.append((t, p)),
+        generate=False,
+        trace=True,
+    )
+
+    assert graph.expansion_calls == []
+    assert vector.calls[0][1:] == (5, "it")
+    assert ("status", {"stage": "graph", "enabled": True}) not in events
+    graph_trace = next(event for event in done["trace"] if event.get("stage") == "graph")
+    assert graph_trace["enabled"] is False
+    assert graph_trace["skeleton_rows"] == []
+    vector_trace = next(event for event in done["trace"] if event.get("stage") == "vector")
+    assert [candidate["chunk_id"] for candidate in vector_trace["candidates"]] == [
+        "chk:first",
+        "chk:second",
+    ]
+    assert [
+        source["source_url"]
+        for source in done["sources"]
+        if source["axis"] == "vector"
+    ] == ["src://first", "src://second"]
+    assert done["graph_degraded"] is False
+    assert done["retrieval_time_s"] >= 0.0
+    assert done["total_time_s"] >= done["retrieval_time_s"]
+
+
+def test_pipeline_vector_results_seed_bounded_expansion() -> None:
+    order: list[str] = []
+    graph = _CountingGraphStore(events=order)
+    vector = _RecordingVectorStore(_vector_rows(), events=order)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    done = _pipeline(PROFILE, graph, vector).run(
+        "seed",
+        emit=lambda t, p: events.append((t, p)),
+        generate=False,
+        trace=True,
+    )
+
+    assert order == ["vector", "expand"]
+    assert graph.expansion_calls == [
+        (
+            ["tag:it:first", "tag:it:second"],
+            {"direction": "parent", "max_depth": 2, "max_fanout": 4, "max_nodes": 8},
+        )
+    ]
+    assert ("status", {"stage": "graph", "enabled": True}) in events
+    expansion_trace = next(
+        event for event in done["trace"] if event.get("stage") == "graph_expansion"
+    )
+    assert expansion_trace["seed_chunk_ids"] == ["chk:first", "chk:second"]
+    assert expansion_trace["context_ids"] == ["tag:it:first", "tag:it:second"]
+    assert expansion_trace["paths"] == [["tag:it:first", "tag:it:parent"]]
+    assert expansion_trace["depths"] == [1]
+    vector_trace = next(event for event in done["trace"] if event.get("stage") == "vector")
+    assert [candidate["chunk_id"] for candidate in vector_trace["candidates"]] == [
+        "chk:first",
+        "chk:second",
+    ]
+    assert {
+        "source_url": "src://graph",
+        "relevance": 1.0,
+        "axis": "graph",
+    } in done["sources"]
+    assert done["graph_degraded"] is False
+
+
+def test_pipeline_env_disabled_overrides_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    graph = _CountingGraphStore()
+    vector = _RecordingVectorStore(_vector_rows())
+    monkeypatch.setenv("RETRIEVAL_GRAPH_ENABLED", "false")
+
+    _pipeline(PROFILE, graph, vector).run("seed", generate=False)
+
+    assert graph.expansion_calls == []
+    assert graph.events == []
+
+
+def test_pipeline_graph_failure_falls_back_to_vector_baseline() -> None:
+    class FailingGraphStore(_CountingGraphStore):
+        def expand(
+            self,
+            context_ids: list[str],
+            *,
+            direction: str = "parent",
+            max_depth: int = 2,
+            max_fanout: int = 8,
+            max_nodes: int = 32,
+        ) -> list[dict[str, Any]]:
+            super().expand(
+                context_ids,
+                direction=direction,
+                max_depth=max_depth,
+                max_fanout=max_fanout,
+                max_nodes=max_nodes,
+            )
+            raise RuntimeError("graph unavailable")
+
+    graph = FailingGraphStore()
+    vector = _RecordingVectorStore(_vector_rows())
+
+    done = _pipeline(PROFILE, graph, vector).run("seed", generate=False, trace=True)
+
+    assert done["graph_degraded"] is True
+    assert [
+        source["source_url"]
+        for source in done["sources"]
+        if source["axis"] == "vector"
+    ] == ["src://first", "src://second"]
+    degraded_trace = next(
+        event for event in done["trace"] if event.get("stage") == "graph_expansion"
+    )
+    assert degraded_trace["degraded"] is True
 
 
 def test_pipeline_shutdown_rejects_new_runs() -> None:
@@ -177,8 +464,6 @@ def test_pipeline_shutdown_rejects_new_runs() -> None:
 
 
 # --- Semantic Cache (бандл 3/3) ----------------------------------------
-
-from graphrag_proto.retrieval.semantic_cache import InMemorySemanticCache
 
 
 class _CountingLLM:
@@ -199,13 +484,17 @@ class _CountingLLM:
 def _pipeline_with_cache(
     cache: InMemorySemanticCache | None = None,
 ) -> QueryPipeline:
+    profile = {
+        **PROFILE,
+        "retrieval": {**PROFILE["retrieval"], "graph_search_enabled": False},
+    }
     return QueryPipeline(
         embedder=DeterministicEmbedder(),
         graph_store=_CountingGraphStore(),
         vector_store=InMemoryVectorStore(),
         reranker=NoOpRerankerAdapter(),
         llm=FakeLLM(text="ответ"),
-        profile_loader=_StubLoader(PROFILE),
+        profile_loader=_StubLoader(profile),
         semantic_cache=cache,
     )
 

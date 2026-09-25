@@ -40,12 +40,13 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
+
+from graphrag_proto.redis_config import RedisSettings, load_redis_settings
 
 _DEFAULT_THRESHOLD = 0.85
 _DEFAULT_TTL_S = 3600.0
-_REDIS_DEFAULT_URL = "redis://valkey:6379/0"
 _KEY_PREFIX = "query:sc"
 _META_SUFFIX = ":meta"
 
@@ -252,14 +253,18 @@ class RedisSemanticCache(SemanticCache):
 
     def __init__(
         self,
-        url: str = _REDIS_DEFAULT_URL,
+        url: str | None = None,
         threshold: float = _DEFAULT_THRESHOLD,
         ttl_s: float = _DEFAULT_TTL_S,
         client: Any = None,
+        settings: RedisSettings | None = None,
     ) -> None:
         self.threshold = float(threshold)
         self.ttl_s = float(ttl_s)
-        self._url = url
+        self._settings = settings or load_redis_settings()
+        if url is not None:
+            self._settings = replace(self._settings, url=url)
+        self._url = self._settings.url
         self._client = client
 
     def _redis(self) -> Any:
@@ -267,7 +272,8 @@ class RedisSemanticCache(SemanticCache):
             from redis import Redis  # ленивый импорт — redis не обязателен для тестов/демо
 
             self._client = Redis.from_url(
-                self._url, decode_responses=True, socket_timeout=2
+                self._url,
+                **self._settings.client_kwargs(decode_responses=True),
             )
         return self._client
 

@@ -12,6 +12,7 @@ from graphrag_proto.ingestion_service.storage.registry import (
     DocumentRegistry,
     JobStore,
 )
+from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
 
 API_KEY = "changeme"
 
@@ -290,7 +291,14 @@ def test_executor_limits_concurrent_jobs(tmp_path: Path) -> None:
     reg = DocumentRegistry(tmp_path / "r.db")
     src = tmp_path / "in.txt"
     src.write_text("какой-то текст документа для обработки", encoding="utf-8")
-    ex = Executor(jobs, reg, glossary_url="", max_concurrent=1)
+    ex = Executor(
+        jobs,
+        reg,
+        glossary_url="",
+        graph_store=InMemoryGraphStore(),
+        vector_store=InMemoryVectorStore(),
+        max_concurrent=1,
+    )
     assert ex._slots.acquire(blocking=False) is True
     try:
         assert ex.start("blocked", src, "src://blocked", "it", "txt") is False
@@ -299,6 +307,53 @@ def test_executor_limits_concurrent_jobs(tmp_path: Path) -> None:
     jobs.create("ok", "src://ok", "it", "txt")
     assert ex.start("ok", src, "src://ok", "it", "txt") is True
     assert wait_until(lambda: jobs.get("ok")["status"] == "succeeded")
+
+
+def test_executor_loads_profile_once_per_job(tmp_path: Path) -> None:
+    from graphrag_proto.ingestion_service.app import Executor
+
+    calls: list[str] = []
+
+    def fetcher(domain: str) -> dict[str, object]:
+        calls.append(domain)
+        return {
+            "chunking": {
+                "strategy": "sliding_window",
+                "chunk_size": 512,
+                "overlap": 64,
+            }
+        }
+
+    jobs = JobStore(tmp_path / "jobs.db")
+    registry = DocumentRegistry(tmp_path / "registry.db")
+    source = tmp_path / "source.txt"
+    source.write_text("текст для профиля", encoding="utf-8")
+    executor = Executor(
+        jobs,
+        registry,
+        glossary_url="",
+        graph_store=InMemoryGraphStore(),
+        vector_store=InMemoryVectorStore(),
+        profile_fetcher=fetcher,
+    )
+    jobs.create("job", "src://profile.txt", "it", "txt")
+    assert executor.start("job", source, "src://profile.txt", "it", "txt") is True
+    assert wait_until(lambda: jobs.get("job")["status"] == "succeeded")
+    jobs.create("job-noop", "src://profile.txt", "it", "txt")
+    assert executor.start("job-noop", source, "src://profile.txt", "it", "txt") is True
+    assert wait_until(lambda: jobs.get("job-noop")["status"] == "succeeded")
+    assert calls == ["it"]
+
+
+def test_executor_preserves_legacy_positional_max_concurrent(tmp_path: Path) -> None:
+    from graphrag_proto.ingestion_service.app import Executor
+
+    jobs = JobStore(tmp_path / "legacy-jobs.db")
+    registry = DocumentRegistry(tmp_path / "legacy-registry.db")
+    executor = Executor(jobs, registry, "", None, None, None, None, 1)
+    assert executor._slots._value == 1
+    assert executor._slots.acquire(blocking=False) is True
+    executor._slots.release()
 
 
 def test_executor_rejects_invalid_max_concurrent(tmp_path: Path) -> None:
@@ -346,6 +401,8 @@ def test_runner_normしalize_without_glossary_keeps_entities(tmp_path: Path) -> 
     from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
 
     reg = DocumentRegistry(tmp_path / "r.db")
+    graph = InMemoryGraphStore()
+    vector = InMemoryVectorStore()
     reader = {"txt": TxtReader()}
     analyzer = Analyzer(
         [
@@ -357,7 +414,12 @@ def test_runner_normしalize_without_glossary_keeps_entities(tmp_path: Path) -> 
             DedupStage(),
             ContractStage(),
             ValidateStage(),
-            CommitStage(reg),
+            CommitStage(
+                reg,
+                graph_store=graph,
+                vector_store=vector,
+                graph_optional=True,
+            ),
         ]
     )
     src = tmp_path / "d.txt"

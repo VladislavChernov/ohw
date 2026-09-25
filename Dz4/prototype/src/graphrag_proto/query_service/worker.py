@@ -27,6 +27,13 @@ from graphrag_proto.retrieval.pipeline import QueryPipeline
 _LOG = logging.getLogger("graphrag_proto.query_service.worker")
 
 
+def _llm_budget_s() -> float:
+    try:
+        return max(0.0, float(os.environ.get("LLM_TIMEOUT_S", "600")))
+    except (TypeError, ValueError):
+        return 600.0
+
+
 class QueryWorker:
     def __init__(
         self,
@@ -52,7 +59,7 @@ class QueryWorker:
         self._revisions = revisions
         self._backoff_base_s = max(0.1, backoff_base_s)
         self._backoff_max_s = max(self._backoff_base_s, backoff_max_s)
-        self._reclaim_timeout_s = max(1.0, reclaim_timeout_s)
+        self._reclaim_timeout_s = max(1.0, reclaim_timeout_s, _llm_budget_s() + 30.0)
         self._reclaim_interval_s = max(0.0, reclaim_interval_s)
         self._metrics_interval_s = max(0.0, metrics_interval_s)
 
@@ -90,8 +97,13 @@ class QueryWorker:
             self._queue.publish(task.task_id, event_type, payload)
 
         try:
-            revision = self._revisions.revision(task.domain) if self._revisions is not None else None
-            self._pipeline.run(task.query, task.domain or None, emit, revision=revision)
+            active_domain = task.domain or self._pipeline.active_domain()
+            revision = (
+                self._revisions.revision(active_domain)
+                if self._revisions is not None
+                else None
+            )
+            self._pipeline.run(task.query, active_domain, emit, revision=revision)
         except Exception as exc:  # noqa: BLE001 - разнородные сбои пайплайна
             emit("error", {"code": "pipeline_error", "message": str(exc)})
             self._store.mark_failed(task.task_id, str(exc))
@@ -183,6 +195,10 @@ class QueryWorker:
                 payload["cache_misses"] = stats.get("misses", 0)
             except Exception:  # noqa: BLE001 - снапшот не роняет воркер
                 _LOG.warning("metrics snapshot: cache stats недоступны", exc_info=True)
+        projection_metrics = getattr(self._pipeline, "projection_metrics", None)
+        snapshot = getattr(projection_metrics, "snapshot", None)
+        if callable(snapshot):
+            payload.update(snapshot())
         _LOG.info("trigger_metrics snapshot %s", json.dumps(payload, ensure_ascii=False))
 
 

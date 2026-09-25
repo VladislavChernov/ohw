@@ -30,8 +30,13 @@ from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     IngestStage,
     NormalizeStage,
     PipelineContext,
+    ProfileFetcher,
     ValidateStage,
     soft_delete_source,
+)
+from graphrag_proto.ingestion_service.projection import (
+    ProjectionStateStore,
+    try_build_projection_state_store,
 )
 from graphrag_proto.ingestion_service.readers.registry import factory as readers_factory
 from graphrag_proto.ingestion_service.storage.registry import (
@@ -43,8 +48,10 @@ from graphrag_proto.retrieval.adapters.base import Embedder
 from graphrag_proto.retrieval.adapters.factory import (
     build_embedder,
     build_graph_store,
+    build_llm,
     build_vector_store,
 )
+from graphrag_proto.retrieval.profile import DomainProfileLoader
 
 HOST = "0.0.0.0"
 PORT = 8002
@@ -72,6 +79,10 @@ def _max_concurrent() -> int:
         return 2
 
 
+def _strict_profile_loading() -> bool:
+    return os.environ.get("EXTRACT_LLM", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def build_analyzer(
     registry: DocumentRegistry,
     glossary_url: str,
@@ -79,19 +90,33 @@ def build_analyzer(
     vector_store: Any = None,
     embedder: Embedder | None = None,
     chunker: Chunker | None = None,
+    llm: Any | None = None,
+    profile_fetcher: ProfileFetcher | None = None,
+    projection_state_store: ProjectionStateStore | None = None,
 ) -> Analyzer:
     readers = {doc_type: readers_factory(doc_type) for doc_type in sorted(ALLOWED_DOC_TYPES)}
     return Analyzer(
         [
             IngestStage(readers),
-            ChunkStage(chunker),
+            ChunkStage(chunker, profile_fetcher=profile_fetcher),
             EmbedStage(embedder or build_embedder()),
-            ExtractStage(),
+            ExtractStage(
+                llm=llm if llm is not None else build_llm(),
+                profile_fetcher=profile_fetcher,
+                optional_failure=True,
+            ),
             NormalizeStage(glossary_url),
             DedupStage(),
             ContractStage(),
             ValidateStage(),
-            CommitStage(registry, graph_store=graph_store, vector_store=vector_store),
+            CommitStage(
+                registry,
+                graph_store=graph_store,
+                vector_store=vector_store,
+                profile_fetcher=profile_fetcher,
+                graph_optional=True,
+                projection_state_store=projection_state_store,
+            ),
         ]
     )
 
@@ -109,11 +134,15 @@ class Executor:
         embedder: Embedder | None = None,
         chunker: Chunker | None = None,
         max_concurrent: int = 2,
+        llm: Any | None = None,
+        profile_fetcher: ProfileFetcher | None = None,
+        projection_state_store: ProjectionStateStore | None = None,
     ) -> None:
         if max_concurrent < 1:
             raise ValueError("max_concurrent должен быть >= 1")
         self._jobs = jobs
         self._registry = registry
+        self._profile_fetcher = profile_fetcher
         self._slots = threading.BoundedSemaphore(max_concurrent)
         self._analyzer = build_analyzer(
             registry,
@@ -122,6 +151,9 @@ class Executor:
             vector_store=vector_store,
             embedder=embedder,
             chunker=chunker,
+            llm=llm,
+            profile_fetcher=profile_fetcher,
+            projection_state_store=projection_state_store,
         )
 
     def start(
@@ -131,13 +163,16 @@ class Executor:
         source_url: str,
         domain: str,
         doc_type: str,
+        tags: list[dict[str, Any]] | None = None,
+        links: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> bool:
         """Запускает фоновый поток; False, если все слоты заняты (429)."""
         if not self._slots.acquire(blocking=False):
             return False
         thread = threading.Thread(
             target=self._run,
-            args=(job_id, target, source_url, domain, doc_type),
+            args=(job_id, target, source_url, domain, doc_type, tags or [], links or [], metadata or {}),
             daemon=True,
         )
         thread.start()
@@ -150,6 +185,9 @@ class Executor:
         source_url: str,
         domain: str,
         doc_type: str,
+        tags: list[dict[str, Any]],
+        links: list[dict[str, Any]],
+        metadata: dict[str, Any],
     ) -> None:
         ctx = PipelineContext(
             job_id=job_id,
@@ -157,6 +195,9 @@ class Executor:
             doc_type=doc_type,
             source_url=source_url,
             source_path=str(target),
+            tags=tags,
+            links=links,
+            metadata=metadata,
         )
         try:
             for stage_name in STAGES:
@@ -165,6 +206,8 @@ class Executor:
                     return
                 self._jobs.update_stage(job_id, stage_name)
                 self._analyzer.run_one(stage_name, ctx)
+                if stage_name == "INGEST":
+                    self._analyzer.try_noop(ctx)
             self._jobs.finish(job_id, "succeeded")
         except Exception as exc:  # noqa: BLE001 - разнородные источники сбоев этапов
             self._jobs.finish(job_id, "failed", error=str(exc))
@@ -193,12 +236,19 @@ def create_app(
     registry = DocumentRegistry(db_path)
     graph_store = build_graph_store()
     vector_store = build_vector_store()
+    projection_state_store = try_build_projection_state_store()
+    profile_loader = DomainProfileLoader(
+        config_url=os.environ.get("CONFIG_URL", ""),
+        strict=False,
+    )
     executor = Executor(
         jobs,
         registry,
         glossary_url,
         graph_store=graph_store,
         vector_store=vector_store,
+        profile_fetcher=profile_loader.load,
+        projection_state_store=projection_state_store,
         max_concurrent=max_concurrent,
     )
 
@@ -218,6 +268,11 @@ def create_app(
         domain = payload.get("domain")
         doc_type = payload.get("doc_type")
         content = payload.get("content")
+        tags = payload.get("tags") or []
+        links = payload.get("links") or []
+        metadata = payload.get("metadata") or {}
+        if not isinstance(tags, list) or not isinstance(links, list) or not isinstance(metadata, dict):
+            raise HTTPException(status_code=422, detail="tags/links должны быть списками, metadata — mapping")
         if not source_url or not domain or not doc_type:
             raise HTTPException(status_code=422, detail="source_url/domain/doc_type обязательны")
         if doc_type not in ALLOWED_DOC_TYPES:
@@ -235,7 +290,16 @@ def create_app(
         if content is not None:
             raw = content.encode("utf-8") if isinstance(content, str) else content
             target.write_bytes(raw)
-        if not executor.start(job_id, target, source_url, domain, doc_type):
+        if not executor.start(
+            job_id,
+            target,
+            source_url,
+            domain,
+            doc_type,
+            tags=tags,
+            links=links,
+            metadata=metadata,
+        ):
             jobs.finish(job_id, "failed", error="перегрузка: все слоты исполнения заняты")
             raise HTTPException(
                 status_code=429,
@@ -279,7 +343,14 @@ def create_app(
     @app.delete("/api/v1/ingestion/documents", dependencies=[Depends(require_key)])
     def delete_document(domain: str, source_url: str) -> dict[str, Any]:
         """Soft-delete источника (ADR-014): чанки снимаются с поиска (L2-05)."""
-        deleted = soft_delete_source(registry, graph_store, vector_store, domain, source_url)
+        deleted = soft_delete_source(
+            registry,
+            graph_store,
+            vector_store,
+            domain,
+            source_url,
+            projection_state_store=projection_state_store,
+        )
         if not deleted:
             raise HTTPException(
                 status_code=404,

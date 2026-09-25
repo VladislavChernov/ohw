@@ -91,6 +91,15 @@ docker build -f Dockerfile.llm -t ohw/llm:prototype `
 # пример: заменить квант Q4_K_M на Q8_0 (ревизия и SHA-256 — с Hugging Face)
 ```
 
+### Настройка оператора
+
+Обычному пользователю lease/offline projection менять не нужно: значение по
+умолчанию безопасно (`300s`), а graph остаётся optional. Оператор настраивает
+его в Topology Configurator через `GET/PUT /api/v1/config/projection`; отдельного
+CLI-флага нет. После изменения сохраняется override, а следующий rebuild
+использует новую политику. Точный запуск offline rebuild и работа с
+`--stale-source-url` описаны в [runbook](./demo_runbook.md#offline-projection-lease-в-конфигураторе).
+
 ### Режим без LLM (заглушка FakeLLM)
 
 **Зачем он нужен.** Воркер умеет выдавать полный ответ без всякой модели и GPU:

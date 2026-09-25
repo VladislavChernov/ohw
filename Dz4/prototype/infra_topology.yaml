@@ -43,6 +43,24 @@ endpoints:
   valkey:
     base: "redis://valkey:6379"
 
+# Runtime Redis/Valkey client settings. Query API/worker read this file through
+# INFRA_TOPOLOGY_PATH; Topology Orchestrator exposes the same section via
+# GET/PUT /api/v1/config/redis. Environment variables documented in docs/04
+# override individual fields for a deployment.
+redis:
+  url: "redis://valkey:6379/0"
+  socket_timeout_s: 2
+  socket_connect_timeout_s: 2
+  max_connections: 32
+  retry_on_timeout: false
+  health_check_interval_s: 30
+  read_block_ms: 1000
+
+# Offline projection lease. The Topology Configurator exposes this section via
+# GET/PUT /api/v1/config/projection; the job renews the lease per source unit.
+projection:
+  lease_seconds: 300
+
 # Настройки запуска инсталляции.
 startup:
   auto_apply_adapters: true    # применять providers из этого файла при старте

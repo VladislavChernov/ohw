@@ -74,7 +74,10 @@ def check_snapshot(snapshot, manifest_path=None):
     return locked
 
 
-def api(url, body=None, timeout=30):
+def api(url, body=None, timeout=None):
+    # Таймаут HTTP-клиента — из env (Go-style харнес: без зашитых цифр в исходнике).
+    if timeout is None:
+        timeout = int(os.environ.get("HTTP_CLIENT_TIMEOUT_S", "30"))
     key = os.environ.get("X_API_KEY") or os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"X-API-Key": key, "Content-Type": "application/json"})
@@ -90,7 +93,7 @@ def upload(snapshot, out, manifest_path=None):
     health = api(embeddings + "/health")
     assert health["mode"] == "sentence-transformer" and health["dimensions"] == 1024
     api(config + "/api/v1/config/domain/activate", {"domain": "it"})
-    vector = api(embeddings + "/api/v1/embed", {"text": "Проверка эмбеддингов проекта", "domain": "it"}, timeout=1800)
+    vector = api(embeddings + "/api/v1/embed", {"text": "Проверка эмбеддингов проекта", "domain": "it"})
     assert len(vector["vector"]) == 1024
     receipt = {"corpus_version": locked["corpus_version"], "jobs": []}
     for doc in locked["documents"]:

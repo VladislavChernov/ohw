@@ -111,11 +111,31 @@ def test_required_contours_include_backends_when_configured(monkeypatch: Any) ->
     assert {"ingestion-api", "neo4j", "embeddings-service", "reranker-service", "llm"} <= names
 
 
+def test_required_contours_include_config_and_judge_llm(monkeypatch: Any) -> None:
+    monkeypatch.setenv("CONFIG_URL", "http://config-service:8001")
+    monkeypatch.setenv("LLM_ADAPTER", "fake")
+    monkeypatch.setenv("EVAL_LLM_ADAPTER", "openai")
+    monkeypatch.delenv("GRAPH_STORE", raising=False)
+    monkeypatch.delenv("VECTOR_STORE", raising=False)
+    monkeypatch.delenv("EMBEDDER", raising=False)
+    names = {c["name"] for c in _run_eval.required_contours()}
+    assert {"config-service", "llm"} <= names
+
+
+def test_retrieval_only_keeps_ingestion_llm_contour(monkeypatch: Any) -> None:
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    monkeypatch.setenv("LLM_ADAPTER", "fake")
+    monkeypatch.setenv("EVAL_LLM_ADAPTER", "none")
+    contours = _run_eval.required_contours(include_generation=False, include_ingestion=True)
+    assert "llm" in {contour["name"] for contour in contours}
+
+
 def test_preflight_writes_log_and_verdict(monkeypatch: Any, tmp_path: Path) -> None:
     server, port = _start_http(200)
     try:
         monkeypatch.setattr(_run_eval, "INGESTION_URL", f"http://127.0.0.1:{port}")
         monkeypatch.setenv("LLM_ADAPTER", "fake")
+        monkeypatch.setenv("EVAL_LLM_ADAPTER", "fake")
         monkeypatch.delenv("GRAPH_STORE", raising=False)
         monkeypatch.delenv("EMBEDDER", raising=False)
         ok = _run_eval.preflight(tmp_path, timeout_s=2)

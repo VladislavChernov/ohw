@@ -29,6 +29,7 @@ ontology:
       type: "SIMILAR_TO"
 
 extraction:
+  llm_enabled: false
   prompt_template:
     id: "extract_cinema_v1"
     system: "Извлеки сущности и связи по онтологии cinema (фильмы, режиссёры, жанры)."

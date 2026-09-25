@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from graphrag_proto.ingestion_service.pipeline import orchestrator as orchestrator_module
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     N_RETRY_COMMIT,
     CommitStage,
@@ -81,6 +82,7 @@ class FakeTransientGraph(InMemoryGraphStore):
 
 
 SOURCE_ID = "src:it:src://d.txt"
+CONTEXT_NODE_ID = "tag:it:failed-entity"
 CHUNK_IDS = ["chk:a", "chk:b"]
 
 NODES: list[dict[str, Any]] = [
@@ -89,6 +91,16 @@ NODES: list[dict[str, Any]] = [
         {"node_id": chunk_id, "labels": ["Chunk"], "properties": {"text": chunk_id}}
         for chunk_id in CHUNK_IDS
     ],
+    {
+        "node_id": CONTEXT_NODE_ID,
+        "labels": ["ContextNode"],
+        "properties": {
+            "domain": "it",
+            "tag_id": CONTEXT_NODE_ID,
+            "source_ids": ["src://d.txt"],
+            "chunk_ids": ["chk:a"],
+        },
+    },
 ]
 EDGES: list[dict[str, Any]] = [
     {"from_id": SOURCE_ID, "to_id": chunk_id, "type": "CONTAINS", "properties": {}}
@@ -276,6 +288,21 @@ def test_best_effort_first_axis_transient_fails_without_compensation() -> None:
     assert graph.get_node(SOURCE_ID) is None, "транзакция графа откатилась"
 
 
+def test_compensation_failure_is_reported_as_uncompensated(monkeypatch: Any) -> None:
+    graph = InMemoryGraphStore()
+    vector = FakeTransientVector(fail_times=99, exc_factory=lambda: RuntimeError("vector failure"))
+
+    def fail_compensation(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("compensation failure")
+
+    monkeypatch.setattr(orchestrator_module, "_compensate", fail_compensation)
+    with pytest.raises(CommitStageError) as excinfo:
+        _write_best_effort(graph, vector)
+    assert excinfo.value.compensated is False
+    assert isinstance(excinfo.value.__cause__, RuntimeError)
+    assert str(excinfo.value.__cause__) == "vector failure"
+
+
 def test_compensate_removes_written_and_stale_chunks() -> None:
     """`_compensate` удаляет и записанные, и stale-чанки; Source остаётся."""
     graph = InMemoryGraphStore()
@@ -296,3 +323,29 @@ def test_compensate_removes_written_and_stale_chunks() -> None:
     assert graph.get_node("stale:x") is None
     assert graph.get_node(SOURCE_ID) is not None
     assert not vector._vectors, "векторы удалены, включая stale"
+
+
+def test_best_effort_compensation_removes_context_provenance() -> None:
+    graph = InMemoryGraphStore()
+    vector = FakeTransientVector(fail_times=99, exc_factory=lambda: RuntimeError("vector failure"))
+    stage = CommitStage(registry=None, graph_store=graph, vector_store=vector)
+
+    with pytest.raises(CommitStageError) as excinfo:
+        stage._write_best_effort(
+            graph,
+            vector,
+            NODES,
+            EDGES,
+            VECTORS,
+            [],
+            CHUNK_IDS,
+            source_domain="it",
+            source_url="src://d.txt",
+        )
+
+    assert excinfo.value.compensated is True
+    context_node = graph.get_node(CONTEXT_NODE_ID)
+    assert context_node is not None
+    assert context_node["_labels"] == ["ContextNode"]
+    assert context_node["source_ids"] == []
+    assert context_node["chunk_ids"] == []

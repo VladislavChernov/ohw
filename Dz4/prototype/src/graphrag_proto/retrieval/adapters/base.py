@@ -25,6 +25,19 @@ VectorTx = AbstractContextManager["VectorStoreProvider"]
 
 # A-2 (ADR-024): честный контракт атомарности COMMIT. Ровно два значения, без алгебры типов.
 Consistency = Literal["atomic", "best_effort"]
+VECTOR_METADATA_BACKFILL_KEYS = frozenset(
+    {
+        "context_ids",
+        "tag_ids",
+        "source_ids",
+        "chunk_ids",
+        "aliases",
+        "enrichment_origin",
+        "projection_revision",
+        "projection_retry",
+        "custom",
+    }
+)
 
 
 class AtomicBatch(Protocol):
@@ -39,6 +52,12 @@ class AtomicBatch(Protocol):
     def delete_node(self, node_id: str) -> bool: ...
     def upsert_vectors(self, items: list[dict[str, Any]]) -> None: ...
     def delete_vectors(self, chunk_ids: list[str]) -> None: ...
+    def remove_source_from_entities(
+        self,
+        domain: str,
+        source_url: str,
+        chunk_ids: list[str],
+    ) -> None: ...
 
 
 class Embedder(ABC):
@@ -68,9 +87,21 @@ class LLMInference(ABC):
 class GraphStoreProvider(ABC):
     """Графовая ось (ADR-013): логические связи, обход, Cypher."""
 
-    @abstractmethod
     def query(self, cypher: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Выполнение графового Cypher-запроса (обход связей, расширение)."""
+        """Legacy read path; core retrieval uses expand."""
+        raise NotImplementedError("graph adapter does not provide query")
+
+    def expand(
+        self,
+        context_ids: list[str],
+        *,
+        direction: str = "parent",
+        max_depth: int = 2,
+        max_fanout: int = 8,
+        max_nodes: int = 32,
+    ) -> list[dict[str, Any]]:
+        """Bounded context expansion; returns empty when unsupported."""
+        return []
 
     @abstractmethod
     def upsert_nodes(self, nodes: list[dict[str, Any]]) -> None:
@@ -84,9 +115,23 @@ class GraphStoreProvider(ABC):
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         """Получение узла по node_id."""
 
+    def verify_edge(self, from_id: str, to_id: str, edge_type: str) -> bool:
+        """Проверить наличие ребра после projection upsert."""
+        del from_id, to_id, edge_type
+        return True
+
     @abstractmethod
     def delete_node(self, node_id: str) -> bool:
         """Удаление узла по node_id (вместе с инцидентными рёбрами)."""
+
+    def remove_source_from_entities(
+        self,
+        domain: str,
+        source_url: str,
+        chunk_ids: list[str],
+    ) -> None:
+        """Убрать soft-deleted source/chunk provenance из доменных узлов."""
+        return
 
     @abstractmethod
     def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
@@ -118,6 +163,10 @@ class GraphStoreProvider(ABC):
         `transaction()`-контекстами (единый процесс/журнал)."""
         return None
 
+    def ensure_schema(self, node_types: list[dict[str, Any]]) -> None:
+        """Legacy no-op retained for operator migrations; ingest never calls it."""
+        return
+
     def transient_aware(self) -> bool:
         """True — хранилище может бросать transient-ошибки (сеть/deadlock),
         которые имеют смысл ретраить (S1/S2, ADR-028). InMemory — False,
@@ -137,7 +186,12 @@ class VectorStoreProvider(ABC):
     """Векторная ось (ADR-013): косинусный поиск по единицам чанков."""
 
     @abstractmethod
-    def vector_search(self, embedding: list[float], top_k: int = 5) -> list[dict[str, Any]]:
+    def vector_search(
+        self,
+        embedding: list[float],
+        top_k: int = 5,
+        domain: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Косинусный поиск топ-K ближайших чанков."""
 
     @abstractmethod
@@ -147,6 +201,34 @@ class VectorStoreProvider(ABC):
     @abstractmethod
     def delete_vectors(self, chunk_ids: list[str]) -> None:
         """Снятие чанков с поиска (soft-delete, L2-05)."""
+
+    def update_vector_metadata(self, updates: list[dict[str, Any]]) -> int:
+        """Обновить только metadata существующих vector records.
+
+        В update можно передать ``replace=True``: списки разрешённых
+        enrichment-полей заменяются, а не объединяются со старыми значениями.
+        """
+        del updates
+        return 0
+
+    def get_vector_metadata(self, chunk_id: str) -> dict[str, Any] | None:
+        """Прочитать metadata vector record для verification backfill."""
+        del chunk_id
+        return None
+
+    def verify_projection(self, domain: str, projection_revision: str) -> bool:
+        """Проверить, что domain vectors принадлежат projection revision."""
+        del domain, projection_revision
+        return True
+
+    def list_chunk_ids_of_source(
+        self,
+        source_url: str,
+        domain: str | None = None,
+    ) -> list[str]:
+        """Chunk IDs одного источника для безопасной vector-only re-index."""
+        del source_url, domain
+        return []
 
     def transaction(self) -> VectorTx:
         """Атомарная запись пачки эмбеддингов (M2, L2-04). По умолчанию — no-op."""
