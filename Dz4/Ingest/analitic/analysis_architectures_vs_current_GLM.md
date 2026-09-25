@@ -9,13 +9,13 @@
 
 ## 1. Введение
 
-**Контекст.** Проект Dz4 находится в фазе аналитики: предыдущие разборы (`ingest_refactoring_solution.txt` и материалы из `proposals/`) выявили вырожденность графовой оси (M5) и подготовили предложение «Облако тегов + Столицы». Дополнительно представлены два материала по архитектурам гибридных RAG-систем и языковым стекам. Требуется сопоставить их с тем, что реализовано сейчас.
+**Контекст.** Проект Dz4 находится в фазе аналитики: предыдущие разборы (`ingest_refactoring_solution.txt` и материалы из архива `docs/archive/ingest_proposals_v1/`, бывш. `proposals/`) выявили вырожденность графовой оси (M5) и подготовили предложение «Облако тегов + Столицы». Дополнительно представлены два материала по архитектурам гибридных RAG-систем и языковым стекам. Требуется сопоставить их с тем, что реализовано сейчас.
 
 **Исследованные материалы:**
 
 - `D:\Otus\ohw\Dz4\Ingest\analitic\hybrid_rag_architectures.md` — обзор 7 архитектурных подходов к гибридному RAG
 - `D:\Otus\ohw\Dz4\Ingest\analitic\rag_language_stacks.md` — сравнение 3 языковых стеков реализации
-- `D:\Otus\ohw\Dz4\Ingest\proposals\ingest_refactoring_solution.txt` — предложение по рефакторингу ингеста
+- `docs\archive\ingest_proposals_v1\ingest_refactoring_solution.txt` — предложение по рефакторингу ингеста (архивировано из `Ingest\proposals\`)
 - Текущий код Dz4 (M1-M2): `prototype/src/graphrag_proto/` (retrieval, ingestion_service)
 
 **Цель анализа:** определить, где на карте гибридных RAG-архитектур находится текущая реализация Dz4, к какой целевой архитектуре её вести и какой стек этому соответствует.
@@ -126,5 +126,5 @@
 
 ---
 
-*Связанные документы: `Ingest/proposals/ingest_refactoring_solution.txt`, `docs/05_adr_log.md` (ADR-003, ADR-013), `openspec/changes/eval-graph-contribution-experiment/design.md`, `Ingest/analitic/ANALYTICAL_NOTES_RULES.md`*
+*Связанные документы: `docs/archive/ingest_proposals_v1/ingest_refactoring_solution.txt` (архив), `docs/05_adr_log.md` (ADR-003, ADR-013), `openspec/changes/eval-graph-contribution-experiment/design.md`, `analitic/ANALYTICAL_NOTES_RULES.md`*
 

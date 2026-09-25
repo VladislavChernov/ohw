@@ -159,5 +159,5 @@ Gleaning — не сейчас (x2 к стоимости ингеста).
 
 ---
 
-*Связанные документы: `docs/05_adr_log.md` (ADR-003, ADR-013, ADR-022), `Ingest/analitic/analysis_architectures_vs_current_GLM.md`, `Ingest/proposals/ingest_refactoring_solution.txt`, `openspec/changes/eval-graph-contribution-experiment/design.md`, внешние источники: LightRAG (HKUDS, DeepWiki июль 2026), ConTEB / arXiv:2505.24782, Particula Tech (август 2026).*
+*Связанные документы: `docs/05_adr_log.md` (ADR-003, ADR-013, ADR-022), `Ingest/analitic/analysis_architectures_vs_current_GLM.md`, `docs/archive/ingest_proposals_v1/ingest_refactoring_solution.txt` (архив), `openspec/changes/eval-graph-contribution-experiment/design.md`, внешние источники: LightRAG (HKUDS, DeepWiki июль 2026), ConTEB / arXiv:2505.24782, Particula Tech (август 2026).*
 
