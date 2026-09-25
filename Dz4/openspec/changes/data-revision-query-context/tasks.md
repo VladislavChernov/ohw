@@ -47,7 +47,7 @@
       staleness сформулирован как L2-07 с указанием окна ≤ интервал поллинга.
 - [ ] Выровнять нумерацию L2-04/L2-07 во всех файлах — SC-13:
       `docs/prototype_requirements.md` (L2-04→L2-07 для bounded staleness),
-      ADR-026 последствия, `learning/data_revision_analytics.md`.
+      ADR-026 последствия, `analitic/revision/data_revision_analytics.md`.
 - [ ] ADR-026: статус → реализован (последствия фактических решений).
 - [ ] `docs/prototype_requirements.md`: чеклист Вехи 4-хвост — отмечен
       (кроме M4-Eval), история в `docs/history.md`.

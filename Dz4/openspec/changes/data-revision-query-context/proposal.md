@@ -36,7 +36,7 @@
   `REVISION_TIMEOUT_S` (дефолт 3.0), ключ — `AUTH_API_KEY`/`GRAPH_AUTH_API_KEY`.
 - Инварианты: `L2-07` → реализован (снять «planned»); SC-13 — нумерация
   bounded staleness выровнена на L2-07 во всех файлах (`invariants.md`,
-  `prototype_requirements.md`, ADR-026, `learning/data_revision_analytics.md`);
+  `prototype_requirements.md`, ADR-026, `analitic/revision/data_revision_analytics.md`);
   ADR-026 отмечается как реализованный; чеклист Вехи 4-хвост в
   `prototype_requirements.md` закрывается (кроме M4-Eval, отдельная веха).
 - Наблюдаемость (S6/вывод 3 ревью-07): `RevisionClient` считает

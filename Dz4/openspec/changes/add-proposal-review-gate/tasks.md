@@ -12,7 +12,7 @@
 - [x] 2.1a. **Инвентаризация архива `Ingest/proposals/` закрыта 2026-09-26.** Пять
       предложений поколения 2026-09-19/21 зарегистрированы в `review-records/`: одно
       `partial` (`ingest_refactoring_solution`), одно `deferred` с переносом материала
-      в `learning/` (`turbopuffer_dual_write`), три `deferred`
+      в личные методички (`turbopuffer_dual_write`), три `deferred`
       (`multidomain_graph`, `prompt_and_entity_resolution`). Источник статуса —
       review-record, не README архива.
 - [x] 2.1b. **Проставить вердикты по трём `deferred`:** измеримые gap и условия

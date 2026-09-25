@@ -610,7 +610,7 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
    `revisions.revision(task.domain)`; снапшот метрик дополнен `revision_poll_errors_total`
    и `revisions` (известные ревизии доменов) — видимость свежести оператору.
 5. **Доки** — `prototype_requirements.md` (чеклист Вехи 4-хвост), `invariants.md` L2-07
-   реализован, L4-04 снапшот, ADR-026 → реализовано, `learning/data_revision_analytics.md`
+   реализован, L4-04 снапшот, ADR-026 → реализовано, `analitic/revision/data_revision_analytics.md`
    (нумерация L2-04/L2-07 выровнена).
 
 **Верификация** — `test_ingestion_revision.py`, `test_semantic_cache.py`,

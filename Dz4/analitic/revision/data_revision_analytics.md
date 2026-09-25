@@ -1,7 +1,7 @@
 # Ревизия данных в query-контуре: аналитика и обоснование решений (Веха 4-хвост)
 
 > **Контекст:** решение, отложенное на обсуждении свежести семантического кэша
-> (2026-09-13). Проверяемый чеклист — `../Dz4/docs/prototype_requirements.md`
+> (2026-09-13). Проверяемый чеклист — `../../docs/prototype_requirements.md`
 > §«Веха 4-хвост — Ревизия данных в query-контуре». Цель документа — объяснить
 > «что это вообще такое» и дать обоснование вариантов по трём развилкам:
 > гранулярность, источник ревизии, механизм доставки.
@@ -123,7 +123,7 @@ naming things"* (Phil Karlton). Цитата живёт потому, что с�
   инвариант L2-07 «свежесть ансвера = свежесть данных»).
 - с ревизией: обещание становится явным — **«ответ не старше ревизии R»**, где R —
   состояние данных на момент сборки. Это и есть то, что мы должны зафиксировать в
-  `../Dz4/docs/invariants.md` L2-07 (пункт вехи).
+  `../../docs/invariants.md` L2-07 (пункт вехи).
 
 ### 2.3. Fingerprint / content addressing — «отпечаток данных»
 
@@ -246,10 +246,10 @@ query-контура» (формулировка вехи).
 | QueryPipeline | `retrieval/pipeline.py:105-175` | `lookup(embedding, threshold, domain)` и `store(embedding, answer, domain)` — rev извне не прокидывается |
 | Cборка кэша | `retrieval/runtime.py:57`, `query_service/worker.py:168` | `build_semantic_cache()` вызывается **один раз** в `worker.main()` и переживает hot-reload топологии |
 | Поллер топологии | `query_service/worker.py:129-149` | `_topology_rebuilder`: сравнение `client.revision(refresh=True)` → ребилд пайплайна |
-| ADR-014 | `../Dz4/docs/05_adr_log.md:206` | жизненный цикл источников, идемпотентность, версии |
-| ADR-015 | `../Dz4/docs/05_adr_log.md:238` | Eval-датасет, Retrieval@K, groundedness/coverage, lift-отчёт |
-| ADR-025 | `../Dz4/docs/05_adr_log.md:616-638` | TTL + `clear()` реализованы, epoch-bump — план (п.3) |
-| Инвариант L2-07 | `../Dz4/docs/invariants.md` (L2-07, реализован) | bounded staleness: «ответ не старее ревизии R»; атомарность COMMIT остаётся L2-04 |
+| ADR-014 | `../../docs/05_adr_log.md:206` | жизненный цикл источников, идемпотентность, версии |
+| ADR-015 | `../../docs/05_adr_log.md:238` | Eval-датасет, Retrieval@K, groundedness/coverage, lift-отчёт |
+| ADR-025 | `../../docs/05_adr_log.md:616-638` | TTL + `clear()` реализованы, epoch-bump — план (п.3) |
+| Инвариант L2-07 | `../../docs/invariants.md` (L2-07, реализован) | bounded staleness: «ответ не старее ревизии R»; атомарность COMMIT остаётся L2-04 |
 | docstring кэша | `retrieval/semantic_cache.py:8-11` | «PROBLEM: нет catalog-revision в контуре запроса. Planned upgrade — epoch-bump key `query:sc:<rev>:<domain>`», моменты пересмотра — M4/M5/M6 |
 
 **Разрывы (то, что надо закрыть):**

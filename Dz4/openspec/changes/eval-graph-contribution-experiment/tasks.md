@@ -193,7 +193,7 @@
       (default/--no-judge/--retrieval-only), таблица послойных артефактов (ADR-029 /
       L5-05), `--compare-with`; снят пункт про «исправить согласно ревью №09/10».
 - [x] 6.5. Сверка списка слоёв артефактов между `design.md` §5, `docs/test_plan.md` §5 и
-      `learning/prototype_test_plan_learning.md` §5 — единый состав и имена файлов.
+      `docs/test_plan.md` §5 — единый состав и имена файлов.
       Реализовано: во всех трёх документах 4 слоя с едиными именами
       `<out>/run_manifest.json`, `<out>/qa_log.jsonl`, `<out>/lift_report.json`+`.md`,
       `<out>/trace.jsonl`; §5.3 test_plan обновлён (трасса сохраняется раннером при

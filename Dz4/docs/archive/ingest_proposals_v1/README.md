@@ -30,7 +30,7 @@ ER конфликтует с уже принятым инвариантом L3-0
 ## Что ушло из архива
 
 `how_it_use_in_turbopuffer.md` (dual-write: граф без текста + векторный payload во внешнем
-хранилище) перенесён в `learning/hybrid_rag_dual_write_example.md` как учебный пример и
+хранилище) перенесён в в личные методички как учебный пример и
 больше не является проектным предложением. Review-record:
 [`turbopuffer_dual_write.md`](../openspec/changes/add-proposal-review-gate/review-records/turbopuffer_dual_write.md).
 
