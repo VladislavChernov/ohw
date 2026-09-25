@@ -1,114 +1,55 @@
 # Глоссарий терминов GraphRAG
 
-> **Версия:** v6 (итерация поверх базы v5)  
-> **Последнее обновление:** 2026-09-05
-
----
+> **Статус:** multilingual alias resolution для dynamic context graph
 
 ## Core Concepts
 
-| Термин               | Определение                                                                 |
-|----------------------|-----------------------------------------------------------------------------|
-| **GraphRAG**         | Доменно-агностичная гибридная RAG-платформа: граф знаний + векторный поиск + LLM-генерация |
-| **Hybrid RAG**       | Синергия классического векторного RAG и поиска по графу знаний             |
-| **RAG**              | Retrieval-Augmented Generation — техника, при которой LLM использует внешние источники знаний |
-| **Retriever**        | Ядро поиска: комбинация графового и векторного поиска с реранжированием   |
-| **Graph Retriever**  | Компонент поиска по графу знаний (Cypher-запросы через GraphStoreProvider) |
-| **Vector Retriever** | Компонент поиска по векторному пространству (cosine similarity)           |
-| **Reranker**         | Модель (bge-reranker-base) для переранжирования векторных результатов     |
-| **Context Assembly** | Сборка итогового промпта из графового и векторного контекста              |
-| **Domain Profile**   | YAML-конфигурация домена: онтология, промпты, правила валидации, глоссарий |
+| Термин | Определение |
+|---|---|
+| **Context Graph** | Лёгкий разреженный граф контекстных узлов и связей; не тяжёлая академическая онтология |
+| **Context Node** | Динамический тег/сущность со стабильным `tag_id`, preferred label и aliases |
+| **Vector Retriever** | Семантический поиск chunks; baseline и источник graph seeds |
+| **Graph Expansion** | Ограниченный traversal от chunk `context_ids` к связанным контекстам с boost |
+| **Domain Profile** | Optional hints для chunking, extraction, glossary и assembly; не mandatory ontology |
+| **Document Registry** | Реестр источников, content hash и версий |
 
----
+## Tag identity
 
-## Architecture Components
+```text
+tag_id: opaque stable id within domain
+canonical_name: preferred display label
+aliases: variants, synonyms, translations
+origin: user | ai | system
+```
 
-| Термин               | Определение                                                                 |
-|----------------------|-----------------------------------------------------------------------------|
-| **Ingestion Pipeline** | Процесс загрузки данных: INGEST → CHUNK → EMBED → EXTRACT → NORMALIZE → DEDUP → CONTRACT → VALIDATE → COMMIT |
-| **Normalizer**         | Компонент канонизации и дедупликации сущностей                     |
-| **Validator**          | Проверка графа на ошибки и противоречия                          |
-| **Extraction**         | Извлечение сущностей и связей из текста с помощью LLM            |
-| **Canonicalization**   | Приведение имён сущностей к единому каноническому виду             |
-| **Glossary Service**   | Доменный сервис трансляции тегов (синонимов) в канонический ряд; авторинг ведётся через конфигуратор |
-| **Config Service**     | Сервис управления конфигурацией и feature flags                  |
-| **Embeddings Service** | Сервис расчёта векторных представлений текста                    |
-| **Document Registry**  | Реестр обработанных документов для инкрементального обновления   |
+`canonical_name` — label, а не универсальный constraint. Например, `Quicksort` и
+«Быстрая сортировка» могут ссылаться на один `tag_id` через glossary/alias map. При
+неоднозначности создаются отдельные кандидаты и необязательный merge proposal; AI не обязан
+молча объединять теги.
 
----
+## Graph vocabulary
 
-## Data Model
+| Generic kind | Назначение |
+|---|---|
+| `parent` | Иерархическая связь контекстов; направление задаётся adapter policy |
+| `related` | Необязательная лёгкая связь между custom tags |
+| `mentions` | Техническая связь Chunk → ContextNode |
 
-| Термин              | Определение                                                              |
-|---------------------|--------------------------------------------------------------------------|
-| **Node/Узел**       | Сущность в графе знаний (:Requirement, :Concept, :Contract, :Module)   |
-| **Edge/Ребро**      | Связь между узлами (REQUIRES, CONTRADICTS, ALTERNATIVE_TO и др.)         |
-| **canonical_name**  | Уникальное каноническое имя сущности после нормализации                  |
-| **Тег / вариант записи** | Синоним или форма записи термина, видимая лингвисту; маппится в canonical_name |
-| **source_ids**      | Список ID документов, из которых извлечена сущность                    |
-| **extractor_version** | Версия промпта/модели, использованная для извлечения                  |
-| **SIMILAR_TO**      | Связь между похожими узлами (cosine >= 0.85)                            |
-| **DEPRECATED_BY**   | Связь устаревания контракта на более новый                               |
+Fixed labels, `unique_key`, Cypher validation rules и semantic constraints не являются
+обязательными.
 
----
+## Retrieval
 
-## Technology Stack
+Vector search выполняется первым. В target режиме seeds из vector metadata проходят bounded
+graph expansion; path, depth, confidence и boost попадают в QA/trace. При недоступном graph
+используется vector-only fallback с degraded marker.
 
-| Термин             | Описание                                                          |
-|--------------------|-------------------------------------------------------------------|
-| **Neo4j**          | Графовая СУБД с native vector index (GPLv3)                     |
-| **Qwen 2.5 Coder 7B Abliterate** | Локальная LLM (GGUF q4_K_M) для генерации и extraction (Apache 2.0) |
-| **llama.cpp**     | Сервер инференса GGUF-моделей (CUDA), базовый LLM-контейнер (k/v1 OpenAI-совместимый) |
-| **Ollama**         | Сервер локального инференса LLM (альтернатива llama.cpp)                 |
-| **bge-m3**         | Мультиязычная модель эмбеддингов (Apache 2.0)                    |
-| **bge-reranker**   | Модель переранжирования на CPU                                   |
-| **Docker Compose** | Оркестратор контейнеров для прототипа                            |
-| **Prometheus**     | Сбор метрик                                                        |
-| **Grafana**        | Визуализация метрик                                              |
-| **Loki**           | Сбор и хранение логов                                            |
+## Optional Glossary Service
 
----
+Glossary Service отображает aliases/переводы в `tag_id`/`canonical_name`. Он не блокирует
+primitive ingest, если недоступен. Ручные tags имеют приоритет над AI suggestions.
 
-## Infrastructure Terms
+## Adapter Layer
 
-| Термин               | Определение                                                            |
-|----------------------|------------------------------------------------------------------------|
-| **Docker Profiles**  | Механизм изоляции компонентов для экономии ресурсов                   |
-| **GPU-конфликт**     | Проблема наложения bge-m3 и LLM (на прототипе Qwen 2.5 Coder 7B Abliterate, ADR-022) на одну GPU; ограничение среды прототипа, не платформенное требование (ADR-027) |
-| **ohw_net**          | Выделенная Docker-сеть для коммуникации сервисов                      |
-| **Feature Flag**     | Runtime-переключатель функционала через Config Service                |
-| **ADR**              | Architecture Decision Record — документ архитектурного решения        |
-
----
-
-## Adapter Layer (новое в v5)
-
-| Термин               | Определение                                                                 |
-|----------------------|-----------------------------------------------------------------------------|
-| **Adapter Layer**    | Слой абстракции, изолирующий ядро системы от конкретных технологий хранения, инференса LLM, эмбеддингов и реранкера |
-| **Adapter**          | Программный интерфейс, определяющий контракт взаимодействия с инфраструктурой |
-| **GraphStoreProvider** | Интерфейс графовой оси хранилища: логические связи, обход графа, Cypher-запросы (Neo4jGraphStore, MemgraphGraphStore) |
-| **VectorStoreProvider** | Интерфейс векторной оси хранилища: косинусный поиск чанков и запись эмбеддингов (Neo4jVectorStore, QdrantVectorStore) |
-| **LLM Adapter**      | Интерфейс для инференса LLM (Ollama, vLLM, OpenAI-совместимые серверы) |
-| **Embeddings Adapter** | Интерфейс для расчёта эмбеддингов (bge-m3, sentence-transformers) |
-| **Reranker Adapter** | Интерфейс для реранжирования результатов (bge-reranker, NoOp, Cohere) |
-| **Runtime Config**   | Конфигурация, позволяющая переключать адаптеры без перезапуска контейнеров |
-| **entry_points**     | Механизм Python setuptools для регистрации сторонних адаптеров без изменения кода ядра |
-| **NoOp Adapter**     | Адаптер-заглушка, возвращающий входные данные без изменений (используется для отключения реранкера) |
-| **Vendor Lock-in**   | Риск привязки к конкретному поставщику инфраструктуры; митогируется слоем адаптеров |
-
----
-
-## Итерация v6 (асинхронная архитектура)
-
-| Термин               | Определение                                                                 |
-|----------------------|-----------------------------------------------------------------------------|
-| **Task Queue**       | Асинхронная очередь задач на Valkey / Redis Streams; разделяет веб-потоки Query API и обработку запросов |
-| **Query API Gateway**| Точка входа сетевого контура (порт 8000): принимает `POST /query` → `202 Accepted` + `task_id`. Обязанности и контракты — `docs/api_reference.md`; выбор языка реализации — на усмотрение владельца (прототип — ADR-020, замена — `docs/web_layer_replacement.md`) |
-| **MCP-шлюз**         | Подкомпонент Query API Gateway (:8000): прокси-интеграция автономных ИИ-агентов (Cursor) по протоколу MCP (JSON-RPC) для чтения графа знаний |
-| **Web UI — Конфигуратор (Streamlit)** | Веб-панель «Бизнес-онтология» (порт 8501): интерфейс аналитика и конфигуратор Domain Profile и глоссариев |
-| **Topology UI (Streamlit)** | Настроечное приложение оператора «Топология инфраструктуры» (порт 8502) — отдельный UI вынесенного Topology Orchestrator (ADR-019) |
-| **Query Workers**    | Пул процессов, асимметрично забирающих задачи из Task Queue (граф-поиск + инференс) |
-| **Topology Orchestrator** | Отдельный сервис (порт 8005, ADR-019): фабрика провайдеров; читает `prototype/infra_topology.yaml` и подменяет InMemory-классы на сетевые драйверы (Redis/RabbitMQ/vLLM) |
-| **infra_topology.yaml**   | Конфигурация сетевой топологии (`prototype/infra_topology.yaml`): какие пулы соединений и драйверы используются в текущей инсталляции |
-| **WebSockets / SSE** | Каналы доставки результата обработки запроса и стриминга токенов ответа пользователю |
+`GraphStoreProvider` и `VectorStoreProvider` независимы. Neo4j — выбранный backend прототипа,
+не обязательная архитектурная зависимость.

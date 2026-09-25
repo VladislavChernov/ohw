@@ -1,38 +1,55 @@
-# Документация: Стратегия Ретривера и Слияния контекста
+# Документация: Стратегия Ретривера и слияния контекста
 
-> **Версия:** v5.1  
-> **Последнее обновление:** 2026-09-14
+> **Статус:** vector-only baseline + optional graph experiment
 
-## 1. Доменно-агностичный Retrieval Pipeline и генерация ответа
+## 1. Baseline и graph experiment
 
-При запросе пользователя Query API последовательно выполняет следующие шаги:
+### Baseline
 
-0. **Semantic Cache (M3.3, опционально)** — если включён (`SEMANTIC_CACHE_ENABLED=true`),
-   эмбеддинг запроса проверяется по кэшу (Valkey HASH `query:sc:<domain>`, cos-порог
-   `SEMANTIC_CACHE_THRESHOLD`, TTL `SEMANTIC_CACHE_TTL_S`). Hit → `done` сразу, без
-   retrieval/LLM: `cache_hit:true`, `generation_time_s: 0`, токенов нет. Miss → шаги 1–7
-   ниже и запись ответа в кэш (`cache_hit:false`). При выключенном кэше поведение
-   идентично M2 (поля `cache_hit`/`cache_lookup_s` в `done` отсутствуют).
-1. **Расчёт эмбеддинга запроса** — через **Embeddings Adapter** (модель bge-m3 на GPU, ~50 мс). Выбор модели — через runtime config (namespace: adapters.embeddings).
-2. **Graph Retriever** — выполнение параметризованного Cypher-шаблона через **GraphStoreProvider**. Шаблон автоматически подставляет типы узлов и правила расширения связей (SIMILAR_TO) из метаданных активного Domain Profile.
-3. **Vector Retriever** — поиск топ-N релевантных текстовых чанков через **VectorStoreProvider** (vector_search). Обращается параллельно с Graph Retriever как независимая ось.
-4. **Reranker** — переранжирование чанков через **Reranker Adapter**. Базовая реализация: bge-reranker-base на CPU. Альтернатива: NoOpRerankerAdapter (отключён, возвращает входной массив без изменений). Выбор — через runtime config (namespace: adapters.reranker).
-5. **Context Assembly** — сборка итогового промпта (см. правила в п.2).
-6. **LLM Generation** — передача промпта и системных инструкций через **LLM Adapter** (на прототипе llama.cpp + Qwen 2.5 Coder 7B Abliterate q4_K_M; модель и размещение — runtime config, ADR-022, L4-01). Время генерации: от 3 до 10 сек.
-7. **Response** — потоковый стриминг токенов ответа пользователю через SSE (Server-Sent Events) с выдачей списка источников (sources) и таймингов.
+При запросе:
 
-> **Допущение инвалидации (ADR-025):** COMMIT индексации кэш не чистит — актуальность
-> держится на TTL + ручной сброс (`clear()`/DEL ключей). Плановый путь — epoch-bump
-> `query:sc:<rev>:<domain>` по ревизии данных (Веха 4-хвост); пересмотр допущения на
-> M4 Eval (кэш off в срезе), M5 (конфигуратор профилей), M6 (коннекторы).
+1. Semantic cache (если включён) проверяет revision/domain.
+2. Embedder вычисляет embedding запроса.
+3. **Vector Retriever** возвращает top-K chunks с `text`, `source_id`, `chunk_id`, `domain`,
+   `revision` и optional `context_ids`/`tag_ids`.
+4. Reranker/Context Assembly формируют bounded prompt и provenance-aware sources.
+5. LLM генерирует ответ, API возвращает sources и timings.
 
----
+Baseline не вызывает graph adapter и не зависит от наличия graph projection.
 
-## 2. Динамическая сборка контекста (Context Assembly)
+### Graph experiment
 
-Формат сборки контекста определяется флагами из Domain Profile:
+Если projection построена inline или offline job и её revision готова, после vector search
+выполняется bounded expansion по `context_ids`/`tag_ids` из metadata. Default policy может
+подниматься по parent/context direction; related edges опциональны. Expansion имеет depth,
+fanout, total-node и time budget, возвращает path/depth/confidence и получает ограниченный boost.
 
-- **Порядок данных:** Результаты графового поиска ("Скелет") всегда вставляются первыми, формируя логический каркас для ЛЛМ. Векторные чанки ("Тело") идут вторыми, наполняя каркас формулами, цитатами и кодом.
-- **Шаблон контекста:** Подгружается по ID из профиля (context_it_v1, context_cinema_v1).
-- **Окно контекста:** Жёсткий лимит в 4096 токенов контролируется программно.
-- **Стратегия вытеснения при переполнении лимита:** Если объём контекста превышает 4096 токенов, излишки детерминированно отбрасываются. При этом первоочерёдно отбрасываются векторные чанки с наименьшим reranker-score.
+Graph experiment не является prerequisite для baseline. Перед expansion QueryPipeline проверяет
+`ProjectionState`: `ready` и актуальная `data_revision` разрешают graph; `pending`, `degraded`,
+`stale`, `failed` или отсутствие state дают vector-only fallback. При `graph_enabled=false`,
+отсутствии adapter, неполной или stale projection retrieval возвращает vector-only fallback.
+
+## 2. Fallback и атрибуция
+
+Fallback получает явный degraded marker. В graph experiment такой fallback не считается успешным
+graph-enabled результатом.
+
+`qa_log`/`trace` сохраняют seed chunk IDs, graph paths, depth, edge kind, confidence, boost,
+исходный vector score, `projection_status` и projection revision. Semantic cache разделяет
+vector baseline и graph experiment по mode, а для готовой graph projection добавляет
+`projection_revision` в cache key. Fallback и state `missing/stale/degraded/failed` не кэшируются
+как успешный graph result. Это позволяет отличить реальный вклад experiment от graph-first
+parallel search или улучшения reranker.
+
+## 3. Context budget
+
+Vector body и optional graph evidence имеют отдельные бюджеты. При переполнении сначала
+ограничивается expansion, затем вытесняются наименее полезные vector chunks по reranker score.
+Graph evidence не вставляется отдельным бесконечным skeleton-блоком.
+
+## 4. Совместимость
+
+Graph и vector остаются независимыми adapters. Neo4j — выбранный backend прототипа, но не
+обязательная архитектурная привязка; S3/embedded/другой graph adapter реализует тот же
+bounded expansion contract. Если vector backend уже умеет нужные metadata filters и связи,
+отдельный graph backend можно не подключать.

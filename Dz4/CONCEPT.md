@@ -17,7 +17,7 @@
 
 ## 1. Обзор системы и архитектурные принципы
 
-GraphRAG v5 — доменно-агностичная платформа для извлечения, хранения и семантического поиска сущностей из неструктурированных текстов на русском и английском языках.
+GraphRAG v5 — доменно-агностичная платформа для извлечения, хранения и семантического поиска текстовых chunks на русском и английском языках. Векторный baseline с metadata — основной контур; лёгкий context graph — отдельный optional experiment, который можно построить inline или offline.
 
 ---
 
@@ -27,11 +27,13 @@ GraphRAG v5 — доменно-агностичная платформа для 
 
 ### 2.1. Graph & Vector Storage Adapters (разделение интерфейсов)
 
-> Монолитный интерфейс `GraphStorage` аннулирован (перенесён в ADR-013). В гибриде граф и вектор — две независимые оси поиска, поэтому они представлены двумя изолированными ABC-контрактами, которые соединяются только на этапе Context Assembly.
+> Монолитный интерфейс `GraphStorage` аннулирован (ADR-013). Векторный baseline и optional
+> graph experiment разделены двумя изолированными ABC-контрактами. Graph projection — не
+> обязательная ось baseline: она строится inline или offline и подключается только когда готова.
 
 ```
 interface GraphStoreProvider:
-    - query(cypher, params) -> results
+    - expand(context_ids, direction, max_depth, max_fanout, max_nodes) -> results
     - upsert_nodes(nodes)
     - upsert_edges(edges)
     - get_node(id) -> node
@@ -87,8 +89,8 @@ interface Reranker:
 значения задаются конфигурацией (см. `docs/04 §5`, `docs/06 §1`); здесь приведена только семантика
 осей:
 
-- `graph_store` — графовая ось (реализация `GraphStoreProvider`).
-- `vector_store` — векторная ось (реализация `VectorStoreProvider`).
+- `graph_store` — optional graph experiment backend (реализация `GraphStoreProvider`).
+- `vector_store` — основной vector baseline backend (реализация `VectorStoreProvider`).
 - `llm` — реализация `LLMInference`.
 - `embeddings` — реализация `Embedder`.
 - `reranker` — реализация `Reranker`.
@@ -122,24 +124,22 @@ Management API (`PUT /api/v1/config/adapters`, см. §6.3).
                                  | настраивается через
                                  v
 +----------------------------------------------------------+
-|                DOMAIN PROFILE (configurable)              |
+|                DOMAIN PROFILE (optional)                 |
 |                                                           |
-|  Ontology Schema (типы узлов, типы рёбер)                 |
-|  Extraction Prompt Template (доменный промпт)              |
-|  Validation Rules (правила семантической валидации)      |
-|  Glossary Content (синонимы, канонизация, Unicode)       |
-|  Chunking Strategy (стратегия разрезания по типам источника)|
-|  Context Assembly Template (формат сборки промпта)        |
+|  Extraction Prompt Hints (не ontology gate)               |
+|  Glossary / Alias Hints (синонимы, переводы)              |
+|  Chunking Hints (опционально)                             |
+|  Context Assembly Hints (опционально)                     |
 +----------------------------------------------------------+
 ```
 
-Ядро не знает, с каким доменом работает. Domain Profile определяет:
-- Какие типы узлов и рёбер существуют
-- Какие правила валидации применять
-- Какой промпт использовать для извлечения
-- Как канонизировать имена сущностей
-- Как разрезать документы на чанки
-- Как собирать контекст для LLM
+Ядро не знает, с каким доменом работает. Domain Profile задаёт только область и optional hints:
+- какие chunking/extraction настройки использовать;
+- как предлагать aliases и glossary candidates;
+- как собирать контекст для LLM.
+
+Профиль не определяет обязательные типы узлов/рёбер, не запускает ontology validation и не
+блокирует primitive ingest.
 
 ---
 
@@ -150,37 +150,53 @@ Management API (`PUT /api/v1/config/adapters`, см. §6.3).
 Движок последовательно прогоняет данные через этапы:
 
 1. **INGEST** — Приём документа через Ingestion API. Поддержка: .txt, .md, .pdf, .json. Метаданные: source_url, domain, doc_type.
-2. **CHUNK** — Фрагментация текста через интерфейс-стратегию **Chunker** (аналогично слою адаптеров). Выбор стратегии и параметров — runtime config (`namespace: chunking`): sliding window с overlap, structure-aware (по заголовкам документа), на базе внешних фреймворков (например, LangChain / LlamaIndex). Сторонние стратегии регистрируются через entry_points (§2.6). Стратегия по типам источника задаётся Domain Profile (§3.1). Сохранение: Chunk-узлы с CONTAINS-связями к Source.
+2. **CHUNK** — Фрагментация текста через интерфейс-стратегию **Chunker** (аналогично слою адаптеров). Выбор стратегии и параметров — runtime config (`namespace: chunking`): sliding window с overlap, structure-aware (по заголовкам документа), на базе внешних фреймворков (например, LangChain / LlamaIndex). Сторонние стратегии регистрируются через entry_points (§2.6). Chunking не требует Domain Profile или graph ontology.
 3. **EMBED** — Генерация векторных embeddings через **Embeddings Adapter**. Выбор модели — через runtime config (namespace: adapters.embeddings), параметры батча — namespace: embeddings.batch_size. Ядро не знает, какой эмбеддер под капотом.
-4. **EXTRACT** — Сырая экстракция сущностей через **LLM Adapter**. Выбор модели — через runtime config (namespace: adapters.llm). Промпт: доменный prompt_template из активного Domain Profile. Модель отвечает ТОЛЬКО за экстракцию сырых сущностей и связей. Гарантия детерминированности — на стороне Python (нормализация).
-5. **NORMALIZE** — Контекстно-зависимая канонизация. Правила канонизации берутся из Domain Profile (canonicalization). Математические символы (Big-O) изолированы от текстовых полей. Unicode-нормализация через таблицу unicode_map из Glossary Service. LLM-fallback: при сбое regex-валидации — автоматический fallback на исходную строку + warning в лог.
-6. **DEDUP** — Двухступенчатая дедупликация. Ступень 1 (auto): косинус >= 0.92 → автоматическое слияние. Эмбеддинги получаются через **Embeddings Adapter**. Ступень 2 (LLM): зона 0.75–0.92 → верификация через **LLM Adapter**. LLM-fallback: при недоступности LLM — сохранение как separate entities + связь SIMILAR_TO + warning. Зона < 0.75 → разные сущности, не склеиваются.
-7. **CONTRACT** — Склейка вложенных JSON-схем. Поиск связей EXTENDS и REFERENCES ($ref, allOf) для построения иерархии Contract-узлов.
-8. **VALIDATE** — Семантическая валидация графа. Cypher-правила из Domain Profile (validation_rules). Типы ошибок: structural (нет обязательного поля), semantic (логические противоречия).
-9. **COMMIT** — Атомарная запись в хранилище через **GraphStoreProvider** и **VectorStoreProvider**. Используется транзакция с rollback при ошибке. После коммита — обновление Document Registry.
+4. **GRAPH PROJECTION (optional experiment)** — manual tags/links, AI candidates и glossary
+   aliases строят generic context nodes/edges. Projection может выполняться inline после vector
+   commit или отдельным offline replay; её ошибка не отменяет document ingest.
+5. **REGISTER/COMMIT** — запись канонического документа, chunks, vectors, provenance и optional
+   enrichment. `domain` изолирует контекст и tag cloud; `tag_id` и aliases разрешаются через
+   glossary/optional AI. Runtime не создаёт ontology constraints и не выполняет Cypher validation.
+6. **OFFLINE GRAPH REBUILD (optional)** — идемпотентный replay корпуса строит или обновляет graph
+   projection и backfill-ит metadata, не меняя vector-only baseline.
+
+### 4.2. Projection state и readiness
+
+Offline job и inline enrichment используют общий domain-scoped `ProjectionState`:
+`data_revision`, `projection_revision`, `config_fingerprint`, status (`pending`, `ready`,
+`degraded`, `stale`, `failed`), lease и счётчики источников. Query experiment разрешён только
+для `ready` state с актуальной data revision; `stale`, `degraded`, `failed`, отсутствующий
+state и partial projection дают vector-only fallback с degraded marker. Семантический cache
+и eval используют projection revision как отдельный фактор.
 
 ---
 
 ## 5. Стратегия ретривера и слияния контекста
 
-При запросе пользователя Query API последовательно выполняет следующие шаги:
+При запросе пользователя Query API сначала выполняет baseline:
 
 1. **Расчёт эмбеддинга запроса** — через **Embeddings Adapter** (выбор модели — namespace: adapters.embeddings).
-2. **Graph Retriever** — выполнение параметризованного Cypher-шаблона через **GraphStoreProvider**. Шаблон автоматически подставляет типы узлов и правила расширения связей (SIMILAR_TO) из метаданных активного Domain Profile.
-3. **Vector Retriever** — поиск топ-N релевантных текстовых чанков через **VectorStoreProvider** (vector_search). Обращается параллельно с Graph Retriever как независимая ось.
-4. **Reranker** — переранжирование чанков через **Reranker Adapter** (выбор/отключение — namespace: adapters.reranker).
-5. **Context Assembly** — сборка итогового промпта (см. правила ниже).
-6. **LLM Generation** — передача промпта и системных инструкций через **LLM Adapter** (выбор модели — namespace: adapters.llm).
-7. **Response** — потоковый стриминг токенов ответа пользователю через SSE (Server-Sent Events) с выдачей списка источников (sources) и таймингов.
+2. **Vector Retriever** — поиск top-N релевантных текстовых чанков через **VectorStoreProvider**; metadata возвращает text, source/chunk provenance, revision и optional `context_ids`/`tag_ids`.
+3. **Context Assembly** — сборка bounded prompt из vector evidence; graph adapter не вызывается.
+4. **LLM Generation** — передача промпта и системных инструкций через **LLM Adapter**.
+5. **Response** — потоковый стриминг ответа с sources и таймингами.
+
+Отдельный **graph experiment** может выполнить после vector search bounded expansion по
+`context_ids`/`tag_ids`, если inline/offline projection готова. Expansion имеет depth/fanout/
+node/time budget, возвращает provenance/path и получает ограниченный boost. При unavailable/
+stale graph используется vector-only fallback с degraded marker; silent fallback не считается
+успешным graph experiment.
 
 ### Динамическая сборка контекста (Context Assembly)
 
-Формат сборки контекста определяется флагами из Domain Profile:
+Формат сборки контекста определяется runtime policy и adapter metadata:
 
-- **Порядок данных:** Результаты графового поиска ("Скелет") всегда вставляются первыми, формируя логический каркас для ЛЛМ. Векторные чанки ("Тело") идут вторыми, наполняя каркас формулами, цитатами и кодом.
-- **Шаблон контекста:** Подгружается по ID из профиля (context_it_v1, context_cinema_v1).
-- **Окно контекста:** Жёсткий лимит в 4096 токенов контролируется программно.
-- **Стратегия вытеснения при переполнении лимита:** Если объём контекста превышает 4096 токенов, излишки детерминированно отбрасываются. При этом первоочерёдно отбрасываются векторные чанки с наименьшим reranker-score.
+- **Порядок данных:** vector body и metadata — baseline; bounded graph evidence добавляется только
+  в experiment и не превращается в отдельный skeleton-first block.
+- **Шаблон контекста:** может быть задан профилем, но его отсутствие не блокирует primitive ingest.
+- **Окно контекста:** жёсткий лимит контролируется программно; experiment expansion имеет отдельный budget.
+- **Стратегия вытеснения:** при переполнении сначала ограничивается graph expansion, затем вытесняются наименее полезные vector chunks по reranker-score.
 
 ---
 
@@ -220,7 +236,7 @@ Management API (`PUT /api/v1/config/adapters`, см. §6.3).
 
 ### 6.4. Структура изолированных глоссарей
 
-**Роль Glossary Service:** доменный сервис трансляции «тегов» (синонимы и варианты записи) в канонический ряд для графа (`canonical_name`). Лингвист/аналитик работает через GUI-модель тегов (экран «Бизнес-онтология» конфигуратора); технический формат узлов внутри сервиса скрыт. При сохранении словаря выполняется валидация уникальности: в рамках домена один вариант записи не может вести к двум каноническим терминам; пересечения словарей с активными профилями проверяются через `POST /api/v1/config/domain/validate`.
+**Роль Glossary Service:** опциональный сервис разрешения вариантов записи, синонимов и переводов в стабильный `tag_id`/`canonical_name` графа. Он не является обязательной онтологией и не блокирует ingest. В рамках домена один вариант записи должен разрешаться однозначно; при конфликте сохраняются отдельные кандидаты и merge proposal. AI может предлагать alias/merge, но не перезаписывает manual tags.
 
 Glossary Service подгружает соответствующий файл глоссария (`glossary.{profile}.yaml`) вслед за
 активацией домена. Содержимое типовых секций (terms, aliases, unicode_map, function_synonyms) —
@@ -271,11 +287,11 @@ Glossary Service подгружает соответствующий файл г
 
 ## 7. Журнал архитектурных решений (ADR-001 — ADR-013)
 
-### ADR-001: Выбор Neo4j в качестве единого хранилища для прототипа
+### ADR-001: Выбор Neo4j в качестве backend'а прототипа
 
-**Статус:** Accepted  
-**Контекст:** Нужно выбрать хранилище для графа знаний и векторных чанков.  
-**Решение:** Neo4j Community (GPLv3, native vector index, Cypher).  
+**Статус:** Accepted для прототипа; архитектурная независимость сохранена
+**Контекст:** Нужно выбрать backend для прототипа graph/vector, не связывая ядро с вендором.
+**Решение:** Neo4j Community используется как выбранный backend прототипа; `GraphStoreProvider` и `VectorStoreProvider` допускают независимые реализации.
 
 **Последствия:**
 - + Один источник правды, нет JOIN между БД
@@ -339,11 +355,11 @@ Glossary Service подгружает соответствующий файл г
 
 ---
 
-### ADR-006: Иерархия Contract-узлов
+### ADR-006: Иерархия контекстных узлов (Superseded)
 
-**Статус:** Accepted  
-**Контекст:** JSON-схемы ссылаются друг на друга через $ref и allOf.  
-**Решение:** Добавить связи EXTENDS и REFERENCES между :Contract.
+**Статус:** Superseded corrective change `add-lightweight-context-graph`
+**Контекст:** Иерархия не ограничивается типами Contract и является произвольной.
+**Решение:** Использовать generic context nodes/edges с `parent`/`related` kinds; ADR-006 остаётся историческим описанием typed-подхода.
 
 **Последствия:**
 - + Граф знает структуру вложенных схем
@@ -370,15 +386,11 @@ Glossary Service подгружает соответствующий файл г
 
 ---
 
-### ADR-008: Семантическая валидация графа
+### ADR-008: Валидация контекстного графа (Superseded)
 
-**Статус:** Accepted  
-**Контекст:** Структурной валидации недостаточно. Система должна блокировать логические противоречия на этапе ingestion.  
-**Решение:** Validator v2 проверяет:
-- REQUIRES_CONSTRAINT без цели → warning
-- CONTRADICTS внутри одного требования → error
-- REQUIRES + CONTRADICTS одновременно → error
-- SIMILAR_TO без обратной связи → auto-fix
+**Статус:** Superseded corrective change `add-lightweight-context-graph`
+**Контекст:** Hard ontology validation блокирует primitive ingest и произвольные tags.
+**Решение:** Runtime сохраняет только технические проверки endpoint/provenance; `_validate_ontology` и profile Cypher validation rules не являются ingest gate.
 
 **Последствия:**
 - + Ошибки ТЗ ловятся до продакшена
@@ -407,11 +419,11 @@ Glossary Service подгружает соответствующий файл г
 
 ---
 
-### ADR-011: Переход к доменно-агностичной архитектуре платформы (ВЕРСИЯ 4.0)
+### ADR-011: Переход к домено-агностичной архитектуре платформы (ВЕРСИЯ 4.0)
 
-**Статус:** Accepted  
-**Контекст:** Жесткая привязка кода к ИТ-домену ограничивала масштабируемость.  
-**Решение:** Реализовать концепцию Domain Profile (YAML). Вся онтология, промпты, правила валидации на Cypher и канонизация вынесены в конфиги. Ядро системы абсолютно агностично. Смена домена происходит на лету через Config Service API.
+**Статус:** Accepted, extended corrective change `add-lightweight-context-graph`
+**Контекст:** Жесткая привязка кода к ИТ-домену ограничивала масштабируемость.
+**Решение:** Domain Profile может задавать optional extraction/chunking/glossary hints, но не является обязательной ontology или runtime validation schema. Primitive ingest и tag cloud работают с dynamic properties/edges; смена домена изолирует данные и tag cloud.
 
 **Последствия:**
 - + Один движок — множество доменов
@@ -446,7 +458,7 @@ Glossary Service подгружает соответствующий файл г
 
 **Статус:** Accepted  
 **Контекст:** Монолитный интерфейс `GraphStorage`, введённый в ADR-012, концептуально неверно моделировал гибрид. Чисто векторный поиск ложно зависел от логики графового движка, а `QdrantStorageAdapter` (только векторы) не мог корректно реализовать графовые операции. Это нарушало принцип разделения интерфейсов (ISP) и блокировало независимое масштабирование осей.  
-**Решение:** Аннулировать `GraphStorage`. Ввести два изолированных ABC-контракта: `GraphStoreProvider` (логика связей, Cypher, обход) и `VectorStoreProvider` (косинусный поиск чанков). Гибридный ретривер обращается к ним параллельно, соединяя результаты только на этапе Context Assembly. В прототипе обе реализации смотрят на Neo4j (native graph engine + native vector index); при росте `VectorStoreProvider` бесшовно заменяется на `QdrantVectorStore` без изменения графовой логики.
+**Решение:** Аннулировать `GraphStorage`. Ввести два изолированных ABC-контракта: `GraphStoreProvider` (generic graph upsert/expansion) и `VectorStoreProvider` (semantic chunk search). В target vector search выполняется первым; graph получает seeds из chunk metadata и выполняет bounded expansion. В прототипе Neo4j — выбранный backend, но не обязательная архитектурная привязка.
 
 **Последствия:**
 - + Соответствие ISP: граф и вектор — две независимые оси.

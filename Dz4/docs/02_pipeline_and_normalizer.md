@@ -1,76 +1,66 @@
 # Документация: Ingestion Pipeline и Normalizer v3
 
-> **Версия:** v5.1  
-> **Последнее обновление:** 2026-09-11
+> **Статус:** vector-only baseline + optional offline graph experiment
 
-## 1. Динамический Ingestion Pipeline (9 этапов)
+## 1. Primitive pipeline
 
-Движок последовательно прогоняет данные через этапы:
+1. **INGEST** — reader создаёт canonical `Document` из txt/md/pdf; profile и AI не требуются.
+2. **CHUNK** — текст режется выбранным `Chunker`; профиль может дать optional hints, но
+   недоступный профиль не блокирует дефолтный chunker.
+3. **EMBED** — выбранный Embedder вычисляет vectors. Ошибка graph enrichment не влияет на этот шаг.
+4. **VECTOR COMMIT** — Source/Chunk anchors, text, embeddings и provenance записываются в
+   vector/object storage. Это завершает baseline ingest.
+5. **GRAPH PROJECTION (optional experiment)** — manual tags/links, AI candidates и glossary
+   aliases сохраняются как dynamic context nodes/edges. Projection может быть построена inline
+   после vector commit или отдельным offline replay; пустой enrichment допустим.
 
-1. **INGEST** — Приём документа через Ingestion API (:8002). Поддержка: .txt, .md, .pdf (в M1; .json — вне скоупа, см. ADR-021). Метаданные: source_url, domain, doc_type. Выход этапа — **канонический документ** (DocumentReader, ADR-021), источник-агностичный. Пайплайн ниже работает ТОЛЬКО с этим представлением.
-2. **CHUNK** — Фрагментация текста. Стратегия по умолчанию: sliding window с overlap (chunk_size=512, overlap=64 токена). Чанкер — адаптер (`Chunker`, namespace `chunking`): `sliding_window` (M1-поведение) / `structure_aware` (пер-секционный по заголовкам Markdown, `^#{1,6}\s`; короткая секция — один чанк) / `langchain` / `llamaindex` (optional deps, lazy import, fail-fast). Настройки — per-field precedence `INGEST_CHUNKER`/`INGEST_CHUNK_SIZE`/`INGEST_CHUNK_OVERLAP` (env) > профиль домена (Config Service, per-job) > namespaces.yaml > дефолты M1 (см. `04_services_config.md`, namespace `chunking`). Сохранение: Chunk-узлы с CONTAINS-связями к Source. Контракт Chunker и регламент подключения новых стратегий — `docs/chunkers_guide.md`.
-3. **EMBED** — Генерация векторных embeddings через **Embeddings Adapter**. Выбор модели — через runtime config (namespace: adapters.embeddings). Базовая реализация: bge-m3 (1024 dim), HTTP к Embeddings Service :8004. Альтернатива: LocalSentenceTransformerAdapter — встроен в пайплайн, без отдельного контейнера. Batch: 32 фрагмента за запрос (настраивается: namespace: embeddings.batch_size). Ядро не знает, какой эмбеддер под капотом.
-4. **EXTRACT** — Сырая экстракция сущностей через **LLM Adapter**. Выбор модели — через runtime config (namespace: adapters.llm). Реализация: OpenAICompatibleAdapter (llama.cpp `/v1/chat/completions`), Qwen 2.5 Coder 7B Abliterate q4_K_M. Альтернатива: OllamaAdapter — HTTP к :11434, и любой другой `/v1/chat/completions` (vLLM, LM Studio). Промпт: доменный prompt_template из активного Domain Profile. Модель отвечает ТОЛЬКО за экстракцию сырых сущностей и связей. Гарантия детерминированности — на стороне Python (нормализация).
-5. **NORMALIZE** — Контекстно-зависимая канонизация. Правила канонизации берутся из Domain Profile (canonicalization). Математические символы (Big-O) изолированы от текстовых полей. Unicode-нормализация через таблицу unicode_map из Glossary Service. LLM-fallback: при сбое regex-валидации — автоматический fallback на исходную строку + warning в лог.
-6. **DEDUP** — Двухступенчатая дедупликация. Ступень 1 (auto): косинус >= 0.92 → автоматическое слияние. Эмбеддинги получаются через **Embeddings Adapter**. Ступень 2 (LLM): зона 0.75–0.92 → верификация через **LLM Adapter**. LLM-fallback: при недоступности LLM — сохранение как separate entities + связь SIMILAR_TO + warning. Зона < 0.75 → разные сущности, не склеиваются.
-7. **CONTRACT** — Склейка вложенных JSON-схем. Поиск связей EXTENDS и REFERENCES ($ref, allOf) для построения иерархии Contract-узлов.
-8. **VALIDATE** — Семантическая валидация графа. Cypher-правила из Domain Profile (validation_rules). Типы ошибок: structural (нет обязательного поля), semantic (логические противоречия).
-9. **COMMIT** — Атомарная запись в хранилище через **GraphStoreProvider** (узлы/рёбра) и **VectorStoreProvider** (эмбеддинги чанков). Используется транзакция с rollback при ошибке. После коммита — обновление Document Registry.
+Ошибка optional AI enrichment сохраняется как degraded/quarantine status и не превращает
+primitive ingest в failed job, если не запрошен strict enrichment mode. Offline job также не
+изменяет активный vector baseline: он строит экспериментальную projection и может backfill-ить
+`context_ids`/`tag_ids` в metadata.
 
-### 1.1. Канонический документ (выход INGEST) и DocumentReader
+## 2. Два lifecycle graph experiment
 
-Контракт «источник → канонический документ» фиксирует **ADR-021**. Etap INGEST отдаёт
-пайплайну единственный источник-агностичный формат:
+### 2.1 Inline enrichment
 
-```json
-Document {
-  source_id, source_url, domain, doc_type,
-  content_hash,               // sha256 по сериализации нормализованного канонич. вида
-  blocks: [ { type, page, order, data } ]  // type: text | code | image
-}
+Inline enrichment выполняется best-effort после vector commit. Он может записать generic nodes,
+edges и metadata за один ingest job, но его ошибка не отменяет документ и не блокирует baseline.
+
+### 2.2 Offline enrichment/rebuild
+
+Offline enrichment — отдельный идемпотентный replay корпуса. Он строит или обновляет graph
+projection, backfill-ит metadata и фиксирует projection revision/readiness. Job key состоит из
+`domain`, `data_revision`, `projection_revision` и `config_fingerprint`; claim/lease не позволяет
+двум writer обрабатывать один projection одновременно. Graph batch и metadata backfill могут
+повторяться без дублей и без изменения content, embedding или document registry.
+
+State store допускает статусы `pending`, `ready`, `degraded`, `stale` и `failed`. Только
+`ready` с актуальной `data_revision` разрешает graph experiment. Пока job не завершён, индекс
+отстал или state отсутствует, query получает vector-only fallback с degraded marker; job и
+baseline не блокируют друг друга.
+
+## 3. Identity и multilingual aliases
+
+Документ идентифицируется по `(domain, source_url, content_hash)`. Контекстный тег имеет
+стабильный `tag_id` внутри domain, `canonical_name` и aliases. Glossary/AI resolution может
+связать английское и русское названия одного алгоритма; неоднозначные кандидаты остаются
+отдельными до явного user merge. AI dedup использует multilingual embeddings и существующие
+пороги только как optional suggestion/confirmation policy, а не как жёсткую ontology.
+
+## 4. Graph write
+
+Разрешены generic node/edge properties и kinds (`parent`, `related`, `mentions`). Проверяются
+только технические условия: корректный endpoint, domain, provenance и отсутствие опасных
+операций. `_validate_ontology`, profile edge whitelist, `ensure_schema` и Neo4j constraints не
+являются ingest-гейтом.
+
+## 5. Retrieval pipeline
+
+```text
+baseline: vector search → metadata sources → rerank/context assembly
+optional graph experiment: vector seeds → bounded graph expansion → boost/rerank → context assembly
 ```
 
-- `Document` — результат `DocumentReader.read()`; каждый `doc_type` (txt/md/pdf) имеет
-  свою реализацию ридера. Новый ридер/OCR = НОВАЯ реализация интерфейса, без правки этапов.
-- `content_hash` считается с канонического вида (нормализация переносов и whitespace) —
-  источник-независим, обеспечивает идемпотентность (ADR-014, L2-06).
-- **Инвариант (ADR-021):** этапы CHUNK…COMMIT читают ТОЛЬКО `Document`; доступ к
-  исходным байтам допустим только внутри `DocumentReader`.
-- PDF в M1: текст (склейка переносов), code-блоки → `type:code`, изображения → `type:image`
-  (без смысла, `data.ref`). OCR — M3 (та же реализация интерфейса расширяется).
-
----
-
-## 2. Регламент контекстно-зависимой канонизации (Normalizer v3 — Этап 5)
-
-Правила нормализации жестко изолированы по категориям сущностей внутри профиля. Трансформация применяется только к canonical_name, оригинал пишется в description.
-
-### Профиль "it" (ИТ-Домен):
-
-- Категория "complexity": 4 детерминированных слоя (Unicode → Синонимы функций → Структурное сжатие Big-O → Текстовые алиасы) + LLM-Fallback (LLM-адаптер, на прототипе Qwen 2.5 Coder 7B Abliterate, temp 0) с обязательной проверкой результата регулярным выражением (Regex) по строгому паттерну o(...). При сбое Regex-валидации — автоматический fallback на исходную строку + warning в лог.
-- Категория "algorithm": 2 слоя (Unicode → Текстовые алиасы из глоссария). Нижний регистр, дефисы и пробелы преобразуются в "_".
-- Категория "data_type": 1 слой (Прямой маппинг типов через Glossary Service).
-
-### Профили "library" / "cinema" (Гуманитарные домены):
-
-- Канонизация формул отключена.
-- Применяются слои: Unicode → Glossary для чистки имён авторов, режиссёров и жанров.
-- Для остальных узлов: стандартный trim().
-
----
-
-## 3. Двухступенчатая векторная дедупликация и семантический вывод
-
-Механика едина для всех доменов (пороги контролируются Config Service):
-
-- **Ступень 1 (cosine >= 0.92):** Автоматический merge узлов в Python (без LLM). Эмбеддинги получаются через **Embeddings Adapter**.
-- **Ступень 2 (0.75 <= cosine < 0.92):** Пограничная зона. LLM-верификация SAME/DIFFERENT через **LLM Adapter**.
-- **Ступень 3 (cosine < 0.75):** Пропустить.
-
-Вывод связей SIMILAR_TO: Создается между близкими узлами соответствующего типа, определённого в активном Domain Profile (например, Movie в cinema, Work в library, Concept в it) при условии удержания метрики cosine >= 0.85.
-
----
-
-## 4. Динамическая семантическая валидация (Этап 8)
-
-Validator v2 выполняет встроенные структурные проверки (изоляты, циклы), а затем последовательно считывает массив Cypher-запросов из секции validation.rules активного Domain Profile. Любое совпадение логируется согласно severity (error/warning/info).
+Vector-only baseline не вызывает graph. Graph experiment получает seeds из vector metadata,
+выполняет ограниченный traversal и сохраняет path/depth/confidence для eval. При недоступном,
+неполном или устаревшем graph используется vector-only fallback с degraded marker.

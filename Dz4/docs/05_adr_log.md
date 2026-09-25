@@ -1,7 +1,7 @@
 # Документация: Журнал архитектурных решений (ADR)
 
-> **Версия:** v5.4 (ADR-001 — ADR-025 + ADR-026; ADR-025 Draft → Accepted)
-> **Последнее обновление:** 2026-09-14
+> **Версия:** v5.5 (ADR-001 — ADR-029; ADR-025 Draft → Accepted, ADR-029 Draft)
+> **Последнее обновление:** 2026-09-22
 
 > **Сводка решений ADR-014+:** жизненный цикл источников (ADR-014), методология оценки (ADR-015),
 > JSON-Schema событий стриминга (ADR-016), набор MCP-инструментов (ADR-017), контракты
@@ -250,19 +250,42 @@ Registry (`docs/data_model.md` §2) имеет поле `status`, но его д
 3. **Метрики генерации:** groundedness (доля утверждений ответа, подтверждаемых источниками),
    coverage (доля golden_facts, покрытых ответом), показатель галлюцинаций (утверждения без
    источника).
-4. **Сравнение (lift-отчёт):** baseline = vector-only; target = hybrid (Graph + Vector).
-   Отчёт фиксирует delta по каждой метрике; инженерное решение о выпуске принимается по
-   «валютному» правилу: groundedness и coverage не ниже baseline при приемлемом времени ответа.
+4. **Сравнение (lift-отчёт):** baseline = vector-only; optional graph experiment = vector +
+   bounded graph expansion. Отчёт фиксирует delta по каждой метрике; инженерное решение о
+   выпуске принимается по «валютному» правилу: groundedness и coverage не ниже baseline при
+   приемлемом времени ответа.
 5. **Прогон:** eval-скрипт в составе пайплайна при смене `extractor_version` / модели / словаря;
    результаты — с метаданными `{run_id, model, prompt_version, date}`.
 
 **Последствия:**
-- + Измеримое обоснование ценности гибрида и смены моделей.
+- + Измеримое обоснование ценности optional graph experiment и смены моделей.
 - + Регрессионный барьер при смене промптов/моделей (нельзя незаметно ухудшить качество).
 - - Трудозатраты на разметку eval-датасета (фиксируется в `operations_requirements.md` как
   регулярная задача).
 - - Метрики groundedness требуют доработки LLM-as-judge шага (оценочный прогон на той же модели,
   что и генерация, — риск системной ошибки, учитывается в отчёте).
+
+**Delta (эксперимент «вклад графа», 2026-09-22, см. design.md §4):**
+Формат вопроса расширяется **опциональными** полями `v2` (обязательные — прежние:
+`id, query, golden_sources, golden_facts`; старые наборы остаются парсибельными):
+
+| Поле | Значение |
+|---|---|
+| `reasoning_type` | `single-hop`, `cross-document`, `temporal-cross-document`, `contradiction`, `causal-risk`, `multi-hop` (обратно совместимы пилотные `historical-fact`, `conditional`, `evidence-boundary`, `insufficient-evidence`) |
+| `answerability` | `answerable` / `unanswerable` (пилот: `partial`) |
+| `as_of` | дата среза знаний, ISO (`2026-09-17`) |
+| `evidence_sections` | список разделов документов-свидетельств |
+| `evidence_policy` | `joint` / `any` / `graph_required` (пилот: `alternatives`) |
+| `rubric` | инструкция для проверяющего |
+| `golden_graph_evidence` | `true` — факт требует графового пути/оси |
+
+Правила:
+- `golden_facts` — атомарные утверждения: одна строка ≈ один проверяемый факт.
+- `evidence_policy=graph_required` **влечёт** `golden_graph_evidence: true` (валидируется).
+- Вопросы, где граф нужен для полноты, помечаются `golden_graph_evidence` — вклад графа
+  измеряется только на этом срезе (design.md «Критерии»); остальные — шум, не интерпретируются.
+- `done.sources` дополнен аддитивным полем `axis ∈ {graph, vector}` (формат события `done`
+  в ADR-016 остаётся обратно совместимым: `relevance`/`source_url` без изменений).
 
 ---
 
@@ -684,10 +707,11 @@ cache-aside + инъекция обновлений из ingestion-контур�
    изолирована (апдейт `it` не сжигает кэш `legal`). Глобальная ревизия отклонена:
    ломает изоляцию доменов (L1-01) и размерность остального контура.
 2. **Источник rev — fingerprint активного сета DocumentRegistry**:
-   `rev<domain> = sha256(sorted(content_hash ОБ активных документов домена))`.
-   Идемпотентен (повторный INGEST того же `content_hash` = no-op, ADR-014 → fingerprint
-   не меняется), честно отражает реальный набор источников (коллекции из 1..N книг на
-   домен, разные языки/переводы учитываются как отдельные `content_hash`),
+   `rev<domain> = sha256(sorted((source_url, content_hash) активных документов домена))`.
+    Идемпотентен (повторный INGEST того же `source_url` и `content_hash` = no-op,
+    ADR-014 → fingerprint не меняется), честно отражает реальный набор источников
+    (коллекции из 1..N книг на домен, разные URL/языки/переводы учитываются как
+    отдельные пары),
    переиспользует существующие поля ADR-014 — **без новой параллельной модели ревизии**.
    Монотонный counter отклонён: не идемпотентен относительно no-op и не является
    отпечатком содержимого (нельзя сравнить «одинаковые ли данные» у двух срезов).
@@ -804,3 +828,130 @@ transient), `ingestion_service/pipeline/orchestrator.py` (retry-loop, сорти
 (Этап 14), `openspec/changes/concurrent-ingest-write-policy/*`.
 
 ---
+
+## ADR-029: Методика эксперимента «вклад графа» (Draft)
+
+**Статус:** Draft (2026-09-22; typed-ontology часть superseded corrective change
+`add-lightweight-context-graph`, ADR-031; baseline/target eval сохраняются)
+
+**Контекст:** ADR-015 фиксирует *что* мерим (recall/groundedness/coverage) и валютное
+правило гейта, но не *как атрибутировать* прирост компоненту. Известные пробелы:
+(1) абсолютный recall не доказывает, что прирост дал граф; (2) вопросы, где граф не нужен
+для полноты, размывают агрегат шумом; (3) прогон без артефактов не перепроверяем —
+парность веток восстанавливается по памяти; (4) полный прогон с LLM-судьёй дорогой,
+блокирует быстрый итерационный цикл.
+
+**Решение:**
+1. **Парный прогон как операция** (§3.1 design.md): ветки отличаются **только** фактором
+   `graph_enabled`, на **одной ревизии** (`revision_fingerprint` в манифестах совпадает).
+   Правило парности: манифесты различаются не более чем в одном поле фактора
+   (`mode`/`graph_enabled`); больше → «прогоны не парные», разность метрик не является
+   вкладом компонента, вердикт `invalid` (`run_eval.py --compare-with`).
+2. **Критерий необходимости:** вклад графа измеряется **только на срезе**
+   `golden_graph_evidence=true`: метрики `necessity` (доля golden-источников, принесённых
+   только графовой осью), `delta_recall` (recall_hybrid − recall_vector) и per-axis recall
+   (`recall_graph`/`recall_vector`) + `evidence_recall_graph`. Вопросы вне среза
+   (`mode="not_measured"`) не интерпретируются — это шум для вопроса «нужен ли граф».
+3. **Запрет интерпретации без осей:** `done.sources` несёт аддитивное поле
+   `axis ∈ {graph, vector}` (формат ADR-016 обратно совместим); без атрибуции оси вклад
+   графа измерим нулём, поэтому журнал пар обязан включать `axis` у каждого источника.
+4. **Judge-less как fast-loop:** послойные артефакты (`<out>/run_manifest.json`,
+   `<out>/qa_log.jsonl`, `<out>/lift_report.json`+`.md`) обязательны **во всех режимах** —
+   включая `--no-judge` и `--retrieval-only`; их полнота **не зависит от наличия судьи**
+   (инвариант L5-05). Без судьи groundedness/coverage = `n/a` и не участвуют в вердикте
+   гейта (`verdict="n/a"`). Retrieval-уровень и атрибуция осей считаются **всегда**, поэтому
+   fast-loop не зависит от дорогого судьи. Диагностическая трасса `<out>/trace.jsonl`
+   (слой 4) — по требованию (`--trace`) и не подменяет слои 1–3.
+
+**Последствия:**
+- + Прогон оставляет перепроверяемый след; парность доказуема по файлам, а не по памяти.
+- + Быстрый итерационный цикл (retrieval-only / no-judge) без LLM-судьи сохраняет все
+  артефакты и уровни 1 и 3 (recall, атрибуция осей).
+- + Вклад графа измеряем честно: necessity + per-axis recall на размеченном срезе.
+- - Требует ручной разметки `golden_graph_evidence`/`evidence_policy=graph_required`
+  (фиксируется как регулярная задача, ADR-015).
+- - Выводы об ограниченности: измеряется только срез `graph_required`; остальные вопросы
+  в этот эксперимент не попадают.
+- - Draft: live-приёмка на живом Neo4j-стеке (стадия 7) ещё не выполнена; температура судьи
+  в `build_judge` не детерминирована — учитывается в отчёте (пункт «условия прогона»).
+
+**Затрагиваемые компоненты:** `infra/eval/run_eval.py` (классы артефактов, правила парности,
+режимы `--no-judge`/`--retrieval-only`/`--trace`/`--compare-with`), `src/graphrag_proto/eval/
+metrics.py` (`graph_contribution`, `lift_report` c verdict n/a), `src/graphrag_proto/retrieval/
+pipeline.py` (`done.sources[].axis`, `done["trace"]`), `infra/eval/{it}/questions{,_graph}.jsonl`,
+`docs/test_plan.md` (§5–§6), `docs/invariants.md` (L5-05), `docs/history.md` (Этап 15),
+`openspec/changes/eval-graph-contribution-experiment/*`.
+
+---
+
+## ADR-030: Жизненный цикл graph/vector-проекций (Draft)
+
+**Статус:** Draft (2026-09-25; решение о переносе полной реализации на M6-Growth)
+
+**Контекст:** graph и vector — независимые адаптеры; Neo4j является выбранным backend
+прототипа, но не архитектурной обязательностью. Для роста системы изменение профиля,
+онтологии, chunker или embedding должно перестраивать соответствующие проекции без
+смешивания поколений. В прототипе COMMIT синхронный, а registry отслеживает только
+`content_hash`; автоматический reindex после смены профиля не реализован.
+
+**Решение:**
+1. Полноценные transactional outbox, dual-generation и миграция проекций отложены на
+   **M6-Growth / pre-connectors** — после текущего M4-эксперимента и до подключения
+   внешних коннекторов.
+2. До этой стадии профиль/ontology и pipeline-контракт загруженного корпуса считаются
+   неизменными; повтор того же `content_hash` остаётся no-op. Автоматическая смена
+   профиля не объявляется поддерживаемой операцией ingestion.
+3. На M6-Growth вводятся независимые `vector_fingerprint` и `graph_fingerprint`, outbox
+   проекций, построение новой generation рядом со старой и переключение active manifest
+   только после успешной проверки. Запросы используют одну зафиксированную revision.
+4. Это решение не относится к optional graph experiment: baseline и experiment должны
+   использовать одну ревизию, chunking/embedding-контракт и отличаться только включением
+   готовой graph projection.
+
+**Последствия:**
+- + Текущий prototype остаётся простым и пригодным для проверки ускорения graph-осью.
+- + Сохраняется независимость graph/vector backend и отсутствие фиктивного общего ACID.
+- - Онлайн-изменение ingestion-профиля до M6-Growth требует ручного clean rebuild и не
+  входит в поддерживаемый lifecycle.
+- - До M6-Growth нельзя утверждать наличие автоматической миграции проекций или безопасного
+  обновления индекса при смене ontology.
+
+**Затрагиваемые компоненты:** `openspec/changes/add-lightweight-context-graph/*`,
+`docs/prototype_requirements.md`, `docs/06_operations_and_risks.md`, `docs/operations_requirements.md`,
+`docs/history.md` (Этап 15).
+
+---
+
+## ADR-031: Primitive ingest и lightweight context graph
+
+**Статус:** Accepted (2026-09-25; corrective change `add-lightweight-context-graph`)
+
+**Контекст:** текущий typed-ontology эксперимент усложняет primitive ingest и ограничивает
+динамические tags. Цель проекта — измерить вклад лёгкой графовой связности, а не внедрить
+тяжёлую академическую ontology или Neo4j schema ownership.
+
+**Решение:**
+1. Document ingest, chunking, embeddings и registry не требуют profile, LLM, tags или links.
+2. Ручные tags/links и AI suggestions — optional enrichment одного dynamic graph; сохраняются
+   `tag_id`, `canonical_name`, aliases, origin, confidence и provenance. Projection может строиться
+   inline после vector commit или отдельным offline replay.
+3. `tag_id` стабилен в пределах domain; multilingual aliases разрешаются через optional glossary/AI,
+   неоднозначные кандидаты не объединяются молча.
+4. `_validate_ontology`, `ensure_schema`, typed labels, edge whitelist и runtime Neo4j constraints
+   удаляются из ingest path. `Source`/`Chunk` остаются technical anchors.
+5. Vector-only baseline выполняет vector search с metadata и не вызывает graph. Optional graph
+   experiment после готовой inline/offline projection делает bounded expansion по chunk
+   `context_ids` и применяет boost; unavailable/stale graph даёт degraded baseline.
+
+**Последствия:**
+- + Прототип соответствует optional user/AI workflow и позволяет построить graph experiment
+  во время ingest или офлайн, не блокируя vector-only MVP.
+- + Мультиязычные aliases и custom context properties не требуют heavy ontology migration.
+- - Старые typed-узлы/constraints в существующей Neo4j базе не удаляются автоматически.
+- - До M6-Growth изменение профиля не запускает автоматическую reindex проекции.
+- - Пока projection не готова, graph experiment нельзя считать доказанным.
+
+**Затрагиваемые компоненты:** `openspec/changes/add-lightweight-context-graph/*`,
+`CONCEPT.md`, `docs/01`, `docs/02`, `docs/03`, `docs/data_model.md`, `docs/glossary.md`,
+`docs/invariants.md`, `prototype/src/graphrag_proto/ingestion_service/*`,
+`prototype/src/graphrag_proto/retrieval/*`.

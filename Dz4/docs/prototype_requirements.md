@@ -3,26 +3,27 @@
 > **Версия:** v1 (стартовая редакция)
 > **Последнее обновление:** 2026-09-05
 >
-> Единый документ для фазы прототипирования: цель и границы прототипа, скоуп,
-> системные требования, набор фиксированных контрактов, состав работ по вехам,
-> критерий готовности (eval-гейт), а также заглушки User Guide и Runbook,
-> заполняемые в ходе реализации.
+> **Corrective notice (2026-09-25):** typed ontology, runtime `_validate_ontology`,
+> `ensure_schema` и Neo4j constraints из старой линии superseded change
+> `add-lightweight-context-graph` / ADR-031. Primitive ingest и optional dynamic context graph
+> являются актуальным контрактом; исторические typed-задачи не закрывают текущий DoD.
 
 ## 1. Цель прототипа
 
 **Проверить на практике утверждения технической документации (v5–v7):**
 
-1. Что гибридный подход «граф + вектор» даёт измеримый прирост качества ответов по
-   сравнению с vector-only (ADR-015, метрики recall/coverage/groundedness).
-2. Что ядро доменно-агностично: активация другого Domain Profile (it / library / cinema)
-   работает без изменений кода и без перезапуска контейнеров (инвариант L1-01, L1-03).
-3. Что слой адаптеров изолирует ядро от конкретных технологий: смена реализации
+1. Что vector-only baseline с metadata даёт работоспособное grounding и retrieval без graph.
+2. Что optional graph experiment, построенный inline или offline, даёт измеримый прирост
+   контекста по сравнению с baseline (ADR-015, метрики recall/coverage/groundedness).
+3. Что ядро остаётся domain-agnostic: primitive ingest не требует фиксированной бизнес-онтологии,
+   а Domain Profile даёт optional hints и изоляцию tag cloud.
+4. Что слой адаптеров изолирует ядро от конкретных технологий: смена реализации
    (`graph_store`, `vector_store`, `llm`, `embeddings`, `reranker`) через runtime config
    не требует правки ядра (L1-02, L1-03).
-4. Что пайплайн из 9 этапов (INGEST → … → COMMIT) реально исполним на целевом железе с
-   учётом GPU-гейтинга (поочерёдная работа эмбеддингов bge-m3 и LLM Qwen 2.5 Coder 7B
-   Abliterate q4_K_M — ограничение среды прототипа, ADR-027; «L4-01» сейчас = контракт
-   `LLMInference`, см. `invariants.md`).
+5. Что пайплайн из обязательных document/chunk/embed/vector-commit этапов и optional enrichment
+   реально исполним на целевом железе; graph не является тяжёлой ontology-зависимостью.
+6. Что sparse graph expansion после vector search даёт измеримый прирост контекста при
+   сохранении vector-only baseline и одинаковой revision.
 
 Прототип — **не цель, а валидация**: любые расхождения с документацией фиксируются и
 возвращаются либо в реализацию, либо в ADR (запись нового решения).
@@ -32,6 +33,7 @@
 | Исключено | Причина | Куда уходит |
 |-----------|---------|-------------|
 | Каскадная очередь ingestion (Kafka/RabbitMQ) | Прототип — синхронная схема; очередь — фаза роста | `docs/06`, `infrastructure_stack` §3 |
+| Полноценные outbox, dual-generation и автоматическая миграция graph/vector-проекций | Не нужны для измерения вклада графа; offline rebuild разрешён как отдельная idempotent job | **M6-Growth / pre-connectors**, `docs/06` §4 |
 | Reconciliation с TMS/GitLab | Операционная задача, не критична для валидации | `operations_requirements.md` §3 |
 | Eval-инфраструктура с LLM-as-judge | Метрики groundedness требуют доработки judge-шага | ADR-015 §5, `operations_requirements.md` §5 |
 | Multi-GPU / кластеры (K3s/K8s, Qdrant-кластер, Memgraph) | Фаза «Рост», после прототипа | `infrastructure_stack` §3 |
@@ -77,12 +79,12 @@
 - bge-m3 и Qwen 2.5 Coder 7B Abliterate работают **поочерёдно** через compose-профили
   (`embeddings` / `llm`), ограничение среды прототипа — гейтинг L4-01 (ADR-027), риск №1 (`docs/06` §5).
 
-## 4. Стек прототипа (фиксированный набор на этап)
+## 4. Стек прототипа (выбранные backend'ы; не архитектурная привязка)
 
 | Ось | Выбранная реализация | Интерфейс адаптера |
 |-----|----------------------|--------------------|
-| Граф | Neo4j Community (native vector index, ADR-001) | `GraphStoreProvider` |
-| Векторы | Neo4j native vector index | `VectorStoreProvider` |
+| Граф | Neo4j Community (prototype default; optional generic expansion) | `GraphStoreProvider` |
+| Векторы | выбранный vector backend; Neo4j native index в prototype | `VectorStoreProvider` |
 | Конфиги/глоссарий | SQLite + YAML-профили | Config / Glossary Service |
 | LLM | llama.cpp + Qwen 2.5 Coder 7B Abliterate q4_K_M (GGUF, `/v1`) | `LLMInference` |
 | Embeddings | bge-m3, 1024 dim (Embeddings Service :8004 или LocalSentenceTransformerAdapter) | `Embedder` |
@@ -93,6 +95,11 @@
 | Топология | Topology Orchestrator Service (:8005) + Topology UI (:8502) — отдельный сервис и приложение (ADR-019) | — |
 
 Полная карта контейнеров, портов, профилей и лицензий — `docs/infrastructure_stack.md`.
+
+Значения в таблице — выбранный backend прототипа, а не архитектурная зависимость:
+graph и vector подключаются через независимые `GraphStoreProvider` и
+`VectorStoreProvider`; они могут использовать разные хранилища, а Neo4j не является
+обязательным.
 Портовая карта конкретной инсталляции (`8000–8005`, `8501–8502`, `7687/7474`, `8080`) —
 `docs/04_services_config.md` §1; консервированный снапшот конкретики v5 (до агностификации
 Этапа 7) восстановим из git-истории — см. `docs/history.md` Этап 7.
@@ -258,7 +265,7 @@ Dz4/
   по-доменные; мультидоменная инвалидация изолирована (переиндексация `it` не сжигает
   кэш `legal`).
 - **Источник rev — fingerprint активного сета DocumentRegistry**:
-  `rev<domain> = sha256(sorted(content_hash ОБ активных документов домена))`.
+  `rev<domain> = sha256(sorted((source_url, content_hash) активных документов домена))`.
   Идемпотентен (no-op INGEST не меняет), честно отражает коллекцию источников
   (2 книги EN+RU на тему = 2 `content_hash` в множестве), переиспользует поля
   ADR-014 — без новой параллельной модели ревизии.
@@ -269,7 +276,7 @@ Dz4/
       fingerprint «профиль домена + карта адаптеров + версия данных» — переиспользование
       ADR-014/topology, без новой параллельной модели.
 - [x] Реализовать `DocumentRegistry.data_revision(domain) -> str | None` (sha256 активных
-      `content_hash`) + endpoint `GET /api/v1/ingestion/revision?domain=` (X-API-Key).
+      пар `(source_url, content_hash)`) + endpoint `GET /api/v1/ingestion/revision?domain=` (X-API-Key).
 - [x] Query-контур: поллер ревизии (аналог `_topology_rebuilder`), текущая `rev<domain>`
       в lookup/store; кэш-объект один (ADR-025), старые эпохи умирают по TTL.
 - [x] Семантический кэш: ключ `query:sc:<rev>:<domain>` (epoch-bump префикс в поле HASH).
@@ -281,6 +288,8 @@ Dz4/
 
 > Предусловие: веха 4-хвост «Ревизия данных в query-контуре» (конфигуратор профилей
 > меняет онтологию онлайн → нужен fingerprint контекста до/в паре с инвалидацией кэша).
+> До M6-Growth онлайн-изменение ingestion-профиля не считается автоматической
+> переиндексацией; для эксперимента профиль фиксируется на время корпуса.
 
 - [ ] MCP-шлюз (:8000, JSON-RPC), инструменты ADR-017, rate-limiting (`docs/security.md` §4).
 - [ ] Streamlit — конфигуратор «Бизнес-онтология» (:8501) — отдельное приложение.
@@ -306,6 +315,21 @@ Dz4/
 - [ ] (Опционально) слот `source` в топологии — переключение активных источников на лету,
       по аналогии с адаптерами M3.
 - [ ] Реализация не меняет push-контракт `POST /documents` (ADR-018) и пайплайн (ADR-021).
+
+### M6-Growth / pre-connectors — lifecycle проекций (отложено)
+
+- [ ] Ввести outbox для событий перестроения graph/vector-проекций.
+- [ ] Разделить `vector_fingerprint` и `graph_fingerprint`; no-op считать отдельно для
+  каждой проекции.
+- [ ] Реализовать dual-generation: новая generation строится и проверяется рядом со старой,
+  затем публикуется active manifest/pointer; старые generation удаляются после drain.
+- [ ] Обрабатывать смену профиля/онтологии/chunker/embedding без привязки к Neo4j;
+  `GraphStoreProvider` и `VectorStoreProvider` остаются единственными backend-контрактами.
+- [ ] До этой стадии профиль и pipeline-контракт загруженного корпуса считаются неизменными:
+  автоматический reindex после смены профиля не поддерживается, а чистый rebuild является
+  ручной операцией. Это ограничение не относится к замеру baseline/target.
+
+Стадия не является предусловием M4-eval gate и не блокирует текущий прототип.
 
 ## 7. Валидационные проверки по инвариантам
 

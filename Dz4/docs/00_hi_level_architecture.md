@@ -7,7 +7,7 @@
 
 ## 1. Актуальная архитектура (итерация v6)
 
-Одна цельная картина: база v5 (гибридный ретривер Graph + Vector, Adapter Layer, сервисы) слита с обновлением v6 (асинхронный Task Queue контур, Query Workers, Topology Orchestrator). На Этапе 8 Topology Orchestrator выделен в отдельный сервис с собственным настроечным UI (ADR-019): конфигуратор «Бизнес-онтология» (:8501) и Topology UI (:8502) — раздельные приложения.
+Одна цельная картина: vector-only baseline с metadata и optional graph experiment (Graph + Vector), Adapter Layer и сервисы слиты с обновлением v6 (асинхронный Task Queue контур, Query Workers, Topology Orchestrator). На Этапе 8 Topology Orchestrator выделен в отдельный сервис с собственным настроечным UI (ADR-019): конфигуратор «Бизнес-онтология» (:8501) и Topology UI (:8502) — раздельные приложения.
 
 ```mermaid
 flowchart LR
@@ -45,14 +45,14 @@ flowchart LR
         GLOS["Glossary Service :8003"]
         EMB["Embeddings Service :8004"]
 
-        subgraph HYBRID["Гибридный ретривер (Graph + Vector)"]
+        subgraph HYBRID["Vector baseline + optional graph experiment"]
             direction TB
             RET["Retriever"]
-            GR["Graph Retriever"]
-            VR["Vector Retriever"]
-            CA["Context Assembly<br/>(граф = скелет, вектор = тело, лимит 4096 токенов)"]
+            GR["Graph Experiment<br/>(inline/offline projection)"]
+            VR["Vector Baseline"]
+            CA["Context Assembly<br/>(vector evidence + optional bounded graph)"]
         end
-        PP["Ingestion Pipeline<br/>(EMBED → EXTRACT → NORMALIZE → COMMIT)"]
+        PP["Ingestion Pipeline<br/>(VECTOR COMMIT → optional GRAPH PROJECTION)"]
     end
 
     %% ---- Topology контур (отдельный сервис, ADR-019) ----
@@ -100,7 +100,7 @@ flowchart LR
     U -->|"POST /query → 202 Accepted + task_id"| GATE
     GATE -->|"публикация задачи"| QUEUE
     QUEUE -->|"асимметричное распределение"| W
-    W -->|"граф-поиск + инференс"| RET
+    W -->|"vector baseline + optional experiment"| RET
     GATE -->|"WebSockets / SSE — стриминг токенов"| U
 
     %% ---- Управление ----
@@ -111,18 +111,18 @@ flowchart LR
     TOPO -.->|"пулы соединений: InMemory → Redis/RabbitMQ/vLLM"| QUEUE
     TOPO -.->|"runtime config"| GSP & VSP & LLM & EMD & RER
 
-    %% ---- Гибридный ретривер (база v5) ----
-    RET --> GR
+    %% ---- Baseline + optional graph experiment ----
     RET --> VR
-    GR --> CA
     VR --> CA
+    RET -.->|"если projection готова"| GR
+    GR -.-> CA
     CA -->|"инференс промпта"| LLM
     CA --> RER
 
     GR -->|"Cypher-запросы, обход связей"| GSP
     VR -->|"vector_search (top-N чанков)"| VSP
 
-    GSP -->|"графовая ось"| NEO4J
+     GSP -->|"optional graph experiment"| NEO4J
     GSP -.->|"альтернатива"| MEMGRAPH
     VSP -->|"векторная ось"| NEO4J
     VSP -.->|"альтернатива"| QDRANT

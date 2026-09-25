@@ -1,7 +1,7 @@
 # Документация: Инварианты платформы
 
-> **Версия:** v10 (итерация поверх базы v5; L2-07 → реализован (ADR-026, Веха 4-хвост), L4-04 → partial, L4-01 → переквалифицирован ADR-027; L3-06 → реализован (ADR-028, бандл `concurrent-ingest-write-policy`))
-> **Последнее обновление:** 2026-09-19
+> **Версия:** v11 (итерация поверх базы v5; L2-07 → реализован (ADR-026, Веха 4-хвост), L4-04 → partial, L4-01 → переквалифицирован ADR-027; L3-06 → реализован (ADR-028, бандл `concurrent-ingest-write-policy`); L5-05 → зафиксирован (ADR-029, бандл `add-lightweight-context-graph`))
+> **Последнее обновление:** 2026-09-22
 >
 > Единый сводный перечень инвариантов — утверждений, которые обязаны выполняться во **всех**
 > реализациях и при любых изменениях стека/домена/версий. Это верхнеуровневые контракты для
@@ -15,33 +15,34 @@
 
 | ID | Инвариант | Обоснование |
 |----|-----------|-------------|
-| L1-01 | Ядро **не знает**, с каким доменом работает: вся доменная специфика (онтология, промпты, правила валидации, глоссарий, чанкинг) задаётся Domain Profile (YAML) | CONCEPT §3, ADR-011 (доменно-агностичность) |
+| L1-01 | Ядро **не знает** фиксированную бизнес-онтологию: domain задаёт scope и optional hints, а graph data остаётся dynamic | CONCEPT §3–§5, corrective change `add-lightweight-context-graph` |
 | L1-02 | Ядро взаимодействует с инфраструктурой **только** через интерфейсы `GraphStoreProvider`, `VectorStoreProvider`, `LLMInference`, `Embedder`, `Reranker`; прямая зависимость от конкретной реализации в ядре запрещена | CONCEPT §2, ADR-012 |
 | L1-03 | Смена реализации адаптера выполняется через runtime config (`namespace: adapters`) **без изменения кода ядра и без перезапуска контейнеров** | CONCEPT §2.5, §6.3, ADR-012 |
-| L1-04 | Граф и вектор — **две независимые оси** поиска; они соединяются только на этапе Context Assembly | CONCEPT §2.1, ADR-013 |
-| L1-05 | Детерминированность критичных шагов (дедупликация, канонизация, валидация, сборка контекста, вытеснение) обеспечивается **Python-кодом**, LLM допускается только на экстракции и пограничных решениях | CONCEPT §4, ADR-004 |
+| L1-04 | Vector store и metadata образуют self-contained baseline; graph adapter — optional experiment projection, которая строится inline или offline и не является prerequisite для ingest/query | CONCEPT §5, ADR-013, `add-lightweight-context-graph` |
+| L1-05 | Детерминированность критичных шагов (tag identity, dedup policy, context assembly, bounded expansion, вытеснение) обеспечивается Python-кодом; LLM допускается только на optional enrichment и пограничных предложениях | CONCEPT §4–§5, ADR-004 |
 | L1-06 | Версионирование платформы: изменения контрактов ломающего характера — только через новый ADR; изменения инвариантов — отдельное решение | `docs/05_adr_log.md`, `docs/history.md` (итерации) |
 
 ## L2. Данные (граф / вектор)
 
 | ID | Инвариант | Обоснование |
 |----|-----------|-------------|
-| L2-01 | Каждая доменная сущность имеет уникальный `canonical_name` (constraint по `unique_key` профиля) и несёт `source_ids` + `extractor_version` | `docs/data_model.md` §3, §5 |
+| L2-01 | Context node имеет стабильный `tag_id` в пределах домена, `canonical_name`/aliases и provenance; `canonical_name` не является глобальным constraint | `docs/data_model.md`, corrective change `add-lightweight-context-graph` |
 | L2-02 | Один вариант записи («тег») в домене не может вести к двум разным каноническим терминам | CONCEPT §6.4, `docs/04` §4 |
 | L2-03 | Каждый Chunk принадлежит ровно одному Source (связь `CONTAINS`); орфанные чанки запрещены | CONCEPT §4.1 (CHUNK), `docs/data_model.md` §4 |
 | L2-04 | Графовая и векторная оси связаны по ключу `chunk_id`; запись узлов/рёбер и эмбеддингов коммитится атомарно **в пределах одного движка** (атомарная пара: обе оси `consistency_capability()=="atomic"` и общий `engine_key()`); разнородные пары — best-effort c компенсацией (сбой второй оси → граф откатывается `delete_node`, джоба `failed` с пометкой «компенсировано») | CONCEPT §4.1 (COMMIT), ADR-013, ADR-024, `docs/data_model.md` §6, `openspec/changes/architecture-atomic-commit/spec.md` |
-| L2-05 | Удаление источника — soft delete: чанки снимаются с поиска, сущности сохраняются, пока имеют активные `source_ids`; физическое удаление — только фоновый cleanup по retention | ADR-014, `docs/operations_requirements.md` §2 |
+| L2-05 | Удаление источника — soft delete: чанки снимаются с поиска, context nodes сохраняются при активном provenance; физическое удаление — только фоновый cleanup по retention | ADR-014, `docs/operations_requirements.md` §2 |
 | L2-06 | Идемпотентность INGEST: повторная загрузка неизменённого `source_url` (тот же content hash) — no-op, без плодования версий | ADR-014 |
-| L2-07 | **Bounded staleness (query-контур):** ответ конструируется из данных не старее ревизии `R<domain>`; ревизия = fingerprint активного сета DocumentRegistry (`sha256(sorted content_hash)`, ADR-026). Query-контур знает текущую `R<domain>` (поллер `GET /revision`), кэшированные записи старой эпохи умирают по TTL, «свежесть ответа = свежесть данных» только при совпадении ревизий | ADR-026, `docs/prototype_requirements.md` §Веха 4-хвост, `learning/data_revision_analytics.md` |
+| L2-07 | **Bounded staleness (query-контур):** ответ конструируется из данных не старее ревизии `R<domain>`; ревизия = fingerprint активного сета DocumentRegistry (`sha256(sorted (source_url, content_hash))`, ADR-026). Query-контур знает текущую `R<domain>` (поллер `GET /revision`), кэшированные записи старой эпохи умирают по TTL, «свежесть ответа = свежесть данных» только при совпадении ревизий | ADR-026, `docs/prototype_requirements.md` §Веха 4-хвост, `learning/data_revision_analytics.md` |
+| L2-08 | Graph projection имеет отдельные readiness и revision; stale/partial projection не блокирует vector baseline и не выдаётся за успешный graph experiment | `add-lightweight-context-graph/design.md` §2–§5 |
 | L2-09 | Offline rebuild использует domain-scoped job key, lease и compare-and-set; повторный backfill не создаёт дублей и не меняет content/embedding | `add-offline-graph-projection/design.md` §2–§3 |
 
 ## L3. Процессы (ingestion / retrieval)
 
 | ID | Инвариант | Обоснование |
 |----|-----------|-------------|
-| L3-01 | Ingestion проходит 9 фиксированных этапов (INGEST→…→COMMIT) в заданном порядке; пропуск этапа запрещён | CONCEPT §4.1, `docs/02` §1 |
+| L3-01 | Primitive ingest проходит обязательные document/chunk/embed/vector-commit этапы; optional graph projection не является gate и не должен блокировать success | CONCEPT §4, `docs/02` §1 |
 | L3-02 | Двухступенчатая дедупликация: авто-merge только при cosine ≥ 0.92; зона 0.75–0.92 — обязательная LLM-верификация; ниже 0.75 — никогда не склеиваются | CONCEPT §4.1 (DEDUP), ADR-005 |
-| L3-03 | Графовый «скелет» в контексте вставляется всегда первым; вытеснение при переполнении лимита контекста затрагивает только векторные чанки (по убыванию reranker-score) | `docs/03_retriever.md` §2 |
+| L3-03 | Vector-only baseline не вызывает graph; optional graph experiment выполняет vector-first search, bounded expansion и boost только при готовой projection, а fallback маркируется degraded | `docs/03_retriever.md`, `add-lightweight-context-graph/spec.md` |
 | L3-04 | Окно контекста имеет жёсткий программный лимит (4096 токенов); неконтролируемый рост контекста запрещён | `docs/03_retriever.md` §2 |
 | L3-05 | Query API (v6) — асинхронный контур: `POST /query` → `202 Accepted` + `task_id`, доставка результата через WebSockets/SSE единым конвертом событий | ADR-016, `docs/api_reference.md` §3 |
 | L3-06 | Политика конкурентной записи COMMIT: план записи детерминирован по контрактным ключам сортировки (`nodes.sort(node_id)`, `edges.sort(from_id, to_id, type)`); transient-ошибки движка (deadlock/сеть) ретраятся до `N_RETRY_COMMIT` (всего `N_RETRY_COMMIT + 1` попыток) перед fail/компенсацией; non-transient — fail без повторов. Детерминированный порядок **снижает вероятность** deadlock-циклов на общих сущностях, но НЕ исключает их (другие операции и блокировки движка) — отсюда обязательный retry; заявление «deadlock невозможен» запрещено | ADR-028, UC12-07, `docs/05_adr_log.md` (ADR-028), `openspec/changes/concurrent-ingest-write-policy/spec.md` §2/§3 |
@@ -66,6 +67,7 @@
 | L5-02 | Секреты (API-ключи, пароли БД, доступ к LM-серверам) не попадают в логи (redaction) | `docs/security.md` §3 |
 | L5-03 | MCP-шлюз предоставляет агентам только чтение графа и поиск (без правки профилей/конфигурации) | ADR-017, `docs/security.md` §1 |
 | L5-04 | Ввод новой модели/промпта допустим только при groundedness и coverage не ниже baseline (eval-гейт) | ADR-015, `docs/operations_requirements.md` §5 |
+| L5-05 | Оценка не зависит от железа/присутствия судьи: послойные артефакты прогона (слои 1–3: `run_manifest.json`, `qa_log.jsonl`, `lift_report.json` + `.md`) обязательны и пишутся **во всех режимах**, включая `--no-judge` и `--retrieval-only`; их наличие и полнота не зависят от судьи. Без судьи groundedness/coverage = `n/a` и не участвуют в вердикте гейта. Слой 4 (`trace.jsonl`) — только по требованию и не подменяет слои 1–3 | ADR-029, `docs/test_plan.md` §5, `openspec/changes/add-lightweight-context-graph/design.md` §5 |
 
 ---
 

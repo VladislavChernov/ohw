@@ -593,7 +593,7 @@ worker/PEL/SSE / `fast_review2.md` thread-per-job).**
 ### Реализация (ADR-026)
 
 1. **Ingestion** — `DocumentRegistry.data_revision(domain) -> str | None`: fingerprint
-   `sha256(sorted(content_hash активных документов))`, идемпотентен (no-op upsert не
+   `sha256(sorted((source_url, content_hash) активных документов))`, идемпотентен (no-op upsert не
    меняет, soft-delete меняет) + `data_revision_updated_at`; endpoint
    `GET /api/v1/ingestion/revision?domain=` (X-API-Key, L5-01; 422 без domain); тесты
    `test_ingestion_revision.py` (8 passed).
@@ -714,6 +714,67 @@ retry (N повторов → успех), non-transient без повторов
 
 ---
 
+## Этап 15: Эксперимент «вклад графа» (историческая typed-ontology линия)
+
+> **Superseded 2026-09-25:** обязательные typed labels, `_validate_ontology`, `ensure_schema`
+> и parallel graph/vector axes не являются актуальной архитектурой. Целевая corrective-линия —
+> `add-lightweight-context-graph` / ADR-031: primitive ingest, optional tags/AI enrichment и
+> vector-first bounded graph expansion.
+
+### Находка (обоснование бандла)
+
+ADR-015 не умел атрибутировать прирост графу: абсолютный recall не говорит, что помог граф;
+вопросы без `graph_required` размывают агрегат; раннер не сохранял пары «вопрос → ответ»
+(прогон без артефактов неотличим от «кажется, стало лучше»); полный прогон с судьёй
+блокировал быстрый цикл. Зафиксирован дефект парности: в режиме `both` граф выключался
+**в обеих** ветках — сравнение двух baseline'ов (исправлено в стадии 4, `_run_mode`).
+
+### Что сделано
+
+**Стадия 1 — типизированный граф (выборка для среза):** граф-ритривер с typed-запросами
+(Neo4j DDL-constraint `uniq_<Type>_<key>`, `node_labels` по типу, 05_schema_v2 extraction).
+**Стадия 2 — атрибуция осей:** `done.sources` дополнен аддитивным `axis ∈ {graph, vector}`
+(ADR-016-совместимо), включая cache-hit-ветку.
+**Стадия 3 — метрики вклада:** `graph_contribution()` — `necessity`, `delta_recall`,
+`recall_graph/vector`, `evidence_recall_graph`, считается только на срезе
+`golden_graph_evidence=true` (вне среза — `mode="not_measured"`, без интерпретации).
+**Стадия 4 — датасет v2 и графовый поднабор:** поля `reasoning_type`, `answerability`,
+`as_of`, `evidence_sections`, `evidence_policy` (`graph_required` влечёт
+`golden_graph_evidence`), `rubric`; валидация `validate_question` + `--extra-dataset`
+(merge с дедупликацией id); `it/questions.jsonl` переразмечен в v2 (50 вопросов);
+`it/questions_graph.jsonl` — 16 вопросов (9 `graph_required`), факты сверены с docs.
+**Стадия 5 — послойные артефакты (ADR-029, L5-05):** `<out>/run_manifest.json` (условия:
+run_id, started_at, code_commit, revision/fingerprint, datasets, k, mode, graph_enabled,
+components, generation, flags — пишется один раз), `<out>/qa_log.jsonl` (пары с axis,
+append на вопрос, переживает падение), `<out>/lift_report.{json,md}` (+ блок «Условия
+прогона», `verdict=n/a` без судьи), `<out>/trace.jsonl` (`--trace`, события pipeline).
+Режимы: `--no-judge` (generation.mode=`n/a`), `--retrieval-only` (`skipped`, LLM-контур
+не требуется в preflight, `pipeline.run(generate=False)`). Правило парности:
+`compare_run_manifests` (факторы `mode`/`graph_enabled`), `--compare-with` → расхождение
+> 1 поля → «прогоны не парные», `verdict=invalid`.
+
+### Верификация
+
+`tests/test_eval_dataset.py` (v2-валидация, дедупликация merge), `test_typed_graph.py`,
+`test_retrieval_core.py` (axis в done), `test_eval_metrics.py` (graph_contribution,
+verdict n/a), `test_run_eval_artifacts.py` (манифест, qa_log, trace, режимы, парность).
+Итог: **pytest 420 passed** (2 deselected e2e), **ruff** чисто, **mypy** чисто
+(dev-образ `ohw/dz4-dev:0.1.0`). Доки: ADR-029 (Draft), инвариант L5-05 (v11),
+`docs/test_plan.md` §5–§6, `prototype/infra/eval/README-minimal.md`.
+
+### Замечания / следующие шаги
+
+- Стадия 7 — парный прогон `--mode both` на живом Neo4j-стеке (одна revision,
+  `it/questions.jsonl` + `it/questions_graph.jsonl`); ручной сан-чек выборки пар (n ≥ 10);
+  хронометраж fast-loop vs полный; диагностический `--trace` на 1–2 вопросах.
+- Проверка no-op переингеста (L2-06, замечание Этапа 14, задача 1.3) — в стадии 4
+  EXTRACT переведён на типизированный, ревизия корпуса сменится после переингеста.
+- Projection lifecycle (transactional outbox, dual-generation, автоматическая
+  переиндексация после смены профиля/онтологии) отложена на M6-Growth /
+  pre-connectors; текущий эксперимент использует синхронный COMMIT и одну revision.
+
+---
+
 ## Связи с другими документами
 
 | Документ                        | Связано с                        | Тип связи           |
@@ -723,7 +784,7 @@ retry (N повторов → успех), non-transient без повторов
 | docs/02_pipeline_and_normalizer.md    | CONCEPT.md §4           | Техническая детализация |
 | docs/03_retriever.md                  | CONCEPT.md §5           | Техническая детализация |
 | docs/04_services_config.md            | CONCEPT.md §6           | Техническая детализация |
-| docs/05_adr_log.md                    | CONCEPT.md §7           | Подробное обоснование (ADR-001 - ADR-028) |
+| docs/05_adr_log.md                    | CONCEPT.md §7           | Подробное обоснование (ADR-001 - ADR-029) |
 | docs/06_operations_and_risks.md       | CONCEPT.md §8           | Техническая детализация |
 | docs/adapters_specification.md        | CONCEPT.md §2, ADR-012/013 | Контракты интерфейсов |
 | docs/adapters_guide.md                | CONCEPT.md §2.5, docs/adapters_specification.md | Инструкция подключения внешних систем |

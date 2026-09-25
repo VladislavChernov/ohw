@@ -1,31 +1,67 @@
-# Документация: Онтология и Domain Profile
+# Документация: Domain Profile и контекстные теги
 
-> **Версия:** v5.0  
-> **Последнее обновление:** 2026-09-05
+> **Статус:** corrective contract `add-lightweight-context-graph`
 
-## 1. Принцип изоляции предметной области
+## 1. Назначение
 
-Ядро системы (пайплайн, ретривер, СУБД) полностью изолировано от специфики конкретной индустрии. Вся доменная логика вынесена в Domain Profile (YAML).
+Domain Profile задаёт область данных и optional hints для chunking, extraction и glossary.
+Он не является обязательной онтологией, не валидирует каждый тег и не создаёт Neo4j constraints
+во время ingest. Primitive ingest должен работать без профиля, LLM, tags и links.
 
-Базовый профиль (поставляется из коробки): "it" (Requirement -> Concept -> Contract).  
-Примеры расширения: "library" (литература), "cinema" (кино/рекомендации).
+## 2. Контекстное облако
 
-## 2. Структура конфигурации Domain Profile (Контракт ядра)
+Основная graph-модель — динамический набор context nodes и sparse edges:
 
-Каждый подключаемый YAML-профиль обязан декларировать секции:
-
-- `profile`: name, description, language.
-- `ontology`: node_types (с полем unique_key), edge_types (направления from -> to).
-- `extraction`: prompt_template (ID промпта), temperature, max_tokens.
-- `validation`: массив правил rules (каждое правило содержит Cypher-запрос).
-- `canonicalization`: перечень слоёв трансформации для каждой категории узла.
-- `chunking`: стратегии нарезки по типам источников (book/schema/poem и др.).
-- `context_assembly`: template (шаблон сборки промпта) и приоритет вывода.
-
-## 3. Автоматическая генерация Cypher constraints
-
-При активации нового доменного профиля, Config Service парсит секцию node_types и автоматически выполняет в Neo4j команды создания индексов уникальности:
-
-```cypher
-CREATE CONSTRAINT FOR (n:{node_type}) REQUIRE n.{unique_key} IS UNIQUE;
+```text
+ContextNode {
+  tag_id: opaque stable id within domain,
+  canonical_name: preferred display label,
+  aliases: list[string],
+  origin: user | ai | system,
+  confidence: number | null,
+  source_ids: list[string],
+  chunk_ids: list[string],
+  properties: schemaless object
+}
 ```
+
+`canonical_name` — preferred label, а не универсальный constraint. Один смысловой объект
+(например, алгоритм) получает стабильный `tag_id`; его варианты и переводы живут в `aliases`.
+Glossary/alias resolution и optional AI dedup помогают связать `Quicksort` и
+«Быстрая сортировка». Неоднозначные варианты не объединяются молча.
+
+Edges используют generic kinds `parent`, `related` и technical `mentions`; custom properties
+и link kinds допустимы. `Source` и `Chunk` остаются техническими anchors, а не бизнес-типами.
+
+## 3. Optional enrichment
+
+Пользователь может загрузить документ без тегов или вручную добавить tags/links. AI может
+предложить enrichment автоматически. Оба источника используют один graph и сохраняют `origin`,
+confidence и provenance; ручные данные не перезаписываются AI предложениями.
+
+Ошибка AI enrichment не отменяет сохранение документа, chunks и vectors. Projection может быть
+построена inline после vector commit или отдельным offline replay; offline job backfill-ит
+`context_ids`/`tag_ids` и фиксирует readiness/revision, не меняя vector-only baseline. Изменение
+только tags/links является отдельной graph mutation в lifecycle-стадии M6-Growth, а не скрытым
+изменением `content_hash`.
+
+### 3.1. Projection state
+
+Для каждого domain job хранит `ProjectionState` с `data_revision`, `projection_revision`,
+`config_fingerprint`, status (`pending`, `ready`, `degraded`, `stale`, `failed`), lease и
+счётчиками источников. `ready` означает, что projection построена и проверена для текущей
+revision; `stale` и отсутствие state запрещают graph experiment, но не запрещают vector-only
+поиск. Offline rebuild использует claim/lease, детерминированный job key и безопасный retry.
+
+## 4. Границы профиля
+
+Профиль может содержать:
+
+- `profile` и domain metadata;
+- optional `chunking` settings;
+- optional extraction prompt/parameters;
+- glossary aliases и normalization hints;
+- optional context-assembly template.
+
+Профиль не обязан содержать `ontology.node_types`, `edge_types`, `unique_key` или Cypher
+validation rules. Runtime не вызывает `_validate_ontology` и `ensure_schema`.

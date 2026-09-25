@@ -41,6 +41,7 @@ docker compose -f prototype/infra/compose.yaml ps       # ждём всех "hea
 # Переменные окружения (генерируются случайно)
 $env:GRAPH_AUTH_API_KEY = [guid]::NewGuid().ToString("N")
 $env:NEO4J_PASSWORD = [guid]::NewGuid().ToString("N")
+$env:RUN_CODE_COMMIT = (git rev-parse --short HEAD)
 
 $project  = "ohw-eval-minimal"
 $compose  = "prototype/infra/compose.eval-minimal.yaml"
@@ -53,16 +54,16 @@ docker compose -p $project -f $compose ps              # ждём "healthy"
 ### Загрузка корпуса и eval
 
 ```powershell
-# 1. Формируем snapshot (offline, без стека)
-docker compose -p $project -f $compose run --rm eval-runner python /app/infra/eval/pilots/docs-review/corpus_tools.py prepare
+# 1. Pilot snapshot: путь --root обязателен, snapshot не пишется в read-only mount
+$snapshot = "/reports/docs-review-snapshot"
+docker compose -p $project -f $compose run --rm eval-runner python /proposal/corpus_tools.py prepare --root /repo --snapshot $snapshot
 
 # 2. Загрузка 7 документов (требуется запущенный стек)
-docker compose -p $project -f $compose run --rm eval-runner python /app/infra/eval/pilots/docs-review/corpus_tools.py upload --out /reports/docs-review-upload.json
+docker compose -p $project -f $compose run --rm eval-runner python /proposal/corpus_tools.py upload --snapshot $snapshot --out /reports/docs-review-upload.json
 
-# 3. Диагностический запуск baseline + hybrid
+# 3. Полный graph experiment на публичном docs/корпусе
 $run = Get-Date -Format "yyyyMMdd-HHmmss"
-docker compose -p $project -f $compose run --rm --no-deps eval-runner python /app/infra/eval/run_eval.py --domain it --mode baseline --dataset /proposal/questions.jsonl --out "/reports/docs-review-$run/baseline"
-docker compose -p $project -f $compose run --rm --no-deps eval-runner python /app/infra/eval/run_eval.py --domain it --mode hybrid  --dataset /proposal/questions.jsonl --out "/reports/docs-review-$run/hybrid"
+docker compose -p $project -f $compose run --rm --no-deps eval-runner python /app/infra/eval/run_eval.py --domain it --mode both --corpus /repo/docs --source-prefix docs --dataset /app/infra/eval/it/questions.jsonl --extra-dataset /app/infra/eval/it/questions_graph.jsonl --out "/reports/experiment-$run"
 
 # 4. Остановка (volumes сохранятся)
 docker compose -p $project -f $compose down
@@ -102,6 +103,7 @@ docker compose -p $project -f $compose down
 ```powershell
 $env:GRAPH_AUTH_API_KEY = "eval-key"
 $env:NEO4J_PASSWORD = "eval-pass"
+$env:RUN_CODE_COMMIT = (git rev-parse --short HEAD)
 docker compose -p ohw-eval-minimal -f prototype/infra/compose.eval-minimal.yaml up -d --wait --wait-timeout 600
 ```
 
