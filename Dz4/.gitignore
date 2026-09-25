@@ -9,7 +9,8 @@ __pycache__/
 # Локальные артефакты процесса (не публикуются)
 review/
 QA_review/
-Ingest/analitic/
+# Ingest/analitic/ больше не игнорируется: аналитика по модулям — целевое
+# обоснование будущих решений, в т.ч. ингеста (см. Dz4/analitic/ANALYTICAL_NOTES_RULES.md)
 
 # Секреты локального контура (не публикуются): ключи API и пароль Neo4j
 prototype/infra/.env
