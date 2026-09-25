@@ -7,7 +7,9 @@
 ## Стек (прототип, ADR-001…020)
 
 - Python 3.11+, uv, FastAPI (ИИ-контур; Query API :8000 — Python на прототипе, ADR-020).
-- Neo4j Community (граф + vector index), Ollama + qwen2.5:7b-instruct, bge-m3, bge-reranker-base.
+- Neo4j Community — выбранный backend прототипа для graph/vector; graph и vector
+  подключаются через независимые `GraphStoreProvider`/`VectorStoreProvider` и не требуют
+  общей Neo4j-транзакции. Ollama + qwen2.5:7b-instruct, bge-m3, bge-reranker-base.
 - Valkey / Redis Streams (Task Queue, веха 2), SQLite + YAML (Config/Glossary), Docker Compose.
 - Собственная сеть `ohw_net`, собственные volumes. Проект полностью автономный
   (не использует общий `<local-path>`, shared ollama или `ohw_kit`).
@@ -18,6 +20,8 @@
   код и тесты — после.
 - Верификация задачи (= done) — зелёные pytest/ruff/mypy, а не «код смотрится ок».
 - `/review` — adversarial-ревью diff перед коммитом (агент `reviewer`, только читает).
+- `Proposals/` — непроектные идеи; перед переносом в контракт проходят `add-proposal-review-gate`
+  с решением `accepted/partial/deferred/rejected`.
 - Python локально отсутствует: toolchain гоняется в dev-container (VS Code,
   `prototype/.devcontainer`/корневом) или на ВМ для запуска.
 
