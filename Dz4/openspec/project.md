@@ -25,4 +25,5 @@
 
 - `docs/` — живая документация (SSOT: `docs/00`–`06`, ADR, спeки контрактов).
 - `openspec/` — спеки изменений (по вехам).
+  Активные lifecycle-контракты: `add-lightweight-context-graph` и `add-offline-graph-projection`.
 - `prototype/` — код и контур прототипа (compose, config, domain_profiles, src).

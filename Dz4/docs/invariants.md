@@ -33,6 +33,7 @@
 | L2-05 | Удаление источника — soft delete: чанки снимаются с поиска, сущности сохраняются, пока имеют активные `source_ids`; физическое удаление — только фоновый cleanup по retention | ADR-014, `docs/operations_requirements.md` §2 |
 | L2-06 | Идемпотентность INGEST: повторная загрузка неизменённого `source_url` (тот же content hash) — no-op, без плодования версий | ADR-014 |
 | L2-07 | **Bounded staleness (query-контур):** ответ конструируется из данных не старее ревизии `R<domain>`; ревизия = fingerprint активного сета DocumentRegistry (`sha256(sorted content_hash)`, ADR-026). Query-контур знает текущую `R<domain>` (поллер `GET /revision`), кэшированные записи старой эпохи умирают по TTL, «свежесть ответа = свежесть данных» только при совпадении ревизий | ADR-026, `docs/prototype_requirements.md` §Веха 4-хвост, `learning/data_revision_analytics.md` |
+| L2-09 | Offline rebuild использует domain-scoped job key, lease и compare-and-set; повторный backfill не создаёт дублей и не меняет content/embedding | `add-offline-graph-projection/design.md` §2–§3 |
 
 ## L3. Процессы (ingestion / retrieval)
 
@@ -44,16 +45,18 @@
 | L3-04 | Окно контекста имеет жёсткий программный лимит (4096 токенов); неконтролируемый рост контекста запрещён | `docs/03_retriever.md` §2 |
 | L3-05 | Query API (v6) — асинхронный контур: `POST /query` → `202 Accepted` + `task_id`, доставка результата через WebSockets/SSE единым конвертом событий | ADR-016, `docs/api_reference.md` §3 |
 | L3-06 | Политика конкурентной записи COMMIT: план записи детерминирован по контрактным ключам сортировки (`nodes.sort(node_id)`, `edges.sort(from_id, to_id, type)`); transient-ошибки движка (deadlock/сеть) ретраятся до `N_RETRY_COMMIT` (всего `N_RETRY_COMMIT + 1` попыток) перед fail/компенсацией; non-transient — fail без повторов. Детерминированный порядок **снижает вероятность** deadlock-циклов на общих сущностях, но НЕ исключает их (другие операции и блокировки движка) — отсюда обязательный retry; заявление «deadlock невозможен» запрещено | ADR-028, UC12-07, `docs/05_adr_log.md` (ADR-028), `openspec/changes/concurrent-ingest-write-policy/spec.md` §2/§3 |
+| L3-07 | Projection state и job audit не меняют vector-only baseline; partial failure оставляет retry marker и не превращает документ в failed ingest | `add-offline-graph-projection/spec.md`, `docs/02` §2 |
 
 ## L4. Операции
 
 | ID | Инвариант | Обоснование |
 |----|-----------|-------------|
 | L4-01 | Доступ к LLM-инференсу — только через контракт `LLMInference`; ядро не знает физического размещения модели (локальный GPU, отдельный хост, внешний endpoint). Совместное размещение моделей (эмбеддер + LLM на одном GPU → гейтинг по фазам) — ограничение среды развертывания, фиксируется в прототипных доках, а не инвариантом | CONCEPT §2.2, ADR-022, ADR-027, `docs/06` §5 (риск №1) |
-| L4-02 | Фоновые задачи (cleanup, retention, reconciliation) не выполняются в hot-path обработки запросов | ADR-014, `docs/operations_requirements.md` §2–§3 |
+| L4-02 | Offline graph enrichment/rebuild, cleanup, retention и reconciliation не выполняются в hot-path обработки запросов; projection readiness/revision фиксируются отдельно | ADR-014, `docs/operations_requirements.md` §2–§3, `add-lightweight-context-graph/design.md` §3 |
 | L4-03 | Смена активного домена и адаптеров не требует перезапуска контейнеров (runtime config) | CONCEPT §6, `docs/04` |
 | L4-04 | **Метрики:** *(partial — этап A реализован, Prometheus /metrics — этап B/фаза 2)* все сервисы публикуют метрики с обязательным лейблом `{domain}`; структура метрик фиксирована. Этап A: `trigger_metrics snapshot {...}` из `worker.loop()` (env `METRICS_SNAPSHOT_INTERVAL_S`, дефолт 30 c; поля `domain="*"`, `queue_depth`, `oldest_pending_s` (задел), `topology_poll_errors_total`, `revision_poll_errors_total`, `revisions` (известные ревизии доменов), `cache_*`); поллер ошибок топологии и ревизий логирует счётчик вместо глотания | `docs/06` §2 |
 | L4-05 | Восстановление из бэкапа должно соответствовать целевым RPO/RTO, зафиксированным в эксплу.требованиях | `docs/operations_requirements.md` §1 |
+| L4-06 | Каждая projection job attempt имеет audit record и status/counts; payload documents, secrets и embeddings не логируются | `add-offline-graph-projection/design.md` §6, `docs/06` §2 |
 
 ## L5. Безопасность и качество
 

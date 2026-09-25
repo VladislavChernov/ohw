@@ -11,6 +11,9 @@ review/
 QA_review/
 Ingest/analitic/
 
+# Секреты локального контура (не публикуются): ключи API и пароль Neo4j
+prototype/infra/.env
+
 # Runtime data (SQLite прототипа, локальные прогоны)
 prototype/runtime/
 prototype/reports/
