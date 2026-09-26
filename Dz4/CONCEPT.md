@@ -114,7 +114,7 @@ Management API (`PUT /api/v1/config/adapters`, см. §6.3).
 +----------------------------------------------------------+
 |                    ЯДРО СИСТЕМЫ (fixed)                   |
 |                                                           |
-|  Ingestion Pipeline (6 этапов)                             |
+|  Ingestion Pipeline (9 стадий)                        |
 |  Retriever (Vector + Reranker, graph experiment опционально) |
 |  Services (Query, Config, Glossary, Ingestion)           |
 |  Adapter Layer (GraphStore, VectorStore, LLM, Embedder, Reranker) |
@@ -145,21 +145,32 @@ Management API (`PUT /api/v1/config/adapters`, см. §6.3).
 
 ## 4. Ingestion Pipeline
 
-### 4.1. Динамический Ingestion Pipeline (6 этапов)
+### 4.1. Динамический Ingestion Pipeline (9 стадий)
 
-Движок последовательно прогоняет данные через этапы:
+Движок последовательно прогоняет данные через стадии:
 
 1. **INGEST** — Приём документа через Ingestion API. Поддержка: .txt, .md, .pdf, .json. Метаданные: source_url, domain, doc_type.
 2. **CHUNK** — Фрагментация текста через интерфейс-стратегию **Chunker** (аналогично слою адаптеров). Выбор стратегии и параметров — runtime config (`namespace: chunking`): sliding window с overlap, structure-aware (по заголовкам документа), на базе внешних фреймворков (например, LangChain / LlamaIndex). Сторонние стратегии регистрируются через entry_points (§2.6). Chunking не требует Domain Profile или graph ontology.
 3. **EMBED** — Генерация векторных embeddings через **Embeddings Adapter**. Выбор модели — через runtime config (namespace: adapters.embeddings), параметры батча — namespace: embeddings.batch_size. Ядро не знает, какой эмбеддер под капотом.
-4. **GRAPH PROJECTION (optional experiment)** — manual tags/links, AI candidates и glossary
-   aliases строят generic context nodes/edges. Projection может выполняться inline после vector
-   commit или отдельным offline replay; её ошибка не отменяет document ingest.
-5. **REGISTER/COMMIT** — запись канонического документа, chunks, vectors, provenance и optional
+4. **EXTRACT** — извлечение сущностей и связей. При `llm_enabled` используется промпт из Domain
+   Profile; стадия необязательна, её ошибка не превращает ingest в failed job.
+5. **NORMALIZE** — разрешение вариантов и aliases через glossary.
+6. **DEDUP** — слияние сущностей по точному совпадению нормализованного canonical key.
+7. **CONTRACT** — приведение сущностей к контракту записи.
+8. **VALIDATE** — техническая проверка результата перед записью.
+9. **COMMIT** — запись канонического документа, chunks, vectors, provenance и optional
    enrichment. `domain` изолирует контекст и tag cloud; `tag_id` и aliases разрешаются через
    glossary/optional AI. Runtime не создаёт ontology constraints и не выполняет Cypher validation.
-6. **OFFLINE GRAPH REBUILD (optional)** — идемпотентный replay корпуса строит или обновляет graph
-   projection и backfill-ит metadata, не меняя vector-only baseline.
+
+**Векторная и графовая запись — не два последовательных шага, а одна стадия COMMIT** с
+внутренним выбором стратегии: при отсутствии graph store выполняется vector-only запись; при
+наличии обоих хранилищ, атомарной capability у обоих и совпадении `engine_key` — атомарная пара,
+иначе best-effort. Vector store обязателен всегда. Ошибка записи при `graph_optional` не отменяет
+документ: статус становится `degraded`, и выполняется повторная запись только вектора.
+
+Отдельно от ingest существует **OFFLINE GRAPH REBUILD (optional)** — идемпотентный replay корпуса,
+который строит или обновляет graph projection и backfill-ит metadata, не меняя vector-only
+baseline. Inline projection возникает внутри COMMIT, а не отдельным шагом пайплайна.
 
 ### 4.2. Projection state и readiness
 
@@ -184,9 +195,13 @@ state и partial projection дают vector-only fallback с degraded marker. С
 
 Отдельный **graph experiment** может выполнить после vector search bounded expansion по
 `context_ids`/`tag_ids`, если inline/offline projection готова. Expansion имеет depth/fanout/
-node/time budget, возвращает provenance/path и получает ограниченный boost. При unavailable/
-stale graph используется vector-only fallback с degraded marker; silent fallback не считается
-успешным graph experiment.
+node/time budget, обходит рёбра любого вида в обе стороны и возвращает provenance/path вместе с
+фактическим видом ребра. Влияние на ранжирование задаётся профилем через
+`retrieval.graph_boost` и **по умолчанию равно нулю**, то есть без явной настройки граф даёт
+контекст для генерации, но не меняет порядок выдачи; сужение обхода видами задаётся
+`retrieval.expansion_kinds`. При unavailable/stale graph, а также при пустом результате обхода
+используется vector-only fallback с degraded marker, причём причина различается: рёбер нет либо
+сужение ничего не нашло. Silent fallback не считается успешным graph experiment.
 
 ### Динамическая сборка контекста (Context Assembly)
 
