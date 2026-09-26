@@ -36,6 +36,7 @@ from graphrag_proto.retrieval.adapters.base import (
     Reranker,
     VectorStoreProvider,
     _expand_depth,
+    _expand_kinds,
 )
 from graphrag_proto.retrieval.context import (
     CONTEXT_TOKEN_LIMIT,
@@ -418,7 +419,7 @@ class QueryPipeline:
                                 "degraded": True,
                                 "reason": (
                                     "no_matching_edge_kinds"
-                                    if expansion_kinds
+                                    if _expand_kinds(expansion_kinds) is not None
                                     else "empty_projection"
                                 ),
                             }

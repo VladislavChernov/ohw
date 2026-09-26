@@ -83,6 +83,7 @@ class _CountingGraphStore(GraphStoreProvider):
                 list(context_ids),
                 {
                     "direction": direction,
+                    "kinds": list(kinds) if kinds is not None else None,
                     "max_depth": max_depth,
                     "max_fanout": max_fanout,
                     "max_nodes": max_nodes,
@@ -271,10 +272,62 @@ def test_strict_pipeline_accepts_bounded_expansion_config() -> None:
     assert graph.expansion_calls == [
         (
             ["tag:it:first", "tag:it:second"],
-            {"direction": "related", "max_depth": 1, "max_fanout": 2, "max_nodes": 3},
+            {
+                "direction": "related",
+                "kinds": None,
+                "max_depth": 1,
+                "max_fanout": 2,
+                "max_nodes": 3,
+            },
         )
     ]
     assert done["graph_degraded"] is False
+
+
+def test_expansion_kinds_reach_the_adapter_and_narrowing_reason_is_reported() -> None:
+    """Сужение по видам доходит до адаптера, и пустой результат честно называет причину."""
+    graph = _CountingGraphStore(expansion_rows=[])
+    profile = {
+        **PROFILE,
+        "retrieval": {**PROFILE["retrieval"], "expansion_kinds": ["REQUIRES_CONSTRAINT"]},
+    }
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(profile),
+    )
+
+    result = pipe.run("seed", trace=True)
+
+    assert graph.expansion_calls[0][1]["kinds"] == ["REQUIRES_CONSTRAINT"]
+    assert result["graph_degraded"] is True
+    assert result["trace"][1]["reason"] == "no_matching_edge_kinds"
+
+
+def test_expansion_kinds_any_means_no_narrowing_and_reports_empty_projection() -> None:
+    """`any` снимает сужение, поэтому пустой результат — это отсутствие рёбер, а не промах сужения."""
+    graph = _CountingGraphStore(expansion_rows=[])
+    profile = {
+        **PROFILE,
+        "retrieval": {**PROFILE["retrieval"], "expansion_kinds": ["any"]},
+    }
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(profile),
+    )
+
+    result = pipe.run("seed", trace=True)
+
+    assert graph.expansion_calls[0][1]["kinds"] == ["any"]
+    assert result["graph_degraded"] is True
+    assert result["trace"][1]["reason"] == "empty_projection"
 
 
 def test_empty_graph_projection_is_degraded_and_not_cached() -> None:
@@ -386,7 +439,13 @@ def test_pipeline_vector_results_seed_bounded_expansion() -> None:
     assert graph.expansion_calls == [
         (
             ["tag:it:first", "tag:it:second"],
-            {"direction": "parent", "max_depth": 2, "max_fanout": 4, "max_nodes": 8},
+            {
+                "direction": "parent",
+                "kinds": None,
+                "max_depth": 2,
+                "max_fanout": 4,
+                "max_nodes": 8,
+            },
         )
     ]
     assert ("status", {"stage": "graph", "enabled": True}) in events
