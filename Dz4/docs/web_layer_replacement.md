@@ -40,7 +40,7 @@ Query API Gateway — **граница**, а не часть ядра. Его о
 
 ## 3. Что НЕ трогается при замене веб-слоя
 
-- Python-ядро: пайплайн 9 этапов, ретривер, Config/Glossary Service, адаптеры, Domain Profiles.
+- Python-ядро: пайплайн primitive-этапов, ретривер, Config/Glossary Service, адаптеры, Domain Profiles.
 - Neo4j, llama.cpp, Valkey, embeddings/reranker-сервисы.
 - Docker-профили, сеть `ohw_net` (меняется только образ `query-api` в `prototype/infra/compose.yaml`).
 - Контракты ADR-016/017/018 (остаются SSOT для границы).

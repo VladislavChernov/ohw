@@ -32,8 +32,10 @@
 
 ## 3. Query API (:8000) — асинхронный контур v6
 
-Цикл генерации — 7 шагов по `docs/03_retriever.md`: эмбеддинг запроса → Graph Retriever →
-Vector Retriever → Reranker → Context Assembly → LLM Generation → стриминг ответа.
+Цикл генерации — по `docs/03_retriever.md`: эмбеддинг запроса → Vector Retriever → Reranker →
+сборка контекста (bounded 4096) → LLM Generation → стриминг ответа. Graph experiment, если
+включён, выполняется как bounded expansion **после** vector search и не является шагом
+обязательного контура.
 Healthcheck сервиса — `GET /health` (без `X-API-Key`).
 Сервис обслуживает SSE-сессии в сетевом контуре (язык реализации — на усмотрение
 владельца; прототип — ADR-020, процедура замены — `docs/web_layer_replacement.md`);

@@ -12,7 +12,12 @@
 
 Данный гайд описывает путь подключения **внешней системы** как собственного адаптера: от выбора интерфейса до runtime-переключения и отката.
 
-**Ключевое правило (ADR-013):** хранилище — это **две независимые оси** (`graph_store` + `vector_store`). Они переключаются раздельно и соединяются только на этапе Context Assembly.
+**Ключевое правило (ADR-013, уточнено ADR-031 и `add-lightweight-context-graph`):** хранилище — это
+**две независимые оси** (`graph_store` + `vector_store`), переключаемые раздельно. Vector store и
+metadata образуют self-contained baseline (инвариант L1-04); graph adapter — опциональная
+experiment projection, которая строится inline или offline и **не является prerequisite** для
+ingest/query. Оси сходятся в bounded context, причём graph expansion выполняется только после
+vector search.
 
 ---
 

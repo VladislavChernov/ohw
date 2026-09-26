@@ -114,8 +114,8 @@ Management API (`PUT /api/v1/config/adapters`, см. §6.3).
 +----------------------------------------------------------+
 |                    ЯДРО СИСТЕМЫ (fixed)                   |
 |                                                           |
-|  Ingestion Pipeline (9 этапов)                            |
-|  Retriever (Graph + Vector + Reranker + Context)         |
+|  Ingestion Pipeline (6 этапов)                             |
+|  Retriever (Vector + Reranker, graph experiment опционально) |
 |  Services (Query, Config, Glossary, Ingestion)           |
 |  Adapter Layer (GraphStore, VectorStore, LLM, Embedder, Reranker) |
 |  Observability (метрики, логи, дашборды)                |
@@ -145,7 +145,7 @@ Management API (`PUT /api/v1/config/adapters`, см. §6.3).
 
 ## 4. Ingestion Pipeline
 
-### 4.1. Динамический Ingestion Pipeline (9 этапов)
+### 4.1. Динамический Ingestion Pipeline (6 этапов)
 
 Движок последовательно прогоняет данные через этапы:
 
@@ -303,11 +303,16 @@ Glossary Service подгружает соответствующий файл г
 
 ### ADR-002: Выбор Qwen 2.5 7B Instruct как LLM
 
-**Статус:** Accepted  
+**Статус:** Superseded от 2026-09-26 (ADR-022)  
 **Контекст:** Нужна локальная LLM для генерации + extraction, без API.  
-**Решение:** Qwen 2.5 7B Instruct через Ollama.  
+**Прежнее решение:** Qwen 2.5 7B Instruct через Ollama.  
 
-**Последствия:**
+ADR-022 перенёс локальный LLM-контур на llama.cpp с
+`Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf`. По существу сохранено одно: конкретная
+модель и хост — конфигурация стенда, а не архитектурное решение. Ядро ходит в LLM только через
+контракт `LLMInference` (инвариант L4-01), поэтому подойдёт любой OpenAI-совместимый endpoint.
+
+**Последствия (прежней формулировки):**
 - + Работает на 1 GPU (8 GB VRAM достаточно)
 - + Хороший русский язык, instruction-tuned
 - - 7B может галлюцинировать → Validator + ручной ревью

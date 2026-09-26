@@ -28,7 +28,7 @@
 
 | Документ | Описание |
 |----------|----------|
-| [02_pipeline_and_normalizer.md](./02_pipeline_and_normalizer.md) | Регламент Ingestion Pipeline (9 этапов) и Normalizer v3 |
+| [02_pipeline_and_normalizer.md](./02_pipeline_and_normalizer.md) | Регламент Ingestion Pipeline (primitive-этапов) и Normalizer v3 |
 | [chunkers_guide.md](./chunkers_guide.md) | Контракт Chunker и регламент добавления чанкер-стратегий (родные + плагин через entry_points) |
 | [03_retriever.md](./03_retriever.md) | Стратегия ретривера и слияния контекста |
 

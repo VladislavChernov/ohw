@@ -158,8 +158,8 @@ Dz4/
 > | Веха | Статус | Коммиты | Кратко |
 > |------|--------|---------|--------|
 > | M0 — Инфраструктура | ✅ закрыта | `9225b3a` | Compose+профили, Config :8001, Glossary :8003, Neo4j+llama.cpp |
-> | M1 — Ingestion Pipeline | ✅ закрыта | `55914ff` | Ingestion API :8002, 9 этапов INGEST→COMMIT, DocumentReader (ADR-021) |
-> | M2 — Query API async + Retriever | ✅ закрыта | `a9c36f3`, `b7558ca`, `93b96c3` | Query :8000+SSE, Worker+Valkey (ADR-023), граф∥вектор+Context Assembly, demo-ui+e2e, тумблер граф-оси |
+> | M1 — Ingestion Pipeline | ✅ закрыта | `55914ff` | Ingestion API :8002, primitive-этапы INGEST→COMMIT, DocumentReader (ADR-021) |
+> | M2 — Query API async + Retriever | ✅ закрыта | `a9c36f3`, `b7558ca`, `93b96c3` | Query :8000+SSE, Worker+Valkey (ADR-023), vector-first ретривер, demo-ui+e2e, тумблер граф-оси |
 > | M3 — Адаптеры и runtime-переключение | 🚧 в работе | `dfb7e9f`, `81490af`, `0208c28` | Бандлы 2/3 и 3/3 реализованы и закоммичены: `add-real-embeddings-reranker` (Embeddings :8004 bge-m3, Reranker :8006 bge-reranker-base, адаптеры, EmbedStage на Embedder, live mock + real-прогон MiniLM/CE) и `add-semantic-cache` (Valkey-кэш семантических ответов, hit/miss + `cache_hit`/`cache_lookup_s`; A-2 — честный контракт атомарности COMMIT) |
 > | M4 — Eval и гейт готовности | ⬜ не начата | — | — |
 > | M5 — MCP-шлюз и UI | ⬜ не начата | — | — |
@@ -176,7 +176,7 @@ Dz4/
 - [x] Glossary Service: `glossary.{profile}.yaml`, RESOLVE/VALIDATE (стек proto: SQLite).
 - [x] Topology Orchestrator Service (:8005) + профиль `topology` (ADR-019).
 
-### Веха 1 — Ingestion Pipeline (9 этапов)
+### Веха 1 — Ingestion Pipeline (primitive-этапы INGEST→COMMIT)
 - [x] Ingestion API (:8002): POST /documents, GET/DELETE /jobs/{id} (ADR-018).
 - [x] Этап INGEST→COMMIT: CHUNK (512/64), EMBED (bge-m3, batch 32; на прототипе до M3 —
       детерминированный эмбеддер, см. add-real-embeddings-reranker), EXTRACT (Qwen),
@@ -191,7 +191,7 @@ Dz4/
 - [x] Query API (:8000): POST /query → 202, GET /query/tasks/{task_id}.
 - [x] Query Workers + Task Queue (Valkey/Redis Streams).
 - [x] Стриминг WebSockets/SSE: контракт ADR-016.
-- [x] Retriever: Graph (Cypher-шаблон) ∥ Vector + Reranker + Context Assembly (4096, вытеснение).
+- [x] Retriever: vector-first (Vector + Reranker), окно контекста 4096 с вытеснением; graph experiment опционально, выполняется после vector search.
 
 ### Веха 3 — Адаптеры и runtime-переключение
 - [x] Интерфейсы-адаптеры: GraphStoreProvider, VectorStoreProvider, LLMInference, Embedder, Reranker.
@@ -338,7 +338,7 @@ Dz4/
 | L1-01 домен-агностичность | Активация it → library → cinema без изменений кода |
 | L1-02/L1-03 интерфейсы и runtime config | Смена `vector_store` на Qdrant / `llm` на OpenAICompatible — работает без правки ядра |
 | L1-05 детерминизм | Повторный прогон NORMALIZE/DEDUP даёт тот же результат |
-| L2-01 canonical_name | Констрейнт в Neo4j, отсутствие дублей после DEDUP |
+| L2-01 canonical_name | контекстный тег, не глобальный constraint; разрешение через tag_id/aliases |
 | L2-04 атомарность COMMIT | Атомарная пара (оба `atomic` + общий движок) — обе оси в одной транзакции: ошибка на COMMIT → граф без частичных записей; разнородная пара — best-effort: сбой второй оси → граф компенсирован (`delete_node`), джоба `failed` с пометкой «компенсировано» (ADR-024) |
 | L3-01..L3-05 | Выполнение пайплайна и контрактов (журнал этапов, лимит контекста, 202+task_id) |
 | L4-01 гейтинг (ограничение среды прототипа, ADR-027) | Профили embeddings/ingestion не конфликтуют по VRAM |
@@ -349,11 +349,11 @@ Dz4/
 Прототип считается **валидированным**, когда:
 
 1. Пайплайн исполним на целевом железе без ручного вмешательства (один вызов Ingestion API
-   проходит все 9 этапов до COMMIT).
+   проходит обязательные document/chunk/embed/vector-commit этапы).
 2. Query API: вопрос через асинхронный контур возвращает ответ + sources + тайминги
    (стриминг по контракту ADR-016).
 3. Переключение Domain Profile работает без перезапуска контейнеров.
-4. **Eval-гейт:** groundedness и coverage не ниже baseline (vector-only) при приемлемой
+4. **Eval-гейт:** groundedness, coverage и hallucination_rate не ниже baseline (vector-only) или приращение
    задержке (ADR-015, «валютное» правило). Если гибрид не даёт прироста — фиксируется ADR
    о пересмотре подхода (это легитимный результат валидации).
 5. Все пункты вех M0–M4 (без M5) отмечены выполненными.

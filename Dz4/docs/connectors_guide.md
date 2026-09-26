@@ -14,7 +14,7 @@
 Ingestion API (:8002) принимает источники по **push-модели** (`POST /documents`, ADR-018):
 клиент шлёт содержимое + метаданные (`source_url`, `domain`, `doc_type`). Текущий реестр
 ридеров поддерживает `txt`, `md`, `pdf` (`registry.py::factory`, ADR-021). Пайплайн из
-9 этапов (INGEST→COMMIT) работает **только с каноническим документом** и источник-агностичен.
+primitive-этапы (INGEST→COMMIT) работает **только с каноническим документом** и источник-агностичен.
 
 Вы хотите загружать в систему данные из **внешних систем**: Jira, Test Management Systems
 (TestRail, Zephyr…), корпоративные вики (Confluence, Wiki.js…), GitLab и т.п.
@@ -124,7 +124,7 @@ curl -X POST http://localhost:8002/api/v1/ingestion/documents \
   }'
 ```
 
-Ответ `202 {job_id, status, created_at}` — дальше пайплайн сам выполнит 9 этапов.
+Ответ `202 {job_id, status, created_at}` — дальше пайплайн сам выполнит primitive-этапов.
 Повторная передача того же источника с тем же содержимым **идемпотентна** (`content_hash`
 по каноническому виду, ADR-014): дублей не будет.
 

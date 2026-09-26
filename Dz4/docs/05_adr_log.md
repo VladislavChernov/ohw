@@ -104,9 +104,9 @@ llama.cpp, Ollama, vLLM, LM Studio, внешний провайдер. Выбо�
 
 ## ADR-006: Иерархия Contract-узлов
 
-**Статус:** Accepted  
+**Статус:** Superseded от 2026-09-26 (ADR-031)  
 **Контекст:** JSON-схемы ссылаются друг на друга через $ref и allOf.  
-**Решение:** Добавить связи EXTENDS и REFERENCES между :Contract.
+**Прежнее решение:** Добавить связи EXTENDS и REFERENCES между :Contract.  
 
 **Последствия:**
 - + Граф знает структуру вложенных схем
@@ -137,9 +137,9 @@ llama.cpp, Ollama, vLLM, LM Studio, внешний провайдер. Выбо�
 
 ## ADR-008: Семантическая валидация графа
 
-**Статус:** Accepted  
+**Статус:** Superseded от 2026-09-26 (ADR-031)  
 **Контекст:** Структурной валидации недостаточно. Система должна блокировать логические противоречия на этапе ingestion.  
-**Решение:** Validator v2 проверяет:
+**Прежнее решение:** Validator v2 проверяет:
 - REQUIRES_CONSTRAINT без цели → warning
 - CONTRADICTS внутри одного требования → error
 - REQUIRES + CONTRADICTS одновременно → error

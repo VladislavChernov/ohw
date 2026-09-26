@@ -36,7 +36,7 @@
 | Topology Orchestrator Service | Фабрика провайдеров по `prototype/infra_topology.yaml`, runtime-переключение адаптеров (отдельный сервис, ADR-019) | Python | 8005 | topology | ADR-019, docs/00 |
 | Topology UI (Streamlit) | Настроечное приложение «Топология инфраструктуры» (оператор, ADR-019); фронтенд к Topology Orchestrator Service | Python (Streamlit) | 8502 | topology | ADR-019, docs/00 |
 | Ingestion API | Приём файлов/URL, управление джобами индексации | Python | 8002 | ingestion | docs/04 §1, docs/02 §1 |
-| Ingestion Pipeline Workers | 9 этапов: CHUNK…VALIDATE, канонизация, COMMIT | Python | — | ingestion | docs/02 §1, docs/06 §3 (профиль ingestion) |
+| Ingestion Pipeline Workers | primitive-этапы: chunk, embed, vector commit; graph projection опционально | Python | — | ingestion | docs/02 §1, docs/06 §3 (профиль ingestion) |
 | Glossary Service | Словари доменов, трансляция тегов → канонический ряд | Python | 8003 | config | docs/04 §4, docs/00 |
 | Embeddings Service | Расчёт векторов bge-m3 (GPU) | Python | 8004 | embeddings | docs/04 §1, docs/02 §1 (EMBED) |
 | Neo4j Community | Граф + нативный векторный индекс (ADR-001) | Java (сторонний) | 7687 (Bolt) / 7474 (HTTP) | graph | docs/04 §1, docs/06 §3 |
