@@ -218,6 +218,25 @@ def test_runtime_docs_exclude_mandatory_ddl(repo_root: Path) -> None:
     assert "не создаёт constraints" in data_model, "docs/data_model.md потерял формулировку ADR-031"
 
 
+def test_cosine_dedup_stays_out_of_runtime(repo_root: Path) -> None:
+    """L3-02a: косинусная дедупликация не реализована и не должна вернуться в код молча.
+
+    Константы `DEDUP_AUTO`/`DEDUP_LLM`/`SIMILAR_TO` были объявлены и не использовались,
+    а инвариант L3-02 при этом обещал косинусную политику. Тест закрывает оба конца:
+    в коде порогов нет, а в документах политика помечена как нереализованная.
+    """
+    orchestrator = (
+        repo_root
+        / "prototype/src/graphrag_proto/ingestion_service/pipeline/orchestrator.py"
+    ).read_text(encoding="utf-8")
+    for dead in ("DEDUP_AUTO", "DEDUP_LLM", "SIMILAR_TO"):
+        assert dead not in orchestrator, f"{dead} вернулся в код, но политика не реализована"
+    invariants = (repo_root / "docs/invariants.md").read_text(encoding="utf-8")
+    assert "L3-02a" in invariants, "docs/invariants.md потерял пометку о нереализованной политике"
+    plan = repo_root / "docs/plans/cosine-dedup.md"
+    assert plan.is_file(), "план косинусной дедупликации должен существовать"
+
+
 def test_it_042_matches_structure_aware_chunker_contract() -> None:
     questions = {q["id"]: q for q in _load_jsonl(EVAL_ROOT / "it" / "questions.jsonl")}
     facts = " ".join(questions["it_042"]["golden_facts"])

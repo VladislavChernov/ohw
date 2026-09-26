@@ -283,6 +283,42 @@ def test_neo4j_expansion_query_is_not_restricted_to_parent_or_related() -> None:
     assert "MATCH path=(seed)<-[*1..2]-(node)" in session.query
 
 
+def test_expansion_depth_is_capped_and_shared_across_adapters() -> None:
+    """Профиль может запросить больше предела, но урезание обязано быть общим и явным."""
+    from graphrag_proto.retrieval.adapters.base import MAX_EXPANSION_DEPTH, _expand_depth
+
+    assert _expand_depth(1) == 1
+    assert _expand_depth(MAX_EXPANSION_DEPTH) == MAX_EXPANSION_DEPTH
+    assert _expand_depth(MAX_EXPANSION_DEPTH + 5) == MAX_EXPANSION_DEPTH
+    assert _expand_depth(0) == 1
+    assert _expand_depth(-7) == 1
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    session = _Session()
+    store._session = lambda: session
+
+    store.expand(["tag:it:alpha"], max_depth=99, max_nodes=3)
+
+    assert f"1..{MAX_EXPANSION_DEPTH}]" in session.query
+    assert "1..99" not in session.query
+
+
+def test_build_sources_graph_relevance_is_overridable() -> None:
+    """Relevance графовой оси — параметр, а не зашитое 1.0 (docs/04, разделение домов)."""
+    from graphrag_proto.retrieval.pipeline import GRAPH_SOURCE_RELEVANCE, build_sources
+
+    chunks = [{"source_url": "s://a.txt", "chunk_id": "chk:1", "score": 0.9}]
+    skeleton = [{"n": {"node_id": "tag:it:x", "source_ids": ["s://b.txt"]}}]
+
+    default = build_sources(chunks, skeleton)
+    tuned = build_sources(chunks, skeleton, graph_relevance=0.25)
+
+    assert GRAPH_SOURCE_RELEVANCE == 1.0
+    assert {row["source_url"]: row["relevance"] for row in default}["s://b.txt"] == 1.0
+    assert {row["source_url"]: row["relevance"] for row in tuned}["s://b.txt"] == 0.25
+    assert {row["source_url"] for row in tuned} == {"s://a.txt", "s://b.txt"}
+
+
 def test_remove_source_clears_edge_provenance() -> None:
     store = InMemoryGraphStore()
     _seed(store)

@@ -35,6 +35,7 @@ from graphrag_proto.retrieval.adapters.base import (
     LLMInference,
     Reranker,
     VectorStoreProvider,
+    _expand_depth,
 )
 from graphrag_proto.retrieval.context import (
     CONTEXT_TOKEN_LIMIT,
@@ -47,6 +48,10 @@ from graphrag_proto.retrieval.retrievers import GraphRetriever, VectorRetriever
 from graphrag_proto.retrieval.semantic_cache import CachedAnswer, SemanticCache
 
 Emit = Callable[[str, dict[str, Any]], None]
+
+# Relevance, приписываемая источникам графовой оси в ответе. Влияет только на порядок
+# и значение `relevance`; переопределяется профилем (`retrieval.graph_source_relevance`).
+GRAPH_SOURCE_RELEVANCE = 1.0
 
 DEFAULT_SYSTEM_PROMPT = (
     "Ты — GraphRAG-ассистент. Отвечай строго по предоставленному контексту. "
@@ -79,12 +84,18 @@ def _noop_emit(event_type: str, payload: dict[str, Any]) -> None:
 def build_sources(
     body_chunks: list[dict[str, Any]],
     skeleton_rows: list[dict[str, Any]] | None = None,
+    *,
+    graph_relevance: float = GRAPH_SOURCE_RELEVANCE,
 ) -> list[dict[str, Any]]:
     """Уникальные источники с максимальным relevance по паре (source_url, axis).
 
     Ось `vector` — из body-чанков, ось `graph` — из узлов графового скелета
     (design.md §2, аддитивное поле `axis`, ADR-016). `retrieval_metrics`
     по-прежнему работает по `source_url`.
+
+    `graph_relevance` — relevance, приписываемый источникам графовой оси. Число
+    влияет только на порядок и `relevance` в ответе; по умолчанию графовые источники
+    идут раньше векторных, что и обеспечивает сортировка по оси.
     """
     best: dict[tuple[str, str], float] = {}
     for chunk in body_chunks:
@@ -96,7 +107,7 @@ def build_sources(
         best[key] = max(best.get(key, 0.0), score)
     for row in skeleton_rows or []:
         for url in _skeleton_source_urls(row):
-            best[(url, "graph")] = max(best.get((url, "graph"), 0.0), 1.0)
+            best[(url, "graph")] = max(best.get((url, "graph"), 0.0), graph_relevance)
     ordered = sorted(
         best.items(),
         key=lambda pair: (0 if pair[0][1] == "graph" else 1, -pair[1], pair[0][0]),
@@ -386,11 +397,13 @@ class QueryPipeline:
                         if isinstance(expansion_kinds_raw, list)
                         else None
                     )
+                    requested_depth = int(retrieval_profile.get("max_depth", 2))
+                    effective_depth = _expand_depth(requested_depth)
                     expanded_rows = graph_retriever.expand(
                         unique_seed_ids,
                         direction=str(retrieval_profile.get("expansion_direction", "both")),
                         kinds=expansion_kinds,
-                        max_depth=int(retrieval_profile.get("max_depth", 2)),
+                        max_depth=requested_depth,
                         max_fanout=int(retrieval_profile.get("max_fanout", 8)),
                         max_nodes=int(retrieval_profile.get("max_graph_nodes", self._max_graph_nodes)),
                     )
@@ -425,6 +438,9 @@ class QueryPipeline:
                                 "origins": [row.get("origin") for row in expanded_rows],
                                 "confidences": [row.get("confidence") for row in expanded_rows],
                                 "boost": float(retrieval_profile.get("graph_boost", 0.0) or 0.0),
+                                "requested_depth": requested_depth,
+                                "effective_depth": effective_depth,
+                                "depth_clamped": effective_depth != requested_depth,
                             }
                         )
                 except Exception:  # noqa: BLE001
@@ -520,7 +536,17 @@ class QueryPipeline:
             text = ""
             generation_s = 0.0
 
-        sources = build_sources(body_chunks, skeleton_rows)
+        graph_relevance = GRAPH_SOURCE_RELEVANCE
+        if enabled and skeleton_rows:
+            try:
+                graph_relevance = float(
+                    (profile.get("retrieval") or {}).get(
+                        "graph_source_relevance", GRAPH_SOURCE_RELEVANCE
+                    )
+                )
+            except (TypeError, ValueError):
+                graph_relevance = GRAPH_SOURCE_RELEVANCE
+        sources = build_sources(body_chunks, skeleton_rows, graph_relevance=graph_relevance)
         if graph_requested and graph_degraded:
             self.projection_metrics.observe_fallback(
                 projection_status if projection_status != "ready" else "graph_expansion"

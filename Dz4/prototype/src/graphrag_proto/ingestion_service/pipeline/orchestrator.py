@@ -38,10 +38,6 @@ from graphrag_proto.ingestion_service.projection import (
 from graphrag_proto.retrieval.adapters.base import Embedder, GraphStoreProvider, VectorStoreProvider
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 
-DEDUP_AUTO = 0.92
-DEDUP_LLM = 0.75
-SIMILAR_TO = 0.85
-
 EXTRACTOR_VERSION = "deterministic:v1"
 
 SOURCE_LABEL = "Source"

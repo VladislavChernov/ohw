@@ -43,6 +43,16 @@ def _expand_kinds(kinds: Sequence[str] | None) -> frozenset[str] | None:
         return None
     return frozenset(values)
 
+
+# Предел глубины обхода — страховка от неограниченного разворачивания графа. Профиль
+# может запросить больше; значение нормализуется одинаково всеми адаптерами, а факт
+# урезания сообщается в трассировке конвейера, а не применяется молча.
+MAX_EXPANSION_DEPTH = 3
+
+
+def _expand_depth(max_depth: int) -> int:
+    return min(max(int(max_depth), 1), MAX_EXPANSION_DEPTH)
+
 # A-2 (ADR-024): честный контракт атомарности COMMIT. Ровно два значения, без алгебры типов.
 Consistency = Literal["atomic", "best_effort"]
 VECTOR_METADATA_BACKFILL_KEYS = frozenset(

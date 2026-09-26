@@ -161,6 +161,23 @@ factorial: ["!", "fact"]
 
 ## 5. Конфигурация сервисов
 
+### 5.0 Где какой параметр живёт
+
+Отдельный конфигуратор не нужен: `infra/config/namespaces.yaml` загружается в SQLite
+`runtime_config` с ключом `(namespace, key)` и управляется через Config API. Проблема не в
+отсутствии механизма, а в том, что подключён он частично — см. 5.2.
+
+Правило разделения — **меняет ли значение уже записанные данные**:
+
+| Дом | Что попадает | Последствие изменения |
+|---|---|---|
+**Config Service** (`namespaces.yaml`) | поведение во время чтения: `context_size`, `cosine_threshold` векторного поиска, `max_vector_chunks`, `reranker_enabled`, выбор адаптеров, `auth`, `domain.active_profile` | меняет ответ, но не то, что лежит в хранилище; переключается на hot |
+**Domain Profile** | поведение во время записи: чанкинг, промпт экстракции, `retrieval.graph_boost`, `expansion_direction`, `expansion_kinds`, `graph_source_relevance`, пороги дедупликации | версионируется вместе с корпусом и требует re-ingest |
+
+Отсюда важное следствие: пороги дедупликации, даже если будут реализованы, должны жить в
+профиле, а не в `namespace: normalizer` — изменение порога меняет уже слитые сущности в графе,
+то есть инвалидирует projection.
+
 ### 5.1. Полный набор ключей runtime config (Config Service namespaces)
 
 **namespace: domain**
@@ -254,3 +271,27 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
 
 Допустимые id каждого слота — каталог фабрики `retrieval/adapters/factory.py::ADAPTER_CATALOG`
 (SSOT по контракту `tests/test_adapter_catalog_ssot.py`: значение YAML ∈ каталог слота).
+
+### 5.2 Что из этого реально подключено
+
+Проверено по коду 2026-09-26. Механизм Config Service универсален, но из
+`infra/config/namespaces.yaml` код читает только `domain.active_profile`
+(`ingestion_service/app.py`). Остальное:
+
+| Ключ | Состояние |
+|---|---|
+`domain.active_profile` | **читается**, определяет профиль по умолчанию |
+`chunking.*` | читается через env и профиль; в `namespaces.yaml` используется как последний fallback |
+`normalizer.*` | **не читается**; косинусная дедупликация не реализована (`L3-02a`) |
+`retrieval.cosine_threshold` | **не читается** |
+`retrieval.similar_to_expansion` | **не читается** |
+`retrieval.max_graph_nodes` | **дублируется**: конвейер берёт одноимённый ключ из профиля, значение из YAML не подключено, в конструкторе стоит литерал `5` |
+`retrieval.context_size`, `max_vector_chunks`, `reranker_enabled` | передаются в сервисы через параметры подключения, а не через YAML |
+`storage.*`, `auth.*`, `adapters.*`, `projection.lease_seconds` | читаются env и compose; YAML используется как документация и дефолт |
+
+Параметры retrieval в текущем коде живут в секции `retrieval` Domain Profile
+(`graph_boost`, `expansion_direction`, `expansion_kinds`, `max_depth`, `max_fanout`,
+`max_graph_nodes`, `graph_source_relevance`). Это соответствует правилу 5.0 для параметров
+записи, но для параметров чтения домом должен стать Config Service — подключение namespaces
+к `QueryPipeline` не сделано. Отдельный конфигуратор для этого не требуется, требуется
+проводка существующего.

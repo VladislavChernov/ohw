@@ -22,6 +22,7 @@ from graphrag_proto.retrieval.adapters.base import (
     Consistency,
     GraphStoreProvider,
     VectorStoreProvider,
+    _expand_depth,
     _expand_direction,
     _expand_kinds,
 )
@@ -190,7 +191,7 @@ class Neo4jGraphStore(GraphStoreProvider):
         max_fanout: int = 8,
         max_nodes: int = 32,
     ) -> list[dict[str, Any]]:
-        depth = min(max(int(max_depth), 1), 3)
+        depth = _expand_depth(max_depth)
         walk = _expand_direction(direction)
         allowed = _expand_kinds(kinds)
         edge_types = f":{'|'.join(sorted(allowed))}" if allowed else ""
