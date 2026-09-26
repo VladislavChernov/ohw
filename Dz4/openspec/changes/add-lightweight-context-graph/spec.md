@@ -58,12 +58,27 @@ constraints; технические проверки ограничивают т
 **THEN** сначала выполняется vector search, затем graph expansion по `context_ids` из metadata;
 expansion имеет bounded depth/fanout/node budget и возвращает path/depth/confidence.
 
+**AND** обход не ограничен видом ребра: по умолчанию он проходит по любому типу в обе стороны и
+возвращает фактический вид последнего прыжка. Направление задаётся `retrieval.expansion_direction`
+(`both` по умолчанию, `out`, `in`; `parent` и `related` — синонимы `out` и `in`), а необязательное
+`retrieval.expansion_kinds` сужает обход до явного набора видов.
+
+**AND** предел глубины применяется одинаково всеми адаптерами; урезание профиля фиксируется в
+трассировке как `requested_depth`/`effective_depth`/`depth_clamped`, а не применяется молча.
+
 ## Scenario: graph boost
 
-**WHEN** expansion находит связанный context с более высоким уровнем или nearby tag
+**WHEN** `retrieval.graph_boost` задан и expansion нашёл связанный context
 
-**THEN** его provenance добавляется в результаты и получает ограниченный boost; исходный
-vector rank и vector-only counterfactual сохраняются.
+**THEN** исходный vector rank сохраняется, а найденный контекст добавляется в provenance и
+получает ограниченный boost.
+
+**AND** boost по умолчанию равен `0.0`, и ни один доменный профиль его не задаёт, поэтому по
+умолчанию граф даёт контекст и provenance, но не меняет порядок векторных чанков.
+
+**AND** boost прибавляется к скору reranker'а, а не к similarity, и применяется на уровне
+`source_url`: все чанки документа, давшего любой найденный узел, получают одинаковую прибавку.
+На `necessity` и `delta_recall` boost не влияет.
 
 ## Scenario: graph unavailable or stale
 
@@ -71,6 +86,10 @@ vector rank и vector-only counterfactual сохраняются.
 
 **THEN** retrieval возвращает vector-only fallback; событие/метрика фиксирует degraded state;
 это не выдаётся за успешный graph experiment.
+
+**AND** при пустом результате обхода различаются две причины: `empty_projection` — рёбер нет,
+`no_matching_edge_kinds` — сужение видами ничего не нашло. Раньше обе сводились к
+`empty_projection`, из-за чего потеря графа выглядела как штатная работа.
 
 ## Scenario: no hard ontology DDL
 
