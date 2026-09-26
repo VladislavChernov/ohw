@@ -30,6 +30,8 @@ SUPERSEDED_PATTERNS: dict[str, str] = {
     "Констрейнт в Neo4j": "ADR-031 вывел runtime constraints из ingest path",
     "констрейнт в Neo4j": "ADR-031 вывел runtime constraints из ingest path",
     "соединяются только на этапе Context Assembly": "оси сходятся в bounded context, graph expansion после vector search",
+    "соединяя результаты только на этапе Context Assembly": "оси сходятся в bounded context, graph expansion после vector search",
+    "время обоих осей (параллельно)": "оси последовательны: vector search, затем bounded expansion",
     "Graph (Cypher-шаблон)": "ритейвер vector-first, docs/03_retriever.md §1",
     "граф∥вектор": "graph — опциональная projection, а не параллельная ось",
     "Graph ∥ Vector": "graph — опциональная projection, а не параллельная ось",
@@ -44,6 +46,31 @@ def _live_docs(repo_root: Path) -> list[Path]:
     return [*docs, repo_root / "CONCEPT.md", repo_root / "prototype" / "README.md"]
 
 
+def _corrective_noted_lines(path: Path) -> frozenset[int]:
+    """Номера строк ADR-блоков, к которым добавлена явная корректирующая пометка.
+
+    Статус Accepted не отменяет решение, поэтому старая формулировка в его тексте
+    остаётся историей. Но она перестаёт быть нормой только когда рядом сказано, что
+    часть не реализована, — этот разряд и отмечает такой блок.
+    """
+    if path.name != "05_adr_log.md":
+        return frozenset()
+    noted: set[int] = set()
+    block_start: int | None = None
+    block_noted = False
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if line.startswith("## ADR-"):
+            if block_start is not None and block_noted:
+                noted.update(range(block_start, number))
+            block_start = number
+            block_noted = False
+        if "Примечание (" in line:
+            block_noted = True
+    if block_start is not None and block_noted:
+        noted.update(range(block_start, number + 1))
+    return frozenset(noted)
+
+
 @pytest.mark.parametrize("pattern,reason", sorted(SUPERSEDED_PATTERNS.items()))
 def test_live_docs_have_no_superseded_vocabulary(
     repo_root: Path, pattern: str, reason: str
@@ -52,11 +79,15 @@ def test_live_docs_have_no_superseded_vocabulary(
     adr_log = repo_root / "docs" / "05_adr_log.md"
     offenders: list[str] = []
     for path in _live_docs(repo_root):
+        noted = _corrective_noted_lines(path)
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if pattern not in line:
                 continue
             # В ADR-логе старая формулировка законна, если строка сама помечена Superseded.
             if path == adr_log and "Superseded" in line:
+                continue
+            # ...или если весь ADR-блок несёт явную корректирующую пометку.
+            if number in noted:
                 continue
             offenders.append(f"{path.relative_to(repo_root)}:{number}")
     assert not offenders, (

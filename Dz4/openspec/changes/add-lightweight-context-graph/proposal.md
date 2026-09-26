@@ -45,8 +45,9 @@ Lifecycle графа допускает два запуска:
 - Убрать runtime `_validate_ontology`, `ensure_schema` и DDL constraints из ingest path.
 - Сохранить `Source`/`Chunk` как технические anchors, chunk/vector linkage и soft-delete.
 - Ввести vector-first **experiment retrieval**: metadata возвращает `context_ids`; готовый
-  graph adapter выполняет bounded expansion по `parent`/`related` связям с configurable
-  depth/fanout/budget; результат получает ограниченный boost.
+  graph adapter выполняет bounded expansion по рёбрам любого вида в обе стороны
+  (`retrieval.expansion_direction`), с configurable depth/fanout/budget; результат получает
+  ограниченный boost.
 - Сохранить независимость `GraphStoreProvider` и `VectorStoreProvider`; Neo4j — только
   прототиповый backend, не обязательная архитектурная привязка.
 - Переписать eval-контракт: baseline = vector-only; experiment = vector + готовый graph

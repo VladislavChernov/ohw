@@ -76,6 +76,12 @@ Env перекрывает значение из `retrieval.graph_search_enabled
 
 Сравнение скорости (два прогона):
 
+> **Предварительное условие.** Оси последовательны: vector search, затем bounded expansion.
+> Ветка «граф вкл» имеет смысл только при `projection_status: ready` и непустом `graph_paths`
+> в трассировке. На стенде, где проекция не построена, обе ветви — vector-only, и сравнение
+> измеряет шум. Проверьте `graph_axis_active`/`graph_paths` в артефактах прогона, а не только
+> флаг env.
+
 ```bash
 # 1. граф вкл (по умолчанию)
 docker compose down -v && docker compose --profile config --profile graph --profile ingestion --profile llm up -d --wait

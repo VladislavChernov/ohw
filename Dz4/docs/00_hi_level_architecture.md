@@ -52,7 +52,7 @@ flowchart LR
             VR["Vector Baseline"]
             CA["Context Assembly<br/>(vector evidence + optional bounded graph)"]
         end
-        PP["Ingestion Pipeline<br/>(VECTOR COMMIT → optional GRAPH PROJECTION)"]
+        PP["Ingestion Pipeline<br/>(9 стадий; записьvector и graph - одна CommitStage)"]
     end
 
     %% ---- Topology контур (отдельный сервис, ADR-019) ----

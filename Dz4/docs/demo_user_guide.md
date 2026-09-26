@@ -148,8 +148,13 @@ Env-переменная `RETRIEVAL_GRAPH_ENABLED` управляет графо
 (true/false, перекрывает `retrieval.graph_search_enabled` в Domain Profile).
 При `false` графовой запрос к Neo4j не выполняется — retrieval идёт только
 по векторам. Нужно для замера разницы: `retrieval_time_s` в `done` отражает
-время обоих осей (параллельно) + rerank + сборка контекста; `total_time_s` —
-весь pipeline, `generation_time_s` — LLM.
+vector search, затем bounded expansion, если он был, плюс rerank и сборку
+контекста; `total_time_s` — весь pipeline, `generation_time_s` — LLM.
+
+> **Оси работают последовательно, а не параллельно:** сначала vector search, затем
+> bounded expansion по `context_ids`. Сравнивать имеет смысл только при готовой
+> проекции. Если `projection_status` не `ready` или в трассировке пуст `graph_paths`,
+> обе ветви A/B — vector-only, и разница будет измерять шум. Проверяйте это до сравнения.
 
 ```bash
 RETRIEVAL_GRAPH_ENABLED=false  # граф выкл
