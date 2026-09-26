@@ -277,7 +277,7 @@ MERGE-семантика по `node_id`/`chunk_id` (идемпотентност
 
 #### 2.6.3. Soft-delete (L2-05)
 
-`GraphStoreProvider.list_chunk_ids_of_source(source_id)` — чанки по ребру CONTAINS; `delete_node(chunk_id)` удаляет узел и инцидентные рёбра (в том числе CONTAINS); `VectorStoreProvider.delete_vectors(chunk_ids)` снимает те же чанки с поиска. Узлы Entity и Source при soft-delete **сохраняются**, но `source_ids`/`chunk_ids` удалённого источника очищаются, поэтому его evidence не попадает в graph-контекст; эмиссия `SIMILAR_TO` при этом не затрагивается.
+`GraphStoreProvider.list_chunk_ids_of_source(source_id)` — чанки по ребру CONTAINS; `delete_node(chunk_id)` удаляет узел и инцидентные рёбра (в том числе CONTAINS); `VectorStoreProvider.delete_vectors(chunk_ids)` снимает те же чанки с поиска. Узлы ContextNode и Source при soft-delete **сохраняются**, но `source_ids`/`chunk_ids` удалённого источника очищаются, поэтому его evidence не попадает в graph-контекст. Связи между контекстными узлами при этом не удаляются — снимается только provenance источника, а `upsert_edges` затем объединяет `source_ids` (см. `docs/data_model.md` §2.1). Эмиссии `SIMILAR_TO` по порогу в коде нет: этот вид приходит только из ответа модели.
 
 ### 2.7. Projection state и offline backfill
 

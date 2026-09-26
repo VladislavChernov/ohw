@@ -41,8 +41,8 @@
 | ID | Инвариант | Обоснование |
 |----|-----------|-------------|
 | L3-01 | Primitive ingest проходит обязательные document/chunk/embed/vector-commit этапы; optional graph projection не является gate и не должен блокировать success | CONCEPT §4, `docs/02` §1 |
-| L3-02 | Дедупликация объединяет сущности по точному совпадению нормализованного canonical key; неоднозначные варианты не объединяются молча | CONCEPT §4.1 (DEDUP), `docs/02` §1, ADR-005 |
-| L3-02a | Косинусная двухступенчатая политика дедупликации (авто-merge ≥ 0.92, зона 0.75–0.92 на LLM-верификацию, ниже 0.75 не склеивать) **не реализована** и не является инвариантом. План вынесен в `docs/plans/`, ключи `namespace: normalizer` объявлены, но не читаются кодом | `docs/plans/cosine-dedup.md`, §L3-02 |
+| L3-02 | Дедупликация объединяет сущности по точному совпадению нормализованного canonical key; неоднозначные варианты не объединяются молча. Ключ узла выводится из canonical name, поэтому одна сущность из разных документов домена — один узел (см. `docs/data_model.md` §2.1) | CONCEPT §4.1 (DEDUP), `docs/02` §1, ADR-005 |
+| L3-02a | Косинусная двухступенчатая политика дедупликации (авто-merge ≥ 0.92, зона 0.75–0.92 на LLM-верификацию, ниже 0.75 не склеивать) **не реализована** и не является инвариантом. Ключи порогов удалены из `namespace: normalizer` вместе с константами `DEDUP_AUTO`/`DEDUP_LLM`/`SIMILAR_TO`; оставшиеся три ключа этого namespace кодом не читаются. План сведён к ссылке на вердикт `deferred` | `docs/plans/cosine-dedup.md`, §L3-02 |
 | L3-03 | Vector-only baseline не вызывает graph; optional graph experiment выполняет vector-first search, bounded expansion и boost только при готовой projection, а fallback маркируется degraded | `docs/03_retriever.md`, `add-lightweight-context-graph/spec.md` |
 | L3-04 | Окно контекста имеет жёсткий программный лимит (4096 токенов); неконтролируемый рост контекста запрещён | `docs/03_retriever.md` §2 |
 | L3-05 | Query API (v6) — асинхронный контур: `POST /query` → `202 Accepted` + `task_id`, доставка результата через WebSockets/SSE единым конвертом событий | ADR-016, `docs/api_reference.md` §3 |
