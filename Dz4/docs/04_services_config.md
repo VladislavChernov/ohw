@@ -184,6 +184,8 @@ factorial: ["!", "fact"]
 - Примечание: доменный prompt_template подгружается динамически из профиля
 
 **namespace: normalizer**
+- Объявлен, но **не читается кодом** (проверено 2026-09-26). Косинусная политика дедупликации
+  не реализована, см. инвариант `L3-02a` и план `docs/plans/cosine-dedup.md`.
 - `dedup_auto_threshold` (0.92)
 - `dedup_llm_threshold` (0.75)
 - `similar_to_threshold` (0.85)

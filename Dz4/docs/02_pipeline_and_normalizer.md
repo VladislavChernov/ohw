@@ -67,10 +67,16 @@ baseline не блокируют друг друга.
 ## 3. Identity и multilingual aliases
 
 Документ идентифицируется по `(domain, source_url, content_hash)`. Контекстный тег имеет
-стабильный `tag_id` внутри domain, `canonical_name` и aliases. Glossary/AI resolution может
-связать английское и русское названия одного алгоритма; неоднозначные кандидаты остаются
-отдельными до явного user merge. AI dedup использует multilingual embeddings и существующие
-пороги только как optional suggestion/confirmation policy, а не как жёсткую ontology.
+стабильный `tag_id` внутри domain, `canonical_name` и aliases. Glossary resolution может связать
+английское и русское названия одного алгоритма; неоднозначные кандидаты остаются отдельными до
+явного user merge. Если ручной тег не имеет `tag_id`, но совпадает ровно с одним известным
+context node, он переиспользует существующий идентификатор; при нескольких кандидатах
+идентификатор не выбирается молча.
+
+**AI-дедупликации в прототипе нет.** `NormalizeStage` выполняет только resolve через Glossary
+HTTP. Ни LLM-верификации пар, ни multilingual embeddings, ни порогов сходства в рантайме не
+существует; косинусная политика вынесена в план `docs/plans/cosine-dedup.md` и инвариант
+`L3-02a`.
 
 ## 4. Graph write
 

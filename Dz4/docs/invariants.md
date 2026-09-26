@@ -41,7 +41,8 @@
 | ID | Инвариант | Обоснование |
 |----|-----------|-------------|
 | L3-01 | Primitive ingest проходит обязательные document/chunk/embed/vector-commit этапы; optional graph projection не является gate и не должен блокировать success | CONCEPT §4, `docs/02` §1 |
-| L3-02 | Двухступенчатая дедупликация: авто-merge только при cosine ≥ 0.92; зона 0.75–0.92 — обязательная LLM-верификация; ниже 0.75 — никогда не склеиваются | CONCEPT §4.1 (DEDUP), ADR-005 |
+| L3-02 | Дедупликация объединяет сущности по точному совпадению нормализованного canonical key; неоднозначные варианты не объединяются молча | CONCEPT §4.1 (DEDUP), `docs/02` §1, ADR-005 |
+| L3-02a | Косинусная двухступенчатая политика дедупликации (авто-merge ≥ 0.92, зона 0.75–0.92 на LLM-верификацию, ниже 0.75 не склеивать) **не реализована** и не является инвариантом. План вынесен в `docs/plans/`, ключи `namespace: normalizer` объявлены, но не читаются кодом | `docs/plans/cosine-dedup.md`, §L3-02 |
 | L3-03 | Vector-only baseline не вызывает graph; optional graph experiment выполняет vector-first search, bounded expansion и boost только при готовой projection, а fallback маркируется degraded | `docs/03_retriever.md`, `add-lightweight-context-graph/spec.md` |
 | L3-04 | Окно контекста имеет жёсткий программный лимит (4096 токенов); неконтролируемый рост контекста запрещён | `docs/03_retriever.md` §2 |
 | L3-05 | Query API (v6) — асинхронный контур: `POST /query` → `202 Accepted` + `task_id`, доставка результата через WebSockets/SSE единым конвертом событий | ADR-016, `docs/api_reference.md` §3 |

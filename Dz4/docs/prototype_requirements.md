@@ -180,7 +180,7 @@ Dz4/
 - [x] Ingestion API (:8002): POST /documents, GET/DELETE /jobs/{id} (ADR-018).
 - [x] Этап INGEST→COMMIT: CHUNK (512/64), EMBED (bge-m3, batch 32; на прототипе до M3 —
       детерминированный эмбеддер, см. add-real-embeddings-reranker), EXTRACT (Qwen),
-      NORMALIZE (v3, fallback), DEDUP (0.92/0.75/0.85), CONTRACT, VALIDATE, COMMIT.
+      NORMALIZE (v3, fallback), DEDUP (слияние по нормализованному ключу), CONTRACT, VALIDATE, COMMIT.
 - [x] Document Registry + версии источника (ADR-014), идемпотентность по content hash.
 - [x] Семейство «запуск профилей embeddings/ingestion поочерёдно» (гейтинг L4-01, ограничение
       среды — ADR-027): процедура

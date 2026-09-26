@@ -275,7 +275,7 @@ Glossary Service подгружает соответствующий файл г
 - Примечание: доменный prompt_template подгружается динамически из профиля
 
 **namespace: normalizer**
-- `dedup_auto_threshold`, `dedup_llm_threshold`, `similar_to_threshold`, `llm_canonicalize_fallback`, `unicode_normalization`, `log_normalization`
+- `dedup_auto_threshold`, `dedup_llm_threshold`, `similar_to_threshold`, `llm_canonicalize_fallback`, `unicode_normalization`, `log_normalization` — объявлены в `namespace: normalizer`, но кодом не читаются; косинусная политика дедупликации не реализована (`L3-02a`, план `docs/plans/cosine-dedup.md`)
 
 **namespace: llm**
 - `model`, `temperature`, `max_tokens`, `context_window`
