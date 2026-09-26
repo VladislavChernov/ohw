@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,32 @@ EVAL_ROOT = Path(__file__).resolve().parent.parent / "infra" / "eval"
 DOMAINS = ["it", "library", "cinema"]
 
 _RUN_EVAL_PY = EVAL_ROOT / "run_eval.py"
+
+
+def _find_repo_root() -> Path | None:
+    """Корень проекта Dz4 (каталог, где лежат `docs/` и `prototype/`).
+
+    Раньше здесь было `EVAL_ROOT.parents[2]`, что внутри dev-контейнера давало `/`
+    (корень ФС), а не `Dz4/`: документов там нет, и все проверки, которым они
+    нужны, молча выключались — `if source_root_available:` давал вакуумный pass,
+    а явный тест уходил в skip. Дрейф наборов прошёл незамеченным.
+
+    Поэтому ищем корень по маркеру, а не по фиксированной глубине, и перебираем
+    известные точки монтирования: в compose-стенде `eval-runner` проект смонтирован
+    в `/repo`, в dev-контейнере — туда же.
+    """
+    candidates: list[Path] = []
+    env_root = os.environ.get("DZ4_REPO_ROOT")
+    if env_root:
+        candidates.append(Path(env_root))
+    candidates.extend([Path("/repo"), *EVAL_ROOT.parents])
+    for candidate in candidates:
+        if (candidate / "docs").is_dir() and (candidate / "prototype").is_dir():
+            return candidate
+    return None
+
+
+REPO_ROOT = _find_repo_root()
 
 
 def _load_run_eval() -> Any:
@@ -171,11 +198,25 @@ def test_it_dataset_is_v2() -> None:
     assert len(_load_jsonl(jsonl)) == 50
 
 
+def test_repo_docs_are_mounted() -> None:
+    """Документы проекта должны быть доступны тестам.
+
+    Если корень не найден — это падение, а не skip: иначе все проверки ниже
+    выключаются молча, и следующий ревайт документов снова пройдёт зелёным.
+    """
+    assert REPO_ROOT is not None, (
+        "корень проекта не найден: ожидается каталог с docs/ и prototype/. "
+        "В dev-контейнере проект должен быть смонтирован в /repo "
+        "(docker run -v <путь-к-Dz4>:/repo:ro) либо задан DZ4_REPO_ROOT."
+    )
+    assert (REPO_ROOT / "docs").is_dir()
+    assert (REPO_ROOT / "prototype").is_dir()
+
+
 def test_it_graph_goldens_match_runtime_contract() -> None:
     jsonl = EVAL_ROOT / "it" / "questions_graph.jsonl"
     questions = _load_jsonl(jsonl)
-    repo_root = EVAL_ROOT.parents[2]
-    source_root_available = (repo_root / "docs").is_dir()
+    assert REPO_ROOT is not None, "корень проекта недоступен — см. test_repo_docs_are_mounted"
     for question in questions:
         assert "HAS_ENTITY" not in " ".join(question["golden_facts"])
         assert "unique_key id" not in " ".join(question["golden_facts"])
@@ -183,20 +224,29 @@ def test_it_graph_goldens_match_runtime_contract() -> None:
         assert "Graph Retriever расширяет обход" not in " ".join(question["golden_facts"])
         assert "invariants v10" not in " ".join(question["golden_facts"])
         assert "sorted(content_hash" not in " ".join(question["golden_facts"])
-        if source_root_available:
-            for source in question["golden_sources"]:
-                assert (repo_root / source).is_file(), source
+    # Existence of every cited document is a hard check, not a silent no-op.
+    for question in questions:
+        for source in question["golden_sources"]:
+            assert (REPO_ROOT / source).is_file(), f"{question['id']}: нет {source}"
 
 
 def test_runtime_docs_exclude_mandatory_ddl() -> None:
-    repo_root = EVAL_ROOT.parents[2]
-    if not (repo_root / "docs").is_dir():
-        pytest.skip("repository docs unavailable in this container mount")
+    """ADR-031: runtime ingest не создаёт constraints (ensure_schema выведен из ingest path).
+
+    Проверка намеренно не привязана к одной формулировке: `docs/01` говорит
+    «не создаются Neo4j constraints», `docs/data_model.md` — «не создаёт constraints».
+    Раньше здесь была точная фраза «не создаёт constraints» для обоих файлов, и
+    Vector-first рерайт её сломал — а тест при этом молча пропускался из-за
+    недоступного монтирования, так что расхождение не всплыло.
+    """
+    assert REPO_ROOT is not None, "корень проекта недоступен — см. test_repo_docs_are_mounted"
     for relative in ("docs/01_ontology_and_domain_profile.md", "docs/data_model.md"):
-        text = (repo_root / relative).read_text(encoding="utf-8")
-        assert "не создаёт constraints" in text
-        assert "ensure_schema" in text
-        assert "CREATE CONSTRAINT" not in text
+        text = (REPO_ROOT / relative).read_text(encoding="utf-8")
+        assert "ensure_schema" in text, f"{relative}: ensure_schema должен быть назван"
+        assert "CREATE CONSTRAINT" not in text, f"{relative}: runtime-DDL инструкция недопустима"
+        assert "constraints" in text, f"{relative}: нужно явное упоминание constraints"
+    data_model = (REPO_ROOT / "docs/data_model.md").read_text(encoding="utf-8")
+    assert "не создаёт constraints" in data_model, "docs/data_model.md потерял формулировку ADR-031"
 
 
 def test_it_042_matches_structure_aware_chunker_contract() -> None:
