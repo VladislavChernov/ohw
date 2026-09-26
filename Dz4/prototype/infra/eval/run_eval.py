@@ -1341,7 +1341,8 @@ def write_lift_report(report: dict[str, Any], out_dir: Path, manifest: dict[str,
 
     lines.append("\n## Delta\n")
     for k, v in report.get("delta", {}).items():
-        lines.append(f"- **{k}**: {v:+.4f}\n")
+        # Валютное правило: неизмеренная метрика — это n/a, а не 0.0 (docs/test_plan.md §3).
+        lines.append(f"- **{k}**: {'n/a' if v is None else format(v, '+.4f')}\n")
 
     # Правило парности (design.md §5.1): расхождение > 1 поля фактора -> не парные.
     pair = report.get("pair")

@@ -267,12 +267,13 @@ Registry (`docs/data_model.md` §2) имеет поле `status`, но его д
    минимум 50 вопросов на домен для базового среза; расширяется при каждом выпуске.
 2. **Метрики ретрива (K=5):** Recall@K, Precision@K, MRR, nDCG@K — по `golden_sources`.
 3. **Метрики генерации:** groundedness (доля утверждений ответа, подтверждаемых источниками),
-   coverage (доля golden_facts, покрытых ответом), показатель галлюцинаций (утверждения без
-   источника).
+   coverage (доля golden_facts, покрытых ответом), `hallucination_rate` (утверждения без
+   источника; в коде — обратная к groundedness по тем же утверждениям, 1.0 при пустом ответе).
 4. **Сравнение (lift-отчёт):** baseline = vector-only; optional graph experiment = vector +
    bounded graph expansion. Отчёт фиксирует delta по каждой метрике; инженерное решение о
-   выпуске принимается по «валютному» правилу: groundedness и coverage не ниже baseline при
-   приемлемом времени ответа.
+   выпуске принимается по «валютному» правилу: groundedness, coverage и hallucination_rate не ниже
+   baseline при приемлемом времени ответа. Неизмеренная метрика попадает в delta как `null`, а не
+   как 0; при живом судье и отсутствии метрик вердикт = `invalid`, а не `pass`.
 5. **Прогон:** eval-скрипт в составе пайплайна при смене `extractor_version` / модели / словаря;
    результаты — с метаданными `{run_id, model, prompt_version, date}`.
 

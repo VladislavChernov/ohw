@@ -185,42 +185,71 @@ def lift_report(
     target.coverage >= baseline.coverage. Без судьи (`judge_active=False`,
     --no-judge/--retrieval-only) verdict = "n/a": groundedness/coverage не
     вычислены, валютное правило неприменимо (design.md §6).
-    """
-    gen_b = baseline.get("generation", {})
-    gen_t = target.get("generation", {})
 
-    def _safe(val: Any) -> float:
+    Валютное правило различает ноль и «не измерено»: неизмеренная метрика даёт
+    `None` и в delta попадает как null, а не как 0.0 — иначе быстрый цикл без
+    судьи показывал бы ложные нули. Если судья активен, а блок generation пуст,
+    прогон считается несостоявшимся (verdict="invalid"), а не успешным.
+    """
+    gen_b = baseline.get("generation") or {}
+    gen_t = target.get("generation") or {}
+
+    def _safe(val: Any) -> float | None:
+        if isinstance(val, bool):
+            return None
         if isinstance(val, (int, float)):
             return float(val)
-        return 0.0
+        return None
 
-    def _gc(mode: dict[str, Any], key: str) -> float:
+    def _delta(key_b: Any, key_t: Any) -> float | None:
+        left = _safe(key_b)
+        right = _safe(key_t)
+        if left is None or right is None:
+            return None
+        return right - left
+
+    def _gc(mode: dict[str, Any], key: str) -> float | None:
         return _safe((mode.get("graph_contribution") or {}).get(key))
 
-    delta = {
-        "recall_at_k": _safe(target.get("retrieval", {}).get("recall_at_k"))
-        - _safe(baseline.get("retrieval", {}).get("recall_at_k")),
-        "groundedness": _safe(gen_t.get("groundedness")) - _safe(gen_b.get("groundedness")),
-        "coverage": _safe(gen_t.get("coverage")) - _safe(gen_b.get("coverage")),
-        "necessity": _gc(target, "necessity") - _gc(baseline, "necessity"),
-        "delta_recall": _gc(target, "delta_recall") - _gc(baseline, "delta_recall"),
-        "evidence_recall_graph": _gc(target, "evidence_recall_graph")
-        - _gc(baseline, "evidence_recall_graph"),
+    def _gc_delta(mode_b: dict[str, Any], mode_t: dict[str, Any], key: str) -> float | None:
+        left = _gc(mode_b, key)
+        right = _gc(mode_t, key)
+        if left is None or right is None:
+            return None
+        return right - left
+
+    delta: dict[str, float | None] = {
+        "recall_at_k": _delta(
+            baseline.get("retrieval", {}).get("recall_at_k"),
+            target.get("retrieval", {}).get("recall_at_k"),
+        ),
+        "groundedness": _delta(gen_b.get("groundedness"), gen_t.get("groundedness")),
+        "coverage": _delta(gen_b.get("coverage"), gen_t.get("coverage")),
+        "necessity": _gc_delta(baseline, target, "necessity"),
+        "delta_recall": _gc_delta(baseline, target, "delta_recall"),
+        "evidence_recall_graph": _gc_delta(baseline, target, "evidence_recall_graph"),
     }
 
     target_graph = target.get("graph_contribution") or {}
     degraded_questions = target_graph.get("degraded_questions", 0)
+    d_grounded = delta["groundedness"]
+    d_coverage = delta["coverage"]
     if isinstance(degraded_questions, (int, float)) and degraded_questions > 0:
         verdict = "invalid"
     elif not judge_active:
         verdict = "n/a"
+    elif not gen_t or _safe(gen_t.get("groundedness")) is None:
+        # Судья активен, но метрик нет: это дефект прогона, а не успех.
+        verdict = "invalid"
+    elif d_grounded is None or d_coverage is None:
+        verdict = "invalid"
     else:
-        verdict = "pass" if delta["groundedness"] >= 0 and delta["coverage"] >= 0 else "fail"
+        verdict = "pass" if d_grounded >= 0 and d_coverage >= 0 else "fail"
 
     return {
         "baseline": baseline,
         "target": target,
-        "delta": {k: round(v, 4) for k, v in delta.items()},
+        "delta": {k: (round(v, 4) if v is not None else None) for k, v in delta.items()},
         "verdict": verdict,
         "revision": revision,
         "run_id": uuid.uuid4().hex[:12],

@@ -132,8 +132,30 @@ def test_lift_report_fail_on_regression() -> None:
 
 
 def test_lift_report_missing_generation_metrics() -> None:
+    """Судья активен, а метрик нет — это дефект прогона, а не успех.
+
+    Раньше здесь стояло ``verdict == "pass"`` с комментарием «0>=0»: неизмеренные
+    groundedness/coverage подставлялись нулём, и сломанный прогон отчитывался зелёным.
+    Теперь ноль и «не измерено» различаются, а отсутствие метрик при живом судье
+    даёт invalid.
+    """
     report = lift_report({"retrieval": {}}, {"retrieval": {"recall_at_k": 0.8}})
-    assert report["verdict"] == "pass"  # нет groundedness/coverage -> 0>=0
+    assert report["verdict"] == "invalid"
+    assert report["delta"]["groundedness"] is None
+    assert report["delta"]["coverage"] is None
+
+
+def test_lift_report_delta_is_null_without_judge() -> None:
+    """Без судьи дельта по метрикам уровня 2 — null, а не 0.0 (валютное правило)."""
+    report = lift_report(
+        {"retrieval": {"recall_at_k": 0.4}},
+        {"retrieval": {"recall_at_k": 0.7}},
+        judge_active=False,
+    )
+    assert report["verdict"] == "n/a"
+    assert report["delta"]["groundedness"] is None
+    assert report["delta"]["coverage"] is None
+    assert report["delta"]["recall_at_k"] == pytest.approx(0.3)
 
 
 def test_graph_contribution_vector_only_covers_all() -> None:

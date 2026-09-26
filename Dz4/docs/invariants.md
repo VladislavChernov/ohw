@@ -66,8 +66,8 @@
 | L5-01 | Все HTTP-контуры (Query/Config/Ingestion/Glossary) и MCP-шлюз требуют `X-API-Key`; `401` при отсутствии/неверном ключе | `docs/security.md` §1, `docs/api_reference.md` §2 |
 | L5-02 | Секреты (API-ключи, пароли БД, доступ к LM-серверам) не попадают в логи (redaction) | `docs/security.md` §3 |
 | L5-03 | MCP-шлюз предоставляет агентам только чтение графа и поиск (без правки профилей/конфигурации) | ADR-017, `docs/security.md` §1 |
-| L5-04 | Ввод новой модели/промпта допустим только при groundedness и coverage не ниже baseline (eval-гейт) | ADR-015, `docs/operations_requirements.md` §5 |
-| L5-05 | Оценка не зависит от железа/присутствия судьи: послойные артефакты прогона (слои 1–3: `run_manifest.json`, `qa_log.jsonl`, `lift_report.json` + `.md`) обязательны и пишутся **во всех режимах**, включая `--no-judge` и `--retrieval-only`; их наличие и полнота не зависят от судьи. Без судьи groundedness/coverage = `n/a` и не участвуют в вердикте гейта. Слой 4 (`trace.jsonl`) — только по требованию и не подменяет слои 1–3 | ADR-029, `docs/test_plan.md` §5, `openspec/changes/add-lightweight-context-graph/design.md` §5 |
+| L5-04 | Ввод новой модели/промпта допустим только при groundedness, coverage и hallucination_rate не ниже baseline (eval-гейт) | ADR-015, `docs/operations_requirements.md` §5 |
+| L5-05 | Оценка не зависит от железа/присутствия судьи: послойные артефакты прогона (слои 1–3: `run_manifest.json`, `qa_log.jsonl`, `lift_report.json` + `.md`) обязательны и пишутся **во всех режимах**, включая `--no-judge` и `--retrieval-only`; их наличие и полнота не зависят от судьи. Без судьи groundedness/coverage/hallucination_rate = `n/a`, не попадают в `delta` и не участвуют в вердикте гейта. Слой 4 (`trace.jsonl`) — только по требованию и не подменяет слои 1–3 | ADR-029, `docs/test_plan.md` §5, `openspec/changes/add-lightweight-context-graph/design.md` §5 |
 
 ---
 
