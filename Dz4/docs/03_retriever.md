@@ -23,12 +23,15 @@ Baseline не вызывает graph adapter и не зависит от нал�
 выполняется bounded expansion по `context_ids`/`tag_ids` из metadata. Expansion имеет depth,
 fanout, total-node и time budget, возвращает path/depth/confidence и получает ограниченный boost.
 
-Фактически `expand()` фильтрует рёбра по одному виду: `PARENT` при `direction="parent"`
-(обход исходящих) либо `RELATED` во всех остальных случаях (обход входящих). `direction`
-берётся из `retrieval.expansion_direction` и ни в одном профиле не задан, поэтому фактически
-всегда используется ветка `parent`. Пустой результат помечается `degraded` с причиной
-`empty_projection`, и запрос silently уходит в vector-only. Из-за несоответствия фильтра
-записываемым видам на текущем стенде expansion пуст всегда — см. `data_model.md` §3.
+`expand()` не ограничивает обход видом ребра: по умолчанию идёт в обе стороны по любому типу и
+возвращает фактический вид последнего прыжка в поле `kind`. Направление задаётся
+`retrieval.expansion_direction` и принимает `both` (по умолчанию), `out` или `in`; прежние значения
+`parent` и `related` сохраняются как синонимы `out` и `in`. Необязательное сужение
+`retrieval.expansion_kinds` ограничивает обход явным списком видов; пустое значение и `any`
+означают отсутствие сужения. Глубина, fanout и общее число узлов ограничены независимо от видов.
+Пустой результат помечается `degraded` с причиной `empty_projection` (рёбер нет) либо
+`no_matching_edge_kinds` (сужение ничего не нашло), и запрос silently уходит в vector-only.
+Контракт обхода и история дефекта — `data_model.md` §3.1.
 
 Graph experiment не является prerequisite для baseline. Перед expansion QueryPipeline проверяет
 `ProjectionState`: `ready` и актуальная `data_revision` разрешают graph; `pending`, `degraded`,

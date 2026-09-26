@@ -275,7 +275,8 @@ Glossary Service подгружает соответствующий файл г
 - Примечание: доменный prompt_template подгружается динамически из профиля
 
 **namespace: normalizer**
-- `dedup_auto_threshold`, `dedup_llm_threshold`, `similar_to_threshold`, `llm_canonicalize_fallback`, `unicode_normalization`, `log_normalization` — объявлены в `namespace: normalizer`, но кодом не читаются; косинусная политика дедупликации не реализована (`L3-02a`, план `docs/plans/cosine-dedup.md`)
+- `llm_canonicalize_fallback`, `unicode_normalization`, `log_normalization` — объявлены в `namespace: normalizer`, но кодом не читаются; косинусная политика дедупликации не реализована (`L3-02a`, план `docs/plans/cosine-dedup.md`)
+- Ключи дедупликации (`dedup_auto_threshold`, `dedup_llm_threshold`, `similar_to_threshold`) и константы `DEDUP_AUTO`/`DEDUP_LLM`/`SIMILAR_TO` удалены 2026-09-26 вместе с косинусной политикой; см. ADR-005
 
 **namespace: llm**
 - `model`, `temperature`, `max_tokens`, `context_window`
@@ -362,12 +363,22 @@ ADR-022 перенёс локальный LLM-контур на llama.cpp с
 
 ### ADR-005: Двухступенчатая векторная дедупликация
 
-**Статус:** Accepted  
+**Статус:** Accepted (решение не реализовано, см. примечание ниже)  
 **Контекст:** Один порог 0.92 отсекает явные дубли, но пропускает пограничные случаи.  
 **Решение:**
 - Ступень 1: cosine >= 0.92 → авто-merge
 - Ступень 2: 0.75 <= cosine < 0.92 → LLM (SAME/DIFFERENT)
 - Ступень 3: cosine < 0.75 → пропустить
+
+**Примечание (2026-09-26).** Политика **не реализована**: `DedupStage` сливает сущности по точному
+совпадению нормализованного canonical key, косинусного сравнения в ingest нет; константы
+`DEDUP_AUTO`/`DEDUP_LLM`/`SIMILAR_TO` и ключи `namespace: normalizer` для порогов удалены.
+Инвариант `L3-02` описывает поведение по факту, `L3-02a` помечает политику как нереализованную.
+Семантическое разрешение сущностей отложено вердиктом
+`openspec/changes/add-proposal-review-gate/review-records/prompt_and_entity_resolution.md`
+(`decision: deferred`): оно ввело бы зависимость пути записи от LLM и нарушило детерминированность
+`L3-06`. Статус Accepted означает, что решение о выбранной политике не пересматривается, а не то,
+что оно реализовано. План: `docs/plans/cosine-dedup.md`.
 
 **Последствия:**
 - + Выше точность
@@ -379,7 +390,7 @@ ADR-022 перенёс локальный LLM-контур на llama.cpp с
 
 **Статус:** Superseded corrective change `add-lightweight-context-graph`
 **Контекст:** Иерархия не ограничивается типами Contract и является произвольной.
-**Решение:** Использовать generic context nodes/edges; ADR-006 остаётся историческим описанием typed-подхода. Виды рёбер не задаются онтологией: технические — `CONTAINS`/`MENTIONS`, остальные приходят из экстракции. Имена `PARENT`/`RELATED` упоминаются только как фильтр, который сейчас применяет `expand()`.
+**Решение:** Использовать generic context nodes/edges; ADR-006 остаётся историческим описанием typed-подхода. Виды рёбер не задаются онтологией: технические — `CONTAINS`/`MENTIONS`, остальные приходят из экстракции. Имена `PARENT`/`RELATED` в обходе больше не используются: фильтр по виду ребра снят, `expand()` идёт по любому виду и возвращает фактический вид прыжка (см. `docs/data_model.md` §3.1).
 
 **Последствия:**
 - + Граф знает структуру вложенных схем

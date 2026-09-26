@@ -84,21 +84,27 @@ projection может быть построена inline после ingest ил�
 ```python
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 class GraphStoreProvider(ABC):
-    @abstractmethod
     def expand(
         self,
-        context_ids: List[str],
+        context_ids: list[str],
         *,
-        direction: str = "parent",
+        direction: str = "both",
+        kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
-    ) -> List[Dict[str, Any]]:
-        """Bounded expansion от chunk context IDs; возвращает узлы, paths и provenance."""
-        ...
+    ) -> list[dict[str, Any]]:
+        """Bounded expansion от chunk context IDs; возвращает узлы, paths и provenance.
+
+        `direction` — `both` (по умолчанию), `out` или `in`; прежние `parent`/`related`
+        работают как синонимы `out`/`in`. Обход не ограничен видом ребра, фактический
+        вид возвращается в поле `kind`; `kinds` сужает обход до явного набора видов.
+        Метод не абстрактный: адаптер без обхода возвращает пустой список.
+        """
+        return []
 
     @abstractmethod
     def upsert_nodes(self, nodes: List[Dict[str, Any]]) -> None:

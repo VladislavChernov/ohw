@@ -34,8 +34,8 @@ origin: user | ai | system
 | `CONTAINS` | Техническая связь Source → Chunk |
 | `MENTIONS` | Техническая связь Chunk → ContextNode |
 | вид из экстракции | Связь ContextNode → ContextNode; набор задаёт промпт профиля, при отсутствии вида подставляется `RELATED` |
-| `PARENT` | Вид, который ищет `expand()` при обходе вверх; пишется только в тестах |
-| `RELATED` | Вид, который ищет `expand()` при обходе внутрь; также значение по умолчанию при записи |
+| `PARENT` | Вид, который больше не ищет `expand()`; в production-пути не пишется (встречается только в тестах) |
+| `RELATED` | Вид по умолчанию при записи, когда модель не вернула вид связи; `expand()` его не фильтрует |
 
 Fixed labels, `unique_key`, Cypher validation rules и semantic constraints не являются
 обязательными.
