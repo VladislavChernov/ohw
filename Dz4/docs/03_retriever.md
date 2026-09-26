@@ -20,9 +20,15 @@ Baseline не вызывает graph adapter и не зависит от нал�
 ### Graph experiment
 
 Если projection построена inline или offline job и её revision готова, после vector search
-выполняется bounded expansion по `context_ids`/`tag_ids` из metadata. Default policy может
-подниматься по parent/context direction; related edges опциональны. Expansion имеет depth,
+выполняется bounded expansion по `context_ids`/`tag_ids` из metadata. Expansion имеет depth,
 fanout, total-node и time budget, возвращает path/depth/confidence и получает ограниченный boost.
+
+Фактически `expand()` фильтрует рёбра по одному виду: `PARENT` при `direction="parent"`
+(обход исходящих) либо `RELATED` во всех остальных случаях (обход входящих). `direction`
+берётся из `retrieval.expansion_direction` и ни в одном профиле не задан, поэтому фактически
+всегда используется ветка `parent`. Пустой результат помечается `degraded` с причиной
+`empty_projection`, и запрос silently уходит в vector-only. Из-за несоответствия фильтра
+записываемым видам на текущем стенде expansion пуст всегда — см. `data_model.md` §3.
 
 Graph experiment не является prerequisite для baseline. Перед expansion QueryPipeline проверяет
 `ProjectionState`: `ready` и актуальная `data_revision` разрешают graph; `pending`, `degraded`,

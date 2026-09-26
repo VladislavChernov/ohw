@@ -31,9 +31,11 @@ origin: user | ai | system
 
 | Generic kind | Назначение |
 |---|---|
-| `parent` | Иерархическая связь контекстов; направление задаётся adapter policy |
-| `related` | Необязательная лёгкая связь между custom tags |
-| `mentions` | Техническая связь Chunk → ContextNode |
+| `CONTAINS` | Техническая связь Source → Chunk |
+| `MENTIONS` | Техническая связь Chunk → ContextNode |
+| вид из экстракции | Связь ContextNode → ContextNode; набор задаёт промпт профиля, при отсутствии вида подставляется `RELATED` |
+| `PARENT` | Вид, который ищет `expand()` при обходе вверх; пишется только в тестах |
+| `RELATED` | Вид, который ищет `expand()` при обходе внутрь; также значение по умолчанию при записи |
 
 Fixed labels, `unique_key`, Cypher validation rules и semantic constraints не являются
 обязательными.

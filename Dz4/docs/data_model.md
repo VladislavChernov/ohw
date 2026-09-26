@@ -31,12 +31,43 @@ multilingual aliases, но не обязательны для записи.
 
 ## 3. Context edges
 
-Generic edge kinds: `parent`, `related`, `mentions`. Edge может иметь `origin`, `confidence`,
-`source_ids` и custom properties. В Neo4j безопасный generic relationship type может хранить
-kind в property, чтобы arbitrary user links не зависели от синтаксиса relationship type.
+Фактический состав графа, проверенный по коду:
 
-`Chunk-[:MENTIONS]-> ContextNode` связывает seed chunk с context graph. Удалённые/неактивные
-source provenance исключаются из retrieval.
+| Ребро | Тип | Кто пишет |
+|---|---|---|
+`Source -[:CONTAINS]-> Chunk` | generic relationship type | оркестратор, `_write` |
+`Chunk -[:MENTIONS]-> ContextNode` | generic relationship type | оркестратор, `_write` |
+`ContextNode -[kind]-> ContextNode` | kind в property | экстракция, приводится к верхнему регистру |
+
+Связи между context nodes приходят из ответа модели: `kind` (или `type`) приводится к верхнему
+регистру, при отсутствии подставляется `RELATED`. Промпт экстракции в Domain Profile ограничивает
+набор видов закрытым списком (`REQUIRES_CONSTRAINT`, `CONTRADICTS`, `SIMILAR_TO`, `REFERENCES`)
+и запрещает придумывать другие.
+
+Edge может иметь `origin`, `confidence`, `source_ids` и custom properties. В Neo4j безопасный
+generic relationship type может хранить kind в property, чтобы arbitrary user links не зависели
+от синтаксиса relationship type. `Chunk-[:MENTIONS]-> ContextNode` связывает seed chunk с
+context graph. Удалённые/неактивные source provenance исключаются из retrieval.
+
+## 3.1 Обход графа
+
+`expand()` не ограничивает обход видом ребра: по умолчанию он идёт в обе стороны по любому типу и
+возвращает фактический вид последнего прыжка в поле `kind`. Направление задаётся
+`retrieval.expansion_direction` и принимает `both` (по умолчанию), `out` или `in`; прежние значения
+`parent` и `related` сохраняются как синонимы `out` и `in`. Необязательное сужение
+`retrieval.expansion_kinds` ограничивает обход явным списком видов; пустое значение и `any`
+означают отсутствие сужения.
+
+Глубина ограничена тремя, дополнительно действуют ограничения на fanout и общее число узлов, так
+что снятие фильтра по видам не снимает бюджеты.
+
+> **История дефекта (исправлено).** Раньше обход фильтровал рёбра по одному виду: `PARENT` при
+> `direction="parent"` либо `RELATED` во всех остальных случаях. Ни один production-путь не пишет
+> `PARENT`, а набор видов из промпта экстракции с искомыми не пересекался, поэтому разворот
+> возвращал пусто и запрос молча уходил в vector-only с причиной `empty_projection`. Смысл при
+> этом не терялся: вид ребра и до, и после хранится и возвращается. Причина пустого результата
+> разделена на `empty_projection` (рёбер нет) и `no_matching_edge_kinds` (сужение ничего не
+> нашло), чтобы потеря графа больше не выглядела как штатная работа.
 
 ## 4. Vector metadata
 

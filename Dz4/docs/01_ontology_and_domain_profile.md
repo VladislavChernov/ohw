@@ -4,9 +4,43 @@
 
 ## 1. Назначение
 
-Domain Profile задаёт область данных и optional hints для chunking, extraction и glossary.
-Он не является обязательной онтологией, не валидирует каждый тег и не создаёт Neo4j constraints
-во время ingest. Primitive ingest должен работать без профиля, LLM, tags и links.
+Domain Profile — это **опорная точка первого залития данных**, а не онтологический контракт.
+Он задаёт область данных и optional hints для chunking, extraction и glossary. Он не является
+обязательной онтологией, не валидирует каждый тег и не создаёт Neo4j constraints во время
+ingest. Primitive ingest должен работать без профиля, LLM, tags и links.
+
+### 1.1 Что из профиля реально действует
+
+| Ключ | Как используется |
+|---|---|
+`chunking.*` (`strategy`, `chunk_size`, `overlap`, `*_splitter`, `*_parser`) | параметры чанкера |
+`extraction.*` (`llm_enabled`, `prompt_template`, `temperature`, `max_tokens`, `template`) | экстракция сущностей и связей |
+`ontology.node_types[].type` | **белый список типов сущностей**: какие типы нормализуются в context nodes. Всё материализуется под одной меткой `ContextNode` |
+`retrieval.graph_search_enabled` | тумблер графовой оси: выключен по умолчанию |
+`glossary`, `canonicalization` (синонимы) | разрешение вариантов и aliases |
+
+### 1.2 Что объявлено, но не обеспечивается
+
+Ключи ниже **не имеют эффекта в рантайме**. Их наличие в профиле не является гарантией, и
+ссылаться на них как на работающий механизм нельзя:
+
+| Ключ | Состояние |
+|---|---|
+`ontology.node_types[].unique_key` | единственный потребитель — `GraphStoreProvider.ensure_schema()`, который не вызывается из ingest path (ADR-031). Уникальность на уровне БД не обеспечивается |
+`ontology.edge_types` | не читается нигде |
+`validation`, `validation.rules` | проверяется только на тип «должен быть маппинг», не исполняется |
+`chunk_entity_edge`, `chunk_size_by_type`, `eviction`, `language` | не читаются |
+
+Практический вывод: если профиль объявляет `unique_key` или `edge_types`, это декларация о
+намерении, а не о работающем ограничении. Идентичность контекстного узла держится на
+стабильном `tag_id` в пределах домена (L2-01), а не на constraint.
+
+### 1.3 Что профиль не должен решать
+
+Профиль не обязан содержать онтологию, типы узлов и рёбер, whitelist связей или Cypher-правила.
+Тяжёлая ontology-driven модель — артефакт раннего предположения о насыщенном графе, от
+которого отказались: граф переведён в разряд optional offline experiment, где узлы — это
+generic `ContextNode`, а рёбра — generic kinds.
 
 ## 2. Контекстное облако
 
@@ -30,8 +64,11 @@ ContextNode {
 Glossary/alias resolution и optional AI dedup помогают связать `Quicksort` и
 «Быстрая сортировка». Неоднозначные варианты не объединяются молча.
 
-Edges используют generic kinds `parent`, `related` и technical `mentions`; custom properties
-и link kinds допустимы. `Source` и `Chunk` остаются техническими anchors, а не бизнес-типами.
+Edges записываются как generic kinds: технические `CONTAINS` (Source → Chunk) и `MENTIONS`
+(Chunk → ContextNode), а связи между context nodes приходят из экстракции и приводятся к верхнему
+регистру; при отсутствии вида подставляется `RELATED`. Набор видов для экстракции задаёт промпт
+в профиле. `Source` и `Chunk` остаются техническими anchors, а не бизнес-типами. Соответствие
+между записываемыми и обходимыми видами — см. `data_model.md` §3.
 
 ## 3. Optional enrichment
 
