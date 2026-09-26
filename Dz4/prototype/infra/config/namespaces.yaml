@@ -25,10 +25,12 @@ extraction:
   temperature: 0.1
   max_tokens: 4096
 
+# Namespace normalizer: ключи дедупликации удалены 2026-09-26 вместе с константами
+# DEDUP_AUTO/DEDUP_LLM/SIMILAR_TO. Косинусная двухступенчатая политика не реализована,
+# см. инвариант L3-02a и openspec/changes/add-proposal-review-gate/review-records/
+# prompt_and_entity_resolution.md (вердикт deferred). Оставшиеся ключи тоже не читаются
+# кодом — приведены как декларация намерения, а не как рабочая конфигурация.
 normalizer:
-  dedup_auto_threshold: 0.92
-  dedup_llm_threshold: 0.75
-  similar_to_threshold: 0.85
   llm_canonicalize_fallback: true
   unicode_normalization: true
   log_normalization: true

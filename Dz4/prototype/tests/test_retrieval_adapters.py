@@ -319,6 +319,56 @@ def test_build_sources_graph_relevance_is_overridable() -> None:
     assert {row["source_url"] for row in tuned} == {"s://a.txt", "s://b.txt"}
 
 
+def test_expansion_depth_cap_is_identical_in_both_adapters() -> None:
+    """Предел глубины обязан действовать одинаково: иначе стенд и тесты дают разный граф.
+
+    Регрессия: `MAX_EXPANSION_DEPTH` применялся только в neo4j.py, а inmemory.py
+    использовал сырое `max_depth`. Из-за этого in-memory путь, на котором держатся
+    юнит-тесты, не был защищён пределом.
+    """
+    from graphrag_proto.retrieval.adapters.base import MAX_EXPANSION_DEPTH, _expand_depth
+
+    store = InMemoryGraphStore()
+    store.upsert_nodes(
+        [
+            {
+                "node_id": f"tag:it:{name}",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": f"tag:it:{name}",
+                    "canonical_name": name,
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+            for name in ("n0", "n1", "n2", "n3", "n4", "n5")
+        ]
+    )
+    store.upsert_edges(
+        [
+            {
+                "from_id": f"tag:it:n{index}",
+                "to_id": f"tag:it:n{index + 1}",
+                "type": "REFERENCES",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+            for index in range(5)
+        ]
+    )
+
+    beyond_cap = MAX_EXPANSION_DEPTH + 10
+    rows = store.expand(["tag:it:n0"], max_depth=beyond_cap, max_nodes=32)
+
+    assert rows, "цепочка рёбер должна находиться"
+    assert max(row["depth"] for row in rows) == MAX_EXPANSION_DEPTH
+    assert len(rows) == MAX_EXPANSION_DEPTH
+    assert _expand_depth(beyond_cap) == MAX_EXPANSION_DEPTH
+
+
 def test_remove_source_clears_edge_provenance() -> None:
     store = InMemoryGraphStore()
     _seed(store)

@@ -27,6 +27,7 @@ from graphrag_proto.retrieval.adapters.base import (
     Consistency,
     GraphStoreProvider,
     VectorStoreProvider,
+    _expand_depth,
     _expand_direction,
     _expand_kinds,
 )
@@ -232,6 +233,7 @@ class InMemoryGraphStore(GraphStoreProvider):
     ) -> list[dict[str, Any]]:
         walk = _expand_direction(direction)
         allowed = _expand_kinds(kinds)
+        depth_limit = _expand_depth(max_depth)
         by_id = {node_id: node for node_id, node in self._nodes.items()}
         by_tag = {
             str(node["properties"].get("tag_id")): node_id
@@ -255,7 +257,7 @@ class InMemoryGraphStore(GraphStoreProvider):
         result: list[dict[str, Any]] = []
         while queue and len(result) < max_nodes:
             current, depth, path = queue.pop(0)
-            if depth >= max_depth:
+            if depth >= depth_limit:
                 continue
             fanout = 0
             for (from_id, to_id, edge_type), properties in self._edges.items():
