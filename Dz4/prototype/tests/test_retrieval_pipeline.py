@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -70,7 +71,8 @@ class _CountingGraphStore(GraphStoreProvider):
         self,
         context_ids: list[str],
         *,
-        direction: str = "parent",
+        direction: str = "both",
+        kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
@@ -425,7 +427,8 @@ def test_pipeline_graph_failure_falls_back_to_vector_baseline() -> None:
             self,
             context_ids: list[str],
             *,
-            direction: str = "parent",
+            direction: str = "both",
+            kinds: Sequence[str] | None = None,
             max_depth: int = 2,
             max_fanout: int = 8,
             max_nodes: int = 32,

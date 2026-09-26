@@ -16,12 +16,32 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Literal, Protocol
 
 GraphTx = AbstractContextManager["GraphStoreProvider"]
 VectorTx = AbstractContextManager["VectorStoreProvider"]
+
+
+def _expand_direction(direction: str) -> str:
+    """Нормализует направление обхода: `parent`→out, `related`→in, всё прочее unknown→both."""
+    value = str(direction or "").strip().lower()
+    if value in {"out", "outgoing", "parent", "up"}:
+        return "out"
+    if value in {"in", "incoming", "related", "down"}:
+        return "in"
+    return "both"
+
+
+def _expand_kinds(kinds: Sequence[str] | None) -> frozenset[str] | None:
+    """Нормализует сужение по видам рёбер; None/`any`/`[]` — без сужения."""
+    if not kinds:
+        return None
+    values = {str(item).strip().upper() for item in kinds if str(item).strip()}
+    if not values or values == {"ANY"}:
+        return None
+    return frozenset(values)
 
 # A-2 (ADR-024): честный контракт атомарности COMMIT. Ровно два значения, без алгебры типов.
 Consistency = Literal["atomic", "best_effort"]
@@ -95,12 +115,19 @@ class GraphStoreProvider(ABC):
         self,
         context_ids: list[str],
         *,
-        direction: str = "parent",
+        direction: str = "both",
+        kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
     ) -> list[dict[str, Any]]:
-        """Bounded context expansion; returns empty when unsupported."""
+        """Bounded context expansion; returns empty when unsupported.
+
+        `direction` is `both` (default), `out` or `in`; the legacy values `parent`
+        and `related` map to `out` and `in`. Traversal is not restricted by edge kind
+        — the written kinds come from extraction and are reported back per row.
+        `kinds` optionally narrows traversal to an explicit set.
+        """
         return []
 
     @abstractmethod

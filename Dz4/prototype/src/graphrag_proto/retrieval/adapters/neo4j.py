@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -21,6 +22,8 @@ from graphrag_proto.retrieval.adapters.base import (
     Consistency,
     GraphStoreProvider,
     VectorStoreProvider,
+    _expand_direction,
+    _expand_kinds,
 )
 from graphrag_proto.retrieval.adapters.schemas import (
     normalize_graph_row,
@@ -181,14 +184,18 @@ class Neo4jGraphStore(GraphStoreProvider):
         self,
         context_ids: list[str],
         *,
-        direction: str = "parent",
+        direction: str = "both",
+        kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
     ) -> list[dict[str, Any]]:
         depth = min(max(int(max_depth), 1), 3)
-        edge_types = "PARENT" if direction == "parent" else "RELATED"
-        pattern = f"-[:{edge_types}*1..{depth}]->" if direction == "parent" else f"<-[:{edge_types}*1..{depth}]-"
+        walk = _expand_direction(direction)
+        allowed = _expand_kinds(kinds)
+        edge_types = f":{'|'.join(sorted(allowed))}" if allowed else ""
+        span = f"{edge_types}*1..{depth}"
+        pattern = f"-[{span}]->" if walk == "out" else f"<-[{span}]-" if walk == "in" else f"-[{span}]-"
         domain = ""
         for value in context_ids:
             if not isinstance(value, str) or not value.startswith("tag:"):

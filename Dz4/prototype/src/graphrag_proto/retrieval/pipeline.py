@@ -380,9 +380,16 @@ class QueryPipeline:
                 _trace({"stage": "graph_expansion", "degraded": True, "reason": "adapter_missing"})
             elif unique_seed_ids:
                 try:
+                    expansion_kinds_raw = retrieval_profile.get("expansion_kinds")
+                    expansion_kinds = (
+                        [str(item) for item in expansion_kinds_raw]
+                        if isinstance(expansion_kinds_raw, list)
+                        else None
+                    )
                     expanded_rows = graph_retriever.expand(
                         unique_seed_ids,
-                        direction=str(retrieval_profile.get("expansion_direction", "parent")),
+                        direction=str(retrieval_profile.get("expansion_direction", "both")),
+                        kinds=expansion_kinds,
                         max_depth=int(retrieval_profile.get("max_depth", 2)),
                         max_fanout=int(retrieval_profile.get("max_fanout", 8)),
                         max_nodes=int(retrieval_profile.get("max_graph_nodes", self._max_graph_nodes)),
@@ -396,7 +403,11 @@ class QueryPipeline:
                                 "context_ids": unique_seed_ids,
                                 "paths": [],
                                 "degraded": True,
-                                "reason": "empty_projection",
+                                "reason": (
+                                    "no_matching_edge_kinds"
+                                    if expansion_kinds
+                                    else "empty_projection"
+                                ),
                             }
                         )
                     else:

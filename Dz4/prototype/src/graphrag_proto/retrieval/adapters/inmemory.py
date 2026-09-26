@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -26,6 +27,8 @@ from graphrag_proto.retrieval.adapters.base import (
     Consistency,
     GraphStoreProvider,
     VectorStoreProvider,
+    _expand_direction,
+    _expand_kinds,
 )
 
 _TERM_COND_RE = re.compile(r"toLower\(n\.(\w+)\)\s+CONTAINS\s+toLower\(t\)")
@@ -221,11 +224,14 @@ class InMemoryGraphStore(GraphStoreProvider):
         self,
         context_ids: list[str],
         *,
-        direction: str = "parent",
+        direction: str = "both",
+        kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
     ) -> list[dict[str, Any]]:
+        walk = _expand_direction(direction)
+        allowed = _expand_kinds(kinds)
         by_id = {node_id: node for node_id, node in self._nodes.items()}
         by_tag = {
             str(node["properties"].get("tag_id")): node_id
@@ -253,17 +259,24 @@ class InMemoryGraphStore(GraphStoreProvider):
                 continue
             fanout = 0
             for (from_id, to_id, edge_type), properties in self._edges.items():
-                if direction == "parent":
+                kind = str(properties.get("kind") or edge_type)
+                if allowed is not None and kind.upper() not in allowed:
+                    continue
+                if walk == "out":
                     if from_id != current:
                         continue
                     neighbor = to_id
-                    kind = str(properties.get("kind") or edge_type).lower()
-                    if kind not in {"parent", "context"}:
-                        continue
-                else:
+                elif walk == "in":
                     if to_id != current:
                         continue
                     neighbor = from_id
+                else:
+                    if current == from_id:
+                        neighbor = to_id
+                    elif current == to_id:
+                        neighbor = from_id
+                    else:
+                        continue
                 if neighbor in visited or fanout >= max_fanout:
                     continue
                 node = by_id.get(neighbor)
@@ -284,7 +297,7 @@ class InMemoryGraphStore(GraphStoreProvider):
                         or node["properties"].get("tag_id"),
                         "path": next_path,
                         "depth": depth + 1,
-                        "kind": str(properties.get("kind") or edge_type),
+                        "kind": kind,
                         "source_ids": node["properties"].get("source_ids", []),
                         "chunk_ids": node["properties"].get("chunk_ids", []),
                         "domain": node["properties"].get("domain"),

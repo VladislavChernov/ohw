@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -991,7 +992,9 @@ class _ExpansionGraph(InMemoryGraphStore):
         self,
         context_ids: list[str],
         *,
-        direction: str = "parent",
+
+            direction: str = "both",
+            kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
@@ -1029,7 +1032,9 @@ class _FailingExpansionGraph(_ExpansionGraph):
         self,
         context_ids: list[str],
         *,
-        direction: str = "parent",
+
+            direction: str = "both",
+            kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,

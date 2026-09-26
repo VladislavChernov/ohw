@@ -13,7 +13,7 @@ from graphrag_proto.retrieval.adapters.deterministic import (
 )
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
 from graphrag_proto.retrieval.adapters.llm import FakeLLM
-from graphrag_proto.retrieval.adapters.neo4j import Neo4jVectorStore
+from graphrag_proto.retrieval.adapters.neo4j import Neo4jGraphStore, Neo4jVectorStore
 from graphrag_proto.retrieval.adapters.reranker import NoOpRerankerAdapter
 from graphrag_proto.retrieval.adapters.schemas import normalize_vector_row
 from graphrag_proto.retrieval.retrievers import VectorRetriever
@@ -122,6 +122,165 @@ def test_inmemory_context_expansion_uses_tag_id_and_respects_bounds() -> None:
         "properties": {"language": "ru"},
     }
     assert "_labels" not in rows[0]
+
+
+def test_inmemory_expansion_traverses_extraction_kinds_in_both_directions() -> None:
+    """Виды из промпта экстракции не должны отсекаться фильтром обхода (ADR-031, open)."""
+    store = InMemoryGraphStore()
+    store.upsert_nodes(
+        [
+            {
+                "node_id": "tag:it:alpha",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": "tag:it:alpha",
+                    "canonical_name": "Альфа",
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            },
+            {
+                "node_id": "tag:it:beta",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": "tag:it:beta",
+                    "canonical_name": "Бета",
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            },
+        ]
+    )
+    store.upsert_edges(
+        [
+            {
+                "from_id": "tag:it:alpha",
+                "to_id": "tag:it:beta",
+                "type": "CONTRADICTS",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+        ]
+    )
+
+    forward = store.expand(["tag:it:alpha"], max_nodes=3)
+    backward = store.expand(["tag:it:beta"], max_nodes=3)
+
+    assert [row["node_id"] for row in forward] == ["tag:it:beta"]
+    assert [row["kind"] for row in forward] == ["CONTRADICTS"]
+    assert [row["node_id"] for row in backward] == ["tag:it:alpha"]
+    assert [row["kind"] for row in backward] == ["CONTRADICTS"]
+
+
+def test_inmemory_expansion_kinds_narrows_traversal() -> None:
+    store = InMemoryGraphStore()
+    store.upsert_nodes(
+        [
+            {
+                "node_id": f"tag:it:{name}",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": f"tag:it:{name}",
+                    "canonical_name": name,
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+            for name in ("alpha", "beta", "gamma")
+        ]
+    )
+    store.upsert_edges(
+        [
+            {
+                "from_id": "tag:it:alpha",
+                "to_id": "tag:it:beta",
+                "type": "CONTRADICTS",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            },
+            {
+                "from_id": "tag:it:alpha",
+                "to_id": "tag:it:gamma",
+                "type": "SIMILAR_TO",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            },
+        ]
+    )
+
+    only_similar = store.expand(["tag:it:alpha"], kinds=["SIMILAR_TO"], max_nodes=3)
+
+    assert [row["node_id"] for row in only_similar] == ["tag:it:gamma"]
+    assert store.expand(["tag:it:alpha"], kinds=["any"], max_nodes=3)
+    assert store.expand(["tag:it:alpha"], kinds=[], max_nodes=3)
+
+
+def test_inmemory_expansion_legacy_direction_values_map_to_single_axis() -> None:
+    store = InMemoryGraphStore()
+    store.upsert_nodes(
+        [
+            {
+                "node_id": f"tag:it:{name}",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": f"tag:it:{name}",
+                    "canonical_name": name,
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+            for name in ("alpha", "beta")
+        ]
+    )
+    store.upsert_edges(
+        [
+            {
+                "from_id": "tag:it:alpha",
+                "to_id": "tag:it:beta",
+                "type": "REQUIRES_CONSTRAINT",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+        ]
+    )
+
+    outgoing = store.expand(["tag:it:alpha"], direction="parent", max_nodes=3)
+    incoming = store.expand(["tag:it:alpha"], direction="related", max_nodes=3)
+
+    assert [row["node_id"] for row in outgoing] == ["tag:it:beta"]
+    assert incoming == []
+
+
+def test_neo4j_expansion_query_is_not_restricted_to_parent_or_related() -> None:
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    session = _Session()
+    store._session = lambda: session
+
+    store.expand(["tag:it:alpha"], max_nodes=3)
+
+    assert ":PARENT" not in session.query
+    assert ":RELATED" not in session.query
+    assert "-[*1..2]-" in session.query
+
+    store.expand(["tag:it:alpha"], direction="out", kinds=["CONTRADICTS"], max_nodes=3)
+
+    assert "MATCH path=(seed)-[:CONTRADICTS*1..2]->(node)" in session.query
+
+    store.expand(["tag:it:alpha"], direction="in", max_nodes=3)
+
+    assert "MATCH path=(seed)<-[*1..2]-(node)" in session.query
 
 
 def test_remove_source_clears_edge_provenance() -> None:

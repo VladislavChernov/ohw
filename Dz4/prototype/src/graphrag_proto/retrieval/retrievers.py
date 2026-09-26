@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from graphrag_proto.retrieval.adapters.base import GraphStoreProvider, VectorStoreProvider
@@ -82,7 +83,8 @@ class GraphRetriever:
         self,
         context_ids: list[str],
         *,
-        direction: str = "parent",
+        direction: str = "both",
+        kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
@@ -92,6 +94,7 @@ class GraphRetriever:
         rows = self._graph_store.expand(
             context_ids,
             direction=direction,
+            kinds=kinds,
             max_depth=max_depth,
             max_fanout=max_fanout,
             max_nodes=max_nodes,
