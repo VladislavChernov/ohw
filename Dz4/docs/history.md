@@ -2,6 +2,13 @@
 
 > **Версия:** v14 (архивный срез `docs.zip` снят с дерева — восстановим из коммита `8a83c72`; реализация прототипа: вехи M0–M2, M3-бандлы адаптеров+topology, embeddings+reranker, semantic-cache; M3-хвосты чанкинга+плагинов; self-contained LLM-образ; X-API-Key на всех HTTP-контурах; SQLite WAL+busy_timeout; лимит параллельных джоб ingestion c 429; единый словарь id адаптеров YAML↔фабрика; redaction секретов L5-02; CI GitHub Actions; отказоустойчивость query-контура: reclaim PEL + бэкофф воркера, SSE heartbeat, общий executor пайплайна; A-2: честный контракт атомарности COMMIT — capability derivation atomic/best_effort + компенсация, ADR-024; Semantic Cache на Valkey, ADR-025; решения по кэшу и ревизии данных; P0-закрытие ревью: fail-open кэша, clear() SCAN+DEL, stats() HLEN, EXPIRE на HASH=TTL, полный sha256-ключ; L4-04 этап A: trigger_metrics snapshot + счётчик ошибок поллера топологии; ADR-027: L4-01 переквалифицирован — гейтинг = ограничение среды прототипа, инвариант = контракт LLMInference; S2 fencing query-воркеров: worker_id в ack/fail (InMemory ownership, Redis PEL), skip claim уже-терминальной задачи, commit-идемпотентность mark_succeeded; блокеры ревью №7: socket_timeout/connect_timeout у клиента Redis-очереди, LLM_TIMEOUT_S в фабрике адаптеров, shared-счётчики hit/miss кэша в Valkey (HINCRBY query:sc:<domain>:meta); M4 eval-инфраструктура (ADR-015): метрики + датасеты + раннер; ADR-028: политика конкурентной записи COMMIT — retry transient + детерминированный порядок (S1-обход M5 `INGEST_MAX_CONCURRENT=1` → S2 закрыт код+тесты+доки, L3-06))
 > **Последнее обновление:** 2026-09-19
+>
+> **Оговорка о хешах (2026-09-27).** Хеши коммитов, встречающиеся ниже, относятся к истории
+> репозитория **до её переписывания**: она была переписана при вычистке внутренних путей, попавших
+> в коммиты, и поэтому эти хеши больше не резолвятся. Два из них (`8a83c72`, `c9a8dec`,
+> `ca9aea9`) остаются живыми. Журнал не переписывается — это история, а не реестр ссылок;
+> указывать следует бандл, а не хеш. Правка колонки коммитов в
+> `docs/prototype_requirements.md` на вариант «ссылка на бандл» сделана по той же причине.
 
 Этот документ содержит исторические материалы, отражающие этапы развития концепции GraphRAG платформы.
 

@@ -153,17 +153,21 @@ Dz4/
 
 ## 6. Состав работ по вехам
 
-> **Статус реализации (обновлено 2026-09-10):**
+> **Статус реализации (уточнено 2026-09-27):**
 >
-> | Веха | Статус | Коммиты | Кратко |
-> |------|--------|---------|--------|
-> | M0 — Инфраструктура | ✅ закрыта | `9225b3a` | Compose+профили, Config :8001, Glossary :8003, Neo4j+llama.cpp |
-> | M1 — Ingestion Pipeline | ✅ закрыта | `55914ff` | Ingestion API :8002, primitive-этапы INGEST→COMMIT, DocumentReader (ADR-021) |
-> | M2 — Query API async + Retriever | ✅ закрыта | `a9c36f3`, `b7558ca`, `93b96c3` | Query :8000+SSE, Worker+Valkey (ADR-023), vector-first ретривер, demo-ui+e2e, тумблер граф-оси |
-> | M3 — Адаптеры и runtime-переключение | 🚧 в работе | `dfb7e9f`, `81490af`, `0208c28` | Бандлы 2/3 и 3/3 реализованы и закоммичены: `add-real-embeddings-reranker` (Embeddings :8004 bge-m3, Reranker :8006 bge-reranker-base, адаптеры, EmbedStage на Embedder, live mock + real-прогон MiniLM/CE) и `add-semantic-cache` (Valkey-кэш семантических ответов, hit/miss + `cache_hit`/`cache_lookup_s`; A-2 — честный контракт атомарности COMMIT) |
-> | M4 — Eval и гейт готовности | ⬜ не начата | — | — |
-> | M5 — MCP-шлюз и UI | ⬜ не начата | — | — |
-> | M6 — Внешние источники (коннекторы) | ⬜ запланирована | — | План-бандл `add-source-connectors`; гайд `docs/connectors_guide.md`; реализация — по потребности, вне скоупа M3–M5 |
+> Колонка коммитов убрана. Раньше там стояли хеши, но они не резолвятся: история репозитория
+> была переписана при вычистке внутренних путей, и указанные коммиты больше не существуют.
+> Ссылаться на бандл — устойчиво; хеш пережил бы только до следующего переписывания.
+>
+> | Веха | Статус | Кратко |
+> |------|--------|--------|
+> | M0 — Инфраструктура | ✅ закрыта | Compose+профили, Config :8001, Glossary :8003, Neo4j+llama.cpp |
+> | M1 — Ingestion Pipeline | ✅ закрыта | Ingestion API :8002, primitive-этапы INGEST→COMMIT, DocumentReader (ADR-021) |
+> | M2 — Query API async + Retriever | ✅ закрыта | Query :8000+SSE, Worker+Valkey (ADR-023), vector-first ретривер, demo-ui+e2e, тумблер граф-оси |
+> | M3 — Адаптеры и runtime-переключение | ✅ закрыта | Бандлы 2/3 и 3/3 реализованы и закоммичены: `add-real-embeddings-reranker` (Embeddings :8004 bge-m3, Reranker :8006 bge-reranker-base, адаптеры, EmbedStage на Embedder, live mock + real-прогон MiniLM/CE) и `add-semantic-cache` (Valkey-кэш семантических ответов, hit/miss + `cache_hit`/`cache_lookup_s`; A-2 — честный контракт атомарности COMMIT) |
+> | M4 — Eval и гейт готовности | 🚧 в работе | Раннер, метрики, датасеты и артефакты реализованы (`openspec/changes/add-prototype-m4-eval`, чек-лист §6 ниже); не выполнено главное — ни одного прогона, удовлетворяющего контракту артефактов `docs/test_plan.md` §5–§6. Хранимые `lift_report` непарны, поэтому приёмка не подтверждена |
+> | M5 — MCP-шлюз и UI | ⬜ не начата | — |
+> | M6 — Внешние источники (коннекторы) | ⬜ запланирована | План-бандл `add-source-connectors`; гайд `docs/connectors_guide.md`; реализация — по потребности, вне скоупа M3–M5 |
 >
 > Детали каждого бандла — в `docs/history.md` «Этап 9» и `openspec/changes/<bundle>/`.
 > Отдельные пункты вех, помеченные ниже как «(partial)», реализованы частично
@@ -236,14 +240,14 @@ Dz4/
       недостаточно»); допущение инвалидации TTL+`clear()`, planned upgrade — epoch-bump
       `query:sc:<rev>:<domain>` (Веха 4-хвост), зафиксировано ADR-025.
 - [x] Тесты: `tests/test_semantic_cache.py`, кэш-hit/miss в `test_retrieval_pipeline.py`,
-      hot-reload-preserve в `test_worker_hotreload.py`; коммит `0208c28`.
+      hot-reload-preserve в `test_worker_hotreload.py`.
 
 ### Веха 4 — Eval и гейт готовности
 - [x] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (50 вопросов/it, 10/library, 10/cinema)
       — валидация через `tests/test_eval_dataset.py`, формат ADR-015 (id, query, golden_sources, golden_facts, category).
 - [x] Метрики Retrieval@K=5 (Recall, Precision, MRR, nDCG), generation (groundedness, coverage,
       hallucination_rate) — `src/graphrag_proto/eval/metrics.py`, 10 unit-тестов (`test_eval_metrics.py`).
-- [x] Eval-раннер `src/graphrag_proto/eval/run_eval.py` — CLI `run_eval.py --domain --mode --questions`,
+- [x] Eval-раннер `prototype/infra/eval/run_eval.py` — CLI `run_eval.py --domain --mode --questions`,
       агрегация метрик, lift-отчёт JSON+markdown.
 - [x] Контрактный тест `tests/test_llm_openai_adapter.py` — streaming, non-streaming, HTTP 500,
       timeout, connection refused; 5 тестов через stub HTTP-сервер.
