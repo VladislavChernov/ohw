@@ -52,6 +52,10 @@ param(
     [switch]$Trace,
     [string]$CompareWith,
     [int]$SampleIntervalSec = 5,
+    # Дедлайн ожидания джоб в секундах. Раньше он был фиксирован на 300 и не был
+    # доступен отсюда: --wait-timeout есть у раннера, но wrapper собирает аргументы
+    # только из этого param(), лишние флаги не пробрасываются.
+    [int]$WaitTimeoutSec = 0,
     [switch]$SkipUp,
     [switch]$KeepStack
 )
@@ -132,6 +136,7 @@ foreach ($ds in $Dataset) { $evalArgs += @('--dataset', $ds) }
 foreach ($ds in $ExtraDataset) { if ($ds) { $evalArgs += @('--extra-dataset', $ds) } }
 foreach ($doc in ($Documents | Where-Object { $_ })) { $evalArgs += @('--documents', $doc) }
 if ($PSBoundParameters.ContainsKey('LimitDocs')) { $evalArgs += @('--limit-docs', "$LimitDocs") }
+if ($PSBoundParameters.ContainsKey('WaitTimeoutSec') -and $WaitTimeoutSec -gt 0) { $evalArgs += @('--wait-timeout', "$WaitTimeoutSec") }
 if ($Note) { $evalArgs += @('--note', $Note) }
 if ($NoJudge) { $evalArgs += '--no-judge' }
 if ($RetrievalOnly) { $evalArgs += '--retrieval-only' }

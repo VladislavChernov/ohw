@@ -412,6 +412,20 @@ class JobStore:
         ]
         return items, total
 
+    def note_stage(self, job_id: str, stage: str, message: str) -> None:
+        """Дописать message к уже начатой стадии, не трогая её статус.
+
+        `update_stage` для этого не годится: он помечает предыдущую running-стадию
+        как succeeded и новую ставит в running. Вызов после завершения джобы
+        вернул бы stage в состояние `running` у уже финальной джобы.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE job_stages SET message=? WHERE job_id=? AND stage=?",
+                (message, job_id, stage),
+            )
+            self._conn.commit()
+
     def stages(self, job_id: str) -> builtins.list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(

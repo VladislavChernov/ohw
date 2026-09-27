@@ -57,6 +57,12 @@ HOST = "0.0.0.0"
 PORT = 8002
 ALLOWED_DOC_TYPES = {"txt", "md", "pdf"}
 
+# Префикс пометки деградации optional-ингеста в message стадии EXTRACT. Владелец
+# контракта — здесь; читает его eval-раннер (`infra/eval/run_eval.py`), который
+# общается с сервисом по HTTP. Деградация иначе неотличима от успеха: джоба
+# остаётся `succeeded`, просто рёбер и фактов в графе меньше.
+ENRICHMENT_DEGRADED_PREFIX = "enrichment_degraded"
+
 
 def _upload_dir() -> Path:
     env = os.environ.get("INGESTION_UPLOAD_DIR")
@@ -208,6 +214,10 @@ class Executor:
                 self._analyzer.run_one(stage_name, ctx)
                 if stage_name == "INGEST":
                     self._analyzer.try_noop(ctx)
+                if ctx.enrichment_degraded:
+                    self._jobs.note_stage(
+                        job_id, stage_name, f"{ENRICHMENT_DEGRADED_PREFIX}: {ctx.enrichment_error}"
+                    )
             self._jobs.finish(job_id, "succeeded")
         except Exception as exc:  # noqa: BLE001 - разнородные источники сбоев этапов
             self._jobs.finish(job_id, "failed", error=str(exc))

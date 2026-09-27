@@ -45,6 +45,11 @@ QUERY_URL = os.environ.get("QUERY_URL", "http://localhost:8000")
 X_API_KEY = os.environ.get("X_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
 
 DEFAULT_WAIT_TIMEOUT_S = 300.0
+
+# Wire-контракт с ingestion-сервисом, а не общий модуль: раннер общается с пайплайном
+# по HTTP. Владелец префикса — ingestion-сервис (`app.ENRICHMENT_DEGRADED_PREFIX`).
+# Согласованность сторон закреплена тестами job API и build_ingest_report.
+ENRICHMENT_DEGRADED_PREFIX = "enrichment_degraded"
 DEFAULT_CONTOUR_TIMEOUT_S = 5.0
 
 EVAL_K = 5
@@ -338,6 +343,7 @@ def wait_jobs(
     """
     deadline = time.monotonic() + timeout_s
     statuses: dict[str, dict[str, Any]] = {}
+    last_seen: dict[str, dict[str, Any]] = {}
     while time.monotonic() < deadline and len(statuses) < len(job_ids):
         for job_id in job_ids:
             if job_id in statuses:
@@ -346,6 +352,7 @@ def wait_jobs(
                 resp = _get_json(f"{INGESTION_URL}/api/v1/ingestion/jobs/{job_id}")
             except RuntimeError:
                 continue
+            last_seen[job_id] = resp
             status = str(resp.get("status", ""))
             if status in TERMINAL_JOB_STATUSES:
                 statuses[job_id] = resp
@@ -355,8 +362,34 @@ def wait_jobs(
             time.sleep(poll_s)
     if len(statuses) < len(job_ids):
         pending = [job_id for job_id in job_ids if job_id not in statuses]
-        raise TimeoutError(f"не дождались завершения джобов: {pending}")
+        # Диагностика вместо голого списка id: по последней известной стадии видно,
+        # где именно прогон встал (INGEST / EXTRACT / ...), иначе таймаут неотличим
+        # от «сеть отвалилась» и упирается в перебор логов вслепую.
+        detail = ", ".join(
+            f"{job_id}@{(statuses.get(job_id) or last_seen.get(job_id) or {}).get('stage') or '?'}"
+            for job_id in pending
+        )
+        raise TimeoutError(
+            f"не дождались завершения джобов за {timeout_s:.0f}s: {pending} (стадия на момент таймаута: {detail})"
+        )
     return statuses
+
+
+def _parse_enrichment_degradation(job: dict[str, Any]) -> tuple[bool, str | None]:
+    """Достать признак деградации optional-ингеста из стадии EXTRACT джобы.
+
+    Контракт записи — `ENRICHMENT_DEGRADED_PREFIX` в ingestion-пакете: пайплайн
+    пишет в message стадии `enrichment_degraded: <причина>`. Джобавляется сюда
+    не «на всякий случай», а потому что деградация иначе неотличима от успеха:
+    статус остаётся `succeeded`, просто рёбер меньше.
+    """
+    for entry in job.get("stages") or []:
+        if not isinstance(entry, dict) or entry.get("stage") != "EXTRACT":
+            continue
+        message = str(entry.get("message") or "")
+        if message.startswith(f"{ENRICHMENT_DEGRADED_PREFIX}:"):
+            return True, message[len(ENRICHMENT_DEGRADED_PREFIX) + 1 :].strip() or None
+    return False, None
 
 
 def build_ingest_report(
@@ -375,6 +408,7 @@ def build_ingest_report(
         status = str(job.get("status", "unknown"))
         stage = job.get("stage")
         is_noop = status == "succeeded" and stage == "INGEST"
+        degraded, degradation_error = _parse_enrichment_degradation(job)
         documents.append(
             {
                 "source_url": record["source_url"],
@@ -385,6 +419,8 @@ def build_ingest_report(
                 "last_stage": stage,
                 "noop": is_noop,
                 "error": job.get("error"),
+                "enrichment_degraded": degraded,
+                "enrichment_error": degradation_error,
                 "wall_time_s": round(float(record.get("waited_s") or 0.0), 2),
                 "seconds_per_kb": (
                     round(float(record["waited_s"]) / max(record["bytes"] / 1024.0, 0.001), 2)
@@ -399,6 +435,9 @@ def build_ingest_report(
         "documents_total": len(documents),
         "noop_documents": len(noop),
         "cold_documents": len(cold),
+        "enrichment_degraded_documents": sum(
+            1 for d in documents if d["enrichment_degraded"]
+        ),
         "total_wall_time_s": round(sum(d["wall_time_s"] for d in documents), 2),
         "cold_wall_time_sum_s": round(sum(cold), 2),
         "noop_wall_time_sum_s": round(sum(noop), 2),

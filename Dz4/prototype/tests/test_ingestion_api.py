@@ -432,3 +432,25 @@ def test_runner_normしalize_without_glossary_keeps_entities(tmp_path: Path) -> 
     names = {e["name"] for e in ctx.entities}
     # заглушка EXTRACT: deteministic entities из слов >= 5 символов
     assert "алгоритм" in names
+
+def test_note_stage_records_message_without_touching_status(tmp_path: Path) -> None:
+    """note_stage не имеет права переводить стадию обратно в running.
+
+    Именно этим отличается от update_stage, который после завершения джобы вернул бы
+    EXTRACT в состояние `running`. Регрессия закрывает деградацию в стадии.
+    """
+    jobs = JobStore(tmp_path / "note.db")
+    jobs.create("job-1", source_url="src://a.txt", domain="it", doc_type="txt")
+    job_id = "job-1"
+    jobs.update_stage(job_id, "EXTRACT")
+    jobs.finish(job_id, "succeeded")
+
+    before = {s["stage"]: s["status"] for s in jobs.stages(job_id)}
+    jobs.note_stage(job_id, "EXTRACT", "enrichment_degraded: glossary 503")
+    after = jobs.stages(job_id)
+
+    assert {s["stage"]: s["status"] for s in after} == before
+    assert before["EXTRACT"] == "succeeded"
+    extract = next(s for s in after if s["stage"] == "EXTRACT")
+    assert extract["message"] == "enrichment_degraded: glossary 503"
+    assert jobs.get(job_id)["status"] == "succeeded"

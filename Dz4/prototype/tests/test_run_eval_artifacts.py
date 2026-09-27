@@ -652,3 +652,46 @@ def test_main_compare_with_invalid_pair(monkeypatch: Any, tmp_path: Path) -> Non
     assert report["pair"]["paired"] is False
     md = (tmp_path / "out" / "lift_report.md").read_text(encoding="utf-8")
     assert "прогоны не парные" in md
+
+def test_build_ingest_report_surfaces_enrichment_degradation() -> None:
+    """Деградация optional-ингеста обязана быть видна в отчёте.
+
+    Иначе прогон с частичным графом неотличим от прогона с полным: в обоих
+    случаях статус `succeeded`, а рёбер просто меньше. Метрики начинают
+    сравнивать прогоны с разной полнотой графа.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.5},
+    ]
+    statuses = {
+        "j1": {
+            "status": "succeeded",
+            "stage": "COMMIT",
+            "error": None,
+            "stages": [
+                {"stage": "EXTRACT", "status": "succeeded", "message": "enrichment_degraded: glossary 503"},
+            ],
+        }
+    }
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    doc = report["documents"][0]
+    assert doc["enrichment_degraded"] is True
+    assert doc["enrichment_error"] == "glossary 503"
+    assert report["enrichment_degraded_documents"] == 1
+
+
+def test_build_ingest_report_no_degradation_is_explicitly_false() -> None:
+    """Чистый прогон обязан отличаться от деградировавшего, а не молчать."""
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.5},
+    ]
+    statuses = {"j1": {"status": "succeeded", "stage": "COMMIT", "error": None, "stages": []}}
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    doc = report["documents"][0]
+    assert doc["enrichment_degraded"] is False
+    assert doc["enrichment_error"] is None
+    assert report["enrichment_degraded_documents"] == 0
