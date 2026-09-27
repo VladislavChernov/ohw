@@ -78,6 +78,31 @@ READ_BY_INGEST_CHUNKING_KEYS: frozenset[str] = frozenset(
     }
 )
 
+#: Ключи `retrieval.*`, которые читает запрос. Остальные — инертны и предупреждаются.
+READ_BY_RETRIEVAL_KEYS: frozenset[str] = frozenset(
+    {
+        "graph_search_enabled",
+        "expansion_kinds",
+        "max_depth",
+        "expansion_direction",
+        "max_fanout",
+        "max_graph_nodes",
+        "graph_boost",
+        "graph_source_relevance",
+    }
+)
+
+#: Ключи `retrieval.*`, обязательные ПО ТИПУ, если присутствуют. Неполное значение не
+#: ошибка само по себе: у каждого есть кодовый дефолт, и это нормальная практика. Ошибкой
+#: это делает НЕЧИТАЕМОЕ значение — оно молча меняет поведение ответа пользователя.
+RETRIEVAL_NUMERIC_KEYS: tuple[str, ...] = (
+    "max_depth",
+    "max_fanout",
+    "max_graph_nodes",
+    "graph_boost",
+    "graph_source_relevance",
+)
+
 
 @dataclass(frozen=True)
 class ProfileValidation:
@@ -275,6 +300,70 @@ def _inert_chunking_keys(profile: dict[str, Any]) -> list[str]:
         f"chunking.{key} не читается ingest"
         for key in sorted(set(chunking_map) - READ_BY_INGEST_CHUNKING_KEYS)
     ]
+
+
+def validate_retrieval_profile(profile: dict[str, Any] | None) -> ProfileValidation:
+    """Проверить половину профиля, которую читает ЗАПРОС.
+
+    Отдельная функция, а не режим общей, потому что цена ошибки другая: в ингесте неверный
+    параметр необратимо теряет факты, здесь — молча меняет ответ пользователя, и цена ошибки
+    обнаруживается не сразу, а в чтении ответа. Общее — только механика (чистая функция,
+    возвращает ошибки и предупреждения) и стиль сообщений.
+
+    **Ошибка — нечитаемое значение, а не отсутствующее.** Отсутствующее имеет кодовый дефолт
+    и это законно; нечитаемое означает «работаем не так, как объявлено, молча», и это ровно
+    то, что обязано быть названо. Ошибки и предупреждения по намерению повторяют разбор
+    ингеста: `graph_search_enabled` не bool — ошибка, потому что такой флаг молча игнорируется
+    и решение уходит в другое место.
+    """
+    if profile is None or not _is_mapping(profile):
+        return ProfileValidation()
+    if not profile:
+        return ProfileValidation()
+    retrieval = profile.get("retrieval")
+    if retrieval is None:
+        # Профиль без секции запроса — законно: домен может быть настроен только на запись.
+        return ProfileValidation()
+    if not _is_mapping(retrieval):
+        # Кортеж, а не список: список нехэшируем, а `ProfileProblemLog` дедуплицирует по
+        # ключу, и список уронил бы его на первом же не-mapping профиле.
+        return ProfileValidation(errors=("retrieval должен быть mapping",))
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    retrieval_map: dict[str, Any] = retrieval
+
+    if "graph_search_enabled" in retrieval_map and not isinstance(
+        retrieval_map["graph_search_enabled"], bool
+    ):
+        errors.append(
+            f"retrieval.graph_search_enabled должен быть bool, получено "
+            f"{type(retrieval_map['graph_search_enabled']).__name__} — флаг будет "
+            "проигнорирован, решение примет env"
+        )
+    for key in RETRIEVAL_NUMERIC_KEYS:
+        if key not in retrieval_map:
+            continue
+        raw = retrieval_map[key]
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            errors.append(
+                f"retrieval.{key} должен быть числом, получено {type(raw).__name__} — "
+                "будет применён кодовый дефолт, а объявленное значение проигнорировано"
+            )
+    if (
+        "max_depth" in retrieval_map
+        and isinstance(retrieval_map["max_depth"], int)
+        and not isinstance(retrieval_map["max_depth"], bool)
+        and retrieval_map["max_depth"] < 0
+    ):
+        errors.append("retrieval.max_depth не может быть отрицательным")
+    if "expansion_kinds" in retrieval_map and not isinstance(
+        retrieval_map["expansion_kinds"], list
+    ):
+        errors.append("retrieval.expansion_kinds должен быть списком")
+    for key in sorted(set(retrieval_map) - READ_BY_RETRIEVAL_KEYS):
+        warnings.append(f"retrieval.{key} не читается запросом — значение не влияет ни на что")
+    return ProfileValidation(errors=tuple(errors), warnings=tuple(warnings))
 
 
 class ProfileProblemLog:

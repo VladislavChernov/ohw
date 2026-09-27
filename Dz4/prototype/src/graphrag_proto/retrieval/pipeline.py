@@ -17,12 +17,21 @@ cache-hit и при генерации) — «по каким данным со�
 
 from __future__ import annotations
 
+import builtins
+import hashlib
+import json
+import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from typing import Any
 
+from graphrag_proto.ingestion_service.pipeline.profile_contract import (
+    PROFILE_PROBLEM_LOG,
+    validate_retrieval_profile,
+)
 from graphrag_proto.ingestion_service.projection import (
     ProjectionMetrics,
     ProjectionState,
@@ -54,6 +63,8 @@ Emit = Callable[[str, dict[str, Any]], None]
 # и значение `relevance`; переопределяется профилем (`retrieval.graph_source_relevance`).
 GRAPH_SOURCE_RELEVANCE = 1.0
 
+_log = logging.getLogger(__name__)
+
 DEFAULT_SYSTEM_PROMPT = (
     "Ты — GraphRAG-ассистент. Отвечай строго по предоставленному контексту. "
     "Ссылайся на источники из контекста. Если контекста недостаточно — так и скажи."
@@ -71,6 +82,68 @@ def graph_search_enabled(profile: dict[str, Any]) -> bool:
         return env.strip().lower() == "true"
     retrieval = profile.get("retrieval") or {}
     return bool(retrieval.get("graph_search_enabled", False))
+
+
+def _config_number(
+    section: Mapping[str, Any],
+    key: str,
+    default: float,
+    fallbacks: builtins.list[str],
+    *,
+    path: str,
+) -> float:
+    """Читать числовой параметр конфигурации один раз, терпимо и С НАЗВАНИЕМ.
+
+    Три свойства, каждое из которых раньше нарушалось:
+
+    * **одно чтение.** `graph_boost` читался дважды: в теле trace-события (аргумент функции
+      вычисляется до вызова, то есть даже при выключенном trace) и ниже по терпимой ветке.
+      Первое чтение падало на негодном значении, и терпимая обработка была мёртвым кодом —
+      «fallback есть» и «fallback работает» оказались разными утверждениями.
+    * **терпимо.** Негодное значение в конфиге — дефект конфига, а не отказ системы. Раньше
+      оно роняло всё расширение по графу, и вопрос выпадал из измерения целиком: опечатка в
+      одной строке профиля стоила дороже, чем дефолт.
+    * **с именем.** Тихий дефолт без следа — это «просто работает», а работает не то, что
+      объявлено. Имя попадает в `config_fallbacks` ответа и дальше в артефакт прогона.
+    """
+    raw = section.get(key, default)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        fallbacks.append(f"{path}.{key}")
+        return float(default)
+
+
+def _config_int(
+    section: Mapping[str, Any],
+    key: str,
+    default: int,
+    fallbacks: builtins.list[str],
+    *,
+    path: str,
+) -> int:
+    """То же для целого, но с проверкой диапазона: `max_depth: -1` — тоже негодное значение."""
+    raw = section.get(key, default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        fallbacks.append(f"{path}.{key}")
+        return default
+    if value < 0:
+        fallbacks.append(f"{path}.{key}")
+        return default
+    return value
+
+
+def profile_fingerprint(profile: Mapping[str, Any]) -> str:
+    """Идентичность конфигурации: короткий отпечаток по канонической сериализации.
+
+    Третья нога в артефакте измерения рядом с `code_commit` и `revision`. Без неё отчёт не
+    может сказать, каким конфигом измерен, а восстановить его из версии кода нельзя: код
+    менялся после прогона, и параметры конфигурации в коммите не закреплены.
+    """
+    canonical = json.dumps(profile, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
 def _validate_runtime_profile(profile: dict[str, Any]) -> None:
@@ -171,6 +244,12 @@ class QueryPipeline:
         self._semantic_cache = semantic_cache
         self._cache_threshold = semantic_cache.threshold if semantic_cache is not None else 0.0
         self._closed = False
+        # Конфигурация закрепляется на первый запрос и дальше неизменна в рамках сессии.
+        # Поля не `_cache_*`: это не ускоритель, а момент применения, и называть его
+        # кэшем значило бы приучить читателя думать, что значение может устареть.
+        self._pinned_profile: dict[str, Any] | None = None
+        self._pinned_fingerprint: str | None = None
+        self._pinned_at: str | None = None
 
     def shutdown(self) -> None:
         """Закрытие общего executor'а (вызывается при замене пайплайна/остановке воркера)."""
@@ -229,6 +308,46 @@ class QueryPipeline:
         limit = _context_limit(profile)
         enabled = graph_requested
         graph_degraded = False
+        # Параметры запроса читаются ОДИН раз, до расширения, и читаются терпимо.
+        # Разделение принципиальное: дефект конфигурации — это «работаем с дефолтом и
+        # называем его», а отказ рантайма (Neo4j недоступен) — это деградация. Раньше
+        # негодное значение в профиле попадало в широкий `except` расширения и обнуляло
+        # вклад графа целиком, то есть дефект конфига выглядел как отказ системы.
+        config_fallbacks: builtins.list[str] = []
+        retrieval_cfg: dict[str, Any] = profile.get("retrieval") or {}
+        cfg_max_depth = _config_int(retrieval_cfg, "max_depth", 2, config_fallbacks, path="retrieval")
+        cfg_max_fanout = _config_int(retrieval_cfg, "max_fanout", 8, config_fallbacks, path="retrieval")
+        cfg_max_graph_nodes = _config_int(
+            retrieval_cfg, "max_graph_nodes", self._max_graph_nodes, config_fallbacks, path="retrieval"
+        )
+        cfg_boost = _config_number(
+            retrieval_cfg, "graph_boost", 0.0, config_fallbacks, path="retrieval"
+        )
+        cfg_source_relevance = _config_number(
+            retrieval_cfg,
+            "graph_source_relevance",
+            GRAPH_SOURCE_RELEVANCE,
+            config_fallbacks,
+            path="retrieval",
+        )
+        expansion_kinds_raw = retrieval_cfg.get("expansion_kinds")
+        cfg_expansion_kinds = (
+            [str(item) for item in expansion_kinds_raw] if isinstance(expansion_kinds_raw, list) else None
+        )
+        if expansion_kinds_raw is not None and cfg_expansion_kinds is None:
+            config_fallbacks.append("retrieval.expansion_kinds")
+        cfg_direction = str(retrieval_cfg.get("expansion_direction", "both"))
+        effective_retrieval: dict[str, Any] = {
+            "max_depth": cfg_max_depth,
+            "max_fanout": cfg_max_fanout,
+            "max_graph_nodes": cfg_max_graph_nodes,
+            "graph_boost": cfg_boost,
+            "graph_source_relevance": cfg_source_relevance,
+            "expansion_kinds": cfg_expansion_kinds,
+            "expansion_direction": cfg_direction,
+            "graph_search_enabled": graph_requested,
+            "context_limit": limit,
+        }
         projection_status = "not_requested" if not graph_requested else "not_tracked"
         projection_revision: str | None = None
         projection_state: ProjectionState | None = None
@@ -378,7 +497,6 @@ class QueryPipeline:
         graph_boosts: dict[str, float] = {}
         if enabled:
             emit("status", {"stage": "graph", "enabled": True})
-            retrieval_profile = profile.get("retrieval") or {}
             seed_ids = [
                 str(value)
                 for chunk in body_chunks
@@ -392,21 +510,18 @@ class QueryPipeline:
                 _trace({"stage": "graph_expansion", "degraded": True, "reason": "adapter_missing"})
             elif unique_seed_ids:
                 try:
-                    expansion_kinds_raw = retrieval_profile.get("expansion_kinds")
-                    expansion_kinds = (
-                        [str(item) for item in expansion_kinds_raw]
-                        if isinstance(expansion_kinds_raw, list)
-                        else None
-                    )
-                    requested_depth = int(retrieval_profile.get("max_depth", 2))
+                    # Здесь только работа с графом: отказы рантайма деградируют, дефекты
+                    # конфигузации разобраны выше и сюда не доходят.
+                    expansion_kinds = cfg_expansion_kinds
+                    requested_depth = cfg_max_depth
                     effective_depth = _expand_depth(requested_depth)
                     expanded_rows = graph_retriever.expand(
                         unique_seed_ids,
-                        direction=str(retrieval_profile.get("expansion_direction", "both")),
+                        direction=cfg_direction,
                         kinds=expansion_kinds,
                         max_depth=requested_depth,
-                        max_fanout=int(retrieval_profile.get("max_fanout", 8)),
-                        max_nodes=int(retrieval_profile.get("max_graph_nodes", self._max_graph_nodes)),
+                        max_fanout=cfg_max_fanout,
+                        max_nodes=cfg_max_graph_nodes,
                     )
                     if not expanded_rows:
                         graph_degraded = True
@@ -438,7 +553,11 @@ class QueryPipeline:
                                 "depths": [row.get("depth", 0) for row in expanded_rows],
                                 "origins": [row.get("origin") for row in expanded_rows],
                                 "confidences": [row.get("confidence") for row in expanded_rows],
-                                "boost": float(retrieval_profile.get("graph_boost", 0.0) or 0.0),
+                                # Уже прочитанное и уже терпимо нормализованное значение, а не
+                                # второе чтение того же поля. Второе чтение здесь означало
+                                # `float(...)` на негодном значении, падало ВНУТРИ этого
+                                # `try` и делало именованный fallback ниже недостижимым.
+                                "boost": cfg_boost,
                                 "requested_depth": requested_depth,
                                 "effective_depth": effective_depth,
                                 "depth_clamped": effective_depth != requested_depth,
@@ -460,11 +579,10 @@ class QueryPipeline:
                 )
 
         if enabled and expanded_rows:
-            retrieval_profile = profile.get("retrieval") or {}
-            try:
-                boost = float(retrieval_profile.get("graph_boost", 0.0))
-            except (TypeError, ValueError):
-                boost = 0.0
+            # Терпимой обработки здесь больше нет: значение прочитано один раз выше и уже
+            # приведено к дефолту с записью имени в `config_fallbacks`. Дублировать разбор
+            # значило бы снова получить два разных ответа на один вопрос «что применилось».
+            boost = cfg_boost
             if boost:
                 graph_sources = {
                     str(source)
@@ -537,16 +655,7 @@ class QueryPipeline:
             text = ""
             generation_s = 0.0
 
-        graph_relevance = GRAPH_SOURCE_RELEVANCE
-        if enabled and skeleton_rows:
-            try:
-                graph_relevance = float(
-                    (profile.get("retrieval") or {}).get(
-                        "graph_source_relevance", GRAPH_SOURCE_RELEVANCE
-                    )
-                )
-            except (TypeError, ValueError):
-                graph_relevance = GRAPH_SOURCE_RELEVANCE
+        graph_relevance = cfg_source_relevance
         sources = build_sources(body_chunks, skeleton_rows, graph_relevance=graph_relevance)
         if graph_requested and graph_degraded:
             self.projection_metrics.observe_fallback(
@@ -571,6 +680,18 @@ class QueryPipeline:
             "graph_degraded": graph_degraded,
             "projection_status": projection_status,
             "projection_revision": projection_revision,
+            # Три величины, без которых отчёт неполон: ИДЕНТИЧНОСТЬ конфигурации, момент
+            # её ПРИМЕНЕНИЯ и право на УСТАРЕВАНИЕ. Все три названы явно, а не выводятся из
+            # версии кода: конфигурация меняется на лету, и из коммита её не восстановить.
+            "profile_fingerprint": self._pinned_fingerprint,
+            "profile_pinned_at": self._pinned_at,
+            "profile_staleness": "immutable_for_session",
+            # Что ПРИМЕНЕНО, а не что запрошено: иначе «применилось с дефолтом» и
+            # «применилось как просили» неразличимы в артефакте.
+            "effective_retrieval": effective_retrieval,
+            # Имена параметров, ушедших в дефолт. Пустой список — тоже факт: значит
+            # применено ровно то, что объявлено.
+            "config_fallbacks": config_fallbacks,
         }
         if self._semantic_cache is not None and cache_allowed:
             done["cache_hit"] = False
@@ -582,15 +703,64 @@ class QueryPipeline:
         return done
 
     def _load_profile(self, domain: str) -> dict[str, Any]:
+        """Профиль, ЗАКРЕПЛЁННЫЙ на весь срок жизни пайплайна (сессии).
+
+        Не кэш ради скорости, а решение о моменте применения: конфигурация неизменяема в
+        рамках сессии, поэтому берётся один раз и дальше только выдаётся. Три следствия,
+        каждое проверено на прошлом поведении:
+
+        * **Воспроизводимость.** Сессия измеряет ровно тот конфиг, который закреплён, даже
+          если файл на хосте изменили посреди прогона. Раньше профиль перечитывался на
+          каждый запрос (bind mount + чтение файла Config Service на каждый HTTP-запрос,
+          кэша в загрузчике нет), то есть два вопроса одного прогона могли быть измерены
+          разными настройками без следа.
+        * **Латентность.** HTTP-запрос к Config Service с трёхсекундным таймаутом уходит из
+          критического пути пользовательского запроса.
+        * **Наблюдаемость.** Отпечаток закреплённого профиля — один на сессию, а не
+          вычисляется постфактум, и `profile_fingerprint` в ответе стабилен.
+
+        Дрейф между двумя режимами прогона ловится снаружи: они собирают разные пайплайны,
+        поэтому у каждого свой отпечаток, и их сравнивает eval-раннер.
+        """
+        if self._pinned_profile is None:
+            self._pinned_profile = self._fetch_profile(domain)
+            self._pinned_fingerprint = profile_fingerprint(self._pinned_profile)
+            # Момент применения фиксируется при ЗАКРЕПЛЕНИИ, а не при каждом ответе: он
+            # относится к конфигурации, и «когда применён этот конфиг» — один вопрос с
+            # одним ответом на всю сессию.
+            self._pinned_at = datetime.now(UTC).isoformat(timespec="seconds")
+        return self._pinned_profile
+
+    def _fetch_profile(self, domain: str) -> dict[str, Any]:
         try:
             profile = self._profiles.load(domain)
-            if self._strict_profile:
-                _validate_runtime_profile(profile)
-            return profile
         except ProfileError:
             if self._strict_profile:
                 raise
             return {"retrieval": {}, "context_assembly": {}, "ontology": {}}
+        verdict = validate_retrieval_profile(profile)
+        if verdict.errors and PROFILE_PROBLEM_LOG.due(domain, "retrieval_error", verdict.errors):
+            _log.error(
+                "профиль домена %r нарушает контракт запроса: %s",
+                domain,
+                "; ".join(verdict.errors),
+            )
+        if verdict.warnings and PROFILE_PROBLEM_LOG.due(
+            domain, "retrieval_warning", verdict.warnings
+        ):
+            _log.warning("профиль домена %r: %s", domain, "; ".join(verdict.warnings))
+        if self._strict_profile and verdict.errors:
+            raise ProfileError(
+                f"профиль домена {domain!r} нарушает контракт запроса: " + "; ".join(verdict.errors)
+            )
+        if self._strict_profile:
+            _validate_runtime_profile(profile)
+        return profile
+
+    @property
+    def profile_fingerprint(self) -> str | None:
+        """Отпечаток закреплённого конфига, `None` пока пайплайн ни разу не работал."""
+        return self._pinned_fingerprint
 
 
 def _context_limit(profile: dict[str, Any]) -> int:

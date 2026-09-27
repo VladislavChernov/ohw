@@ -1046,6 +1046,7 @@ def build_run_manifest(
     corpus_limit: int | None = None,
     golden: dict[str, Any] | None = None,
     timeouts: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
     note: str = "",
 ) -> dict[str, Any]:
     """Манифест условий прогона (design.md §5.1) — «что именно сравнивалось».
@@ -1058,6 +1059,11 @@ def build_run_manifest(
     фазы подачи. В пару с ``ingest_report.json`` это то, чем калибруются будущие
     прогоны: без них «долго» и «зависло» неразличимы, потому что оба кончаются ошибкой
     прогона.
+
+    ``config`` — идентичность, момент применения и право на устаревание конфигурации
+    запроса. Без неё артефакт неполон по построению: версия кода конфигурацию не
+    определяет, а профиль меняется на лету, так что восстановить применённые настройки
+    из коммита нельзя.
     """
     return {
         "run_id": run_id,
@@ -1069,6 +1075,7 @@ def build_run_manifest(
         "revision_fingerprint": revision,
         "datasets": datasets,
         "corpus": corpus,
+        "config": config or {},
         "timeouts": timeouts or {},
         "corpus_documents": sorted(corpus_documents or []),
         "corpus_documents_count": len(corpus_documents or []),
@@ -1272,10 +1279,17 @@ def eval_question(
         "graph_degraded": graph_degraded,
         "projection_status": done.get("projection_status"),
         "projection_revision": done.get("projection_revision"),
+        # Применённый boost берётся из `done`, а не из trace-события: при выключенном trace
+        # trace-события нет, и поле было всегда `None` — то есть запись о применённой
+        # настройке зависела от отладочного флага.
+        "graph_boost": (done.get("effective_retrieval") or {}).get("graph_boost"),
+        "profile_fingerprint": done.get("profile_fingerprint"),
+        "profile_pinned_at": done.get("profile_pinned_at"),
+        "config_fallbacks": done.get("config_fallbacks") or [],
+        "effective_retrieval": done.get("effective_retrieval") or {},
         "seed_chunk_ids": graph_trace.get("seed_chunk_ids", []),
         "graph_paths": graph_trace.get("paths", []),
         "graph_depths": graph_trace.get("depths", []),
-        "graph_boost": graph_trace.get("boost"),
         "query": question.get("query", ""),
         "revision": revision,
         "retrieved": [
@@ -1507,6 +1521,54 @@ def write_qa_review(results: list[dict[str, Any]], out_dir: Path) -> Path:
     return path
 
 
+def build_config_state(
+    reports: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Идентичность, момент применения, право на устаревание и фактически применённое.
+
+    Собирается из ответов, а не из предположения о конфиге: отпечаток и момент закрепления
+    ставит `QueryPipeline` при первом запросе, а отсюда берутся только имена.
+
+    **Дрейф между режимами — разрушающий для пары.** Baseline и target обязаны быть измерены
+    одним конфигом: иначе delta измеряет не «вклад графа», а «вклад графа плюс разницу между
+    двумя настройками». Проверка по образцу `revision mismatch` — не тихо, а Invalid.
+    Конфигурация закрепляется на первый запрос каждого режима, поэтому дрейф возможен, если
+    файл изменили между режимами, — и это видно, а не предполагается.
+    """
+    fingerprints: dict[str, str] = {}
+    pinned_at: dict[str, str] = {}
+    fallbacks: dict[str, int] = {}
+    effective: dict[str, Any] = {}
+    for record in records:
+        fp = record.get("profile_fingerprint")
+        if isinstance(fp, str) and fp:
+            fingerprints.setdefault(str(record.get("mode", "?")), fp)
+        when = record.get("profile_pinned_at")
+        if isinstance(when, str) and when:
+            pinned_at.setdefault(str(record.get("mode", "?")), when)
+        for name in record.get("config_fallbacks") or []:
+            fallbacks[str(name)] = fallbacks.get(str(name), 0) + 1
+        applied = record.get("effective_retrieval")
+        if isinstance(applied, dict) and not effective:
+            effective = applied
+    distinct = sorted(set(fingerprints.values()))
+    drift = len(distinct) > 1
+    return {
+        "profile_fingerprints": fingerprints,
+        "profile_fingerprint": distinct[0] if distinct else None,
+        "profile_pinned_at": sorted(pinned_at.values())[0] if pinned_at else None,
+        # Право на устаревание объявлено явно, а не подразумевается: пока сессия идёт,
+        # конфигурация неизменна, и «устаревшая» конфигурация в артефакте означает, что
+        # правило нарушено, а не что кто-то не обновился.
+        "profile_staleness": "immutable_for_session",
+        "config_drift": drift,
+        "config_fallbacks": fallbacks,
+        "effective_retrieval": effective,
+        "modes": len(reports),
+    }
+
+
 def _format_causes(causes: dict[str, int]) -> str:
     """Гистограмма причин поимённо, отсортированная по частоте.
 
@@ -1613,6 +1675,29 @@ def write_passport(
     # отличим от сбоя раннера, и следующий читатель примет прогон за измерение.
     for reason in (report or {}).get("verdict_reasons") or []:
         lines.append(f"- ⚠️ **вердикт непригоден**: {reason}")
+    # Конфигурация — третье измерение прогона, и без неё отчёт неполон: версия кода
+    # настройки запроса не определяет.
+    cfg = (report or {}).get("config") or {}
+    if cfg:
+        lines.append(
+            f"- **конфигурация**: `{cfg.get('profile_fingerprint') or 'n/a'}` "
+            f"(закреплена {cfg.get('profile_pinned_at') or 'n/a'}, "
+            f"устаревание: {cfg.get('profile_staleness') or 'n/a'})"
+        )
+        if cfg.get("config_drift"):
+            lines.append(
+                "- ⚠️ **`config_drift = true`**: режимы измерены разными настройками, "
+                f"отпечатки: {cfg.get('profile_fingerprints')}"
+            )
+        if cfg.get("config_fallbacks"):
+            applied = ", ".join(
+                f"{name}×{count}" for name, count in sorted(cfg["config_fallbacks"].items())
+            )
+            lines.append(
+                f"- **параметры, применённые с дефолтом** (значение нечитаемо): {applied}"
+            )
+        if cfg.get("effective_retrieval"):
+            lines.append(f"- **применённые настройки**: `{cfg['effective_retrieval']}`")
 
     if ingest:
         lines += [
@@ -2069,6 +2154,10 @@ def main() -> None:
         print(f"run: {key} ({len(questions)} вопросов) ...")
         reports[key] = _run_mode(mode, all_records)
 
+    config_state = build_config_state(reports, all_records)
+    for mode_key in reports:
+        reports[mode_key]["config"] = config_state
+
     judge_active = judge is not None and generate
     # Отчёт ingest строится ДО подсчёта вердикта: потеря LLM-слоя инвалидирует
     # прогон, и вердикт обязан знать о ней, а не узнавать о ней постфактум в паспорте.
@@ -2083,6 +2172,7 @@ def main() -> None:
         judge_active=judge_active,
     )
     report["ingest_quality"] = ingest_quality
+    report["config"] = config_state
     report["run_id"] = run_id
     report["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     report["manifest"] = manifest
@@ -2100,6 +2190,9 @@ def main() -> None:
         }
         for mode, aggregate_report in reports.items()
     }
+    # Конфигурация дописывается после прогона: она известна только из ответов, а манифест
+    # перезаписывается тут же — тот же приём, что с наблюдённой проекцией.
+    manifest["config"] = config_state
     write_run_manifest(manifest, out_dir)
 
     # 4. Сравнение с парным прогоном (design.md §5.1): расхождение факторов → invalid.

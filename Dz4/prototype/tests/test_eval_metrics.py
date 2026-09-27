@@ -245,6 +245,50 @@ def test_lift_report_names_why_verdict_is_invalid() -> None:
     assert report["verdict_reasons"] == ["вопросы с недоступным графовым вкладом: 2"]
 
 
+def test_lift_report_invalidates_when_config_drifted_between_modes() -> None:
+    """Пара, измеренная разными настройками, не является измерением вклада графа.
+
+    Тогда delta измеряет «вклад графа ПЛЮС разницу между конфигами», и разделить эти две
+    части нечем. Конфигурация закрепляется на первый запрос каждого режима, поэтому дрейф
+    возможен, если файл изменили между baseline и target, — и он обязан быть назван.
+    """
+    baseline = {
+        "retrieval": {"recall_at_k": 0.5},
+        "generation": {"groundedness": 0.7, "coverage": 0.6},
+        "config": {"config_drift": True, "profile_fingerprint": "aaa"},
+    }
+    target = {
+        "retrieval": {"recall_at_k": 0.9},
+        "generation": {"groundedness": 0.8, "coverage": 0.7},
+        "config": {"config_drift": True, "profile_fingerprint": "bbb"},
+    }
+
+    report = lift_report(baseline, target)
+
+    assert report["verdict"] == "invalid"
+    assert any("конфигурация изменилась" in reason for reason in report["verdict_reasons"])
+
+
+def test_lift_report_keeps_verdict_when_config_is_identical() -> None:
+    """Одинаковый конфиг обоих режимов — норма, а не повод для тревоги."""
+    config = {"config_drift": False, "profile_fingerprint": "aaa"}
+    baseline = {
+        "retrieval": {"recall_at_k": 0.5},
+        "generation": {"groundedness": 0.7, "coverage": 0.6},
+        "config": config,
+    }
+    target = {
+        "retrieval": {"recall_at_k": 0.9},
+        "generation": {"groundedness": 0.8, "coverage": 0.7},
+        "config": config,
+    }
+
+    report = lift_report(baseline, target)
+
+    assert report["verdict"] == "pass"
+    assert report["verdict_reasons"] == []
+
+
 def test_lift_report_missing_generation_metrics() -> None:
     """Судья активен, а метрик нет — это дефект прогона, а не успех.
 

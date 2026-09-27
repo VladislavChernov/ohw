@@ -228,6 +228,7 @@ def test_eval_question_records_projection_state() -> None:
             result = super().run(*args, **kwargs)
             result["projection_status"] = "ready"
             result["projection_revision"] = "projection-1"
+            result["effective_retrieval"] = {"graph_boost": 0.2, "max_depth": 2}
             result["trace"] = [
                 *self._trace_events,
                 {
@@ -235,7 +236,6 @@ def test_eval_question_records_projection_state() -> None:
                     "seed_chunk_ids": ["c1"],
                     "paths": [["tag:it:a", "tag:it:b"]],
                     "depths": [1],
-                    "boost": 0.2,
                 },
             ]
             return result
@@ -256,6 +256,10 @@ def test_eval_question_records_projection_state() -> None:
     assert record["seed_chunk_ids"] == ["c1"]
     assert record["graph_paths"] == [["tag:it:a", "tag:it:b"]]
     assert record["graph_depths"] == [1]
+    # Применённый boost берётся из канала применённой конфигурации, а НЕ из trace-события.
+    # В фикстуре trace-события `boost` больше нет намеренно: раньше поле читалось оттуда, и
+    # при выключенном trace оно было всегда `None` — то есть запись о применённой настройке
+    # зависела от отладочного флага.
     assert record["graph_boost"] == 0.2
 
 
@@ -780,6 +784,69 @@ def test_wait_jobs_hard_ceiling_stops_slow_but_alive(monkeypatch: Any) -> None:
     assert "жёсткий кап" in message
     assert "1000" in message
     assert "j1@EXTRACT" in message
+
+
+def test_config_state_names_identity_and_applied_settings() -> None:
+    """Артефакт обязан называть, чем измерен: иначе он неполон по построению.
+
+    Версия кода конфигурацию не определяет, а изменить профиль посреди прогона можно было
+    всегда. Три величины — идентичность, момент применения, право на устаревание — плюс
+    фактически применённые настройки.
+    """
+    records = [
+        {
+            "mode": "baseline",
+            "profile_fingerprint": "abc123def456",
+            "profile_pinned_at": "2026-09-27T10:00:00+00:00",
+            "config_fallbacks": [],
+            "effective_retrieval": {"max_depth": 2, "graph_boost": 0.0},
+        },
+        {
+            "mode": "target",
+            "profile_fingerprint": "abc123def456",
+            "profile_pinned_at": "2026-09-27T10:00:00+00:00",
+            "config_fallbacks": ["retrieval.graph_boost"],
+            "effective_retrieval": {"max_depth": 2, "graph_boost": 0.0},
+        },
+    ]
+
+    state = _run_eval.build_config_state({"baseline": {}, "target": {}}, records)
+
+    assert state["profile_fingerprint"] == "abc123def456"
+    assert state["profile_staleness"] == "immutable_for_session"
+    assert state["config_drift"] is False
+    assert state["config_fallbacks"] == {"retrieval.graph_boost": 1}
+    assert state["effective_retrieval"]["max_depth"] == 2
+
+
+def test_config_state_detects_drift_between_modes() -> None:
+    """Два разных отпечатка в одной паре — конфигурация плыла, и это ломает delta.
+
+    Именно тот случай, ради которого закрепление недостаточно само по себе: два режима
+    закрепляют профиль каждый в свой момент, и между ними файл могли изменить.
+    """
+    records = [
+        {"mode": "baseline", "profile_fingerprint": "aaa", "profile_pinned_at": "t0"},
+        {"mode": "target", "profile_fingerprint": "bbb", "profile_pinned_at": "t1"},
+    ]
+
+    state = _run_eval.build_config_state({"baseline": {}, "target": {}}, records)
+
+    assert state["config_drift"] is True
+    assert state["profile_fingerprints"] == {"baseline": "aaa", "target": "bbb"}
+
+
+def test_config_state_survives_pipeline_that_never_ran() -> None:
+    """Пайплайн, не построившийся, не должен ломать сбор состояния конфигурации.
+
+    Иначе первая же ошибка сборки превращается в «нет отпечатка» — то есть в отсутствие
+    данных там, где на самом деле их просто ещё не могло быть.
+    """
+    state = _run_eval.build_config_state({"baseline": {}}, [])
+
+    assert state["profile_fingerprint"] is None
+    assert state["config_drift"] is False
+    assert state["profile_staleness"] == "immutable_for_session"
 
 
 def test_run_manifest_records_resolved_timeouts(monkeypatch: Any) -> None:

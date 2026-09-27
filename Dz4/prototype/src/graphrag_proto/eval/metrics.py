@@ -198,6 +198,12 @@ def lift_report(
     без причины нечитаем и на практике читается как «всё хорошо, только странно».
     Проверяются ОБА прогона пары: потеря в baseline смещает базу сравнения так же, как
     потеря в target смещает цель.
+
+    **Дрейф конфигурации между режимами тоже инвалидирует.** `config.config_drift` означает,
+    что baseline и target измерены разными настройками, и тогда delta измеряет «вклад графа
+    плюс разницу между конфигами» — разделить эти части нечем. Конфигурация закрепляется на
+    первый запрос каждого режима, поэтому дрейф возможен, и он назван стороной, а не только
+    фактом.
     """
     gen_b = baseline.get("generation") or {}
     gen_t = target.get("generation") or {}
@@ -264,6 +270,18 @@ def lift_report(
         # недооценка recall_graph/necessity/delta_recall и coverage гарантирована. Для
         # такой величины «pass» — не утверждение о системе.
         reasons.append("потерян LLM-слой — " + "; ".join(lost))
+
+    drifted = [
+        side
+        for side, modes in (("baseline", baseline), ("target", target))
+        if isinstance(modes.get("config"), dict) and modes["config"].get("config_drift")
+    ]
+    if drifted:
+        # Пара измерена разными настройками: delta измеряет «вклад графа ПЛЮС разницу между
+        # конфигами», и разделить эти две части нечем. Называем сторону, а не только факт.
+        reasons.append(
+            "конфигурация изменилась между режимами — " + ", ".join(drifted)
+        )
 
     if reasons:
         verdict = "invalid"
