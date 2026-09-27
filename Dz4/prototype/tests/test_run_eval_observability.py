@@ -538,3 +538,61 @@ def test_main_passport_flags_inactive_graph_axis(monkeypatch: Any, tmp_path: Pat
     assert "graph_axis_active" in passport
     report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
     assert report["target"]["graph_axis_active"] is False
+
+
+def _passport_ingest(degraded: int, dropped: int = 0) -> dict[str, Any]:
+    return {
+        "documents_total": 3,
+        "cold_documents": 2,
+        "noop_documents": 1,
+        "total_wall_time_s": 12.0,
+        "cold_wall_time_mean_s": 6.0,
+        "enrichment_degraded_documents": degraded,
+        "llm_layer_dropped_documents": dropped,
+    }
+
+
+def _write_passport_text(tmp_path: Path, degraded: int, dropped: int = 0) -> str:
+    path = _run_eval.write_passport(
+        _manifest(),
+        {"verdict": "n/a"},
+        tmp_path / "out",
+        ingest=_passport_ingest(degraded, dropped),
+        failures=0,
+        argv=["run_eval.py", "--retrieval-only"],
+    )
+    return path.read_text(encoding="utf-8")
+
+
+def test_passport_warns_only_about_real_layer_loss(tmp_path: Path) -> None:
+    """Деградация без потери слоя не должна выглядеть как потеря.
+
+    Счётчик деградации — umbrella: он складывает «профиль не загрузился» (ничего не
+    потеряно) и «исключение в экстракции» (потерян весь слой). Читать его как потерю
+    нельзя, поэтому потеря считается отдельно, и предупреждение ставится по ней.
+    """
+    passport = _write_passport_text(tmp_path, degraded=2, dropped=0)
+
+    assert "документов с деградацией optional-ингеста: 2" in passport
+    assert "документов, потерявших LLM-слой целиком: 0" in passport
+    # Проверяется именно блок потери слоя, а не символ «⚠️» вообще: в паспорте есть и
+    # другие штатные предупреждения (verdict n/a, судья не запускался).
+    assert "потеряли LLM-слой целиком" not in passport
+    assert "ADR-032" not in passport
+
+
+def test_passport_warns_when_documents_lost_llm_layer(tmp_path: Path) -> None:
+    """Потерянный LLM-слой обязан быть виден в паспорте, а не только в JSON."""
+    passport = _write_passport_text(tmp_path, degraded=2, dropped=1)
+
+    assert "документов, потерявших LLM-слой целиком: 1" in passport
+    assert "ADR-032" in passport
+    assert "⚠️" in passport
+
+
+def test_passport_has_no_degradation_warning_when_clean(tmp_path: Path) -> None:
+    """Обратный случай: предупреждение не должно появляться на чистом прогоне."""
+    passport = _write_passport_text(tmp_path, degraded=0, dropped=0)
+
+    assert "документов с деградацией optional-ингеста: 0" in passport
+    assert "ADR-032" not in passport

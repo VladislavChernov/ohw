@@ -52,10 +52,25 @@ param(
     [switch]$Trace,
     [string]$CompareWith,
     [int]$SampleIntervalSec = 5,
-    # Дедлайн ожидания джоб в секундах. Раньше он был фиксирован на 300 и не был
-    # доступен отсюда: --wait-timeout есть у раннера, но wrapper собирает аргументы
-    # только из этого param(), лишние флаги не пробрасываются.
-    [int]$WaitTimeoutSec = 0,
+    # Окна и бюджеты в секундах (B3). Раньше был один флаг --wait-timeout, и он
+    # означал «5 минут на всю пачку документов», то есть на полном корпусе падал
+    # гарантированно. Теперь величины разведены по смыслу, и каждая ограничивает
+    # своё (0 = дефолт раннера):
+    #   UnreachableTimeoutSec — опросы не отвечают (стенд недоступен);
+    #   JobTimeoutSec         — опросы идут, но эта джоба не двигается;
+    #   WaitCeilingSec        — жёсткий кап на всю пачку джоб;
+    #   SlotTimeoutSec        — свободный слот исполнителя на один документ (429);
+    #   SubmitBudgetSec       — бюджет всей фазы подачи корпуса.
+    # Первые три — взаимоисключающие условия, а не «кто меньше», поэтому их
+    # соотношение ни на что не влияет. Последние два ограничивают фазу POST, а не
+    # ожидание джоб; смешивать их нельзя, иначе лимит умножается на число файлов.
+    # Флаги есть у раннера, но wrapper собирает аргументы только из этого param(),
+    # лишние флаги не пробрасываются.
+    [int]$UnreachableTimeoutSec = 0,
+    [int]$JobTimeoutSec = 0,
+    [int]$WaitCeilingSec = 0,
+    [int]$SlotTimeoutSec = 0,
+    [int]$SubmitBudgetSec = 0,
     [switch]$SkipUp,
     [switch]$KeepStack
 )
@@ -136,7 +151,11 @@ foreach ($ds in $Dataset) { $evalArgs += @('--dataset', $ds) }
 foreach ($ds in $ExtraDataset) { if ($ds) { $evalArgs += @('--extra-dataset', $ds) } }
 foreach ($doc in ($Documents | Where-Object { $_ })) { $evalArgs += @('--documents', $doc) }
 if ($PSBoundParameters.ContainsKey('LimitDocs')) { $evalArgs += @('--limit-docs', "$LimitDocs") }
-if ($PSBoundParameters.ContainsKey('WaitTimeoutSec') -and $WaitTimeoutSec -gt 0) { $evalArgs += @('--wait-timeout', "$WaitTimeoutSec") }
+if ($PSBoundParameters.ContainsKey('UnreachableTimeoutSec') -and $UnreachableTimeoutSec -gt 0) { $evalArgs += @('--unreachable-timeout', "$UnreachableTimeoutSec") }
+if ($PSBoundParameters.ContainsKey('JobTimeoutSec') -and $JobTimeoutSec -gt 0) { $evalArgs += @('--job-timeout', "$JobTimeoutSec") }
+if ($PSBoundParameters.ContainsKey('WaitCeilingSec') -and $WaitCeilingSec -gt 0) { $evalArgs += @('--wait-ceiling', "$WaitCeilingSec") }
+if ($PSBoundParameters.ContainsKey('SlotTimeoutSec') -and $SlotTimeoutSec -gt 0) { $evalArgs += @('--slot-timeout', "$SlotTimeoutSec") }
+if ($PSBoundParameters.ContainsKey('SubmitBudgetSec') -and $SubmitBudgetSec -gt 0) { $evalArgs += @('--submit-budget', "$SubmitBudgetSec") }
 if ($Note) { $evalArgs += @('--note', $Note) }
 if ($NoJudge) { $evalArgs += '--no-judge' }
 if ($RetrievalOnly) { $evalArgs += '--retrieval-only' }

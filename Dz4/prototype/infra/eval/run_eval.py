@@ -14,7 +14,12 @@ Fail-fast (не тратим время на упавший стек):
     Перед прогоном раннер health-пробами проверяет доступность контуров,
     необходимых для сконфигурированных адаптеров; при падении обязательного —
     отчёт в ``<out>/preflight.log`` и выход с кодом 1.
-    Все ожидания ограничены ``--wait-timeout`` (по умолчанию 300 с = 5 минут).
+    Ожидание джоб ограничено разделёнными окнами (B3), а не одним общим дедлайном:
+    ``--unreachable-timeout`` (опросы не отвечают ⇒ стенд недоступен),
+    ``--job-timeout`` (опросы идут, но джоба не двигается) и ``--wait-ceiling``
+    (жёсткий кап на пачку). Условия взаимоисключающие, поэтому соотношение констант
+    ничего не решает. Фаза подачи ограничена отдельно: ``--slot-timeout`` на документ
+    и ``--submit-budget`` на весь корпус.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -44,12 +49,38 @@ INGESTION_URL = os.environ.get("INGESTION_URL", "http://localhost:8002")
 QUERY_URL = os.environ.get("QUERY_URL", "http://localhost:8000")
 X_API_KEY = os.environ.get("X_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
 
-DEFAULT_WAIT_TIMEOUT_S = 300.0
+# Политика ожидания (B3). Четыре величины, и каждая ограничивает своё: смешивать их
+# нельзя, потому что «бюджет» одного этапа под именем другого — это ловушка, а не
+# настройка.
+#
+# Окна разделены РАЗДЕЛИТЕЛЕМ, а не порядком срабатывания: два независимых таймаута плюс
+# «первым сработает меньший» дают конструкцию, в которой при неверном соотношении
+# констант одно окно становится мёртвым кодом — ровно тот баг, который чинится.
+DEFAULT_UNREACHABLE_TIMEOUT_S = 300.0  # опросы не отвечают ⇒ стенд недоступен
+DEFAULT_JOB_TIMEOUT_S = 900.0          # опросы идут, но эта джоба не двигается
+DEFAULT_WAIT_CEILING_S = 7200.0        # жёсткий кап ожидания джоб (backstop)
+# Бюджеты фазы ПОДАЧИ (POST /documents), отдельной от ожидания джоб: 429 означает «слот
+# занят», и очередь на полном корпусе законна, поэтому слот ждём терпеливо, а всю фазу
+# ограничиваем отдельно — иначе N документов умножают лимит на себя.
+DEFAULT_SLOT_TIMEOUT_S = 300.0         # свободный слот исполнителя для одного документа
+DEFAULT_SUBMIT_BUDGET_S = 7200.0       # вся фаза подачи корпуса
+# Таймаут одного HTTP-вызова LLM (не окно ожидания джоб): та же величина, что была
+# до B3, но с собственным именем — иначе «300 с» означал бы сразу три разных вещи.
+DEFAULT_LLM_TIMEOUT_S = 300.0
 
 # Wire-контракт с ingestion-сервисом, а не общий модуль: раннер общается с пайплайном
 # по HTTP. Владелец префикса — ingestion-сервис (`app.ENRICHMENT_DEGRADED_PREFIX`).
 # Согласованность сторон закреплена тестами job API и build_ingest_report.
 ENRICHMENT_DEGRADED_PREFIX = "enrichment_degraded"
+# Имена структурных сигналов в ответе джобы (владелец — ingestion-service,
+# `app.ENRICHMENT_DEGRADED_SIGNAL` / `app.LLM_LAYER_DROPPED_SIGNAL`). Оба факта
+# приходят одним каналом — полем `signals`. Пока не существовало структурного
+# канала, деградация читалась из текста сообщения по префиксу; это значило, что одна
+# рефакторинга формата тихо обнулила бы метрику потерь, а «мы никогда не теряем
+# слой» выглядело бы как хорошая новость. Тихий ноль в метрике потерь — худший вид
+# поломки, он не выглядит как поломка.
+ENRICHMENT_DEGRADED_SIGNAL = "enrichment_degraded"
+LLM_LAYER_DROPPED_SIGNAL = "llm_layer_dropped"
 DEFAULT_CONTOUR_TIMEOUT_S = 5.0
 
 EVAL_K = 5
@@ -265,8 +296,9 @@ def ingest_corpus(
     corpus_dir: Path,
     domain: str,
     source_prefix: str = "",
-    max_wait_s: float = DEFAULT_WAIT_TIMEOUT_S,
+    slot_timeout_s: float = DEFAULT_SLOT_TIMEOUT_S,
     *,
+    submit_budget_s: float = DEFAULT_SUBMIT_BUDGET_S,
     documents: list[str] | None = None,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -276,13 +308,18 @@ def ingest_corpus(
     этого хватает ``ingest_report.json`` для попер-документной экстраполяции
     времени (стоимость ingest зависит от размера документа, а не от их числа).
 
-    Цикл 429 ограничен дедлайном max_wait_s: если слоты не освобождаются —
-    RuntimeError вместо бесконечного ожидания упавшего стека.
+    **Два разных бюджета, потому что очередь законна.** ``slot_timeout_s`` ждёт свободного
+    слота исполнителя для одного документа: 429 означает «сервис жив и занят», и на полном
+    корпусе с двумя слотами это норма, а не авария — поэтому попытка повторяется, пока не
+    выйдет этот бюджет. ``submit_budget_s`` ограничивает **всю** фазу подачи целиком: без
+    него ``N`` документов умножили бы ``slot_timeout_s`` на себя, и «бюджет» в
+    ``run_manifest.timeouts`` не был бы бюджетом. Раньше дедлайн считался на документ, а поле
+    называлось «жёсткий кап на всю пачку», то есть имя не соответствовало поведению.
     """
     job_ids: list[dict[str, Any]] = []
-    for md_file, rel in select_corpus_files(
-        corpus_dir, documents=documents, limit=limit
-    ):
+    selected = select_corpus_files(corpus_dir, documents=documents, limit=limit)
+    submit_deadline = time.monotonic() + submit_budget_s
+    for md_file, rel in selected:
         source_url = f"{source_prefix}/{rel}" if source_prefix else rel
         content = md_file.read_text(encoding="utf-8")
         body = {
@@ -291,7 +328,7 @@ def ingest_corpus(
             "doc_type": "md",
             "content": content,
         }
-        deadline = time.monotonic() + max_wait_s
+        deadline = min(time.monotonic() + slot_timeout_s, submit_deadline)
         while True:
             try:
                 resp = _post_json(
@@ -304,9 +341,16 @@ def ingest_corpus(
                 if "429" not in str(exc):
                     raise
                 if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"лимит ожидания слотов ingest ({max_wait_s:.0f}с) исчерпан для {source_url}"
-                    ) from exc
+                    # Различаем, что кончилось: слот для этого документа или бюджет всей
+                    # фазы подачи. Сообщение обязано называть, потому что лечится это
+                    # по-разному: слот — подождать или снизить параллелизм, бюджет — снять
+                    # лимит с корпуса либо поднять `submit_budget_s`.
+                    budget = (
+                        f"бюджет фазы подачи {submit_budget_s:.0f}с исчерпан"
+                        if time.monotonic() >= submit_deadline
+                        else f"слот исполнителя не освободился за {slot_timeout_s:.0f}с"
+                    )
+                    raise RuntimeError(f"{budget} для {source_url}") from exc
                 time.sleep(5.0)
         job_id = resp.get("job_id")
         if not job_id:
@@ -328,10 +372,49 @@ def ingest_corpus(
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
 
 
+def _progress_signature(job: dict[str, Any]) -> tuple[Any, ...]:
+    """Отпечаток прогресса джобы: чем он отличается от молчания.
+
+    Учитываются статус, текущая стадия и ``(stage, status, ts)`` всех стадий —
+    ровно те поля, которые пайплайн меняет по мере движения. ``message`` намеренно
+    НЕ учитывается: ``note_stage`` пишет туда ``enrichment_degraded`` (B1) и не
+    двигает стадию, поэтому такой «прогресс» держал бы прогон живым молча.
+    """
+    stages = job.get("stages") or []
+    return (
+        str(job.get("status") or ""),
+        str(job.get("stage") or ""),
+        tuple(
+            (str(entry.get("stage") or ""), str(entry.get("status") or ""), str(entry.get("ts") or ""))
+            for entry in stages
+            if isinstance(entry, dict)
+        ),
+    )
+
+
+def _pending_detail(
+    pending: list[str],
+    last_seen: dict[str, dict[str, Any]],
+) -> str:
+    """Диагностика висящих джоб: стадия каждой, а не голый список id.
+
+    По последней известной стадии видно, где именно прогон встал (INGEST / EXTRACT /
+    ...), иначе таймаут неотличим от «сеть отвалилась» и упирается в перебор логов вслепую.
+    """
+    return ", ".join(
+        f"{job_id}@{(last_seen.get(job_id) or {}).get('stage') or '?'}" for job_id in pending
+    )
+
+
 def wait_jobs(
     job_ids: list[str],
     poll_s: float = 5.0,
-    timeout_s: float = DEFAULT_WAIT_TIMEOUT_S,
+    *,
+    unreachable_timeout_s: float = DEFAULT_UNREACHABLE_TIMEOUT_S,
+    job_timeout_s: float = DEFAULT_JOB_TIMEOUT_S,
+    ceiling_s: float = DEFAULT_WAIT_CEILING_S,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Дождаться завершения async-джобов ingestion (200 → task complete).
 
@@ -339,57 +422,144 @@ def wait_jobs(
     только статус: ``stage == "INGEST"`` при ``succeeded`` — признак no-op
     (документ не изменился, пайплайн встал после INGEST и не дошёл до EXTRACT).
 
-    Дедлайн по умолчанию — 5 минут (не 30): упавший стек не должен «выжигать» время.
+    **Окна разделены разделителем, а не соотношены порядком.** Два независимых
+    таймаута плюс «первым срабатывает меньший» — это конструкция, которая ломается
+    конфигурацией: если одно окно меньше другого, второе становится мёртвым кодом, и
+    ровно тот баг, который чинится, возвращается молча. Поэтому условия тут
+    взаимоисключающие, и ни одна конфигурация ничего не решает:
+
+    * ``unreachable_timeout_s`` — **опросы не отвечают** всё это время ⇒ стенд
+      недоступен. Считается по неудачным опросам, а не по отсутствию прогресса:
+      «мы не видим джоб» и «джобы не двигаются» — разные факты.
+    * ``job_timeout_s`` — **опросы отвечают, но конкретная джоба не двигается**
+      ⇒ виновата названная джоба и её стадия. Это общий случай живого стенда,
+      включая хвост батча, где не завершена одна джоба.
+    * ``ceiling_s`` — жёсткий кап на всю пачку: страховка от «медленно, но живо».
+
+    «Прогресс» — не эвристика по таймеру, а изменение отпечатка ``_progress_signature``
+    между опросами.
+
+    ``clock``/``sleeper`` — внедряемый источник времени: тесты идут секундами
+    модельного времени, без стенда.
     """
-    deadline = time.monotonic() + timeout_s
+    now = clock or time.monotonic
+    sleep = sleeper or time.sleep
+    started = now()
     statuses: dict[str, dict[str, Any]] = {}
     last_seen: dict[str, dict[str, Any]] = {}
-    while time.monotonic() < deadline and len(statuses) < len(job_ids):
+    signatures: dict[str, tuple[Any, ...]] = {}
+    last_progress: dict[str, float] = {}
+    last_progress_any = started
+    unreachable_since: float | None = None
+
+    while len(statuses) < len(job_ids):
+        current = now()
+        if current - started > ceiling_s:
+            pending = [job_id for job_id in job_ids if job_id not in statuses]
+            raise TimeoutError(
+                f"исчерпан жёсткий кап ожидания {ceiling_s:.0f}s: не завершены джобы "
+                f"{pending} (стадия на момент таймаута: {_pending_detail(pending, last_seen)})"
+            )
+        polled = failed = 0
         for job_id in job_ids:
             if job_id in statuses:
                 continue
             try:
                 resp = _get_json(f"{INGESTION_URL}/api/v1/ingestion/jobs/{job_id}")
-            except RuntimeError:
+            except (RuntimeError, OSError):
+                # RuntimeError — приведённая ошибка HTTP-контура, OSError (включая
+                # URLError) — недоступность стенда. Уже��о другое не ловим: дефект нашего
+                # кода обязан упасть громко, а не выглядеть как «стенд молчит».
+                failed += 1
                 continue
+            polled += 1
             last_seen[job_id] = resp
+            signature = _progress_signature(resp)
+            if signatures.get(job_id) != signature:
+                signatures[job_id] = signature
+                last_progress[job_id] = current
+                last_progress_any = current
             status = str(resp.get("status", ""))
             if status in TERMINAL_JOB_STATUSES:
                 statuses[job_id] = resp
             if status in {"failed", "cancelled"}:
                 raise RuntimeError(f"джоба {job_id} завершилась статусом {status}: {resp.get('error')}")
-        if len(statuses) < len(job_ids):
-            time.sleep(poll_s)
-    if len(statuses) < len(job_ids):
         pending = [job_id for job_id in job_ids if job_id not in statuses]
-        # Диагностика вместо голого списка id: по последней известной стадии видно,
-        # где именно прогон встал (INGEST / EXTRACT / ...), иначе таймаут неотличим
-        # от «сеть отвалилась» и упирается в перебор логов вслепую.
-        detail = ", ".join(
-            f"{job_id}@{(statuses.get(job_id) or last_seen.get(job_id) or {}).get('stage') or '?'}"
-            for job_id in pending
-        )
-        raise TimeoutError(
-            f"не дождались завершения джобов за {timeout_s:.0f}s: {pending} (стадия на момент таймаута: {detail})"
-        )
+        if not pending:
+            break
+        # --- разделитель: стенд отвечает или нет
+        if polled == 0 and failed:
+            if unreachable_since is None:
+                unreachable_since = current
+            for job_id in pending:
+                # джобы, до которых не достучались, не получают отметку времени: их
+                # состояние неизвестно, а не «зависло N секунд»
+                last_progress.pop(job_id, None)
+            silent_for = current - unreachable_since
+            if silent_for > unreachable_timeout_s:
+                raise TimeoutError(
+                    f"стенд не отвечает {silent_for:.0f}s (окно {unreachable_timeout_s:.0f}s): "
+                    f"не удалось опросить джобы {pending} "
+                    f"(последняя известная стадия: {_pending_detail(pending, last_seen)})"
+                )
+        else:
+            unreachable_since = None
+            stuck = [
+                job_id
+                for job_id in pending
+                if current - last_progress.get(job_id, started) > job_timeout_s
+            ]
+            if stuck:
+                worst = max(current - last_progress.get(job_id, started) for job_id in stuck)
+                raise TimeoutError(
+                    f"джобы {stuck} не продвинулись {worst:.0f}s "
+                    f"(окно {job_timeout_s:.0f}s) при живом стенде; ещё движется "
+                    f"{len(pending) - len(stuck)} из {len(pending)} "
+                    f"(стадия на момент таймаута: {_pending_detail(stuck, last_seen)})"
+                )
+        sleep(poll_s)
     return statuses
 
 
-def _parse_enrichment_degradation(job: dict[str, Any]) -> tuple[bool, str | None]:
-    """Достать признак деградации optional-ингеста из стадии EXTRACT джобы.
+def _parse_enrichment_degradation(job: dict[str, Any]) -> tuple[bool, str | None, bool]:
+    """Достать признаки деградации и потери LLM-слоя из ответа джобы.
 
-    Контракт записи — `ENRICHMENT_DEGRADED_PREFIX` в ingestion-пакете: пайплайн
-    пишет в message стадии `enrichment_degraded: <причина>`. Джобавляется сюда
-    не «на всякий случай», а потому что деградация иначе неотличима от успеха:
-    статус остаётся `succeeded`, просто рёбер меньше.
+    Возвращает тройку `(деградация, причина, слой_потерян)`.
+
+    **Флаги читаются из поля `signals`, а не из текста `message`.** Оба сразу, одним
+    каналом: если деградация приходит текстом, а потеря полем, у потребителя два
+    механизма, а объяснение «почему так» становится историческим вместо замысла.
+    Причина деградации — свободный текст, и сообщение стадии остаётся её единственным
+    местом; это текст, но не источник счётчиков.
+
+    **Зачем два флага.** `enrichment_degraded` ставится в двух местах с противоположным
+    смыслом: профиль домена не загрузился (ничего не потеряно — LLM-слой и не пытались
+    построить) и исключение внутри экстракции (потерян весь слой сущностей и связей).
+    Сумма этих двух в одном счётчике неинтерпретируема: высокое число может означать
+    нулевую потерю.
+
+    **Точность определения — верхняя граница, а не точная величина.** `llm_layer_dropped`
+    означает «путь сброса отработал», а не «потеряно ровно столько-то»: исключение может
+    выстрелить до того, как модель что-то вернула, и тогда терять нечего, а сигнал есть.
+    Ошибка в безопасную сторону (подталкивает смотреть внимательнее), но при сравнении двух
+    величин их нельзя считать одного смысла. Для точной величины пришлось бы сохранять
+    состояние слоя до сброса — это отдельная работа, и пока она не нужна.
     """
+    signals = job.get("signals")
+    flags = signals if isinstance(signals, dict) else {}
+    reason: str | None = None
     for entry in job.get("stages") or []:
         if not isinstance(entry, dict) or entry.get("stage") != "EXTRACT":
             continue
         message = str(entry.get("message") or "")
         if message.startswith(f"{ENRICHMENT_DEGRADED_PREFIX}:"):
-            return True, message[len(ENRICHMENT_DEGRADED_PREFIX) + 1 :].strip() or None
-    return False, None
+            reason = message[len(ENRICHMENT_DEGRADED_PREFIX) + 1 :].strip() or None
+            break
+    return (
+        bool(flags.get(ENRICHMENT_DEGRADED_SIGNAL)),
+        reason,
+        bool(flags.get(LLM_LAYER_DROPPED_SIGNAL)),
+    )
 
 
 def build_ingest_report(
@@ -408,7 +578,7 @@ def build_ingest_report(
         status = str(job.get("status", "unknown"))
         stage = job.get("stage")
         is_noop = status == "succeeded" and stage == "INGEST"
-        degraded, degradation_error = _parse_enrichment_degradation(job)
+        degraded, degradation_error, layer_dropped = _parse_enrichment_degradation(job)
         documents.append(
             {
                 "source_url": record["source_url"],
@@ -421,6 +591,7 @@ def build_ingest_report(
                 "error": job.get("error"),
                 "enrichment_degraded": degraded,
                 "enrichment_error": degradation_error,
+                "llm_layer_dropped": layer_dropped,
                 "wall_time_s": round(float(record.get("waited_s") or 0.0), 2),
                 "seconds_per_kb": (
                     round(float(record["waited_s"]) / max(record["bytes"] / 1024.0, 0.001), 2)
@@ -438,6 +609,10 @@ def build_ingest_report(
         "enrichment_degraded_documents": sum(
             1 for d in documents if d["enrichment_degraded"]
         ),
+        # Отдельно от umbrella-счётчика: сколько именно документов потеряло LLM-слой
+        # целиком. Без этого числа деградацию нельзя читать как потерю — см.
+        # `_parse_enrichment_degradation`.
+        "llm_layer_dropped_documents": sum(1 for d in documents if d["llm_layer_dropped"]),
         "total_wall_time_s": round(sum(d["wall_time_s"] for d in documents), 2),
         "cold_wall_time_sum_s": round(sum(cold), 2),
         "noop_wall_time_sum_s": round(sum(noop), 2),
@@ -737,13 +912,18 @@ def build_run_manifest(
     corpus_documents: list[str] | None = None,
     corpus_limit: int | None = None,
     golden: dict[str, Any] | None = None,
+    timeouts: dict[str, Any] | None = None,
     note: str = "",
 ) -> dict[str, Any]:
     """Манифест условий прогона (design.md §5.1) — «что именно сравнивалось».
 
     ``corpus_documents``/``corpus_limit``/``golden`` — обязательны для усечённых
     прогонов: без них прогон на 3 документах неотличим от прогона на 36 и
-   recall неинтерпретируем (эталонных источников в корпусе может не быть вовсе).
+    recall неинтерпретируем (эталонных источников в корпусе может не быть вовсе).
+
+    ``timeouts`` — фактически применённые окна ожидания джоб. В пару с
+    ``ingest_report.json`` это то, чем калибруются будущие прогоны: без них
+    «долго» и «зависло» неразличимы, потому что оба кончаются ошибкой прогна.
     """
     return {
         "run_id": run_id,
@@ -755,6 +935,7 @@ def build_run_manifest(
         "revision_fingerprint": revision,
         "datasets": datasets,
         "corpus": corpus,
+        "timeouts": timeouts or {},
         "corpus_documents": sorted(corpus_documents or []),
         "corpus_documents_count": len(corpus_documents or []),
         "corpus_limit": corpus_limit,
@@ -1207,6 +1388,8 @@ def write_passport(
     projection = manifest.get("projection") or {}
     target = (report or {}).get("target") or {}
     gc = target.get("graph_contribution") or {}
+    degraded = int((ingest or {}).get("enrichment_degraded_documents") or 0)
+    dropped = int((ingest or {}).get("llm_layer_dropped_documents") or 0)
 
     lines = [
         "# Паспорт прогона",
@@ -1289,10 +1472,38 @@ def write_passport(
             ),
             f"- суммарно: {ingest.get('total_wall_time_s')} с  ",
             f"- cold mean: {ingest.get('cold_wall_time_mean_s')} с  ",
+            (
+                f"- документов с деградацией optional-ингеста: {degraded}  "
+                if degraded
+                else "- документов с деградацией optional-ингеста: 0  "
+            ),
+            (
+                f"- документов, потерявших LLM-слой целиком: {dropped}  "
+                if dropped
+                else "- документов, потерявших LLM-слой целиком: 0  "
+            ),
             "",
             (
                 "Попер-документные времена — в `ingest_report.json`; по ним оценивается "
                 "стоимость полного корпуса (она зависит от размера документа, а не от числа)."
+            ),
+        ]
+    if dropped:
+        # Счётчик деградации — umbrella: он складывает «профиль не загрузился» (ничего
+        # не потеряно) и «исключение в экстракции» (потерян весь слой). Читать его как
+        # потерю нельзя, поэтому потеря считается отдельно. Слой роняется целиком при
+        # любом исключении в optional-экстракции вместе с `entity_edges`, то есть
+        # теряются и узлы-якоря, и сами гипотезы связей.
+        lines += [
+            "",
+            (
+                f"> ⚠️ **{dropped} документов потеряли LLM-слой целиком** (счётчик деградации: "
+                f"{degraded}, из них с потерей слоя: {dropped}). Метрики графовой оси по ним — "
+                "нижняя граница, а не измерение. Причины — в `ingest_report.json` "
+                "(`enrichment_error`), в логах ingestion-service (сообщение стадии `EXTRACT`). "
+                "Гранулярность сброса слоя — открытый вопрос, см. ADR-032; для "
+                "проектирования реального ingest поведение неприемлемо, потеря необратима "
+                "(повторная загрузка того же `content_hash` — no-op)."
             ),
         ]
 
@@ -1433,10 +1644,45 @@ def main() -> None:
     parser.add_argument("--out", default="reports/", help="Output directory")
     parser.add_argument("--source-prefix", default="", help="Optional prefix for source_url (e.g. docs)")
     parser.add_argument(
-        "--wait-timeout",
+        "--unreachable-timeout",
         type=float,
-        default=DEFAULT_WAIT_TIMEOUT_S,
-        help="Максимум ожидания джобов/слотов ingest, сек (по умолч. 300 = 5 мин)",
+        default=DEFAULT_UNREACHABLE_TIMEOUT_S,
+        help="Сколько секунд опросы могут не отвечать, сек (по умолч. 300): после этого "
+        "стенд считается недоступным. Считается по неудачным опросам, а не по "
+        "отсутствию прогресса: «мы не видим джоб» и «джобы не двигаются» — разные факты "
+        "с разными причинами",
+    )
+    parser.add_argument(
+        "--job-timeout",
+        type=float,
+        default=DEFAULT_JOB_TIMEOUT_S,
+        help="Сколько секунд конкретная джоба может не двигаться при живом стенде, сек "
+        "(по умолч. 900). Ловит и зависшую среди живых, и единственную не завершённую в "
+        "хвосте батча. Независим от --unreachable-timeout: условия взаимоисключающие, "
+        "поэтому ни одна конфигурация не делает одно из окон мёртвым",
+    )
+    parser.add_argument(
+        "--wait-ceiling",
+        type=float,
+        default=DEFAULT_WAIT_CEILING_S,
+        help="Жёсткий кап ожидания всей пачки джоб, сек (по умолч. 7200). Страховка для "
+        "«медленно, но живо». Не путать с бюджетами подачи: --slot-timeout и "
+        "--submit-budget ограничивают фазу POST /documents",
+    )
+    parser.add_argument(
+        "--slot-timeout",
+        type=float,
+        default=DEFAULT_SLOT_TIMEOUT_S,
+        help="Сколько ждать свободного слота исполнителя для одного документа при 429, "
+        "сек (по умолч. 300). 429 = «жив и занят», поэтому это норма на полном корпусе, а "
+        "не авария; отличать надо от --submit-budget, который ограничивает всю фазу",
+    )
+    parser.add_argument(
+        "--submit-budget",
+        type=float,
+        default=DEFAULT_SUBMIT_BUDGET_S,
+        help="Бюджет всей фазы подачи корпуса, сек (по умолч. 7200). Существует отдельно от "
+        "--slot-timeout, иначе лимит умножается на число документов и перестаёт быть капом",
     )
     parser.add_argument(
         "--no-preflight",
@@ -1472,7 +1718,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Единый лимит ожидания сети: если LLM_TIMEOUT_S не задан явно — 5 минут, не 600с.
-    os.environ.setdefault("LLM_TIMEOUT_S", str(DEFAULT_WAIT_TIMEOUT_S))
+    os.environ.setdefault("LLM_TIMEOUT_S", str(DEFAULT_LLM_TIMEOUT_S))
 
     dataset_path = Path(args.dataset)
     datasets = [load_dataset(dataset_path)]
@@ -1500,6 +1746,13 @@ def main() -> None:
 
     # 1. Ingest корпуса (async) и ждём завершения — ревизия знаний до прогона.
     submitted: list[dict[str, Any]] = []
+    resolved_timeouts = {
+        "unreachable_timeout_s": args.unreachable_timeout,
+        "job_timeout_s": args.job_timeout,
+        "wait_ceiling_s": args.wait_ceiling,
+        "slot_timeout_s": args.slot_timeout,
+        "submit_budget_s": args.submit_budget,
+    }
     if args.corpus:
         corpus_dir = Path(args.corpus)
         documents = [str(item) for item in (args.documents or [])]
@@ -1507,13 +1760,17 @@ def main() -> None:
             corpus_dir,
             args.domain,
             args.source_prefix,
-            max_wait_s=args.wait_timeout,
+            slot_timeout_s=args.slot_timeout,
+            submit_budget_s=args.submit_budget,
             documents=documents or None,
             limit=args.limit_docs,
         )
         print(f"ingest: {len(submitted)} документов поставлено, ждём завершения ...")
         statuses = wait_jobs(
-            [record["job_id"] for record in submitted], timeout_s=args.wait_timeout
+            [record["job_id"] for record in submitted],
+            unreachable_timeout_s=args.unreachable_timeout,
+            job_timeout_s=args.job_timeout,
+            ceiling_s=args.wait_ceiling,
         )
         # Попер-документное wall-time: ждём завершения пачкой, поэтому время
         # считаем от подачи заявки до последнего опроса — это включает очередь.
@@ -1548,6 +1805,7 @@ def main() -> None:
         corpus_documents=[record["source_url"] for record in submitted],
         corpus_limit=args.limit_docs,
         golden=golden_coverage(questions, ingested_urls),
+        timeouts=resolved_timeouts,
         note=args.note,
     )
     manifest_path = out_dir / "run_manifest.json"

@@ -506,7 +506,307 @@ def test_wait_jobs_rejects_cancelled_terminal_status(monkeypatch: Any) -> None:
         lambda _url: {"status": "cancelled"},
     )
     with pytest.raises(RuntimeError, match="cancelled"):
-        _run_eval.wait_jobs(["job"], poll_s=0, timeout_s=1)
+        _run_eval.wait_jobs(["job"], poll_s=0, unreachable_timeout_s=1)
+
+
+# --- B3: политика ожидания джоб — окна живости вместо общего дедлайна ---------
+
+
+class _FakeClock:
+    """Монотонные часы и сон без реальных секунд.
+
+    внедрение источника времени (B3, п.4): проверки окон живости идут секунды
+    модельного времени, поэтому гейт не ждёт стенд и не выжигает реальные минуты.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def _job_body(
+    status: str = "running",
+    stage: str = "EXTRACT",
+    ts: str = "2026-01-01T00:00:00+00:00",
+    message: str = "",
+) -> dict[str, Any]:
+    """Тело GET /jobs/{id} в форме ingestion-сервиса (app.get_job)."""
+    return {
+        "status": status,
+        "stage": stage,
+        "error": None,
+        "stages": [
+            {"stage": stage, "status": "running", "message": message, "ts": ts},
+        ],
+    }
+
+
+def _install_jobs(monkeypatch: Any, bodies: dict[str, Any]) -> None:
+    """Подставить _get_json, раздающий заранее заданные тела по job_id."""
+
+    def _fake_get(url: str) -> dict[str, Any]:
+        job_id = url.rsplit("/", 1)[-1]
+        body = bodies[job_id]
+        return body() if callable(body) else body
+
+    monkeypatch.setattr(_run_eval, "_get_json", _fake_get)
+
+
+def test_wait_jobs_returns_when_every_job_completes(monkeypatch: Any) -> None:
+    clock = _FakeClock()
+    polls = {"j1": 0}
+
+    def _j1() -> dict[str, Any]:
+        polls["j1"] += 1
+        if polls["j1"] < 2:
+            return _job_body(ts=f"t{polls['j1']}")
+        return _job_body(status="succeeded", stage="COMMIT", ts="done")
+
+    _install_jobs(
+        monkeypatch,
+        {"j1": _j1, "j2": lambda: _job_body(status="succeeded", stage="COMMIT", ts="done")},
+    )
+
+    statuses = _run_eval.wait_jobs(
+        ["j1", "j2"],
+        poll_s=5.0,
+        unreachable_timeout_s=300.0,
+        job_timeout_s=900.0,
+        ceiling_s=7200.0,
+        clock=clock,
+        sleeper=clock.sleep,
+    )
+
+    assert set(statuses) == {"j1", "j2"}
+    assert statuses["j2"]["status"] == "succeeded"
+    # j1 завершился со второго опроса — значит, между опросами раннер действительно ждал
+    assert clock.sleeps == [5.0]
+
+
+def test_wait_jobs_unreachable_stand_names_no_specific_job(monkeypatch: Any) -> None:
+    """Опросы не отвечают: это диагноз уровня стенда, а не «зависла джоба j1».
+
+    Разделитель, а не порядок срабатывания: окно недоступности применяется только когда
+    не удалось опросить НИ ОДНУ джобу. Поэтому конфигурация констант не решает, какое
+    окно выстрелит, и одно из них не может стать мёртвым кодом.
+    """
+    clock = _FakeClock()
+
+    def _boom(_url: str) -> dict[str, Any]:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(_run_eval, "_get_json", _boom)
+
+    with pytest.raises(TimeoutError) as excinfo:
+        _run_eval.wait_jobs(
+            ["j1", "j2"],
+            poll_s=5.0,
+            unreachable_timeout_s=300.0,
+            job_timeout_s=900.0,
+            ceiling_s=7200.0,
+            clock=clock,
+            sleeper=clock.sleep,
+        )
+
+    message = str(excinfo.value)
+    assert "не отвечает" in message
+    assert "300" in message
+
+
+def test_wait_jobs_unreachable_window_survives_smaller_job_timeout(
+    monkeypatch: Any,
+) -> None:
+    """`job_timeout` меньше окна недоступности не отменяет диагностику стенда.
+
+    Раньше окна конкурировали по порядку, и при таком соотношении одно становилось
+    мёртвым кодом. Теперь условия взаимоисключающие: опросы падают ⇒ применимо окно
+    недоступности независимо от величины `job_timeout`.
+    """
+    clock = _FakeClock()
+
+    def _boom(_url: str) -> dict[str, Any]:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(_run_eval, "_get_json", _boom)
+
+    with pytest.raises(TimeoutError, match="не отвечает"):
+        _run_eval.wait_jobs(
+            ["j1"],
+            poll_s=5.0,
+            unreachable_timeout_s=300.0,
+            job_timeout_s=30.0,
+            ceiling_s=7200.0,
+            clock=clock,
+            sleeper=clock.sleep,
+        )
+
+
+def test_wait_jobs_single_pending_job_reports_its_stage(monkeypatch: Any) -> None:
+    """Хвост батча: опросы идут, не завершена одна джоба — виновата именно она.
+
+    Именно этот случай раньше диагностировался как «стенд мёртв»: при одном висящем
+    прогресса не было ни у кого. Теперь отсутствие прогресса при успешных опросах —
+    это per-job, а стенд недоступен только когда не отвечает всё.
+    """
+    clock = _FakeClock()
+    _install_jobs(monkeypatch, {"j1": _job_body(), "j2": _job_body(stage="COMMIT")})
+
+    with pytest.raises(TimeoutError) as excinfo:
+        _run_eval.wait_jobs(
+            ["j1", "j2"],
+            poll_s=5.0,
+            unreachable_timeout_s=300.0,
+            job_timeout_s=900.0,
+            ceiling_s=7200.0,
+            clock=clock,
+            sleeper=clock.sleep,
+        )
+
+    message = str(excinfo.value)
+    assert "не продвинулись" in message
+    assert "900" in message
+    # диагностика стадии каждой висящей джобы сохраняется (не голый список id)
+    assert "j1@EXTRACT" in message
+    assert "j2@COMMIT" in message
+
+
+def test_wait_jobs_message_only_change_is_not_progress(monkeypatch: Any) -> None:
+    """note_stage меняет только message — это не прогресс.
+
+    Иначе degradation-нотиса (B1) держал бы прогон живым, хотя стадия не
+    двигается: молчаливое ожидание вместо диагностируемого таймаута.
+    """
+    clock = _FakeClock()
+    _install_jobs(
+        monkeypatch,
+        {"j1": lambda: _job_body(message=f"enrichment_degraded: {clock.now:.0f}")},
+    )
+
+    with pytest.raises(TimeoutError, match="не продвинулись"):
+        _run_eval.wait_jobs(
+            ["j1"],
+            poll_s=5.0,
+            unreachable_timeout_s=300.0,
+            job_timeout_s=900.0,
+            ceiling_s=7200.0,
+            clock=clock,
+            sleeper=clock.sleep,
+        )
+
+
+def test_wait_jobs_our_own_bug_is_not_swallowed_as_unreachable(monkeypatch: Any) -> None:
+    """Дефект кода опроса обязан упасть, а не выглядеть как «стенд молчит».
+
+    Ловится только `RuntimeError` (приведённая ошибка HTTP-контура) и `OSError`
+    (недоступность). Всё остальное — наш баг: если его съесть тем жеприёмом, что и
+    недоступность стенда, диагностика снова станет источником неверных выводов.
+    """
+    clock = _FakeClock()
+
+    def _our_bug(_url: str) -> dict[str, Any]:
+        raise AttributeError("NoneType has no attribute 'get'")
+
+    monkeypatch.setattr(_run_eval, "_get_json", _our_bug)
+
+    with pytest.raises(AttributeError):
+        _run_eval.wait_jobs(
+            ["j1"],
+            poll_s=5.0,
+            unreachable_timeout_s=300.0,
+            job_timeout_s=900.0,
+            ceiling_s=7200.0,
+            clock=clock,
+            sleeper=clock.sleep,
+        )
+
+
+def test_wait_jobs_per_job_window_names_only_stuck_job(monkeypatch: Any) -> None:
+    """Одна зависшая джоба при живых соседях: виновата именно она."""
+    clock = _FakeClock()
+
+    def _live(name: str) -> Any:
+        def _body() -> dict[str, Any]:
+            return _job_body(ts=f"{name}-{clock.now:.0f}")
+
+        return _body
+
+    _install_jobs(
+        monkeypatch,
+        {"live1": _live("a"), "live2": _live("b"), "stuck": _job_body(stage="VALIDATE")},
+    )
+
+    with pytest.raises(TimeoutError) as excinfo:
+        _run_eval.wait_jobs(
+            ["live1", "live2", "stuck"],
+            poll_s=5.0,
+            unreachable_timeout_s=300.0,
+            job_timeout_s=900.0,
+            ceiling_s=7200.0,
+            clock=clock,
+            sleeper=clock.sleep,
+        )
+
+    message = str(excinfo.value)
+    assert "не продвинулись" in message
+    assert "stuck@VALIDATE" in message
+    assert "live1" not in message
+    assert "live2" not in message
+
+
+def test_wait_jobs_hard_ceiling_stops_slow_but_alive(monkeypatch: Any) -> None:
+    """Backstop: джоба ползёт, прогресс есть — останавливает только общий кап."""
+    clock = _FakeClock()
+    _install_jobs(monkeypatch, {"j1": lambda: _job_body(ts=f"t{clock.now:.0f}")})
+
+    with pytest.raises(TimeoutError) as excinfo:
+        _run_eval.wait_jobs(
+            ["j1"],
+            poll_s=5.0,
+            unreachable_timeout_s=300.0,
+            job_timeout_s=900.0,
+            ceiling_s=1000.0,
+            clock=clock,
+            sleeper=clock.sleep,
+        )
+
+    message = str(excinfo.value)
+    assert "жёсткий кап" in message
+    assert "1000" in message
+    assert "j1@EXTRACT" in message
+
+
+def test_run_manifest_records_resolved_timeouts(monkeypatch: Any) -> None:
+    """Пороги ожидания — часть условий прогона: без них отчёт не интерпретируем."""
+    monkeypatch.setenv("RUN_CODE_COMMIT", "host-hash")
+    timeouts = {
+        "unreachable_timeout_s": 300.0,
+        "job_timeout_s": 900.0,
+        "wait_ceiling_s": 7200.0,
+        "slot_timeout_s": 300.0,
+        "submit_budget_s": 7200.0,
+    }
+
+    manifest = _run_eval.build_run_manifest(
+        run_id="eval_t",
+        started_at="2026-01-01T00:00:00Z",
+        domain="it",
+        revision="rev-fake",
+        datasets=["q.jsonl"],
+        mode_arg="both",
+        k=5,
+        judge=None,
+        flags=[],
+        timeouts=timeouts,
+    )
+
+    assert manifest["timeouts"] == timeouts
 
 
 # --- 5.3/5.6: retrieval-only + preflight-контуры -----------------------------
@@ -668,6 +968,7 @@ def test_build_ingest_report_surfaces_enrichment_degradation() -> None:
             "status": "succeeded",
             "stage": "COMMIT",
             "error": None,
+            "signals": {"enrichment_degraded": "EXTRACT"},
             "stages": [
                 {"stage": "EXTRACT", "status": "succeeded", "message": "enrichment_degraded: glossary 503"},
             ],
@@ -679,7 +980,93 @@ def test_build_ingest_report_surfaces_enrichment_degradation() -> None:
     doc = report["documents"][0]
     assert doc["enrichment_degraded"] is True
     assert doc["enrichment_error"] == "glossary 503"
+    assert doc["llm_layer_dropped"] is False
     assert report["enrichment_degraded_documents"] == 1
+    assert report["llm_layer_dropped_documents"] == 0
+
+def test_build_ingest_report_separates_layer_loss_from_degradation() -> None:
+    """Деградация и потеря слоя — разные факты, и счётчики их разделяют.
+
+    Флаг деградации ставится в двух местах с противоположным смыслом: профиль
+    домена не загрузился (ничего не потеряно) и исключение в экстракции (потерян
+    весь слой). Одна сумма неинтерпретируема: высокое значение может означать
+    нулевую потерю, и наоборот.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+        {"job_id": "j2", "source_url": "src://b.txt", "relpath": "b.txt", "bytes": 100, "waited_s": 2.0},
+    ]
+    statuses = {
+        # профиль не загрузился: деградация есть, слой не терялся
+        "j1": {
+            "status": "succeeded",
+            "stage": "COMMIT",
+            "error": None,
+            "signals": {"enrichment_degraded": "EXTRACT"},
+            "stages": [
+                {"stage": "EXTRACT", "status": "succeeded", "message": "enrichment_degraded: profile 503"},
+            ],
+        },
+        # исключение в экстракции: слой потерян целиком
+        "j2": {
+            "status": "succeeded",
+            "stage": "COMMIT",
+            "error": None,
+            "signals": {"enrichment_degraded": "EXTRACT", "llm_layer_dropped": "EXTRACT"},
+            "stages": [
+                {
+                    "stage": "EXTRACT",
+                    "status": "succeeded",
+                    "message": "enrichment_degraded: relationship ссылается на неизвестную сущность",
+                },
+            ],
+        },
+    }
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    assert report["enrichment_degraded_documents"] == 2
+    assert report["llm_layer_dropped_documents"] == 1
+    dropped = next(d for d in report["documents"] if d["job_id"] == "j2")
+    assert dropped["enrichment_error"] == "relationship ссылается на неизвестную сущность"
+    kept = next(d for d in report["documents"] if d["job_id"] == "j1")
+    assert kept["llm_layer_dropped"] is False
+
+
+def test_both_flags_come_from_one_structural_channel() -> None:
+    """Оба факта приходят полем `signals`, а не текстом и не разными каналами.
+
+    Если деградация читается из сообщения по префиксу, а потеря — из поля, у потребителя
+    два механизма, и объяснение «почему так» становится историческим вместо замысла.
+    Сообщение стадии при этом переформатировано полностью: счётчики обязаны от этого
+    не измениться, потому что они читаются не из текста.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+
+    def _job(signals: dict[str, str], message: str) -> dict[str, Any]:
+        return {
+            "status": "succeeded",
+            "stage": "COMMIT",
+            "error": None,
+            "signals": signals,
+            "stages": [{"stage": "EXTRACT", "status": "succeeded", "message": message}],
+        }
+
+    both = {"enrichment_degraded": "EXTRACT", "llm_layer_dropped": "EXTRACT"}
+    as_is = _run_eval.build_ingest_report(
+        submitted, {"j1": _job(both, "enrichment_degraded: relation unknown")}
+    )
+    reformatted = _run_eval.build_ingest_report(
+        submitted, {"j1": _job(both, "DEGRADED! relation unknown -- v2 format")}
+    )
+    for report in (as_is, reformatted):
+        assert report["enrichment_degraded_documents"] == 1
+        assert report["llm_layer_dropped_documents"] == 1
+    # причина — свободный текст, и при смене формата она закономерно теряется
+    assert as_is["documents"][0]["enrichment_error"] == "relation unknown"
+    assert reformatted["documents"][0]["enrichment_error"] is None
 
 
 def test_build_ingest_report_no_degradation_is_explicitly_false() -> None:
@@ -694,4 +1081,6 @@ def test_build_ingest_report_no_degradation_is_explicitly_false() -> None:
     doc = report["documents"][0]
     assert doc["enrichment_degraded"] is False
     assert doc["enrichment_error"] is None
+    assert doc["llm_layer_dropped"] is False
     assert report["enrichment_degraded_documents"] == 0
+    assert report["llm_layer_dropped_documents"] == 0
