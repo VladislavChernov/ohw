@@ -190,6 +190,14 @@ def lift_report(
     `None` и в delta попадает как null, а не как 0.0 — иначе быстрый цикл без
     судьи показывал бы ложные нули. Если судья активен, а блок generation пуст,
     прогон считается несостоявшимся (verdict="invalid"), а не успешным.
+
+    **Потеря LLM-слоя при ингесте инвалидирует прогон.** `ingest_quality.loss` — флаг
+    из `run_eval.build_ingest_quality`: смещение из-за пропавших фактов одностороннее
+    (их нельзя ни найти, ни вспомнить), поэтому недооценка оси гарантирована, и «pass»
+    по ней ничего не утверждает. Причина всегда названа в `verdict_reasons`: `invalid`
+    без причины нечитаем и на практике читается как «всё хорошо, только странно».
+    Проверяются ОБА прогона пары: потеря в baseline смещает базу сравнения так же, как
+    потеря в target смещает цель.
     """
     gen_b = baseline.get("generation") or {}
     gen_t = target.get("generation") or {}
@@ -234,15 +242,40 @@ def lift_report(
     degraded_questions = target_graph.get("degraded_questions", 0)
     d_grounded = delta["groundedness"]
     d_coverage = delta["coverage"]
+
+    # Причина вердикта обязана быть названа. `invalid` без причины — это «что-то
+    # сломалось, разбирайтесь», и следующий разбирающийся приходит уже после того, как
+    # принял прогон за измерение.
+    reasons: list[str] = []
     if isinstance(degraded_questions, (int, float)) and degraded_questions > 0:
+        reasons.append(f"вопросы с недоступным графовым вкладом: {degraded_questions}")
+    lost: list[str] = []
+    for side, modes in (("baseline", baseline), ("target", target)):
+        quality = modes.get("ingest_quality") or {}
+        if not isinstance(quality, dict) or not quality.get("loss"):
+            continue
+        lost.append(
+            f"{side}: {quality.get('llm_layer_dropped_documents', 0)} док. "
+            f"(−{quality.get('llm_layer_lost_entities', 0)} записей, "
+            f"−{quality.get('llm_layer_lost_edges', 0)} рёбер)"
+        )
+    if lost:
+        # Смещение одностороннее: пропавшие факты нельзя ни найти, ни вспомнить, поэтому
+        # недооценка recall_graph/necessity/delta_recall и coverage гарантирована. Для
+        # такой величины «pass» — не утверждение о системе.
+        reasons.append("потерян LLM-слой — " + "; ".join(lost))
+
+    if reasons:
         verdict = "invalid"
     elif not judge_active:
         verdict = "n/a"
     elif not gen_t or _safe(gen_t.get("groundedness")) is None:
         # Судья активен, но метрик нет: это дефект прогона, а не успех.
         verdict = "invalid"
+        reasons.append("судья активен, но метрики генерации не вычислены")
     elif d_grounded is None or d_coverage is None:
         verdict = "invalid"
+        reasons.append("метрики генерации не вычислены, delta неприменим")
     else:
         verdict = "pass" if d_grounded >= 0 and d_coverage >= 0 else "fail"
 
@@ -251,6 +284,7 @@ def lift_report(
         "target": target,
         "delta": {k: (round(v, 4) if v is not None else None) for k, v in delta.items()},
         "verdict": verdict,
+        "verdict_reasons": reasons,
         "revision": revision,
         "run_id": uuid.uuid4().hex[:12],
         "created_at": datetime.now(UTC).isoformat(),

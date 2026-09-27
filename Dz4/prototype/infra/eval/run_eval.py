@@ -49,7 +49,7 @@ INGESTION_URL = os.environ.get("INGESTION_URL", "http://localhost:8002")
 QUERY_URL = os.environ.get("QUERY_URL", "http://localhost:8000")
 X_API_KEY = os.environ.get("X_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
 
-# Политика ожидания (B3). Четыре величины, и каждая ограничивает своё: смешивать их
+# Политика ожидания (B3). Пять величин, и каждая ограничивает своё: смешивать их
 # нельзя, потому что «бюджет» одного этапа под именем другого — это ловушка, а не
 # настройка.
 #
@@ -700,6 +700,60 @@ def build_ingest_report(
     }
 
 
+def build_ingest_quality(ingest: dict[str, Any] | None) -> dict[str, Any]:
+    """Плохие условия измерения, принесённые ингестом, в форме для вердикта.
+
+    Живёт в отчёте рядом с метриками, а не только в `ingest_report.json`: вердикт
+    вычисляется раньше, чем отчёт ingest дописывается, и потребитель вердикта не
+    обязан читать второй файл, чтобы понять, можно ли этому вердикту верить.
+
+    Считаются ТОЛЬКО те условия, которые делают измерение смещённым:
+
+    * потеря LLM-слоя смещает `recall_graph`/`necessity`/`delta_recall` вниз —
+      отсутствующие факты нельзя «вспомнить», поэтому недооценка тут односторонняя;
+    * потеря LLM-слоя смещает и groundedness/coverage: эталонные факты, которые модель
+      не извлекла, не попадут ни в один ответ.
+
+    Деградация БЕЗ потери слоя (профиль не загрузился, экстракция не запускалась) сюда
+    не попадает намеренно: слой не строился, терять было нечего, и векторная ось не
+    затронута. Считать это смещением — значит заблокировать вердикт прогона, у
+    которого деградация ничего не испортила.
+
+    **Правило: потеря инвалидирует прогон, а не предупреждает о нём.** Для
+    смещённой величины «прогон прошёл» не является утверждением о системе, а суждением
+    о прогоне, который этого не доказывает. Раньше та же мысль выражалась словами в
+    паспорте прог��на, то есть была нечитаема для автоматики.
+    """
+    if not ingest:
+        return {
+            "llm_layer_dropped_documents": 0,
+            "llm_layer_lost_entities": 0,
+            "llm_layer_lost_edges": 0,
+            "enrichment_degraded_documents": 0,
+            "loss": False,
+        }
+    dropped = int(ingest.get("llm_layer_dropped_documents") or 0)
+    lost_entities = int(ingest.get("llm_layer_lost_entities") or 0)
+    lost_edges = int(ingest.get("llm_layer_lost_edges") or 0)
+    return {
+        "llm_layer_dropped_documents": dropped,
+        "llm_layer_lost_entities": lost_entities,
+        "llm_layer_lost_edges": lost_edges,
+        "enrichment_degraded_documents": int(ingest.get("enrichment_degraded_documents") or 0),
+        "enrichment_causes": ingest.get("enrichment_causes") or {},
+        "documents_with_extraction_stage": int(
+            ingest.get("documents_with_extraction_stage") or 0
+        ),
+        "llm_records_extracted": int(ingest.get("llm_records_extracted") or 0),
+        "llm_records_per_extraction_document": ingest.get(
+            "llm_records_per_extraction_document"
+        ),
+        # Слой потерян, если исчезли факты, а не если сработал путь сброса. Ноль
+        # потерь при ненулевой деградации — законное состояние.
+        "loss": dropped > 0 or lost_entities > 0 or lost_edges > 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Revision fetch
 # ---------------------------------------------------------------------------
@@ -1000,9 +1054,10 @@ def build_run_manifest(
     прогонов: без них прогон на 3 документах неотличим от прогона на 36 и
     recall неинтерпретируем (эталонных источников в корпусе может не быть вовсе).
 
-    ``timeouts`` — фактически применённые окна ожидания джоб. В пару с
-    ``ingest_report.json`` это то, чем калибруются будущие прогоны: без них
-    «долго» и «зависло» неразличимы, потому что оба кончаются ошибкой прогна.
+    ``timeouts`` — фактически применённые пороги: три окна ожидания джоб и два бюджета
+    фазы подачи. В пару с ``ingest_report.json`` это то, чем калибруются будущие
+    прогоны: без них «долго» и «зависло» неразличимы, потому что оба кончаются ошибкой
+    прогона.
     """
     return {
         "run_id": run_id,
@@ -1554,6 +1609,10 @@ def write_passport(
             f"- ⚠️ **degraded_questions = {gc.get('degraded_questions')}**: "
             "readiness-gate не открыл граф (см. `projection_status` в `qa_log.jsonl`)."
         )
+    # Причина вердикта печатается здесь же: вердикт без причины в артефакте не
+    # отличим от сбоя раннера, и следующий читатель примет прогон за измерение.
+    for reason in (report or {}).get("verdict_reasons") or []:
+        lines.append(f"- ⚠️ **вердикт непригоден**: {reason}")
 
     if ingest:
         lines += [
@@ -1603,15 +1662,18 @@ def write_passport(
         # Счётчик деградации — umbrella: он складывает «профиль не загрузился» (ничего
         # не потеряно) и «исключение в экстракции» (потерян весь слой). Читать его как
         # потерю нельзя, поэтому потеря считается отдельно. Слой роняется целиком при
-        # любом исключении в optional-экстракции вместе с `entity_edges`, то есть
-        # теряются и узлы-якоря, и сами гипотезы связей.
+        # негодной конфигурации и при сбое модели (два именованных типа; дефект нашего
+        # кода падает, а не деградирует) вместе с `entity_edges`, то есть теряются и
+        # узлы-якоря, и сами гипотезы связей.
         lines += [
             "",
             (
                 f"> ⚠️ **{dropped} документов потеряли LLM-слой целиком** "
                 f"({lost_entities} записей сущностей и {lost_edges} рёбер исчезли; "
-                f"счётчик деградации: {degraded}). Метрики графовой оси по ним — "
-                "нижняя граница, а не измерение. Причины — в `ingest_report.json` "
+                f"счётчик деградации: {degraded}). **Вердикт прогона при этом "
+                "`invalid`** — смещение одностороннее, пропавшие факты нельзя ни найти, "
+                "ни вспомнить, поэтому недооценка оси гарантирована (см. `docs/06` §2.2). "
+                "Причины — в `ingest_report.json` "
                 "(`enrichment_cause`, `enrichment_error`), в логах ingestion-service "
                 "(сообщение стадии `EXTRACT`). "
                 "Гранулярность сброса слоя — открытый вопрос, см. ADR-032; для "
@@ -1627,7 +1689,7 @@ def write_passport(
         "| Артефакт | Содержимое |",
         "|---|---|",
         "| `run_manifest.json` | условия прогона (машиночитаемо) |",
-        "| `ingest_report.json` | по каждому документу: время, статус, no-op |",
+        "| `ingest_report.json` | по каждому документу: время, статус, no-op, факты обогащения (деградация, причина, размер потери, объём LLM-слоя) |",
         "| `qa_log.jsonl` | по каждому вопросу: источники, метрики, тайминги |",
         "| `qa_review.md` | тот же разбор для чтения глазами |",
         "| `lift_report.json` / `.md` | агрегат и вердикт |",
@@ -1659,6 +1721,10 @@ def write_lift_report(report: dict[str, Any], out_dir: Path, manifest: dict[str,
         f"**Verdict:** `{report.get('verdict', 'n/a')}`  ",
         f"**Revision:** `{report.get('revision', 'n/a')}`\n",
     ]
+    # Причина вердикта идёт сразу под ним, а не в конце отчёта: вердикт без причины
+    # выглядит как результат, и его читают как результат.
+    for reason in report.get("verdict_reasons") or []:
+        lines.append(f"> ⚠️ Вердикт `{report.get('verdict', 'n/a')}` непригоден: {reason}  ")
 
     # Блок «Условия прогона» (design.md §5.1/5.9) — из манифеста.
     if manifest:
@@ -2004,12 +2070,19 @@ def main() -> None:
         reports[key] = _run_mode(mode, all_records)
 
     judge_active = judge is not None and generate
+    # Отчёт ingest строится ДО подсчёта вердикта: потеря LLM-слоя инвалидирует
+    # прогон, и вердикт обязан знать о ней, а не узнавать о ней постфактум в паспорте.
+    ingest_summary = build_ingest_report(submitted, statuses) if submitted else None
+    ingest_quality = build_ingest_quality(ingest_summary)
+    for mode_key in reports:
+        reports[mode_key]["ingest_quality"] = ingest_quality
     report = lift_report(
         baseline=reports.get("baseline", {}),
         target=reports.get("target", {}),
         revision=revision,
         judge_active=judge_active,
     )
+    report["ingest_quality"] = ingest_quality
     report["run_id"] = run_id
     report["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     report["manifest"] = manifest
@@ -2057,9 +2130,7 @@ def main() -> None:
     # 5. Сопутствующие артефакты прогона: паспорт, разбор пар, отчёт ingest.
     argv = ["python", "/app/infra/eval/run_eval.py", *sys.argv[1:]]
     write_command_file(out_dir, argv)
-    ingest_summary = None
-    if submitted:
-        ingest_summary = build_ingest_report(submitted, statuses)
+    if ingest_summary is not None:
         write_ingest_report(ingest_summary, out_dir)
     write_qa_review(all_records, out_dir)
     write_passport(

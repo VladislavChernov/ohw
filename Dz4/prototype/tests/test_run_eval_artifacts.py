@@ -1159,6 +1159,57 @@ def test_ingest_report_names_documents_where_counter_could_be_wrong() -> None:
     assert report["llm_records_per_extraction_document"] == 3.5
 
 
+def test_ingest_quality_flags_loss_only_when_facts_disappeared() -> None:
+    """`loss` — про исчезнувшие факты, а не про сработавший путь сброса.
+
+    Разница ровно та, что делает счётчик пригодным: деградация без потери (профиль не
+    загрузился) и потеря после первого ответа модели — разные события, и сваливать их
+    в один «слой потерян» значит завышать потерю.
+    """
+    degraded_only = _run_eval.build_ingest_quality(
+        _run_eval.build_ingest_report(
+            [{"job_id": "j1", "source_url": "s", "relpath": "a", "bytes": 1, "waited_s": 1.0}],
+            {
+                "j1": _job_with_extraction(
+                    llm_records=0, cause="profile_unavailable", degraded=True
+                )
+            },
+        )
+    )
+    assert degraded_only["loss"] is False
+    assert degraded_only["enrichment_degraded_documents"] == 1
+
+    lost = _run_eval.build_ingest_quality(
+        _run_eval.build_ingest_report(
+            [{"job_id": "j1", "source_url": "s", "relpath": "a", "bytes": 1, "waited_s": 1.0}],
+            {
+                "j1": _job_with_extraction(
+                    llm_records=9,
+                    cause="model_error",
+                    lost_entities=9,
+                    degraded=True,
+                    layer_dropped=True,
+                )
+            },
+        )
+    )
+    assert lost["loss"] is True
+    assert lost["llm_layer_lost_entities"] == 9
+    assert lost["enrichment_causes"] == {"model_error": 1}
+
+
+def test_ingest_quality_of_absent_report_is_clean_not_missing() -> None:
+    """Прогон без ингеста (векторная ось) даёт нули, а не «неизвестно».
+
+    `None` здесь означал бы, что потери нельзя исключить, и вердикт потерял бы
+    право быть `pass` у прогонов, где ингеста просто не было.
+    """
+    quality = _run_eval.build_ingest_quality(None)
+
+    assert quality["loss"] is False
+    assert quality["llm_layer_dropped_documents"] == 0
+
+
 def test_ingest_report_survives_unreadable_numeric_fields() -> None:
     """Мусор в числовом поле обнуляет значение, а не роняет отчёт.
 

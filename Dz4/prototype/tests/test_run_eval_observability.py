@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -435,6 +436,92 @@ def _run_main(
     monkeypatch.setenv("EVAL_LLM_ADAPTER", "fake")
     _run_eval.main()
     return tmp_path / "out"
+
+
+def _run_main_with_lost_layer(monkeypatch: Any, tmp_path: Path) -> Path:
+    """main() целиком, где ингест потерял LLM-слой на одном документе.
+
+    Проверяется сквозной путь, а не только `build_ingest_quality`: правило
+    «потеря инвалидирует прогон» держится на том, что отчёт ingest строится ДО
+    подсчёта вердикта. Переставьте эти два шага — и все юнит-тесты останутся зелёными,
+    а прогон будет объявлять `pass` по заведомо смещённым числам.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "doc.md").write_text("текст документа", encoding="utf-8")
+    dataset = _write_dataset(tmp_path, [_question("loss-01")])
+
+    monkeypatch.setattr(
+        _run_eval,
+        "ingest_corpus",
+        lambda *a, **k: [
+            {
+                "job_id": "j-loss",
+                "source_url": "src://doc.md",
+                "relpath": "doc.md",
+                "bytes": 14,
+                "submitted_at": time.time(),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _run_eval,
+        "wait_jobs",
+        lambda *a, **k: {
+            "j-loss": {
+                "status": "succeeded",
+                "stage": "COMMIT",
+                "error": None,
+                "signals": {
+                    "enrichment_degraded": "EXTRACT",
+                    "llm_layer_dropped": "EXTRACT",
+                },
+                "enrichment": {
+                    "cause": "model_error",
+                    "lost_entities": 77,
+                    "lost_edges": 12,
+                    "llm_records": 77,
+                    "llm_edges": 12,
+                },
+                "stages": [
+                    {"stage": "EXTRACT", "status": "succeeded", "message": "enrichment_degraded: relation unknown"}
+                ],
+            }
+        },
+    )
+    return _run_main(monkeypatch, tmp_path, "--corpus", str(corpus), dataset=dataset)
+
+
+def test_main_invalidates_verdict_when_ingest_lost_llm_layer(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Сквозная гарантия: потеря слоя на ингесте даёт `invalid`, а не `pass`."""
+    out = _run_main_with_lost_layer(monkeypatch, tmp_path)
+
+    report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
+    assert report["verdict"] == "invalid"
+    assert report["ingest_quality"]["loss"] is True
+    assert report["ingest_quality"]["llm_layer_lost_entities"] == 77
+    assert any("потерян LLM-слой" in r for r in report["verdict_reasons"])
+    # причина обязана быть видна в артефактах, которые читает человек
+    passport = (out / "PASSPORT.md").read_text(encoding="utf-8")
+    assert "вердикт непригоден" in passport
+    lift = (out / "lift_report.md").read_text(encoding="utf-8")
+    assert "потерян LLM-слой" in lift
+
+
+def test_main_writes_ingest_report_before_verdict(monkeypatch: Any, tmp_path: Path) -> None:
+    """Отчёт ingest обязан попасть на диск: иначе причину вердикта нечем подтвердить.
+
+    Причина вердикта ссылается на числа из `ingest_report.json`; если файла нет, то
+    либо вердикт неправ, либо потеря случилась не там, где думали.
+    """
+    out = _run_main_with_lost_layer(monkeypatch, tmp_path)
+
+    ingest = json.loads((out / "ingest_report.json").read_text(encoding="utf-8"))
+    assert ingest["llm_layer_dropped_documents"] == 1
+    assert ingest["llm_layer_lost_entities"] == 77
+    assert ingest["enrichment_causes"] == {"model_error": 1}
 
 
 def test_main_writes_passport_command_and_qa_review(monkeypatch: Any, tmp_path: Path) -> None:
