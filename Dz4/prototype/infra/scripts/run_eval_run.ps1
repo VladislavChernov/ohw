@@ -166,7 +166,11 @@ $sampler = Start-Process -FilePath 'powershell.exe' `
 
 $startedAt = Get-Date
 Write-Host "==> прогон $RunName"
-Invoke-Compose 'run' '--rm' '--no-deps' 'eval-runner' 'python' @($evalArgs[1..($evalArgs.Count - 1)])
+# Splatting по переменной, а не `@($evalArgs[1..N])`: array subexpression схлопывает срез
+# в ОДИН аргумент, и python получает «--domain it --mode both ...» одной строкой,
+# отвечая `unknown option`. Проверено: 6 элементов вместо 11.
+$evalTail = $evalArgs[1..($evalArgs.Count - 1)]
+Invoke-Compose 'run' '--rm' '--no-deps' 'eval-runner' 'python' @evalTail
 $runExit = $LASTEXITCODE
 $finishedAt = Get-Date
 
