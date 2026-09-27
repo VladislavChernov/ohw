@@ -103,6 +103,30 @@
 - `graphrag_projection_state_total{domain,status}` — состояния `ready/degraded/stale/failed`
 - `graphrag_projection_sources_total{domain,result}` — обработанные, skipped и failed sources
 - `graphrag_projection_fallback_total{domain,reason}` — vector-only fallback из-за readiness/stale/error
+- `graphrag_ingestion_jobs_total{status, domain}` — счётчик джоб ингеста по итоговому статусу
+  (`succeeded` / `failed` / `cancelled`); traffic и errors одним числом
+- `graphrag_ingestion_degraded_total{domain, reason}` — счётчик деградаций optional-ингеста
+  (профиль или glossary недоступен). Флаг уже считается в пайплайне
+  (`ctx.enrichment_degraded`) и пишется в стадию `EXTRACT` джобы, поэтому эмит сводится
+  к одной строке в точке записи результата. Без этой метрики прогон с частичным графом
+  неотличим от полного: статус остаётся `succeeded`, рёбер просто меньше
+
+### 2.1 Требование к данным для метрик по стадиям
+
+`graphrag_ingestion_duration_seconds{stage, domain}` и
+`graphrag_query_duration_seconds{stage, domain}` уже прописаны в контракте, но на
+стороне ингеста данных для них сейчас нет.
+
+`job_stages.ts` — колонка **метаданных**, а не измерительный прибор: `update_stage` при
+переходе к следующей стадии перезаписывает `ts` предыдущей, поэтому у всех завершённых
+стадий `ts` — момент *окончания*, а не начала. Разности соседних `ts` длительностями
+не являются, а длительность последней стадии не восстанавливается вовсе.
+
+Требование к реализации: длительность измеряется в момент перехода и хранится явно
+(`duration_ms` на стадию), а не восстанавливается вычитанием timestamps. Единица в
+отчёте остаётся секундной — конвенция Prometheus требует секунды в имени длительности,
+а разрешение ниже секунды берётся из границ гистограммы (0.005, 0.01, …).
+
 
 ---
 
