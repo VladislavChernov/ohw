@@ -187,7 +187,7 @@ rev(domain) = sha256(sorted([("book_en_kleppmann.pdf", "abc123"),
 
 **Почему счётчик тут сломается:** монотонный counter «+1 на каждый COMMIT»
 не отражает, *какие* документы в домене. Если два одинаковых INGEST-а пройдут
-для разных sources (оба成功 no-op для разных sources) — counter bump'нется
+для разных sources (оба no-op для разных sources) — counter bump'нется
 вхолостую, кэш сбросится без причины. Fingerprint — честный: если набор
 active-документов не изменился, fingerprint тоже не изменился.
 

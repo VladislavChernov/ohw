@@ -19,7 +19,7 @@ transient была только на graph-оси (vector записался у�
 без вызова `_compensate`.
 
 **Файл задачи:** `openspec/changes/concurrent-ingest-write-policy/tasks.md`, §2.5.3 (переписана),
-в т.ч.新增 2.5.3b: unit-тесты, что `_compensate` НЕ вызывается при non-transient ошибке vector.
+в т.ч. добавлена 2.5.3b: unit-тесты, что `_compensate` НЕ вызывается при non-transient ошибке vector.
 
 ---
 
