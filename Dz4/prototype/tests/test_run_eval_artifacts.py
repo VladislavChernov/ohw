@@ -1033,6 +1033,151 @@ def test_build_ingest_report_separates_layer_loss_from_degradation() -> None:
     assert kept["llm_layer_dropped"] is False
 
 
+def _job_with_extraction(
+    *,
+    llm_records: int,
+    cause: str | None = None,
+    lost_entities: int = 0,
+    degraded: bool = False,
+    layer_dropped: bool = False,
+) -> dict[str, Any]:
+    signals: dict[str, str] = {}
+    if degraded:
+        signals["enrichment_degraded"] = "EXTRACT"
+    if layer_dropped:
+        signals["llm_layer_dropped"] = "EXTRACT"
+    return {
+        "status": "succeeded",
+        "stage": "COMMIT",
+        "error": None,
+        "signals": signals,
+        "enrichment": {
+            "cause": cause,
+            "lost_entities": lost_entities,
+            "lost_edges": 0,
+            "llm_records": llm_records,
+            "llm_edges": 0,
+        },
+        "stages": [{"stage": "EXTRACT", "status": "succeeded", "message": ""}],
+    }
+
+
+def _noop_job() -> dict[str, Any]:
+    """Тёплый корпус: EXTRACT не запускался, джоба встала на INGEST."""
+    return {
+        "status": "succeeded",
+        "stage": "INGEST",
+        "error": None,
+        "signals": {},
+        "stages": [{"stage": "INGEST", "status": "succeeded", "message": "noop"}],
+    }
+
+
+def test_ingest_report_counts_loss_size_not_only_documents() -> None:
+    """«Сколько документов» и «сколько фактов исчезло» — разные числа, и оба нужны.
+
+    Частота отвечает на вопрос «как часто ломается», размер — «сколько это стоит».
+    Из одного флага получается только частота, а потеря на одном документе может быть
+    и двух записей, и двух тысяч; решение о починке принимается по второму.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+    statuses = {
+        "j1": _job_with_extraction(
+            llm_records=77,
+            cause="model_error",
+            lost_entities=77,
+            degraded=True,
+            layer_dropped=True,
+        )
+    }
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    assert report["llm_layer_dropped_documents"] == 1
+    assert report["llm_layer_lost_entities"] == 77
+    assert report["enrichment_causes"] == {"model_error": 1}
+
+
+def test_ingest_report_denominator_is_documents_where_extraction_ran() -> None:
+    """Знаменатель — документы, где EXTRACT реально выполнялся.
+
+    Документ, вставшийся в пайплайн no-op (тёплый корпус), не должен попадать в
+    знаменатель: у него ноль не потому, что модель ничего не нашла, а потому, что её
+    не звали. Иначе улучшение на прогоне с тёплым корпусом читалось бы как деградация
+    модели.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+        {"job_id": "j2", "source_url": "src://b.txt", "relpath": "b.txt", "bytes": 100, "waited_s": 0.0},
+    ]
+    statuses = {"j1": _job_with_extraction(llm_records=40), "j2": _noop_job()}
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    assert report["documents_with_extraction_stage"] == 1
+    assert report["llm_records_extracted"] == 40
+    assert report["llm_records_per_extraction_document"] == 40.0
+    noop_doc = next(d for d in report["documents"] if d["job_id"] == "j2")
+    assert noop_doc["extraction_stage_ran"] is False
+
+
+def test_ingest_report_does_not_publish_zero_percent_on_empty_base() -> None:
+    """Нулевой знаменатель — это «нечего мерить», а не «модель вернула ноль».
+
+    Печатать `0%` на пустой базе нельзя: это самое благоприятное прочтение из
+    возможных, и именно его проще всего пропустить. Поле обязано быть None.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 0.0},
+    ]
+
+    report = _run_eval.build_ingest_report(submitted, {"j1": _noop_job()})
+
+    assert report["documents_with_extraction_stage"] == 0
+    assert report["llm_records_per_extraction_document"] is None
+    assert report["llm_records_extracted"] == 0
+
+
+def test_ingest_report_names_documents_where_counter_could_be_wrong() -> None:
+    """Стадия была, а записей ноль — названное число, а не тихий ноль.
+
+    Само по себе это не поломка: модель действительно могла ничего не найти. Но такой
+    документ обязан быть виден, иначе сломанный счётчик и честный ноль выглядят
+    одинаково — а это ровно тот случай, где молчание дороже всего.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+        {"job_id": "j2", "source_url": "src://b.txt", "relpath": "b.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+    statuses = {"j1": _job_with_extraction(llm_records=0), "j2": _job_with_extraction(llm_records=7)}
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    assert report["documents_with_extraction_stage"] == 2
+    assert report["documents_with_extraction_stage_without_records"] == 1
+    assert report["llm_records_per_extraction_document"] == 3.5
+
+
+def test_ingest_report_survives_unreadable_numeric_fields() -> None:
+    """Мусор в числовом поле обнуляет значение, а не роняет отчёт.
+
+    Отчёт о потере, который падает на одном нечитаемом значении, хуже отсутствия
+    отчёта: вместо данных о потере получается стоп-слово, и потерю перестают замечать.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+    job = _job_with_extraction(llm_records=5)
+    job["enrichment"]["lost_entities"] = "много"  # type: ignore[assignment]
+    statuses = {"j1": job}
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    assert report["llm_layer_lost_entities"] == 0
+    assert report["llm_records_extracted"] == 5
+
+
 def test_both_flags_come_from_one_structural_channel() -> None:
     """Оба факта приходят полем `signals`, а не текстом и не разными каналами.
 

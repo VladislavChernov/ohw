@@ -540,7 +540,14 @@ def test_main_passport_flags_inactive_graph_axis(monkeypatch: Any, tmp_path: Pat
     assert report["target"]["graph_axis_active"] is False
 
 
-def _passport_ingest(degraded: int, dropped: int = 0) -> dict[str, Any]:
+def _passport_ingest(
+    degraded: int,
+    dropped: int = 0,
+    *,
+    lost_entities: int = 0,
+    lost_edges: int = 0,
+    causes: dict[str, int] | None = None,
+) -> dict[str, Any]:
     return {
         "documents_total": 3,
         "cold_documents": 2,
@@ -549,15 +556,28 @@ def _passport_ingest(degraded: int, dropped: int = 0) -> dict[str, Any]:
         "cold_wall_time_mean_s": 6.0,
         "enrichment_degraded_documents": degraded,
         "llm_layer_dropped_documents": dropped,
+        "llm_layer_lost_entities": lost_entities,
+        "llm_layer_lost_edges": lost_edges,
+        "enrichment_causes": causes or {},
     }
 
 
-def _write_passport_text(tmp_path: Path, degraded: int, dropped: int = 0) -> str:
+def _write_passport_text(
+    tmp_path: Path,
+    degraded: int,
+    dropped: int = 0,
+    *,
+    lost_entities: int = 0,
+    lost_edges: int = 0,
+    causes: dict[str, int] | None = None,
+) -> str:
     path = _run_eval.write_passport(
         _manifest(),
         {"verdict": "n/a"},
         tmp_path / "out",
-        ingest=_passport_ingest(degraded, dropped),
+        ingest=_passport_ingest(
+            degraded, dropped, lost_entities=lost_entities, lost_edges=lost_edges, causes=causes
+        ),
         failures=0,
         argv=["run_eval.py", "--retrieval-only"],
     )
@@ -583,11 +603,37 @@ def test_passport_warns_only_about_real_layer_loss(tmp_path: Path) -> None:
 
 def test_passport_warns_when_documents_lost_llm_layer(tmp_path: Path) -> None:
     """Потерянный LLM-слой обязан быть виден в паспорте, а не только в JSON."""
-    passport = _write_passport_text(tmp_path, degraded=2, dropped=1)
+    passport = _write_passport_text(
+        tmp_path,
+        degraded=2,
+        dropped=1,
+        lost_entities=412,
+        lost_edges=63,
+        causes={"model_error": 1, "profile_unavailable": 1},
+    )
 
     assert "документов, потерявших LLM-слой целиком: 1" in passport
     assert "ADR-032" in passport
     assert "⚠️" in passport
+    # Сколько именно исчезло: по одному счётчику документов стоимость потери не
+    # оценить, а решение принимается именно по ней.
+    assert "записей сущностей потеряно: 412 (рёбер: 63)" in passport
+    # Причины поимённо: «деградация 2» не говорит, чинить ли профиль или модель.
+    assert "model_error=1" in passport
+    assert "profile_unavailable=1" in passport
+
+
+def test_passport_reports_cause_even_when_nothing_was_lost(tmp_path: Path) -> None:
+    """Деградация без потери — тоже диагноз, и он обязан быть назван.
+
+    Раньше паспорт молчал: предупреждение ставилось только при потере слоя, поэтому
+    «профиль не грузится на каждом документе» выглядело как чистый прогон. Причина
+    называется, даже когда терять нечего.
+    """
+    passport = _write_passport_text(tmp_path, degraded=3, dropped=0, causes={"profile_unavailable": 3})
+
+    assert "ADR-032" not in passport
+    assert "причины деградации: profile_unavailable=3" in passport
 
 
 def test_passport_has_no_degradation_warning_when_clean(tmp_path: Path) -> None:

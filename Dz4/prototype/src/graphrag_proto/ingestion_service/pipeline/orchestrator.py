@@ -98,9 +98,9 @@ def _extraction_template(profile: dict[str, Any]) -> dict[str, Any]:
     extraction = profile.get("extraction")
     template = extraction.get("prompt_template") if isinstance(extraction, dict) else None
     if not isinstance(template, dict):
-        raise TypeError("в профиле отсутствует extraction.prompt_template")
+        raise ExtractionConfigError("в профиле отсутствует extraction.prompt_template")
     if not isinstance(template.get("user"), str) or not isinstance(template.get("system"), str):
-        raise TypeError("extraction.prompt_template должен содержать system и user")
+        raise ExtractionConfigError("extraction.prompt_template должен содержать system и user")
     return template
 
 
@@ -116,9 +116,9 @@ def _parse_extraction_payload(raw: str) -> dict[str, Any]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError("EXTRACT LLM должен вернуть валидный JSON") from exc
+        raise ExtractionModelError("EXTRACT LLM должен вернуть валидный JSON") from exc
     if not isinstance(payload, dict):
-        raise TypeError("EXTRACT LLM должен вернуть JSON-объект")
+        raise ExtractionModelError("EXTRACT LLM должен вернуть JSON-объект")
     return payload
 
 
@@ -236,12 +236,20 @@ def _entity_record(
         "origin": "ai",
         "variants": [name],
     }
-    for key in ("id", "description", "category", "tag_id", "confidence"):
+    for key in ("id", "description", "category", "confidence"):
         value = item.get(key)
         if key == "description":
             value = _safe_entity_description(value, ctx)
         if value is not None:
             record[key] = value
+    # `tag_id` из ответа модели НЕ копируется (L1-05: идентичность узла детерминирована
+    # Python-кодом, LLM — только optional enrichment). Промпт его и не запрашивает
+    # (`domain_profile.*.yaml`, extraction.prompt_template), то есть поле приходило
+    # непрошенным и могло молча создать дубль-ноду вместо слияния по canonical key.
+    # Считаем, а не просто игнорируем: частота показывает, путает ли модель
+    # идентичность с содержимым, и делает решение обратным по данным, а не по спору.
+    if item.get("tag_id"):
+        ctx.model_tag_ids_ignored += 1
     record["origin"] = "ai"
     properties = item.get("properties")
     if isinstance(properties, dict):
@@ -307,6 +315,26 @@ class PipelineContext:
     profile_error: str | None = None
     enrichment_degraded: bool = False
     enrichment_error: str | None = None
+    # Отдельный факт от `enrichment_degraded`: слой не просто «обработан хуже», а
+    # ПОТЕРЯН целиком. Флаг ставится в точке сброса, а не в логе, иначе значение
+    # пришлось бы вылавливать из текста. Одна метрика на оба факта хуже, чем никакой:
+    # профиль не загрузился (ничего не потеряно, LLM и не пытались построить) и
+    # исключение в экстракции (потерян весь слой) дают одно и то же «деградация».
+    llm_layer_dropped: bool = False
+    # Сколько записей и рёбер ПОТЕРЯНО сбросом, а сколько LLM-слой произвёл.
+    # `llm_layer_dropped` без этих чисел — верхняя граница: сброс мог сработать
+    # раньше первого ответа модели, и тогда терять нечего, а флаг стоит. Счётчик
+    # «документов с потерей» обязан значить «документов, у которых исчезли факты»,
+    # иначе он завышает потерю и его перестают читать.
+    llm_layer_lost_entities: int = 0
+    llm_layer_lost_edges: int = 0
+    llm_records: int = 0
+    llm_edges: int = 0
+    # Причина деградации (`CAUSE_*`), а не её текст: текст можно переформулировать
+    # вместе с причиной, имя — нет.
+    enrichment_cause: str | None = None
+    model_tag_ids_ignored: int = 0
+    ambiguous_aliases: int = 0
     graph_projection_status: str = "not_requested"
     graph_projection_error: str | None = None
     registry_result: tuple[str, int, bool] | None = None
@@ -401,6 +429,35 @@ class EmbedStage(Stage):
             meta["chunk_id"] = _chunk_id(ctx.domain, ctx.source_url, meta["index"])
 
 
+class ExtractionConfigError(RuntimeError):
+    """Профиль или конфигурация домена не позволяют выполнить экстракцию.
+
+    Это НАШ дефект конфигурации, а не сбой модели: чинить надо профиль, а не LLM.
+    Раньше такое приходило как `TypeError` из резолвера, и широкий `except Exception`
+    не мог отличить его от сбоя модели — оба выглядели как «LLM не справился», и
+    счётчик деградации показывал модель там, где виноват конфиг.
+    """
+
+
+class ExtractionModelError(RuntimeError):
+    """Модель или её адаптер вернули негодный результат либо упали.
+
+    Граница намеренно узкая: сюда превращаются только сбои на границе с моделью
+    (вызов адаптера, разбор ответа, проверка формы ответа). Дефекты нашего кода
+    после этой границы остаются дефектами и падают громко, иначе они надевали бы
+    маску «модель не справилась» и уводили расследование не туда.
+    """
+
+
+# Причины деградации, различаемые потребителем. Не перечисление «на вкус»: у них
+# разные действия. `profile_unavailable` — профиль не пришёл/сломан, экстракция не
+# запускалась, потери нет; `profile_invalid` — профиль есть, но негоден (чинить
+# конфиг); `model_error` — виновата модель (чинить промпт/модель/адаптер).
+CAUSE_PROFILE_UNAVAILABLE = "profile_unavailable"
+CAUSE_PROFILE_INVALID = "profile_invalid"
+CAUSE_MODEL_ERROR = "model_error"
+
+
 class ExtractStage(Stage):
     """EXTRACT: LLM или детерминированный fallback."""
 
@@ -431,20 +488,71 @@ class ExtractStage(Stage):
         if ctx.profile_error:
             ctx.enrichment_degraded = True
             ctx.enrichment_error = ctx.profile_error
+            # Профиль не пришёл — экстракция не запускалась, ничего не потеряно.
+            # Отдельная причина, потому что «деградация» без потери и «деградация с
+            # потерей» лечатся противоположно.
+            ctx.enrichment_cause = CAUSE_PROFILE_UNAVAILABLE
         if not ctx.profile or not _profile_llm_enabled(ctx.profile) or self._llm is None:
             self._extract_deterministic(ctx)
             return
         if not self._optional_failure:
             self._extract_llm(ctx)
+            self._record_llm_volume(ctx)
             return
         try:
             self._extract_llm(ctx)
-        except Exception as exc:  # noqa: BLE001
-            ctx.entities = []
-            ctx.entity_edges = []
-            ctx.enrichment_degraded = True
-            ctx.enrichment_error = str(exc)
-            self._extract_deterministic(ctx)
+        except (ExtractionConfigError, ExtractionModelError) as exc:
+            self._degrade_after_extraction_failure(ctx, exc)
+            return
+        self._record_llm_volume(ctx)
+
+    @staticmethod
+    def _record_llm_volume(ctx: PipelineContext) -> None:
+        """Зафиксировать объём LLM-слоя там, где он вычислен (ADR-014).
+
+        Значение эмитится здесь, а не восстанавливается потребителем из строк БД или
+        из текста сообщения: восстановленное значение однажды разъедется с реальностью
+        без всякого следа.
+        """
+        ctx.llm_records = len(ctx.entities)
+        ctx.llm_edges = len(ctx.entity_edges)
+
+    def _degrade_after_extraction_failure(self, ctx: PipelineContext, exc: Exception) -> None:
+        """Сбросить LLM-слой и честно сказать, ЧТО именно исчезло.
+
+        ПРОТОТИПНОЕ ПОВЕДЕНИЕ, для боевого ingest неприемлемо (ADR-032): потеря
+        необратима, повторная загрузка того же `content_hash` — no-op (см.
+        CommitStage.try_noop), то есть простая перезагрузка файла НЕ перезапустит
+        экстракцию.
+
+        Ловим ровно два типа: негодную конфигурацию и сбой модели. Широкий
+        `except Exception` больше не используется — дефект нашего кода обязан упасть
+        громко, иначе он выдаёт себя за «модель не справилась» и уводит
+        расследование не туда, а счётчик деградации показывает чужую причину.
+        """
+        # Сколько записей и рёбер ПЕРЕЖИВАЛИ бы сброс: это и есть потеря. Пока
+        # считаем ДО очистки — иначе потеря всегда выглядит нулевой.
+        lost_entities = len(ctx.entities)
+        lost_edges = len(ctx.entity_edges)
+        ctx.entities = []
+        ctx.entity_edges = []
+        ctx.enrichment_degraded = True
+        ctx.enrichment_cause = (
+            CAUSE_PROFILE_INVALID if isinstance(exc, ExtractionConfigError) else CAUSE_MODEL_ERROR
+        )
+        ctx.enrichment_error = str(exc)
+        # Объём LLM-слоя известен даже при сбое: то, что модель успела вернуть, и есть
+        # то, что мы сейчас уничтожаем.
+        ctx.llm_records = lost_entities
+        ctx.llm_edges = lost_edges
+        ctx.llm_layer_lost_entities = lost_entities
+        ctx.llm_layer_lost_edges = lost_edges
+        # Сброс без записей — не потеря. Флаг «слой потерян» ставится по факту
+        # исчезнувших фактов, а не по факту сработавшего пути сброса: иначе
+        # счётчик завышает потерю на документах, где терять было нечего, и его
+        # перестают читать.
+        ctx.llm_layer_dropped = bool(lost_entities or lost_edges)
+        self._extract_deterministic(ctx)
 
     def _extract_llm(self, ctx: PipelineContext) -> None:
         template = _extraction_template(ctx.profile or {})
@@ -463,28 +571,37 @@ class ExtractStage(Stage):
         allowed_fields = {"relationships", "links", *entity_payloads}
         llm = self._llm
         if llm is None:
-            raise RuntimeError("EXTRACT: LLM adapter is required for profile extraction")
+            raise ExtractionConfigError("EXTRACT: LLM adapter is required for profile extraction")
         for index, chunk in enumerate(ctx.chunks):
             chunk_id = self._chunk_id(ctx, index)
             prompt = (
                 f"{template['user']}\n\n"
                 f"Текст документа для извлечения (чанк {index + 1}):\n{chunk}"
             )
-            raw = "".join(
-                llm.generate(prompt, system=str(template["system"]), stream=False)
-            )
+            # Граница с моделью: ровно здесь всё, что пришло извне, становится
+            # `ExtractionModelError`. Внутри блока нет нашей логики, поэтому
+            # классификация здесь не съест наш дефект — а за пределами блока такой
+            # дефект падает сам, вместо того чтобы выдать себя за сбой модели.
+            try:
+                raw = "".join(
+                    llm.generate(prompt, system=str(template["system"]), stream=False)
+                )
+            except Exception as exc:  # граница с внешним адаптером, ловится намеренно
+                raise ExtractionModelError(f"вызов LLM не удался: {exc}") from exc
             payload = _parse_extraction_payload(raw)
             records: list[dict[str, Any]] = []
             unknown_fields = set(payload) - allowed_fields
             if unknown_fields:
-                raise ValueError(f"EXTRACT содержит неизвестные поля: {sorted(unknown_fields)}")
+                raise ExtractionModelError(
+                    f"EXTRACT содержит неизвестные поля: {sorted(unknown_fields)}"
+                )
             for key, entity_type in entity_payloads.items():
                 items = payload.get(key, [])
                 if not isinstance(items, list):
-                    raise TypeError(f"EXTRACT поле {key!r} должно быть списком")
+                    raise ExtractionModelError(f"EXTRACT поле {key!r} должно быть списком")
                 for item in items:
                     if not isinstance(item, dict):
-                        raise TypeError(f"EXTRACT поле {key!r} содержит не-объект")
+                        raise ExtractionModelError(f"EXTRACT поле {key!r} содержит не-объект")
                     records.append(
                         _entity_record(
                             entity_type,
@@ -517,6 +634,15 @@ class ExtractStage(Stage):
                         edge[key] = relation[key]
                 edge["origin"] = "ai"
                 ctx.entity_edges.append(edge)
+        if ctx.model_tag_ids_ignored:
+            # Одна строка на документ, а не на сущность: при ~77 сущностях на чанк
+            # поштучный лог дал бы десятки тысяч строк на документ.
+            _log.warning(
+                "tag_id в ответе LLM проигнорирован: идентичность считает платформа "
+                "(L1-05); проигнорировано=%d, источник=%s",
+                ctx.model_tag_ids_ignored,
+                ctx.source_url,
+            )
 
     def _chunk_id(self, ctx: PipelineContext, index: int) -> str:
         for meta in ctx.chunks_meta:
@@ -530,7 +656,7 @@ class ExtractStage(Stage):
         records: list[dict[str, Any]],
     ) -> None:
         if not isinstance(relations, list):
-            raise TypeError("EXTRACT поле relationships должно быть списком")
+            raise ExtractionModelError("EXTRACT поле relationships должно быть списком")
         known: set[str] = set()
         for record in records:
             for key in ("tag_id", "canonical", "canonical_name", "name"):
@@ -539,13 +665,13 @@ class ExtractStage(Stage):
                     known.add(_identity_key(value))
         for relation in relations:
             if not isinstance(relation, dict):
-                raise TypeError("EXTRACT relationship должен быть объектом")
+                raise ExtractionModelError("EXTRACT relationship должен быть объектом")
             source = relation.get("from") or relation.get("from_id")
             target = relation.get("to") or relation.get("to_id")
             if not isinstance(source, str) or not source or not isinstance(target, str) or not target:
-                raise ValueError("relationship должен содержать from и to")
+                raise ExtractionModelError("relationship должен содержать from и to")
             if _identity_key(source) not in known or _identity_key(target) not in known:
-                raise ValueError("relationship ссылается на неизвестную сущность")
+                raise ExtractionModelError("relationship ссылается на неизвестную сущность")
 
     def _extract_deterministic(self, ctx: PipelineContext) -> None:
         seen: dict[str, dict[str, Any]] = {}
@@ -620,6 +746,19 @@ class NormalizeStage(Stage):
                 elif previous != entity_id:
                     mapping[key] = ""
                     ambiguous_aliases.add(key)
+        # L3-02: неоднозначные варианты не объединяются молча — алиасы для них
+        # подавлены выше. Но «не молча» про слияние, а не про наблюдаемость: без
+        # этого счётчика нельзя отличить документ без неоднозначности от документа,
+        # где их были десятки и молча выбросили. UNIQUE-constraint этого не даст —
+        # он умеет только слить или отвергнуть (ADR-031 §4).
+        ctx.ambiguous_aliases = len(ambiguous_aliases)
+        if ctx.ambiguous_aliases:
+            _log.warning(
+                "NORMALIZE: неоднозначные ключи не объединены (L3-02): ключей=%d, "
+                "алиасы для них подавлены, источник=%s",
+                ctx.ambiguous_aliases,
+                ctx.source_url,
+            )
         for edge in ctx.entity_edges:
             if edge.get("from_id") is not None or edge.get("to_id") is not None:
                 continue

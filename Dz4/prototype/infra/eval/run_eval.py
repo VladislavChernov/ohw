@@ -521,16 +521,45 @@ def wait_jobs(
     return statuses
 
 
-def _parse_enrichment_degradation(job: dict[str, Any]) -> tuple[bool, str | None, bool]:
-    """Достать признаки деградации и потери LLM-слоя из ответа джобы.
+def _int_field(source: dict[str, Any], name: str) -> int:
+    """Целое из структурного поля; отсутствие/мусор — ноль, а не исключение.
 
-    Возвращает тройку `(деградация, причина, слой_потерян)`.
+    Отчёт о прогоне не должен падать из-за одного нечитаемого значения: тогда вместо
+    данных о потере получается стоп-слово «ошибка чтения отчёта», а потеря как раз
+    требовала внимания.
+    """
+    try:
+        return int(source.get(name) or 0)
+    except (TypeError, ValueError):
+        return 0
 
-    **Флаги читаются из поля `signals`, а не из текста `message`.** Оба сразу, одним
-    каналом: если деградация приходит текстом, а потеря полем, у потребителя два
+
+def _extraction_stage_ran(job: dict[str, Any]) -> bool:
+    """Выполнялась ли стадия EXTRACT у этой джобы.
+
+    Независимый свидетель, а не счётчик: `job_stages` — журнал фактического
+    прохождения стадий, тогда как объём записей живёт в `enrichment`. Два источника
+    нужны именно потому, что независимы: сломавшийся счётчик не исчезнет из знаменателя,
+    и дыра в одном станет видна по расхождению с другим.
+    """
+    for entry in job.get("stages") or []:
+        if isinstance(entry, dict) and entry.get("stage") == "EXTRACT":
+            return True
+    return False
+
+
+def _parse_enrichment_degradation(
+    job: dict[str, Any],
+) -> tuple[bool, str | None, bool, dict[str, Any]]:
+    """Достать признаки деградации, потери LLM-слоя и количественные факты.
+
+    Возвращает `(деградация, причина, слой_потерян, факты)`.
+
+    **Флаги читаются из поля `signals`, а числа — из поля `enrichment`.** Оба канала
+    структурные: если деградация приходит текстом, а потеря полем, у потребителя два
     механизма, а объяснение «почему так» становится историческим вместо замысла.
-    Причина деградации — свободный текст, и сообщение стадии остаётся её единственным
-    местом; это текст, но не источник счётчиков.
+    Причина деградации остаётся свободным текстом, и это текст, но не источник
+    счётчиков.
 
     **Зачем два флага.** `enrichment_degraded` ставится в двух местах с противоположным
     смыслом: профиль домена не загрузился (ничего не потеряно — LLM-слой и не пытались
@@ -538,15 +567,16 @@ def _parse_enrichment_degradation(job: dict[str, Any]) -> tuple[bool, str | None
     Сумма этих двух в одном счётчике неинтерпретируема: высокое число может означать
     нулевую потерю.
 
-    **Точность определения — верхняя граница, а не точная величина.** `llm_layer_dropped`
-    означает «путь сброса отработал», а не «потеряно ровно столько-то»: исключение может
-    выстрелить до того, как модель что-то вернула, и тогда терять нечего, а сигнал есть.
-    Ошибка в безопасную сторону (подталкивает смотреть внимательнее), но при сравнении двух
-    величин их нельзя считать одного смысла. Для точной величины пришлось бы сохранять
-    состояние слоя до сброса — это отдельная работа, и пока она не нужна.
+    **`llm_layer_dropped` теперь означает ровно «факты исчезли», а не «сработал путь
+    сброса».** Сброс до первого ответа модели терять нечего, и раньше такой документ
+    попадал в счётчик потерь, завышая его. Размер потери приходит отдельными числами
+    (`lost_entities`/`lost_edges`), потому что флаг отвечает на вопрос «было ли что
+    терять», а для решения «сколько» нужен размер.
     """
     signals = job.get("signals")
     flags = signals if isinstance(signals, dict) else {}
+    enrichment = job.get("enrichment")
+    facts = enrichment if isinstance(enrichment, dict) else {}
     reason: str | None = None
     for entry in job.get("stages") or []:
         if not isinstance(entry, dict) or entry.get("stage") != "EXTRACT":
@@ -559,6 +589,13 @@ def _parse_enrichment_degradation(job: dict[str, Any]) -> tuple[bool, str | None
         bool(flags.get(ENRICHMENT_DEGRADED_SIGNAL)),
         reason,
         bool(flags.get(LLM_LAYER_DROPPED_SIGNAL)),
+        {
+            "cause": str(facts["cause"]) if facts.get("cause") else None,
+            "lost_entities": _int_field(facts, "lost_entities"),
+            "lost_edges": _int_field(facts, "lost_edges"),
+            "llm_records": _int_field(facts, "llm_records"),
+            "llm_edges": _int_field(facts, "llm_edges"),
+        },
     )
 
 
@@ -578,7 +615,8 @@ def build_ingest_report(
         status = str(job.get("status", "unknown"))
         stage = job.get("stage")
         is_noop = status == "succeeded" and stage == "INGEST"
-        degraded, degradation_error, layer_dropped = _parse_enrichment_degradation(job)
+        degraded, degradation_error, layer_dropped, facts = _parse_enrichment_degradation(job)
+        extraction_ran = _extraction_stage_ran(job)
         documents.append(
             {
                 "source_url": record["source_url"],
@@ -591,7 +629,17 @@ def build_ingest_report(
                 "error": job.get("error"),
                 "enrichment_degraded": degraded,
                 "enrichment_error": degradation_error,
+                "enrichment_cause": facts["cause"],
                 "llm_layer_dropped": layer_dropped,
+                # Свидетель: EXTRACT фактически выполнялся. Отдельно от `llm_layer_dropped`
+                # и `records`, потому что «стадия не запускалась» (no-op тёплого корпуса) —
+                # законное объяснение нуля, а «стадия была, а записей ноль» — повод
+                # смотреть, а не вывод.
+                "extraction_stage_ran": extraction_ran,
+                "llm_records_extracted": facts["llm_records"],
+                "llm_edges_extracted": facts["llm_edges"],
+                "llm_layer_lost_entities": facts["lost_entities"],
+                "llm_layer_lost_edges": facts["lost_edges"],
                 "wall_time_s": round(float(record.get("waited_s") or 0.0), 2),
                 "seconds_per_kb": (
                     round(float(record["waited_s"]) / max(record["bytes"] / 1024.0, 0.001), 2)
@@ -602,6 +650,13 @@ def build_ingest_report(
         )
     cold = [d["wall_time_s"] for d in documents if not d["noop"]]
     noop = [d["wall_time_s"] for d in documents if d["noop"]]
+    extraction_docs = [d for d in documents if d["extraction_stage_ran"]]
+    llm_records_total = sum(d["llm_records_extracted"] for d in extraction_docs)
+    causes: dict[str, int] = {}
+    for doc in documents:
+        cause = doc["enrichment_cause"]
+        if cause:
+            causes[cause] = causes.get(cause, 0) + 1
     return {
         "documents_total": len(documents),
         "noop_documents": len(noop),
@@ -613,6 +668,30 @@ def build_ingest_report(
         # целиком. Без этого числа деградацию нельзя читать как потерю — см.
         # `_parse_enrichment_degradation`.
         "llm_layer_dropped_documents": sum(1 for d in documents if d["llm_layer_dropped"]),
+        # Сколько ФАКТОВ исчезло, а не сколько документов пострадало. Первое — величина
+        # потери для планирования, второе — частота. Одно без другого неинтерпретируемо:
+        # «2 документа» ничего не говорит о том, потеряны две записи или две тысячи.
+        "llm_layer_lost_entities": sum(d["llm_layer_lost_entities"] for d in documents),
+        "llm_layer_lost_edges": sum(d["llm_layer_lost_edges"] for d in documents),
+        # Причины разведены поимённо: чинить профиль, промпт и модель — разные работы.
+        "enrichment_causes": causes,
+        # Знаменатель — документы, где экстракция ФАКТИЧЕСКИ выполнялась. Считать по
+        # всем документам нельзя: у части EXTRACT не запускался (no-op тёплого корпуса,
+        # детерминированный путь), и их нулевой вклад выглядел бы как «модель вернула
+        # ноль», то есть как поломка.
+        "documents_with_extraction_stage": len(extraction_docs),
+        "llm_records_extracted": llm_records_total,
+        # Место, где счётчик может сломаться: стадия была, а записей ноль. Само по себе
+        # не приговор — модель действительно могла ничего не найти, — но такой документ
+        # обязателен для ручной проверки, и поэтому назван числом, а не спрятан.
+        "documents_with_extraction_stage_without_records": sum(
+            1 for d in extraction_docs if not d["llm_records_extracted"]
+        ),
+        # Доля НЕ выводится при нулевом знаменателе: `0%` на пустой базе читается как
+        # «модель не работает», хотя правильный смысл — «нечего было измерять».
+        "llm_records_per_extraction_document": (
+            round(llm_records_total / len(extraction_docs), 2) if extraction_docs else None
+        ),
         "total_wall_time_s": round(sum(d["wall_time_s"] for d in documents), 2),
         "cold_wall_time_sum_s": round(sum(cold), 2),
         "noop_wall_time_sum_s": round(sum(noop), 2),
@@ -1373,6 +1452,19 @@ def write_qa_review(results: list[dict[str, Any]], out_dir: Path) -> Path:
     return path
 
 
+def _format_causes(causes: dict[str, int]) -> str:
+    """Гистограмма причин поимённо, отсортированная по частоте.
+
+    Порядок по частоте, а не по алфавиту: первым читается то, что чинить в первую
+    очередь, а не то, что первым попалось в словарь.
+    """
+    if not causes:
+        return "нет"
+    return ", ".join(
+        f"{name}={count}" for name, count in sorted(causes.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+
+
 def write_passport(
     manifest: dict[str, Any],
     report: dict[str, Any] | None,
@@ -1390,6 +1482,9 @@ def write_passport(
     gc = target.get("graph_contribution") or {}
     degraded = int((ingest or {}).get("enrichment_degraded_documents") or 0)
     dropped = int((ingest or {}).get("llm_layer_dropped_documents") or 0)
+    lost_entities = int((ingest or {}).get("llm_layer_lost_entities") or 0)
+    lost_edges = int((ingest or {}).get("llm_layer_lost_edges") or 0)
+    causes = (ingest or {}).get("enrichment_causes") or {}
 
     lines = [
         "# Паспорт прогона",
@@ -1482,10 +1577,26 @@ def write_passport(
                 if dropped
                 else "- документов, потерявших LLM-слой целиком: 0  "
             ),
+            (
+                f"- записей сущностей потеряно: {lost_entities} (рёбер: {lost_edges})  "
+                if dropped
+                else "- записей сущностей потеряно: 0 (рёбер: 0)  "
+            ),
             "",
             (
                 "Попер-документные времена — в `ingest_report.json`; по ним оценивается "
                 "стоимость полного корпуса (она зависит от размера документа, а не от числа)."
+            ),
+        ]
+    if degraded:
+        # Причины разведены поимённо: чинить профиль, промпт и модель — разные работы,
+        # и «деградация 40» как одно число не говорит ни о какой из них.
+        lines += [
+            "",
+            (
+                f"- причины деградации: {_format_causes(causes)}  "
+                if causes
+                else "- причины деградации: не классифицированы  "
             ),
         ]
     if dropped:
@@ -1497,10 +1608,12 @@ def write_passport(
         lines += [
             "",
             (
-                f"> ⚠️ **{dropped} документов потеряли LLM-слой целиком** (счётчик деградации: "
-                f"{degraded}, из них с потерей слоя: {dropped}). Метрики графовой оси по ним — "
+                f"> ⚠️ **{dropped} документов потеряли LLM-слой целиком** "
+                f"({lost_entities} записей сущностей и {lost_edges} рёбер исчезли; "
+                f"счётчик деградации: {degraded}). Метрики графовой оси по ним — "
                 "нижняя граница, а не измерение. Причины — в `ingest_report.json` "
-                "(`enrichment_error`), в логах ingestion-service (сообщение стадии `EXTRACT`). "
+                "(`enrichment_cause`, `enrichment_error`), в логах ingestion-service "
+                "(сообщение стадии `EXTRACT`). "
                 "Гранулярность сброса слоя — открытый вопрос, см. ADR-032; для "
                 "проектирования реального ingest поведение неприемлемо, потеря необратима "
                 "(повторная загрузка того же `content_hash` — no-op)."

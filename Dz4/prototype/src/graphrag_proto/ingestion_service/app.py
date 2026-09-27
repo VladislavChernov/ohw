@@ -62,6 +62,22 @@ ALLOWED_DOC_TYPES = {"txt", "md", "pdf"}
 # общается с сервисом по HTTP. Деградация иначе неотличима от успеха: джоба
 # остаётся `succeeded`, просто рёбер и фактов в графе меньше.
 ENRICHMENT_DEGRADED_PREFIX = "enrichment_degraded"
+# Имена структурных сигналов в ответе джобы (`job["signals"]`). Один канал на оба
+# факта: «документ обработан хуже» и «LLM-слой потерян». Именно они, а не текст
+# сообщения, являются источником данных для счётчиков: тихий ноль в метрике потерь
+# опаснее, чем её отсутствие, а один флаг полем и другой текстом означают два
+# механизма у потребителя.
+ENRICHMENT_DEGRADED_SIGNAL = "enrichment_degraded"
+# Суффикс к сообщению деградации, когда LLM-слой потерян ЦЕЛИКОМ, а не просто
+# обработан хуже. Отдельное имя, потому что `enrichment_degraded` ставится в двух
+# местах с противоположным смыслом: профиль не загрузился (ничего не потеряно) и
+# исключение в экстракции (потерян весь слой). Одна метка на оба факта не
+# интерпретируется: счётчик может показать высокую деградацию при нулевой потере.
+LLM_LAYER_DROPPED_MARKER = "[llm_layer_dropped]"
+# Имя структурного сигнала в ответе джобы (`job["signals"]`). Именно он, а не текст
+# сообщения, является источником данных для счётчика потерь: тихий ноль в метрике
+# потерь опаснее, чем её отсутствие.
+LLM_LAYER_DROPPED_SIGNAL = "llm_layer_dropped"
 
 
 def _upload_dir() -> Path:
@@ -214,9 +230,35 @@ class Executor:
                 self._analyzer.run_one(stage_name, ctx)
                 if stage_name == "INGEST":
                     self._analyzer.try_noop(ctx)
+                if stage_name == "EXTRACT":
+                    # Факты об объёме пишутся на КАЖДОЙ джобе, прошедшей EXTRACT, а не
+                    # только при деградации: объём LLM-слоя — это знаменатель для
+                    # «записей на документ», и без него доля считается по документам,
+                    # где экстракция не запускалась вовсе.
+                    self._jobs.record_enrichment(
+                        job_id,
+                        cause=ctx.enrichment_cause,
+                        lost_entities=ctx.llm_layer_lost_entities,
+                        lost_edges=ctx.llm_layer_lost_edges,
+                        llm_records=ctx.llm_records,
+                        llm_edges=ctx.llm_edges,
+                    )
                 if ctx.enrichment_degraded:
+                    # Оба факта идут ОДНИМ каналом — полем `signals`. Канал заводится
+                    # один раз на оба флага: если один придёт полем, а другой текстом,
+                    # у потребителя будет два механизма, а объяснение «почему так»
+                    # станет историческим вместо замысла.
+                    self._jobs.set_signal(job_id, stage_name, ENRICHMENT_DEGRADED_SIGNAL)
+                    if ctx.llm_layer_dropped:
+                        self._jobs.set_signal(job_id, stage_name, LLM_LAYER_DROPPED_SIGNAL)
+                    # Сообщение остаётся человекочитаемой пометкой и несёт ПРИЧИНУ,
+                    # которой больше негде жить. Источником данных не является: рефакторинг
+                    # формата не должен обнулять счётчики.
+                    dropped = f" {LLM_LAYER_DROPPED_MARKER}" if ctx.llm_layer_dropped else ""
                     self._jobs.note_stage(
-                        job_id, stage_name, f"{ENRICHMENT_DEGRADED_PREFIX}: {ctx.enrichment_error}"
+                        job_id,
+                        stage_name,
+                        f"{ENRICHMENT_DEGRADED_PREFIX}: {ctx.enrichment_error}{dropped}",
                     )
             self._jobs.finish(job_id, "succeeded")
         except Exception as exc:  # noqa: BLE001 - разнородные источники сбоев этапов
@@ -335,6 +377,13 @@ def create_app(
         if not job:
             raise HTTPException(status_code=404, detail=f"джоба {job_id} не найдена")
         job["stages"] = jobs.stages(job_id)
+        # Структурные сигналы (например, потеря LLM-слоя) отдельным полем: consumer
+        # не должен разбирать `message`, чтобы получить число.
+        job["signals"] = jobs.signals(job_id)
+        # Количественные факты обогащения — тот же принцип, но числа: сколько записей
+        # исчезло и сколько модель вернула. Флаг без размера потери отвечает на вопрос
+        # «было ли что терять», а не «сколько».
+        job["enrichment"] = jobs.enrichment(job_id)
         return job
 
     @app.delete("/api/v1/ingestion/jobs/{job_id}", dependencies=[Depends(require_key)])

@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from graphrag_proto.ingestion_service.app import create_app
@@ -345,6 +346,93 @@ def test_executor_loads_profile_once_per_job(tmp_path: Path) -> None:
     assert calls == ["it"]
 
 
+def test_executor_reports_enrichment_cause_and_loss_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Причина и размер потери доезжают до ответа джобы числами, а не текстом.
+
+    Сквозная проверка ровно того, о чём бьют два соседних теста по отдельности:
+    факты записыются в стадии EXTRACT, отдаются полем `enrichment` и при этом НЕ
+    зависят от текста сообщения. Проверяется на реальном исполнителе, потому что
+    потеря случается на пайплайне, а не в резолвере.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    from graphrag_proto.ingestion_service.app import Executor
+    from graphrag_proto.retrieval.adapters.llm import FakeLLM
+
+    jobs = JobStore(tmp_path / "enr.db")
+    registry = DocumentRegistry(tmp_path / "enr-registry.db")
+    source = tmp_path / "d.txt"
+    source.write_text(
+        "требование индексировать документы дедупликация документов", encoding="utf-8"
+    )
+    executor = Executor(
+        jobs,
+        registry,
+        glossary_url="",
+        graph_store=InMemoryGraphStore(),
+        vector_store=InMemoryVectorStore(),
+        llm=FakeLLM(text="not-json", is_fake=False),
+        profile_fetcher=lambda _domain: _ai_extraction_profile(),
+    )
+    jobs.create("job", "src://d.txt", "it", "txt")
+    assert executor.start("job", source, "src://d.txt", "it", "txt") is True
+    assert wait_until(lambda: jobs.get("job")["status"] == "succeeded")
+
+    job = jobs.get("job")
+    facts = jobs.enrichment("job")
+    assert job["status"] == "succeeded"
+    assert facts["cause"] == "model_error"
+    # модель не вернула ни одной записи → терять нечего → потери нет
+    assert facts["lost_entities"] == 0
+    assert "llm_layer_dropped" not in jobs.signals("job")
+
+
+def test_executor_reports_enrichment_for_healthy_job_as_denominator(tmp_path: Path) -> None:
+    """Здоровый документ тоже пишет факты — иначе знаменателя не существует.
+
+    Доля «записей на документ» считается по джобам, где EXTRACT дошёл. Если писать
+    объём только при сбое, знаменатель состоял бы ровно из отказавших документов, и
+    улучшение выглядело бы как ухудшение.
+    """
+    from graphrag_proto.ingestion_service.app import Executor
+
+    jobs = JobStore(tmp_path / "ok.db")
+    registry = DocumentRegistry(tmp_path / "ok-registry.db")
+    source = tmp_path / "d.txt"
+    source.write_text("алгоритм quicksort дедупликация алгоритм", encoding="utf-8")
+    executor = Executor(
+        jobs,
+        registry,
+        glossary_url="",
+        graph_store=InMemoryGraphStore(),
+        vector_store=InMemoryVectorStore(),
+    )
+    jobs.create("job", "src://d.txt", "it", "txt")
+    assert executor.start("job", source, "src://d.txt", "it", "txt") is True
+    assert wait_until(lambda: jobs.get("job")["status"] == "succeeded")
+
+    facts = jobs.enrichment("job")
+    # детерминированный путь: LLM не запускался, слой не потерян, объём LLM — ноль
+    assert facts == {
+        "cause": None,
+        "lost_entities": 0,
+        "lost_edges": 0,
+        "llm_records": 0,
+        "llm_edges": 0,
+    }
+
+
+def _ai_extraction_profile() -> dict[str, object]:
+    return {
+        "chunking": {"strategy": "sliding_window", "chunk_size": 512, "overlap": 64},
+        "extraction": {
+            "llm_enabled": True,
+            "prompt_template": {"system": "s", "user": "u"},
+        },
+    }
+
+
 def test_executor_preserves_legacy_positional_max_concurrent(tmp_path: Path) -> None:
     from graphrag_proto.ingestion_service.app import Executor
 
@@ -382,7 +470,7 @@ def test_post_when_executor_saturated_returns_429(tmp_path: Path, monkeypatch) -
     assert jobs["items"][0]["status"] == "failed"
 
 
-def test_runner_normしalize_without_glossary_keeps_entities(tmp_path: Path) -> None:
+def test_runner_normalize_without_glossary_keeps_entities(tmp_path: Path) -> None:
     """Без Glossary URL этап NORMALIZE оставляет entity name как canonical."""
     from graphrag_proto.ingestion_service.pipeline.orchestrator import (
         Analyzer,
@@ -454,3 +542,92 @@ def test_note_stage_records_message_without_touching_status(tmp_path: Path) -> N
     extract = next(s for s in after if s["stage"] == "EXTRACT")
     assert extract["message"] == "enrichment_degraded: glossary 503"
     assert jobs.get(job_id)["status"] == "succeeded"
+
+
+def test_job_signals_are_structural_and_independent_of_message(tmp_path: Path) -> None:
+    """Флаги джобы — поле, а не текст: канал один на оба факта.
+
+    Причина в том, что счётчик потерь строится на этом поле: если бы флаг читался из
+    `message`, одна рефакторинга формата тихо дала бы ноль, а «мы никогда не теряем
+    слой» выглядело бы как хорошая новость.
+    """
+    jobs = JobStore(tmp_path / "signals.db")
+    jobs.create("job-1", source_url="src://a.txt", domain="it", doc_type="txt")
+    jobs.update_stage("job-1", "EXTRACT")
+    jobs.set_signal("job-1", "EXTRACT", "enrichment_degraded")
+    jobs.set_signal("job-1", "EXTRACT", "llm_layer_dropped")
+    jobs.note_stage("job-1", "EXTRACT", "enrichment_degraded: relation unknown")
+
+    assert jobs.signals("job-1") == {
+        "enrichment_degraded": "EXTRACT",
+        "llm_layer_dropped": "EXTRACT",
+    }
+
+    # текст стадии может быть полностью переформатирован — сигналы это переживают
+    jobs.note_stage("job-1", "EXTRACT", "DEGRADED v2: relation unknown")
+    assert jobs.signals("job-1") == {
+        "enrichment_degraded": "EXTRACT",
+        "llm_layer_dropped": "EXTRACT",
+    }
+    assert jobs.stages("job-1")[0]["message"] == "DEGRADED v2: relation unknown"
+
+    # отсутствие сигнала — отсутствие ключа, а не «false» из разбора текста
+    jobs.create("job-2", source_url="src://b.txt", domain="it", doc_type="txt")
+    jobs.update_stage("job-2", "EXTRACT")
+    jobs.note_stage("job-2", "EXTRACT", "enrichment_degraded: relation unknown")
+    assert jobs.signals("job-2") == {}
+
+
+def test_job_enrichment_carries_counts_not_just_a_flag(tmp_path: Path) -> None:
+    """Размер потери — число в own-канале, а не вывод из текста сообщения.
+
+    Флаг отвечает на вопрос «было ли что терять», число — «сколько». Метрика «сколько
+    фактов исчезло» строится именно на числе: из флага получается только частота, а из
+    частоты нельзя понять, дорога ли починка.
+    """
+    jobs = JobStore(tmp_path / "enrichment.db")
+    jobs.create("job-1", source_url="src://a.txt", domain="it", doc_type="txt")
+    jobs.record_enrichment(
+        "job-1",
+        cause="model_error",
+        lost_entities=77,
+        lost_edges=12,
+        llm_records=77,
+        llm_edges=12,
+    )
+
+    facts = jobs.enrichment("job-1")
+    assert facts == {
+        "cause": "model_error",
+        "lost_entities": 77,
+        "lost_edges": 12,
+        "llm_records": 77,
+        "llm_edges": 12,
+    }
+
+    # джоба без записанных фактов — пустой словарь, а не нули с выдуманной причиной
+    jobs.create("job-2", source_url="src://b.txt", domain="it", doc_type="txt")
+    assert jobs.enrichment("job-2") == {}
+
+
+def test_job_enrichment_is_written_even_without_degradation(tmp_path: Path) -> None:
+    """Факты пишутся на каждой джобе, прошедшей EXTRACT, а не только при сбое.
+
+    Объём LLM-слоя — знаменатель для «записей на документ». Если писать его только при
+    деградации, то в знаменателе окажутся ровно те документы, где сломалось, и доля
+    посчитается по подмножеству неудач — то есть покажет улучшение там, где стало хуже.
+    """
+    jobs = JobStore(tmp_path / "volume.db")
+    jobs.create("job-1", source_url="src://a.txt", domain="it", doc_type="txt")
+    jobs.record_enrichment(
+        "job-1",
+        cause=None,
+        lost_entities=0,
+        lost_edges=0,
+        llm_records=31,
+        llm_edges=5,
+    )
+
+    facts = jobs.enrichment("job-1")
+    assert facts["cause"] is None
+    assert facts["llm_records"] == 31

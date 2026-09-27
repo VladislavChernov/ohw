@@ -272,6 +272,44 @@ class JobStore:
             "PRIMARY KEY (job_id, stage)"
             ")"
         )
+        # Структурные сигналы джобы — отдельная таблица, а НЕ текст в `job_stages.message`.
+        # Причина: число, на котором строится решение, не должно зависеть от разбора
+        # сообщения. Одна рефакторинга формата — и метрика потерь молча читает ноль, а
+        # «мы никогда не теряем слой» выглядит как хорошая новость. Тихий ноль в метрике
+        # потерь — худший вид поломки, он не выглядит как поломка.
+        #
+        # Новая таблица, а не колонка в `job_stages`: `CREATE TABLE IF NOT EXISTS` создаёт
+        # её на существующих базах без миграции, тогда как добавление колонки потребовало бы
+        # ALTER TABLE на каждой развёрнутой базе.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_signals ("
+            "job_id TEXT NOT NULL, "
+            "stage TEXT NOT NULL, "
+            "name TEXT NOT NULL, "
+            "ts TEXT NOT NULL, "
+            "PRIMARY KEY (job_id, stage, name)"
+            ")"
+        )
+        # ЧИСЛОВЫЕ факты обогащения: причина и объёмы. Флагов здесь нет намеренно —
+        # «деградация» и «слой потерян» уже живут в `job_signals`, и вторая копия
+        # означала бы два источника для одного факта: они разъедутся, и потребитель
+        # будет читать не тот, что сработал. Здесь только то, чего у флагов нет: сколько
+        # именно исчезло и сколько модель вернула.
+        #
+        # Отдельная таблица, а не колонка в `job_stages`: `CREATE TABLE IF NOT EXISTS`
+        # создаёт её на существующих базах без миграции, тогда как добавление колонки
+        # потребовало бы ALTER TABLE на каждой развёрнутой базе.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_enrichment ("
+            "job_id TEXT PRIMARY KEY, "
+            "cause TEXT, "
+            "lost_entities INTEGER NOT NULL DEFAULT 0, "
+            "lost_edges INTEGER NOT NULL DEFAULT 0, "
+            "llm_records INTEGER NOT NULL DEFAULT 0, "
+            "llm_edges INTEGER NOT NULL DEFAULT 0, "
+            "ts TEXT NOT NULL"
+            ")"
+        )
         self._conn.commit()
 
     def close(self) -> None:
@@ -425,6 +463,84 @@ class JobStore:
                 (message, job_id, stage),
             )
             self._conn.commit()
+
+    def set_signal(self, job_id: str, stage: str, name: str) -> None:
+        """Отметить структурный сигнал джобы (например, потерю LLM-слоя).
+
+        Сигнал — машинное поле, а не текст. Consumer читает его без разбора
+        `message`, поэтому формат сообщения можно менять свободно.
+        """
+        from datetime import datetime
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_signals (job_id, stage, name, ts) "
+                "VALUES (?, ?, ?, ?)",
+                (job_id, stage, name, datetime.now(UTC).isoformat(timespec="seconds")),
+            )
+            self._conn.commit()
+
+    def signals(self, job_id: str) -> dict[str, str]:
+        """Сигналы джобы как ``{имя: стадия}``; отсутствие сигнала — отсутствие ключа."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, stage FROM job_signals WHERE job_id=? ORDER BY ts",
+                (job_id,),
+            ).fetchall()
+        return {str(name): str(stage) for name, stage in rows}
+
+    def record_enrichment(
+        self,
+        job_id: str,
+        *,
+        cause: str | None,
+        lost_entities: int,
+        lost_edges: int,
+        llm_records: int,
+        llm_edges: int,
+    ) -> None:
+        """Записать числовые факты обогащения джобы (одна строка на джобу).
+
+        Пишется и для недеградировавшей джобы: объём LLM-слоя нужен как
+        ЗНАМЕНАТЕЛЬ. Считать «записи на документ, где экстракция вообще не
+        запускалась» — значит приписать детерминированному fallback то, что сделала
+        модель, либо приписать модели то, что сделал fallback.
+        """
+        from datetime import datetime
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_enrichment (job_id, cause, lost_entities, "
+                "lost_edges, llm_records, llm_edges, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    cause,
+                    int(lost_entities),
+                    int(lost_edges),
+                    int(llm_records),
+                    int(llm_edges),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def enrichment(self, job_id: str) -> dict[str, Any]:
+        """Числовые факты обогащения; ``{}`` — их не было (EXTRACT не дошёл до записи)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT cause, lost_entities, lost_edges, llm_records, llm_edges "
+                "FROM job_enrichment WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return {}
+        return {
+            "cause": row[0],
+            "lost_entities": int(row[1]),
+            "lost_edges": int(row[2]),
+            "llm_records": int(row[3]),
+            "llm_edges": int(row[4]),
+        }
 
     def stages(self, job_id: str) -> builtins.list[dict[str, Any]]:
         with self._lock:

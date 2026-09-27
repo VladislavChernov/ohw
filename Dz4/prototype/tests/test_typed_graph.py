@@ -10,12 +10,16 @@ import pytest
 
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
+    CAUSE_MODEL_ERROR,
+    CAUSE_PROFILE_INVALID,
+    CAUSE_PROFILE_UNAVAILABLE,
     Analyzer,
     ChunkStage,
     CommitStage,
     ContractStage,
     DedupStage,
     EmbedStage,
+    ExtractionModelError,
     ExtractStage,
     IngestStage,
     NormalizeStage,
@@ -167,6 +171,28 @@ class _RecordingLLM(FakeLLM):
         yield from self._deltas
 
 
+class _PerChunkLLM:
+    """LLM, отвечающий своим текстом на каждый вызов по порядку.
+
+    Нужен, чтобы отказ пришёлся на ВТОРОЙ чанк: потеря видна только там, где записи
+    первого чанка уже попали в контекст. Отказ на первом чанке не теряет ничего, и на
+    нём флаг потери обязан остаться пустым.
+    """
+
+    is_fake = False
+
+    def __init__(self, texts: list[str]) -> None:
+        self._texts = list(texts)
+        self.calls = 0
+
+    def generate(self, prompt: str, system: str = "", stream: bool = True) -> Any:
+        index = self.calls
+        self.calls += 1
+        if index >= len(self._texts):
+            raise AssertionError(f"LLM вызван {self.calls} раз, а ответов заготовлено {len(self._texts)}")
+        yield self._texts[index]
+
+
 class _NoSchemaGraph(InMemoryGraphStore):
     def ensure_schema(self, node_types: list[dict[str, Any]]) -> None:
         raise AssertionError("runtime ingest must not provision ontology schema")
@@ -206,10 +232,14 @@ def test_extract_llm_produces_generic_context_nodes_and_edge(
     ).run(ctx)
 
     assert {entity["type"] for entity in ctx.entities} == {"ContextNode"}
-    assert {entity["tag_id"] for entity in ctx.entities} == {
-        "tag:it:requirement",
-        "tag:it:indexing",
+    # Идентичности на этом шаге ещё нет: её считает NORMALIZE из canonical_name.
+    # `tag_id` из ответа модели не принимается (L1-05), поэтому сущности идут
+    # по содержимому, а не по тому, как модель их назвала.
+    assert {entity["canonical"] for entity in ctx.entities} == {
+        "требование",
+        "индексирование",
     }
+    assert all("tag_id" not in entity for entity in ctx.entities)
     assert all(entity["origin"] == "ai" for entity in ctx.entities)
     assert {entity["confidence"] for entity in ctx.entities} == {0.82, 0.76}
     assert all(entity["extractor_version"] == "llm:extract_context_v1" for entity in ctx.entities)
@@ -265,15 +295,22 @@ def test_normalize_reuses_domain_tag_id_for_resolved_alias(monkeypatch: Any) -> 
     assert {entity["tag_id"] for entity in ctx.entities} == {"tag:it:quicksort"}
 
 
-def test_context_edges_accept_tag_ids_and_preserve_ai_provenance(
+def test_context_edges_accept_canonical_addressing_and_preserve_ai_provenance(
     monkeypatch: Any,
 ) -> None:
+    """Связи адресуются именем из списка сущностей — как и велит промпт.
+
+    `domain_profile.it.yaml` требует: «в полях from/to указывай ТОЛЬКО canonical_name
+    сущностей из списков выше». Это единственная адресация, которая переживает
+    детерминированную идентичность (L1-05): концы связи резолвятся по именам
+    сущностей, а не по идентификаторам, которые модель не контролирует.
+    """
     monkeypatch.setenv("EXTRACT_LLM", "true")
     payload = deepcopy(_AI_CONTEXT)
     payload["links"] = [
         {
-            "from_id": "tag:it:requirement",
-            "to_id": "tag:it:indexing",
+            "from": "требование",
+            "to": "индексирование",
             "kind": "depends_on",
             "origin": "ai",
             "confidence": 0.73,
@@ -296,8 +333,8 @@ def test_context_edges_accept_tag_ids_and_preserve_ai_provenance(
 
     assert ctx.entity_edges == [
         {
-            "from_id": "tag:it:requirement",
-            "to_id": "tag:it:indexing",
+            "from": "требование",
+            "to": "индексирование",
             "kind": "depends_on",
             "origin": "ai",
             "confidence": 0.73,
@@ -305,6 +342,276 @@ def test_context_edges_accept_tag_ids_and_preserve_ai_provenance(
             "properties": {"weight": 0.9},
         }
     ]
+
+
+def test_context_edges_reject_model_invented_tag_id_addressing(
+    monkeypatch: Any,
+) -> None:
+    """Строгий режим: связь, адресованная модельным `tag_id`, отвергается явно.
+
+    Это НЕ продовый путь: прод собирает `ExtractStage(optional_failure=True)`
+    (`app.py`), и там поведение другое — см. следующий тест. Здесь зафиксирован
+    именно строгий режим, потому что он объясняет, откуда берётся
+    `ExtractionModelError`: негодный ответ модели — именованная ошибка модели, а не
+    `ValueError` «неизвестно что», потому что по этому типу решается, чинить ли промпт.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    payload = deepcopy(_AI_CONTEXT)
+    payload["links"] = [
+        {
+            "from_id": "tag:it:requirement",
+            "to_id": "tag:it:indexing",
+            "kind": "depends_on",
+        }
+    ]
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование индексировать документы"],
+    )
+
+    with pytest.raises(ExtractionModelError, match="неизвестную сущность"):
+        ExtractStage(
+            llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
+            profile_fetcher=lambda _domain: _ai_profile(),
+        ).run(ctx)
+
+
+def test_optional_failure_wipes_whole_ai_layer_not_one_edge(
+    monkeypatch: Any,
+) -> None:
+    """Продовый путь: одна нерезолвимая связь уничтожает весь LLM-слой документа.
+
+    Это не «отбросить ребро», а четвёртый, неназванный вариант гранулярности сброса,
+    и он существовал до запрета `tag_id`. Документ при этом остаётся успешным: статус
+    `succeeded`, AI-слоя нет, признак — `enrichment_degraded` с причиной.
+
+    Отказ сделан на ВТОРОМ чанке, чтобы потеря была измеримой: записи первого чанка к
+    этому моменту уже в контексте, и именно они исчезают. Отказ на первом чанке не
+    теряет ничего — это отдельный случай, и смешивать их в одном тесте нельзя, иначе
+    флаг «слой потерян» снова начнёт означать «сработал сброс».
+
+    Зафиксировано как факт, а не как желание: пока гранулярность не решена, запрет
+    `tag_id` делает этот путь заметно чаще. Решение — ADR-032.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    bad = deepcopy(_AI_CONTEXT)
+    bad["links"] = [
+        {
+            "from_id": "tag:it:requirement",
+            "to_id": "tag:it:indexing",
+            "kind": "depends_on",
+        }
+    ]
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование индексировать документы", "индексирование документов"],
+    )
+
+    ExtractStage(
+        llm=_PerChunkLLM(
+            [
+                json.dumps(deepcopy(_AI_CONTEXT), ensure_ascii=False),
+                json.dumps(bad, ensure_ascii=False),
+            ]
+        ),
+        profile_fetcher=lambda _domain: _ai_profile(),
+        optional_failure=True,
+    ).run(ctx)
+
+    assert ctx.enrichment_degraded is True
+    assert ctx.enrichment_cause == CAUSE_MODEL_ERROR
+    # Счётчик потери отвечает на вопрос «исчезли ли факты», а не «сработал ли сброс».
+    assert ctx.llm_layer_dropped is True
+    assert ctx.llm_layer_lost_entities == len(_AI_CONTEXT["tags"])
+    assert ctx.llm_layer_lost_edges == len(_AI_CONTEXT["links"])
+    assert "неизвестную сущность" in (ctx.enrichment_error or "")
+    # AI-слой ушёл целиком: остались только детерминированные сущности
+    assert ctx.entity_edges == []
+    assert ctx.entities
+    assert all(entity["origin"] != "ai" for entity in ctx.entities)
+
+
+def test_profile_failure_degrades_without_dropping_layer(
+    monkeypatch: Any,
+) -> None:
+    """Профиль не загрузился — это деградация БЕЗ потери слоя, и их нельзя смешивать.
+
+    Профиль читается до того, как LLM что-то построил, так что терять нечего: счётчик
+    «деградация» на этом пути растёт, а «слой потерян» обязан остаться нулевым. Иначе
+    отчёт показывает высокую деградацию при нулевой потере.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    payload = deepcopy(_AI_CONTEXT)
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование"],
+    )
+
+    ExtractStage(
+        llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: (_ for _ in ()).throw(RuntimeError("profile 503")),
+        optional_failure=True,
+    ).run(ctx)
+
+    assert ctx.enrichment_degraded is True
+    assert ctx.llm_layer_dropped is False
+
+
+def test_layer_loss_implies_degradation(monkeypatch: Any) -> None:
+    """Инвариант: потеря слоя всегда сопровождается деградацией.
+
+    Сейчас верно по построению, но никем не закреплено, и будущая правка могла бы
+    нарушить это молча — тогда метрика потерь росла бы при нуле деградаций, и разбор
+    пришлось бы начинать с этого. Проверяется на обоих путях: профиль не загрузился
+    (деградация без потери) и исключение в экстракции (потеря, всегда с деградацией).
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+
+    def _profile_fails(_domain: str) -> dict[str, Any]:
+        raise RuntimeError("profile 503")
+
+    ctx_profile = PipelineContext(
+        job_id="j1", domain="it", doc_type="txt", source_url="src://a.txt", chunks=["требование"]
+    )
+    ExtractStage(
+        llm=FakeLLM(text=json.dumps(deepcopy(_AI_CONTEXT), ensure_ascii=False), is_fake=False),
+        profile_fetcher=_profile_fails,
+        optional_failure=True,
+    ).run(ctx_profile)
+    assert ctx_profile.enrichment_degraded is True
+    assert ctx_profile.llm_layer_dropped is False
+    assert ctx_profile.enrichment_cause == CAUSE_PROFILE_UNAVAILABLE
+
+    bad = deepcopy(_AI_CONTEXT)
+    bad["links"] = [{"from_id": "tag:it:requirement", "to_id": "tag:it:indexing"}]
+    ctx_drop = PipelineContext(
+        job_id="j2",
+        domain="it",
+        doc_type="txt",
+        source_url="src://b.txt",
+        chunks=["требование", "индексирование"],
+    )
+    ExtractStage(
+        llm=_PerChunkLLM(
+            [
+                json.dumps(deepcopy(_AI_CONTEXT), ensure_ascii=False),
+                json.dumps(bad, ensure_ascii=False),
+            ]
+        ),
+        profile_fetcher=lambda _domain: _ai_profile(),
+        optional_failure=True,
+    ).run(ctx_drop)
+    assert ctx_drop.llm_layer_dropped is True
+    assert ctx_drop.enrichment_degraded is True
+
+
+def test_extraction_failure_before_any_record_is_degradation_without_loss(
+    monkeypatch: Any,
+) -> None:
+    """Сброс до первого ответа модели — деградация БЕЗ потери.
+
+    Отдельный случай, потому что «деградация» и «потеря» обязаны различаться, а сброс
+    срабатывает и там, где терять нечего. Если такие документы попадают в счётчик
+    потерь, он завышает потерю — и перестаёт быть пригодным для решения «сколько
+    стоит починка».
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    bad = deepcopy(_AI_CONTEXT)
+    bad["links"] = [{"from_id": "tag:it:requirement", "to_id": "tag:it:indexing"}]
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование"],
+    )
+
+    ExtractStage(
+        llm=FakeLLM(text=json.dumps(bad, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: _ai_profile(),
+        optional_failure=True,
+    ).run(ctx)
+
+    assert ctx.enrichment_degraded is True
+    assert ctx.enrichment_cause == CAUSE_MODEL_ERROR
+    assert ctx.llm_layer_dropped is False
+    assert ctx.llm_layer_lost_entities == 0
+    assert ctx.llm_layer_lost_edges == 0
+    assert ctx.llm_records == 0
+
+
+def test_invalid_profile_is_reported_as_config_not_as_model(monkeypatch: Any) -> None:
+    """Негодный профиль — это наш конфиг, а не сбой модели.
+
+    Раньше такое приходило как `TypeError` из резолвера, и широкий `except Exception`
+    записывал его тем же счётчиком, что и сбой модели. Чинить их надо по-разному:
+    конфиг — в репозитории, модель — у провайдера.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    profile = _ai_profile()
+    del profile["extraction"]["prompt_template"]["user"]
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование"],
+    )
+
+    ExtractStage(
+        llm=FakeLLM(text=json.dumps(deepcopy(_AI_CONTEXT), ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: profile,
+        optional_failure=True,
+    ).run(ctx)
+
+    assert ctx.enrichment_degraded is True
+    assert ctx.enrichment_cause == CAUSE_PROFILE_INVALID
+    assert ctx.llm_layer_dropped is False
+
+
+def test_our_own_defect_in_extraction_is_not_reported_as_degradation(
+    monkeypatch: Any,
+) -> None:
+    """Дефект нашего кода обязан упасть, а не выглядеть как «модель не справилась».
+
+    Широкий `except Exception` превращал любой наш баг в тихую деградацию: документ
+    уходил без AI-слоя, счётчик показывал «модель», а расследование уходило к
+    провайдеру вместо нашего кода. Ловится ровно два типа — негодный конфиг и сбой
+    модели; всё остальное пробрасывается.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+
+    def _our_bug(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise AttributeError("наш баг в резолве")
+
+    monkeypatch.setattr(
+        "graphrag_proto.ingestion_service.pipeline.orchestrator._entity_record", _our_bug
+    )
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование"],
+    )
+
+    with pytest.raises(AttributeError):
+        ExtractStage(
+            llm=FakeLLM(text=json.dumps(deepcopy(_AI_CONTEXT), ensure_ascii=False), is_fake=False),
+            profile_fetcher=lambda _domain: _ai_profile(),
+            optional_failure=True,
+        ).run(ctx)
+
+    assert ctx.enrichment_degraded is False
 
 
 def test_extract_llm_prompt_contains_each_document_chunk(monkeypatch: Any) -> None:
@@ -333,6 +640,14 @@ def test_extract_llm_prompt_contains_each_document_chunk(monkeypatch: Any) -> No
 
 
 def test_same_canonical_with_distinct_tag_ids_remains_distinct() -> None:
+    """Разные `tag_id` с одним `canonical_name` остаются разными узлами.
+
+    Область действия — сущности, заданные **не моделью**: здесь они положены в
+    `ctx.entities` напрямую, то есть это путь ручного тега (`origin=user`), где
+    `tag_id` — сознательное пользовательское решение. LLM этот путь не занимает:
+    см. `test_llm_tag_id_does_not_define_node_identity` — по L1-05 идентичность
+    обязана быть детерминированной, поэтому модель её не задаёт.
+    """
     ctx = PipelineContext(
         job_id="j",
         domain="it",
@@ -482,31 +797,34 @@ def test_commit_persists_generic_context_graph_without_schema(
     ctx = _run(analyzer, source)
 
     assert ctx.commit_applied is True
-    requirement = graph.get_node("tag:it:requirement")
-    indexing = graph.get_node("tag:it:indexing")
+    # Идентичность детерминирована: модель назвала узлы `tag:it:requirement` /
+    # `tag:it:indexing`, но идентичность считает платформа от canonical_name (L1-05).
+    requirement = graph.get_node("tag:it:требование")
+    indexing = graph.get_node("tag:it:индексирование")
     assert requirement is not None
     assert indexing is not None
+    assert graph.get_node("tag:it:requirement") is None
     assert requirement["_labels"] == ["ContextNode"]
     assert indexing["_labels"] == ["ContextNode"]
-    assert requirement["tag_id"] == "tag:it:requirement"
-    assert indexing["tag_id"] == "tag:it:indexing"
+    assert requirement["tag_id"] == "tag:it:требование"
+    assert indexing["tag_id"] == "tag:it:индексирование"
     assert requirement["origin"] == "ai"
     assert requirement["properties"] == {"language": "ru"}
     assert requirement["source_ids"] == ["src://d.txt"]
     assert requirement["chunk_ids"]
-    edge_key = ("tag:it:requirement", "tag:it:indexing", "DEPENDS_ON")
+    edge_key = ("tag:it:требование", "tag:it:индексирование", "DEPENDS_ON")
     assert edge_key in graph._edges
     assert graph._edges[edge_key]["kind"] == "depends_on"
     assert any(
         edge[0].startswith("chk:")
-        and edge[1] == "tag:it:requirement"
+        and edge[1] == "tag:it:требование"
         and edge[2] == "MENTIONS"
         for edge in graph._edges
     )
     embedding = DeterministicEmbedder().embed(CONTAINER_IT, "it")
     hits = vector.vector_search(embedding, top_k=10, domain="it")
     assert any(
-        set(hit["context_ids"]) >= {"tag:it:requirement", "tag:it:indexing"}
+        set(hit["context_ids"]) >= {"tag:it:требование", "tag:it:индексирование"}
         for hit in hits
     )
 
@@ -584,6 +902,13 @@ def test_manual_tag_is_not_overwritten_by_ai_for_same_tag_id(
     tmp_path: Path,
     monkeypatch: Any,
 ) -> None:
+    """Ручной тег с `tag_id` переживает прогон, даже когда рядом работает LLM.
+
+    Раньше тест держал коллизию: AI-сущность с тем же `tag_id`, что и ручной тег, и
+    проверял, что ручной не перезаписан. После детерминированной идентичности (L1-05)
+    коллизия со стороны LLM невозможна by construction, поэтому тест закрывает
+    пользовательский путь: явно заданный `tag_id` доезжает до графа целым.
+    """
     monkeypatch.setenv("EXTRACT_LLM", "true")
     graph = InMemoryGraphStore()
     vector = InMemoryVectorStore()
@@ -693,7 +1018,7 @@ def test_real_llm_invalid_json_is_not_converted_to_fallback(
         chunks=["entity"],
     )
 
-    with pytest.raises(ValueError, match="валидный JSON"):
+    with pytest.raises(ExtractionModelError, match="валидный JSON"):
         ExtractStage(
             llm=FakeLLM(text="not-json", is_fake=False),
             profile_fetcher=lambda _domain: _ai_profile(),
@@ -786,8 +1111,195 @@ def test_llm_accepts_dynamic_context_payload_with_optional_legacy_hints(
     ).run(ctx)
 
     assert ctx.entities[0]["type"] == "ContextNode"
-    assert ctx.entities[0]["tag_id"] == "tag:it:custom"
+    # tag_id из ответа LLM не участвует: после EXTRACT (до NORMALIZE) его нет,
+    # идентичность появится только как производная от canonical_name.
+    assert "tag_id" not in ctx.entities[0]
     assert ctx.entities[0]["properties"] == {"custom": True}
+
+
+def test_llm_tag_id_does_not_define_node_identity(monkeypatch: Any) -> None:
+    """L1-05: идентичность узла детерминирована Python-кодом, LLM её не задаёт.
+
+    `tag_id` в ответе модели не попадает в идентичность и не создаёт ноду под своим
+    именем. Промежуточная проверка: после EXTRACT/NORMALIZE идентичность равна
+    `tag:{domain}:{_identity_key(canonical_name)}`.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    payload = {
+        "tags": [
+            {
+                "tag_id": "tag:it:req-from-model",
+                "canonical_name": "требование",
+                "name": "требование",
+            }
+        ],
+        "links": [],
+    }
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование"],
+    )
+
+    ExtractStage(
+        llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: _ai_profile(),
+    ).run(ctx)
+
+    assert ctx.model_tag_ids_ignored == 1
+
+    NormalizeStage("").run(ctx)
+
+    assert _context_node_id("it", ctx.entities[0]) == "tag:it:требование"
+
+
+def test_llm_tag_ids_do_not_split_one_canonical_into_two_nodes(monkeypatch: Any) -> None:
+    """Два разных `tag_id` от модели при одном `canonical_name` ⇒ одна нода.
+
+    Обратная сторона детерминированности: раньше галлюцинированный `tag_id` молча
+    создавал дубликат вместо слияния, и это выглядело как нормальный граф.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+
+    def _payload(model_tag: str) -> str:
+        return json.dumps(
+            {
+                "tags": [
+                    {
+                        "tag_id": model_tag,
+                        "canonical_name": "требование",
+                        "name": "требование",
+                    }
+                ],
+                "links": [],
+            },
+            ensure_ascii=False,
+        )
+
+    class _TwoChunks:
+        def __init__(self) -> None:
+            self._texts = iter([_payload("tag:it:req-a"), _payload("tag:it:req-b")])
+
+        def generate(self, *_args: Any, **_kwargs: Any) -> str:
+            return next(self._texts)
+
+        @property
+        def is_fake(self) -> bool:
+            return False
+
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование", "требование"],
+    )
+
+    ExtractStage(
+        llm=_TwoChunks(),
+        profile_fetcher=lambda _domain: _ai_profile(),
+    ).run(ctx)
+    assert ctx.model_tag_ids_ignored == 2
+
+    NormalizeStage("").run(ctx)
+    DedupStage().run(ctx)
+
+    assert [_context_node_id("it", entity) for entity in ctx.entities] == [
+        "tag:it:требование"
+    ]
+
+
+def test_manual_tag_id_is_still_honoured() -> None:
+    """Ручной тег сохраняет право задать `tag_id`: это решение человека, не вывод LLM.
+
+    Проверяет, что запрет стоит в белом списке полей ответа модели, а не в общем
+    расчёте идентичности: сущность с `origin=user` и явным `tag_id` сохраняет его
+    и после NORMALIZE. Сквозной путь ручного ввода проверяет
+    `test_commit_preserves_dynamic_tag_ids_and_links`.
+    """
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        entities=[
+            {
+                "tag_id": "tag:it:curated",
+                "canonical_name": "Требование",
+                "name": "Требование",
+                "type": "ContextNode",
+                "origin": "user",
+            }
+        ],
+    )
+
+    NormalizeStage("").run(ctx)
+
+    assert _context_node_id("it", ctx.entities[0]) == "tag:it:curated"
+
+
+def test_ambiguous_aliases_are_counted_not_silently_dropped() -> None:
+    """L3-02: неоднозначные варианты не объединяются молча — и это видно.
+
+    Без счётчика документ без неоднозначности и документ, где их были десятки и
+    алиасы молча выбросили, выглядят в артефактах одинаково. Счётчик — минимальная
+    наблюдаемость, которой не может дать UNIQUE-constraint: он умеет только слить
+    или отвергнуть (ADR-031 §4), а L3-02 требует именно «не слить».
+    """
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        entities=[
+            {
+                "tag_id": "tag:it:первое",
+                "name": "Требование",
+                "canonical": "Требование",
+                "origin": "user",
+            },
+            {
+                "tag_id": "tag:it:второе",
+                "name": "Требование",
+                "canonical": "Требование",
+                "origin": "user",
+            },
+        ],
+    )
+
+    NormalizeStage("").run(ctx)
+
+    assert ctx.ambiguous_aliases > 0
+    # сущности при этом остались раздельными — «не объединять», а не «слить»
+    assert {_context_node_id("it", entity) for entity in ctx.entities} == {
+        "tag:it:первое",
+        "tag:it:второе",
+    }
+
+
+def test_ambiguous_aliases_counter_is_zero_for_clean_document() -> None:
+    """Ноль неоднозначностей — тоже результат: он отличает чистый документ от
+    документа, где счётчик не считали вовсе."""
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        entities=[
+            {
+                "tag_id": "tag:it:одно",
+                "name": "Требование",
+                "canonical": "Требование",
+                "origin": "user",
+            },
+        ],
+    )
+
+    NormalizeStage("").run(ctx)
+
+    assert ctx.ambiguous_aliases == 0
 
 
 def test_deterministic_fallback_keeps_repeated_context_chunk_links(
@@ -868,7 +1380,7 @@ def test_llm_repeated_tag_merges_chunk_ids(monkeypatch: Any) -> None:
     ).run(ctx)
     DedupStage().run(ctx)
 
-    matching = [entity for entity in ctx.entities if entity["tag_id"] == "tag:it:requirement"]
+    matching = [entity for entity in ctx.entities if entity["canonical"] == "требование"]
     assert len(matching) == 1
     assert len(matching[0]["chunk_ids"]) == 2
 
