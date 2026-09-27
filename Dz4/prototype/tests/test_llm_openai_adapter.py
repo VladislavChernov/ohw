@@ -10,7 +10,14 @@ from typing import Any
 
 import pytest
 
-from graphrag_proto.retrieval.adapters.llm import OpenAICompatibleAdapter
+from graphrag_proto.retrieval.adapters.llm import (
+    LLMAdapterError,
+    LLMHTTPError,
+    LLMResponseError,
+    LLMTimeoutError,
+    LLMUnavailableError,
+    OpenAICompatibleAdapter,
+)
 
 
 def _make_handler(payloads: dict[str, Any]):
@@ -77,7 +84,7 @@ def test_streaming_total_deadline_stops_slow_token_stream() -> None:
             yield b'data: {"choices":[{"delta":{"content":"late"}}]}\n'
 
     adapter = OpenAICompatibleAdapter("http://127.0.0.1:1", model="test", timeout_s=0.01)
-    with pytest.raises(TimeoutError):
+    with pytest.raises(LLMTimeoutError):
         list(adapter._iter_stream(_SlowStream(), time.monotonic() + 0.01))
 
 
@@ -96,20 +103,29 @@ def test_non_streaming_content() -> None:
 
 
 # --- ошибки ----------------------------------------------------------
+# Типы, а не текст. Разбор прогонов строится на причине, и причина берётся из класса
+# исключения: «стенд упал» и «модель вернула ерунду» требуют противоположных действий,
+# а оба раньше были `RuntimeError` с префиксом в сообщении.
 
-def test_http_500_raises_runtime_error() -> None:
+def test_http_500_raises_typed_http_error_with_status() -> None:
     handler = _make_handler({"/v1/chat/completions": (500, b"Internal Server Error")})
     server, port = _start_server(handler)
     try:
         llm = OpenAICompatibleAdapter(f"http://127.0.0.1:{port}", model="test", timeout_s=5)
-        with pytest.raises(RuntimeError, match="LLM HTTP 500"):
+        with pytest.raises(LLMHTTPError) as excinfo:
             list(llm.generate("вопрос"))
+        assert excinfo.value.status == 500
     finally:
         server.shutdown()
 
 
-def test_timeout_raises_runtime_error() -> None:
-    """Сервис не отвечает дольше timeout_s → RuntimeError."""
+def test_read_timeout_is_timeout_not_unavailable() -> None:
+    """Таймаут чтения обязан быть таймаутом.
+
+    `urlopen(timeout=…)` при таймауте поднимает `socket.timeout`, то есть подкласс
+    `OSError`. Без порядка `except` он уезжал в «сервис недоступен», и самая частая причина
+    сбоя на длинном стриме была неотличима от того, что сервис выключен.
+    """
 
     class _SlowHandler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
@@ -128,16 +144,62 @@ def test_timeout_raises_runtime_error() -> None:
     thread.start()
     try:
         llm = OpenAICompatibleAdapter(f"http://127.0.0.1:{port}", model="test", timeout_s=0.1)
-        with pytest.raises(RuntimeError, match="LLM недоступен"):
+        with pytest.raises(LLMTimeoutError):
             list(llm.generate("вопрос"))
     finally:
         server.shutdown()
 
 
-def test_connection_refused_raises_runtime_error() -> None:
+def test_connection_refused_is_unavailable_not_timeout() -> None:
     llm = OpenAICompatibleAdapter("http://127.0.0.1:59999", model="test", timeout_s=1)
-    with pytest.raises(RuntimeError, match="LLM недоступен"):
+    with pytest.raises(LLMUnavailableError):
         list(llm.generate("вопрос"))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"{}",
+        b'{"choices":[]}',
+        b'{"choices":[{"message":{}}]}',
+        b'{"choices":[{"message":{"content":123}}]}',
+        "не json".encode(),
+        b"[1,2,3]",
+    ],
+    ids=["empty", "no-choices", "no-content", "content-not-str", "not-json", "not-object"],
+)
+def test_malformed_success_body_is_typed_response_error(body: bytes) -> None:
+    """Сервис ответил кодом успеха, но телом, которое не является ответом.
+
+    Раньше `payload["choices"][0]["message"]["content"]` падал в `KeyError`/`IndexError`/
+    `TypeError` прямо в адаптере, и на границе пайплайна это выглядело как «модель вернула
+    ерунду». То есть наш парсинг выдавал себя за вину модели — ровно то, ради чего граница
+    с моделью и сужалась. Проверка формы переносит вину на того, кто нарушил контракт.
+    """
+    handler = _make_handler({"/v1/chat/completions": (200, body)})
+    server, port = _start_server(handler)
+    try:
+        llm = OpenAICompatibleAdapter(f"http://127.0.0.1:{port}", model="test", timeout_s=5)
+        with pytest.raises(LLMResponseError):
+            list(llm.generate("вопрос", stream=False))
+    finally:
+        server.shutdown()
+
+
+def test_all_adapter_errors_share_one_base() -> None:
+    """Общий базовый класс — чтобы поймать «это всё про адаптер» одним isinstance.
+
+    Без него на границе пришлось бы перечислять четыре класса, и пятый (новый вид сбоя)
+    молча попал бы в дефолт.
+    """
+    for exc in (
+        LLMUnavailableError("u"),
+        LLMTimeoutError("t"),
+        LLMHTTPError(500, "b"),
+        LLMResponseError("r"),
+    ):
+        assert isinstance(exc, LLMAdapterError)
+        assert isinstance(exc, RuntimeError)
 
 
 # --- factory wiring (LLM_ADAPTER=openai + LLM_BASE_URL) ----------------

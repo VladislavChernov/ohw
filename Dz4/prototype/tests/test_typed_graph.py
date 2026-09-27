@@ -8,9 +8,13 @@ from typing import Any
 
 import pytest
 
+from graphrag_proto.ingestion_service.pipeline import orchestrator as _orchestrator
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     CAUSE_MODEL_ERROR,
+    CAUSE_MODEL_HTTP_ERROR,
+    CAUSE_MODEL_TIMEOUT,
+    CAUSE_MODEL_UNAVAILABLE,
     CAUSE_PROFILE_INVALID,
     CAUSE_PROFILE_UNAVAILABLE,
     Analyzer,
@@ -576,6 +580,83 @@ def test_invalid_profile_is_reported_as_config_not_as_model(monkeypatch: Any) ->
     assert ctx.enrichment_degraded is True
     assert ctx.enrichment_cause == CAUSE_PROFILE_INVALID
     assert ctx.llm_layer_dropped is False
+
+
+def test_transport_failures_get_distinct_causes(monkeypatch: Any) -> None:
+    """Транспорт до модели и негодный ответ — разные причины с разными ремонтами.
+
+    Раньше адаптер поднимал `RuntimeError` с текстовым префиксом, и на границе всё
+    схлопывалось в `model_error`: «поднять стенд» и «поправить промпт» давали один
+    счётчик и одну причину в отчёте, и расследование уходило к провайдеру модели вместо
+    своего стенда. Классификация идёт по ТИПУ и по цепочке `__cause__`, потому что на
+    границе исходная ошибка обёрнута.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    from graphrag_proto.retrieval.adapters.llm import (
+        LLMHTTPError,
+        LLMResponseError,
+        LLMTimeoutError,
+        LLMUnavailableError,
+    )
+
+    cases = [
+        (LLMUnavailableError("connection refused"), CAUSE_MODEL_UNAVAILABLE),
+        (LLMTimeoutError("read timeout"), CAUSE_MODEL_TIMEOUT),
+        (LLMHTTPError(503, "loading model"), CAUSE_MODEL_HTTP_ERROR),
+        (LLMResponseError("no choices"), CAUSE_MODEL_ERROR),
+    ]
+
+    for index, (raised, expected_cause) in enumerate(cases):
+        ctx = PipelineContext(
+            job_id=f"j{index}",
+            domain="it",
+            doc_type="txt",
+            source_url=f"src://d{index}.txt",
+            chunks=["требование"],
+        )
+
+        def _raise(_exc: BaseException = raised) -> Any:
+            # Значение через аргумент по умолчанию, а не замыкание на переменную цикла:
+            # замыкание здесь означало бы, что все четыре итерации поднимают ПОСЛЕДНЮЮ
+            # ошибку, и тест на различение причин прошёл бы, различая ничего.
+            raise _exc
+            yield
+
+        class _Failing:
+            is_fake = False
+
+            def generate(self, prompt: str, system: str = "", stream: bool = True) -> Any:
+                return _raise()
+
+        ExtractStage(
+            llm=_Failing(),
+            profile_fetcher=lambda _domain: _ai_profile(),
+            optional_failure=True,
+        ).run(ctx)
+
+        assert ctx.enrichment_cause == expected_cause, (
+            f"{type(raised).__name__} должен давать {expected_cause}, "
+            f"а дал {ctx.enrichment_cause}"
+        )
+        assert ctx.enrichment_degraded is True
+
+
+def test_cause_classification_walks_the_cause_chain(monkeypatch: Any) -> None:
+    """Классификатор обязан смотреть вглубь обёртки, иначе он бесполезен.
+
+    Регрессия именно на форму цепочки: `ExtractionModelError` оборачивает исходную ошибку
+    адаптера, и классификация только внешнего типа вернула бы `model_error` всем четверым —
+    то есть ровно то неразличие, ради устранения которого типы и введены.
+    """
+    from graphrag_proto.retrieval.adapters.llm import LLMTimeoutError
+
+    wrapped = ExtractionModelError("вызов LLM не удался: read timeout")
+    wrapped.__cause__ = LLMTimeoutError("read timeout")
+
+    assert _orchestrator._degradation_cause(wrapped) == CAUSE_MODEL_TIMEOUT
+
+    bare = ExtractionModelError("вызов LLM не удался: что-то")
+    assert _orchestrator._degradation_cause(bare) == CAUSE_MODEL_ERROR
 
 
 def test_our_own_defect_in_extraction_is_not_reported_as_degradation(

@@ -29,6 +29,10 @@ from graphrag_proto.ingestion_service.pipeline.chunker import (
     build_chunker_for,
     build_chunker_from_profile,
 )
+from graphrag_proto.ingestion_service.pipeline.profile_contract import (
+    PROFILE_PROBLEM_LOG,
+    validate_ingestion_profile,
+)
 from graphrag_proto.ingestion_service.projection import (
     ProjectionState,
     ProjectionStateStore,
@@ -37,6 +41,13 @@ from graphrag_proto.ingestion_service.projection import (
 )
 from graphrag_proto.retrieval.adapters.base import Embedder, GraphStoreProvider, VectorStoreProvider
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
+from graphrag_proto.retrieval.adapters.llm import (
+    LLMAdapterError,
+    LLMHTTPError,
+    LLMResponseError,
+    LLMTimeoutError,
+    LLMUnavailableError,
+)
 
 EXTRACTOR_VERSION = "deterministic:v1"
 
@@ -76,6 +87,28 @@ def _load_profile(ctx: PipelineContext, profile_fetcher: ProfileFetcher | None) 
         return
     ctx.profile = profile
     ctx.profile_loaded = True
+    # Валидация контракта — здесь, а не в Config Service, потому что это единственная
+    # общая точка для всех трёх стадий ingest, и потому что ingest может грузить профиль
+    # из локального YAML в обход Config Service вообще без проверок.
+    #
+    # Ошибки НЕ превращаются в исключение: ADR-031 §2 требует, чтобы optional enrichment
+    # не блокировал сохранение документа, и «упасть на битом профиле» нарушало бы это.
+    # Громкость обеспечивается ERROR-логом, `cause=profile_invalid` и счётчиком — этого
+    # хватает, чтобы дефект был виден и не мог проскочить как «просто деградация».
+    if not profile:
+        # Пустой профиль — законное состояние (профиль не настроен), а не дефект.
+        return
+    verdict = validate_ingestion_profile(profile)
+    if verdict.errors and PROFILE_PROBLEM_LOG.due(ctx.domain, "error", verdict.errors):
+        _log.error(
+            "профиль домена %r нарушает контракт экстракции: %s — LLM-слой построен не "
+            "будет, документ уйдёт в детерминированный fallback (лог один раз на "
+            "набор проблем, счётчик — в enrichment_causes отчёта)",
+            ctx.domain,
+            "; ".join(verdict.errors),
+        )
+    if verdict.warnings and PROFILE_PROBLEM_LOG.due(ctx.domain, "warning", verdict.warnings):
+        _log.warning("профиль домена %r: %s", ctx.domain, "; ".join(verdict.warnings))
 
 
 def _profile_llm_enabled(profile: dict[str, Any]) -> bool:
@@ -455,10 +488,46 @@ class ExtractionModelError(RuntimeError):
 # Причины деградации, различаемые потребителем. Не перечисление «на вкус»: у них
 # разные действия. `profile_unavailable` — профиль не пришёл/сломан, экстракция не
 # запускалась, потери нет; `profile_invalid` — профиль есть, но негоден (чинить
-# конфиг); `model_error` — виновата модель (чинить промпт/модель/адаптер).
+# конфиг); `model_error` — модель ответила негодным (чинить промпт/модель).
+# `model_unavailable` / `model_timeout` / `model_http_error` — транспорт до модели не
+# дошёл: поднять стенд, посмотреть его логи, увеличить таймаут. Раньше все четыре сводились
+# в `model_error`, и разбор уводил к провайдеру модели вместо своего стенда.
 CAUSE_PROFILE_UNAVAILABLE = "profile_unavailable"
 CAUSE_PROFILE_INVALID = "profile_invalid"
 CAUSE_MODEL_ERROR = "model_error"
+CAUSE_MODEL_UNAVAILABLE = "model_unavailable"
+CAUSE_MODEL_TIMEOUT = "model_timeout"
+CAUSE_MODEL_HTTP_ERROR = "model_http_error"
+
+#: Транспортная ошибка адаптера → причина деградации. Словарь, а не цепочка `isinstance`,
+#: потому что цепочка выросла бы вместе с числом классов и перестала бы читаться.
+ADAPTER_CAUSES: dict[type, str] = {
+    LLMUnavailableError: CAUSE_MODEL_UNAVAILABLE,
+    LLMTimeoutError: CAUSE_MODEL_TIMEOUT,
+    LLMHTTPError: CAUSE_MODEL_HTTP_ERROR,
+    LLMResponseError: CAUSE_MODEL_ERROR,
+}
+
+
+def _degradation_cause(exc: Exception) -> str:
+    """Причина деградации по ТИПУ исключения, а не по его тексту.
+
+    Идёт по цепочке `__cause__`, потому что на границе с моделью исходная транспортная
+    ошибка обёрнута в `ExtractionModelError` — классифицировать только внешний тип значило
+    бы вернуть `model_error` всем четверым, то есть вернуть ту неразличимость, ради
+    устранения которой типы и введены.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        for exc_type, cause in ADAPTER_CAUSES.items():
+            if isinstance(current, exc_type):
+                return cause
+        if isinstance(current, ExtractionConfigError):
+            return CAUSE_PROFILE_INVALID
+        current = current.__cause__
+    return CAUSE_MODEL_ERROR
 
 
 class ExtractStage(Stage):
@@ -528,10 +597,13 @@ class ExtractStage(Stage):
         CommitStage.try_noop), то есть простая перезагрузка файла НЕ перезапустит
         экстракцию.
 
-        Ловим ровно два типа: негодную конфигурацию и сбой модели. Широкий
+        Ловим ровно два класса: негодную конфигурацию и сбой на границе с моделью. Широкий
         `except Exception` больше не используется — дефект нашего кода обязан упасть
         громко, иначе он выдаёт себя за «модель не справилась» и уводит
         расследование не туда, а счётчик деградации показывает чужую причину.
+
+        Причина выбирается по типу, а не по тексту: недоступный стенд, таймаут, код
+        ошибки и негодный ответ — четыре разных ремонта, и раньше они были одной строкой.
         """
         # Сколько записей и рёбер ПЕРЕЖИВАЛИ бы сброс: это и есть потеря. Пока
         # считаем ДО очистки — иначе потеря всегда выглядит нулевой.
@@ -540,9 +612,7 @@ class ExtractStage(Stage):
         ctx.entities = []
         ctx.entity_edges = []
         ctx.enrichment_degraded = True
-        ctx.enrichment_cause = (
-            CAUSE_PROFILE_INVALID if isinstance(exc, ExtractionConfigError) else CAUSE_MODEL_ERROR
-        )
+        ctx.enrichment_cause = _degradation_cause(exc)
         ctx.enrichment_error = str(exc)
         # Объём LLM-слоя известен даже при сбое: то, что модель успела вернуть, и есть
         # то, что мы сейчас уничтожаем.
@@ -585,10 +655,15 @@ class ExtractStage(Stage):
             # `ExtractionModelError`. Внутри блока нет нашей логики, поэтому
             # классификация здесь не съест наш дефект — а за пределами блока такой
             # дефект падает сам, вместо того чтобы выдать себя за сбой модели.
+            #
+            # Тип транспортной ошибки СОХРАНЯЕТСЯ (`from exc`), иначе классификация ниже
+            # не сможет отличить «стенд не отвечает» от «модель ответила ерундой».
             try:
                 raw = "".join(
                     llm.generate(prompt, system=str(template["system"]), stream=False)
                 )
+            except LLMAdapterError as exc:
+                raise ExtractionModelError(f"вызов LLM не удался: {exc}") from exc
             except Exception as exc:  # граница с внешним адаптером, ловится намеренно
                 raise ExtractionModelError(f"вызов LLM не удался: {exc}") from exc
             payload = _parse_extraction_payload(raw)
