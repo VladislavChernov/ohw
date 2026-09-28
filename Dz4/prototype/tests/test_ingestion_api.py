@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 from pathlib import Path
 
@@ -631,3 +632,105 @@ def test_job_enrichment_is_written_even_without_degradation(tmp_path: Path) -> N
     facts = jobs.enrichment("job-1")
     assert facts["cause"] is None
     assert facts["llm_records"] == 31
+
+
+def test_stage_duration_is_measured_at_transition(tmp_path: Path) -> None:
+    """Длительность стадии измеряется в момент перехода и хранится явно.
+
+    Причина, по которой это отдельный факт, а не разность timestamps: `update_stage`
+    перезаписывает `ts` предыдущей стадии в момент перехода, поэтому у всех завершённых
+    стадий `ts` — момент окончания. Разности соседних `ts` длительностями не являются,
+    а длительность последней стадии не восстанавливается вовсе. Из этого же следует,
+    что повышение разрешения `ts` контракт не удовлетворяет: нужна новая величина.
+    """
+    jobs = JobStore(tmp_path / "dur.db")
+    jobs.create("job-1", source_url="src://a.txt", domain="it", doc_type="txt")
+    jobs.update_stage("job-1", "INGEST")
+    time.sleep(0.06)
+    jobs.update_stage("job-1", "EXTRACT")
+
+    durations = jobs.stage_durations("job-1")
+    # Под-секундная стадия обязана быть видна: иначе метрика по стадиям врёт ровно на
+    # том, ради чего она и нужна, - на быстрых стадиях.
+    assert durations["INGEST"] >= 50
+    assert durations["INGEST"] < 5000
+    # Текущая стадия ещё идёт: длительности у неё нет, и это не ноль.
+    assert "EXTRACT" not in durations
+
+
+def test_last_stage_duration_is_recorded_on_finish(tmp_path: Path) -> None:
+    """Длительность последней стадии восстанавливается — раньше это было невозможно.
+
+    Отдельный случай, потому что закрывает стадию не `update_stage`, а `finish`, и
+    именно этот путь раньше не оставлял следа о прошедшем времени вовсе.
+    """
+    jobs = JobStore(tmp_path / "last.db")
+    jobs.create("job-1", source_url="src://a.txt", domain="it", doc_type="txt")
+    jobs.update_stage("job-1", "INGEST")
+    jobs.update_stage("job-1", "EXTRACT")
+    time.sleep(0.06)
+    jobs.finish("job-1", "succeeded")
+
+    durations = jobs.stage_durations("job-1")
+    assert set(durations) == {"INGEST", "EXTRACT"}
+    assert durations["EXTRACT"] >= 50
+
+
+def test_stage_duration_survives_database_created_before_it_existed(tmp_path: Path) -> None:
+    """Новая таблица, а не колонка: у развёрнутой базы не должно быть миграции.
+
+    Добавление колонки потребовало бы ALTER TABLE на каждой базе, где пайплайн уже
+    отработал, а `CREATE TABLE IF NOT EXISTS` создаёт таблицу на месте. Это же объясняет,
+    почему `job_signals` и `job_enrichment` не колонки в `job_stages`.
+    """
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE job_stages (job_id TEXT NOT NULL, stage TEXT NOT NULL, "
+        "status TEXT NOT NULL, message TEXT, ts TEXT NOT NULL, PRIMARY KEY (job_id, stage))"
+    )
+    conn.commit()
+    conn.close()
+
+    jobs = JobStore(db)
+    jobs.create("job-1", source_url="src://a.txt", domain="it", doc_type="txt")
+    jobs.update_stage("job-1", "INGEST")
+    jobs.update_stage("job-1", "EXTRACT")
+    jobs.finish("job-1", "succeeded")
+
+    assert set(jobs.stage_durations("job-1")) == {"INGEST", "EXTRACT"}
+    # Журнал стадий не пострадал: новая таблица не меняет его форму.
+    assert {s["stage"] for s in jobs.stages("job-1")} == {"INGEST", "EXTRACT"}
+
+
+def test_stage_duration_of_repeated_call_reflects_last_attempt(tmp_path: Path) -> None:
+    """Повторный вход в ту же стадию перезапускает её часы — как и `ts` в журнале.
+
+    Осознанный выбор семантики: строка описывает последнее наблюдение, а не сумму
+    всех попыток. Накопление по повторным входам - отдельное решение, и молча
+    складывать его здесь означало бы, что таблица отвечает на вопрос, которого
+    никто не задавал.
+    """
+    jobs = JobStore(tmp_path / "again.db")
+    jobs.create("job-1", source_url="src://a.txt", domain="it", doc_type="txt")
+    jobs.update_stage("job-1", "EXTRACT")
+    time.sleep(0.06)
+    jobs.update_stage("job-1", "EXTRACT")
+    jobs.update_stage("job-1", "PROJECT")
+
+    assert jobs.stage_durations("job-1")["EXTRACT"] < 5000
+
+
+def test_cancelled_stage_records_elapsed_time(tmp_path: Path) -> None:
+    """Отменённая стадия тоже оставляет прошедшее время.
+
+    Время обрывается, но факт состоялся, и по нему видно, где джоба стояла в момент
+    отмены. Не писать его - значит потерять наблюдение; писать ноль - значит соврать.
+    """
+    jobs = JobStore(tmp_path / "cancel.db")
+    jobs.create("job-1", source_url="src://a.txt", domain="it", doc_type="txt")
+    jobs.update_stage("job-1", "EXTRACT")
+    jobs.finish("job-1", "cancelled")
+
+    durations = jobs.stage_durations("job-1")
+    assert durations["EXTRACT"] >= 0

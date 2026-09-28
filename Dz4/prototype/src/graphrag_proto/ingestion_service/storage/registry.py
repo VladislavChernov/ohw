@@ -12,7 +12,7 @@ import hashlib
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -310,6 +310,28 @@ class JobStore:
             "ts TEXT NOT NULL"
             ")"
         )
+        # ДЛИТЕЛЬНОСТИ стадий: измеряются в момент перехода и хранятся явно.
+        #
+        # Почему не разность `job_stages.ts`: `update_stage` при переходе к следующей
+        # стадии перезаписывает `ts` предыдущей, поэтому у всех завершённых стадий `ts` —
+        # момент ОКОНЧАНИЯ. Разности соседних `ts` длительностями не являются, а
+        # длительность последней стадии не восстанавливается вовсе. По этой же причине
+        # повышение разрешения `ts` до миллисекунд контракт не удовлетворяет: моменты
+        # останутся моментами окончания, просто более точными.
+        #
+        # Почему новая таблица, а не колонка в `job_stages`: `CREATE TABLE IF NOT EXISTS`
+        # создаёт её на уже развёрнутой базе без миграции, а колонка потребовала бы
+        # ALTER TABLE везде, где пайплайн уже отработал. Тот же довод, что и у
+        # `job_signals`/`job_enrichment`.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_stage_durations ("
+            "job_id TEXT NOT NULL, "
+            "stage TEXT NOT NULL, "
+            "started_ts TEXT NOT NULL, "
+            "duration_ms INTEGER, "
+            "PRIMARY KEY (job_id, stage)"
+            ")"
+        )
         self._conn.commit()
 
     def close(self) -> None:
@@ -327,11 +349,53 @@ class JobStore:
             )
             self._conn.commit()
 
+    def _open_stage_clock(self, job_id: str, stage: str, now: datetime) -> None:
+        """Открыть часы стадии в момент её фактического начала.
+
+        Разрешение миллисекундное — контракт требует границ гистограммы от 0.005 с, и
+        секундные часы дали бы ровно тот ноль, ради устранения которого всё затевалось.
+
+        `INSERT OR REPLACE` означает «последнее наблюдение побеждает»: повторный вход в
+        ту же стадию перезапускает её часы. Это совпадает с семантикой `job_stages`,
+        где повторный вызов тоже перезаписывает строку, и не требует отдельного решения
+        про накопление по попыткам.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_stage_durations "
+                "(job_id, stage, started_ts, duration_ms) VALUES (?, ?, ?, NULL)",
+                (job_id, stage, now.isoformat(timespec="milliseconds")),
+            )
+
+    def _close_stage_clock(self, job_id: str, stage: str, now: datetime) -> None:
+        """Записать прошедшее время стадии в момент её завершения.
+
+        Повторное закрытие ничего не делает: длительность факта, а не пересчёт задним
+        числом. Отсутствие строки тоже не ошибка — стадии могла не быть.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT started_ts, duration_ms FROM job_stage_durations "
+                "WHERE job_id=? AND stage=?",
+                (job_id, stage),
+            ).fetchone()
+            if row is None or row[1] is not None:
+                return
+            started = datetime.fromisoformat(str(row[0]))
+            elapsed_ms = round((now - started).total_seconds() * 1000)
+            self._conn.execute(
+                "UPDATE job_stage_durations SET duration_ms=? WHERE job_id=? AND stage=?",
+                # Часы могут «поехать назад» при переводе; длительность отрицательной
+                # быть не может, а молчаливый ноль в метрике хуже явного нуля.
+                (max(0, int(elapsed_ms)), job_id, stage),
+            )
+
     def update_stage(self, job_id: str, stage: str, message: str = "") -> None:
         from datetime import datetime
 
         with self._lock:
-            now = datetime.now(UTC).isoformat(timespec="seconds")
+            now_dt = datetime.now(UTC)
+            now = now_dt.isoformat(timespec="seconds")
             status_row = self._conn.execute(
                 "SELECT status, stage FROM jobs WHERE job_id=?", (job_id,)
             ).fetchone()
@@ -347,6 +411,8 @@ class JobStore:
                     "WHERE job_id=? AND stage=? AND status='running'",
                     (now, job_id, prev_stage),
                 )
+                # длительность меряется здесь, а не восстанавливается из `ts` позже
+                self._close_stage_clock(job_id, prev_stage, now_dt)
             self._conn.execute(
                 "UPDATE jobs SET status='running', stage=?, updated_at=? WHERE job_id=?",
                 (stage, now, job_id),
@@ -356,13 +422,15 @@ class JobStore:
                 "VALUES (?, ?, 'running', ?, ?)",
                 (job_id, stage, message, now),
             )
+            self._open_stage_clock(job_id, stage, now_dt)
             self._conn.commit()
 
     def finish(self, job_id: str, status: str, error: str | None = None) -> None:
         from datetime import datetime
 
         with self._lock:
-            now = datetime.now(UTC).isoformat(timespec="seconds")
+            now_dt = datetime.now(UTC)
+            now = now_dt.isoformat(timespec="seconds")
             status_row = self._conn.execute(
                 "SELECT status FROM jobs WHERE job_id=?", (job_id,)
             ).fetchone()
@@ -376,6 +444,14 @@ class JobStore:
             )
             # все «висящие» running-этапы приводим к финальному статусу журнала
             stage_status = "succeeded" if terminal == "succeeded" else terminal
+            running = self._conn.execute(
+                "SELECT stage FROM job_stages WHERE job_id=? AND status='running'",
+                (job_id,),
+            ).fetchall()
+            # Последняя стадия закрывается только здесь: `update_stage` больше не
+            # вызывается, поэтому без этого её время не сохранилось бы вовсе.
+            for (running_stage,) in running:
+                self._close_stage_clock(job_id, str(running_stage), now_dt)
             self._conn.execute(
                 "UPDATE job_stages SET status=? WHERE job_id=? AND status='running'",
                 (stage_status, job_id),
@@ -449,6 +525,25 @@ class JobStore:
             for r in rows
         ]
         return items, total
+
+    def stage_durations(self, job_id: str) -> builtins.dict[str, int]:
+        """Длительности завершённых стадий в миллисекундах: ``{стадия: мс}``.
+
+        Идущая стадия в словаре ОТСУТСТВУЕТ, а не равна нулю. Нулевая длительность и
+        отсутствие наблюдения — разные вещи, и слияние их делает метрику
+        правдоподобной и неверной одновременно: в среднем по стадиям появился бы
+        ноль, который на самом деле означает «не считали».
+
+        Единица хранения — миллисекунды; в отчёт метрики уходит в секундах, как того
+        требует конвенция Prometheus для имени длительности.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT stage, duration_ms FROM job_stage_durations "
+                "WHERE job_id=? AND duration_ms IS NOT NULL ORDER BY started_ts",
+                (job_id,),
+            ).fetchall()
+        return {str(r[0]): int(r[1]) for r in rows}
 
     def note_stage(self, job_id: str, stage: str, message: str) -> None:
         """Дописать message к уже начатой стадии, не трогая её статус.
