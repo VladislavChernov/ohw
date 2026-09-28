@@ -94,6 +94,9 @@ class InMemoryGraphStore(GraphStoreProvider):
                     "labels": list(dict.fromkeys([*existing["labels"], *(node.get("labels") or [])])),
                     "properties": properties,
                 }
+        elif kind == "delete_edge":
+            from_id, to_id, edge_type = arg
+            self._edges.pop((from_id, to_id, edge_type), None)
         elif kind == "remove_source":
             domain = arg["domain"]
             source_url = arg["source_url"]
@@ -342,6 +345,63 @@ class InMemoryGraphStore(GraphStoreProvider):
             "remove_source",
             {"domain": domain, "source_url": source_url, "chunk_ids": list(chunk_ids)},
         )
+
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> int:
+        """Осиротевшие доменные связи и узлы (ADR-014, `docs/02` §4.5).
+
+        Три правила зафиксированы до кода и здесь соблюдаются буквально:
+
+        - канонический признак жизни — **непустой `chunk_ids`**, а не `source_ids`; наличие
+          свойства обязательно (`is not None`), иначе под нож попадут структурные рёбра, у
+          которых `chunk_ids` нет вовсе;
+        - **порядок: связи, затем узлы** — обратный ломает счёт, удалённый узел уносит связь,
+          которую мы посчитали удалённой, не удаляя её;
+        - **`dry_run` ничего не удаляет**, только считает.
+
+        Узлы считаются мусорными, если у них нет ни поддерживающих чанков, ни инцидентных
+        связей, и удаляются с инцидентными рёбрами (в Neo4j это `DETACH DELETE`).
+        """
+        orphan_edges: list[tuple[str, str, str]] = []
+        for key, properties in self._edges.items():
+            if "chunk_ids" not in properties:
+                continue  # структурное ребро: свойства нет, а значит нет и основания судить
+            if properties.get("domain") != domain:
+                continue
+            chunk_values = properties.get("chunk_ids")
+            if isinstance(chunk_values, list) and chunk_values:
+                continue  # поддержано живым чанком
+            orphan_edges.append(key)
+
+        orphan_nodes = [
+            node_id
+            for node_id, node in self._nodes.items()
+            if node["properties"].get("domain") == domain
+            and isinstance(node["properties"].get("chunk_ids"), list)
+            and not node["properties"]["chunk_ids"]
+            and not any(
+                from_id == node_id or to_id == node_id for from_id, to_id, _etype in self._edges
+            )
+        ]
+
+        planned = len(orphan_edges) + len(orphan_nodes)
+        if dry_run:
+            return planned
+
+        # Внутри транзакции уборка не откатывается: подсчёт читает текущее состояние, а
+        # буфер применяется лишь на выходе, поэтому вернувшийся счётчик не соответствовал бы
+        # удалённому. Раньше это дало бы «правдоподобный ноль» в отчёте. Запрещаем явно,
+        # а не молча, и по той же причине удаление не идёт в горячий путь (ADR-028):
+        # откатить удалённое без повторной экстракции нельзя.
+        if self._journal is not None:
+            raise RuntimeError(
+                "delete_orphans нельзя вызывать внутри write-транзакции: "
+                "подсчёт до удаления обязателен, а буфер применяется на выходе"
+            )
+        for key in orphan_edges:
+            self._do("delete_edge", list(key))
+        for node_id in orphan_nodes:
+            self._do("delete_node", node_id)
+        return planned
 
     def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
         return sorted(to_id for (from_id, to_id, etype) in self._edges if from_id == source_id and etype == "CONTAINS")

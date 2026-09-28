@@ -332,6 +332,23 @@ class JobStore:
             "PRIMARY KEY (job_id, stage)"
             ")"
         )
+        # Факт уборки осиротевших связей/узлов (ADR-014, `docs/02` §4.5). Таблица, а не
+        # сигнал в `job_signals`: решение строится на числах (сколько посчитано, сколько
+        # удалено), а сигнал — имя, и разбор текста для числа недопустим.
+        # `planned_*` и `removed_*` разнесены: подсчёт и удаление разделены по времени,
+        # и их расхождение — сигнал о гонке, который нельзя терять.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_orphan_cleanup ("
+            "job_id TEXT PRIMARY KEY, "
+            "domain TEXT NOT NULL, "
+            "planned_relations INTEGER NOT NULL DEFAULT 0, "
+            "removed_relations INTEGER NOT NULL DEFAULT 0, "
+            "planned_nodes INTEGER NOT NULL DEFAULT 0, "
+            "removed_nodes INTEGER NOT NULL DEFAULT 0, "
+            "mode TEXT NOT NULL, "
+            "ts TEXT NOT NULL"
+            ")"
+        )
         self._conn.commit()
 
     def close(self) -> None:
@@ -558,6 +575,71 @@ class JobStore:
                 (message, job_id, stage),
             )
             self._conn.commit()
+
+    def record_orphan_cleanup(
+        self,
+        job_id: str,
+        domain: str,
+        *,
+        planned_relations: int,
+        removed_relations: int,
+        planned_nodes: int,
+        removed_nodes: int,
+        mode: str,
+    ) -> None:
+        """Факт уборки осиротевших связей и узлов — отдельной таблицей, не текстом.
+
+        Отдельная таблица, а не сигнал в `job_signals`, потому что здесь нужны **числа**,
+        а сигнал это имя. Мотив тот же, что у `job_enrichment`: решение строится на числе, а
+        число не должно зависеть от разбора сообщения.
+
+        Подсчёт и удаление разведены по времени (между проходами может прийти другой ingest),
+        поэтому `planned_*` и `removed_*` хранятся раздельно: расхождение между ними — это
+        сигнал о гонке, а не повод его терять.
+
+        Пишется в той же транзакции, что и удаление осиротевших узлов, — иначе сбой между
+        коммитом удаления и записью факта даст правдоподобный ноль, который читается как
+        «удалять нечего».
+        """
+        from datetime import datetime
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_orphan_cleanup ("
+                "job_id, domain, planned_relations, removed_relations, "
+                "planned_nodes, removed_nodes, mode, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    domain,
+                    int(planned_relations),
+                    int(removed_relations),
+                    int(planned_nodes),
+                    int(removed_nodes),
+                    mode,
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def orphan_cleanup(self, job_id: str) -> dict[str, Any] | None:
+        """Факт уборки джобы; отсутствие факта — `None`, а не ноль."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT domain, planned_relations, removed_relations, planned_nodes, "
+                "removed_nodes, mode, ts FROM job_orphan_cleanup WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "domain": str(row[0]),
+            "planned_relations": int(row[1]),
+            "removed_relations": int(row[2]),
+            "planned_nodes": int(row[3]),
+            "removed_nodes": int(row[4]),
+            "mode": str(row[5]),
+            "ts": str(row[6]),
+        }
 
     def set_signal(self, job_id: str, stage: str, name: str) -> None:
         """Отметить структурный сигнал джобы (например, потерю LLM-слоя).

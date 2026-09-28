@@ -703,6 +703,186 @@ def test_stage_duration_survives_database_created_before_it_existed(tmp_path: Pa
     assert {s["stage"] for s in jobs.stages("job-1")} == {"INGEST", "EXTRACT"}
 
 
+def _edge(domain: str, chunk_ids: list[str] | None, source_ids: list[str]) -> dict[str, object]:
+    """Доменное ребро. `chunk_ids=None` — свойства нет вовсе (структурное)."""
+    properties: dict[str, object] = {"domain": domain, "source_ids": list(source_ids)}
+    if chunk_ids is not None:
+        properties["chunk_ids"] = list(chunk_ids)
+    return {
+        "from_id": "e-1",
+        "to_id": "e-2",
+        "type": "REL",
+        "properties": properties,
+    }
+
+
+def test_orphan_cleanup_keeps_edge_supported_by_other_document(tmp_path: Path) -> None:
+    """Связь, которую держат два документа, обязана выжить после смерти одного.
+
+    Регрессия на формулировку «нет ни одного источника»: если удалять по факту потери
+    одного источника, связь, поддержанная ещё одним активным документом, была бы уничтожена
+    вместе с тремя общими сущностями.
+    """
+    store = InMemoryGraphStore()
+    store.upsert_edges([_edge("it", ["chunk-b1", "chunk-b2"], ["docs://b.md", "docs://a-old.md"])])
+
+    removed = store.delete_orphans("it", dry_run=False)
+
+    assert removed == 0
+    assert store.verify_edge("e-1", "e-2", "REL")
+
+
+def test_orphan_cleanup_deletes_edge_with_no_supporting_chunk(tmp_path: Path) -> None:
+    """Устаревшее ребро удаляется: поддерживающих чанков не осталось ни одного."""
+    store = InMemoryGraphStore()
+    store.upsert_edges([_edge("it", [], [])])
+
+    removed = store.delete_orphans("it", dry_run=False)
+
+    assert removed == 1
+    assert not store.verify_edge("e-1", "e-2", "REL")
+
+
+def test_orphan_cleanup_never_touches_structural_edges(tmp_path: Path) -> None:
+    """`CONTAINS` и `MENTIONS` не имеют `chunk_ids` вовсе — уборка их не должна видеть.
+
+    Это главная ловушка реализации: условие «список пуст» для структурных рёбер истинно,
+    и без дискриминатора уборка сносит их. Ошибка проявилась бы не как «не туда удалил»,
+    а как «сломался поиск».
+    """
+    store = InMemoryGraphStore()
+    store.upsert_nodes(
+        [
+            {"node_id": "s-1", "labels": ["Source"], "properties": {"domain": "it"}},
+            {"node_id": "c-1", "labels": ["Chunk"], "properties": {"domain": "it"}},
+            {"node_id": "e-1", "labels": ["ContextNode"], "properties": {"domain": "it"}},
+        ]
+    )
+    store.upsert_edges(
+        [
+            {
+                "from_id": "s-1",
+                "to_id": "c-1",
+                "type": "CONTAINS",
+                "properties": {"domain": "it", "source_ids": ["docs://a.md"]},
+            },
+            {
+                "from_id": "c-1",
+                "to_id": "e-1",
+                "type": "MENTIONS",
+                "properties": {"domain": "it", "source_ids": ["docs://a.md"]},
+            },
+        ]
+    )
+
+    store.delete_orphans("it", dry_run=False)
+
+    assert store.verify_edge("s-1", "c-1", "CONTAINS")
+    assert store.verify_edge("c-1", "e-1", "MENTIONS")
+    assert store.get_node("c-1") is not None
+
+
+def test_orphan_cleanup_respects_domain_boundary(tmp_path: Path) -> None:
+    """Уборка домена не должна трогать другой домен, даже если он пустой по поддержке."""
+    store = InMemoryGraphStore()
+    store.upsert_edges([_edge("legal", [], [])])
+
+    removed = store.delete_orphans("it", dry_run=False)
+
+    assert removed == 0
+    assert store.verify_edge("e-1", "e-2", "REL")
+
+
+def test_orphan_cleanup_dry_run_counts_and_deletes_nothing(tmp_path: Path) -> None:
+    """Подсчёт обязателен до удаления: цена ошибки предиката необратима.
+
+    Регрессия-guard на саму необходимость dry_run: без него неверный предикат обнаруживается
+    не на прогоне, а когда пропавший ответ всплывает через неделю.
+    """
+    store = InMemoryGraphStore()
+    # Разные узлы обязательны: тройка (from_id, to_id, type) — ключ ребра, и ребро с той же
+    # тройкой просто перезаписало бы предыдущее.
+    store.upsert_edges(
+        [
+            _edge("it", [], []),
+            {
+                "from_id": "e-3",
+                "to_id": "e-4",
+                "type": "REL",
+                "properties": {
+                    "domain": "it",
+                    "chunk_ids": ["chunk-live"],
+                    "source_ids": ["docs://b.md"],
+                },
+            },
+        ]
+    )
+
+    planned = store.delete_orphans("it", dry_run=True)
+
+    assert planned == 1
+    assert store.verify_edge("e-1", "e-2", "REL")
+    assert store.verify_edge("e-3", "e-4", "REL")
+
+
+def test_orphan_cleanup_removes_nodes_without_support_and_keeps_connected(tmp_path: Path) -> None:
+    """Узлы чистятся тем же проходом, но узел со связями не трогается."""
+    store = InMemoryGraphStore()
+    store.upsert_nodes(
+        [
+            {"node_id": "lonely", "labels": ["ContextNode"], "properties": {"domain": "it", "chunk_ids": []}},
+            {"node_id": "linked", "labels": ["ContextNode"], "properties": {"domain": "it", "chunk_ids": []}},
+        ]
+    )
+    # Связь должна инцидентна именно `linked`; инцидентность проверяется по обоим концам.
+    store.upsert_edges(
+        [
+            {
+                "from_id": "linked",
+                "to_id": "other",
+                "type": "REL",
+                "properties": {"domain": "it", "chunk_ids": ["chunk-live"], "source_ids": []},
+            }
+        ]
+    )
+
+    store.delete_orphans("it", dry_run=False)
+
+    assert store.get_node("lonely") is None
+    assert store.get_node("linked") is not None
+
+
+def test_orphan_cleanup_is_idempotent(tmp_path: Path) -> None:
+    """Повторный проход на очищенном графе ничего не удаляет и не падает.
+
+    Уборка фоновая и будет проходить повторно; если второй проход падает или считает
+    неверно, это выглядит как «удалять нечего» — правдоподобно и неверно.
+    """
+    store = InMemoryGraphStore()
+    store.upsert_edges([_edge("it", [], [])])
+
+    first = store.delete_orphans("it", dry_run=False)
+    second = store.delete_orphans("it", dry_run=False)
+
+    assert first == 1
+    assert second == 0
+
+
+def test_orphan_cleanup_uses_chunk_ids_not_source_ids(tmp_path: Path) -> None:
+    """Канонический признак — `chunk_ids`: источник может быть жив при отсутствии чанков.
+
+    Связь с непустым `source_ids`, но пустым `chunk_ids` считается мёртвой: держать её
+    не на чем, и сохранять её значило бы держать то, что мы собрались убрать.
+    """
+    store = InMemoryGraphStore()
+    store.upsert_edges([_edge("it", [], ["docs://a.md"])])
+
+    removed = store.delete_orphans("it", dry_run=False)
+
+    assert removed == 1
+    assert not store.verify_edge("e-1", "e-2", "REL")
+
+
 def test_stage_duration_of_repeated_call_reflects_last_attempt(tmp_path: Path) -> None:
     """Повторный вход в ту же стадию перезапускает её часы — как и `ts` в журнале.
 

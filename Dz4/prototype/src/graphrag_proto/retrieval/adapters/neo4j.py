@@ -158,6 +158,66 @@ class Neo4jGraphStore(GraphStoreProvider):
             ).data()
         return [str(row["chunk_id"]) for row in rows]
 
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> int:
+        """Осиротевшие доменные связи и узлы (ADR-014, `docs/02` §4.5).
+
+        Реализация обязана соблюдать три правила из контракта в `base.py`, иначе ошибка
+        проявится не как «не туда удалил», а как «сломался поиск»:
+
+        - **`r.chunk_ids IS NOT NULL` обязателен.** У `CONTAINS` и `MENTIONS` этого свойства
+          нет вовсе, поэтому `size(coalesce(r.chunk_ids, [])) = 0` для них истинно.
+        - **Порядок: связи, затем узлы.** Обратный ломает счёт: `DETACH DELETE` узла унёс бы
+          связь, которую мы посчитали удалённой, не удаляя её.
+        - **`dry_run` ничего не удаляет.** Подсчёт обязателен: цена ошибки предиката —
+          молчаливая потеря данных, которую не откатит ни одна транзакция.
+
+        Узлы отбираются по отсутствию инцидентных связей, что в Neo4j требует
+        `DETACH DELETE`; узлы `Source` и `Chunk` исключены явно, они принадлежат другим
+        путям записи.
+        """
+        values = {"domain": domain}
+        orphan_edges_cypher = (
+            "MATCH ()-[r]->() "
+            "WHERE r.domain = $domain AND r.chunk_ids IS NOT NULL "
+            "AND size(coalesce(r.chunk_ids, [])) = 0 "
+            "RETURN count(r) AS c"
+        )
+        orphan_nodes_cypher = (
+            "MATCH (n) "
+            "WHERE n.domain = $domain AND n.chunk_ids IS NOT NULL "
+            "AND size(coalesce(n.chunk_ids, [])) = 0 "
+            f"AND NOT n:{SOURCE_LABEL} AND NOT n:{CHUNK_LABEL} "
+            "AND NOT (n)--() "
+            "RETURN count(n) AS c"
+        )
+        with self._session() as session:
+            edge_count = int(session.run(orphan_edges_cypher, parameters=values).single()["c"])
+            node_count = int(session.run(orphan_nodes_cypher, parameters=values).single()["c"])
+        if dry_run:
+            return edge_count + node_count
+
+        # Удаление в одной транзакции: полуснятая осиротевшая связь — это и есть тот самый
+        # «правдоподобный ноль», которого мы избегаем.
+        with self._session() as session, session.begin_transaction() as tx:
+            tx.run(
+                "MATCH ()-[r]->() "
+                "WHERE r.domain = $domain AND r.chunk_ids IS NOT NULL "
+                "AND size(coalesce(r.chunk_ids, [])) = 0 "
+                "DELETE r",
+                parameters=values,
+            ).consume()
+            tx.run(
+                "MATCH (n) "
+                "WHERE n.domain = $domain AND n.chunk_ids IS NOT NULL "
+                "AND size(coalesce(n.chunk_ids, [])) = 0 "
+                f"AND NOT n:{SOURCE_LABEL} AND NOT n:{CHUNK_LABEL} "
+                "AND NOT (n)--() "
+                "DETACH DELETE n",
+                parameters=values,
+            ).consume()
+            del tx
+        return edge_count + node_count
+
     def ensure_schema(self, node_types: list[dict[str, Any]]) -> None:
         """Schema-провижининг (стадия 1, design.md §0): `CREATE CONSTRAINT ... IS
         UNIQUE` по паре `(domain, unique_key)` каждого типа онтологии. Идемпотентно
@@ -379,6 +439,19 @@ class _TxGraph(GraphStoreProvider):
             {"domain": domain, "source_url": source_url, "chunk_ids": list(chunk_ids)},
         )
 
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> int:
+        """В буфере отложено не может быть: подсчёт обязан увидеть состояние на момент вызова.
+
+        Попытка забуферизовать удаление дала бы «правдоподобный ноль» в отчёте: буфер
+        применяется в `commit()`, а `dry_run` считал бы по состоянию до него. Поэтому внутри
+        открытой транзакции уборка считается и применяется немедленно, и в буфер попадает
+        **факт удаления**, а не команда.
+        """
+        del dry_run
+        removed = self._outer.delete_orphans(domain, dry_run=False)
+        self._buffered("orphans_removed", removed)
+        return removed
+
     def query(self, cypher: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         raise NotImplementedError("чтение в транзакции записи не поддерживается")
 
@@ -392,18 +465,22 @@ class _TxGraph(GraphStoreProvider):
         if not self._ops:
             return
         with self._outer._session() as session, session.begin_transaction() as tx:
-            for kind, arg in self._ops:
-                if kind == "upsert_nodes":
-                    _upsert_nodes(tx, arg)
-                elif kind == "upsert_edges":
-                    _upsert_edges(tx, arg)
-                elif kind == "delete_node":
-                    _delete_node(tx, arg)
-                elif kind == "remove_source":
-                    _remove_source(tx, arg)
-            # commit в implicit begin_transaction по выходу из with
-            _rollback_guard = tx
-            del _rollback_guard
+                for kind, arg in self._ops:
+                    if kind == "upsert_nodes":
+                        _upsert_nodes(tx, arg)
+                    elif kind == "upsert_edges":
+                        _upsert_edges(tx, arg)
+                    elif kind == "delete_node":
+                        _delete_node(tx, arg)
+                    elif kind == "remove_source":
+                        _remove_source(tx, arg)
+                    elif kind == "orphans_removed":
+                        # Уже применено в delete_orphans: в буфер попал ФАКТ удаления,
+                        # а не команда. Подробнее в docstring метода.
+                        pass
+                # commit в implicit begin_transaction по выходу из with
+                _rollback_guard = tx
+                del _rollback_guard
 
     def discard(self) -> None:
         self._ops = []
