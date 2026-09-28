@@ -11,6 +11,10 @@ Vector-first рерайт (CONCEPT.md, docs/00-06, data_model, glossary, invaria
     переписывать его значило бы подделать историю;
   * `docs/05_adr_log.md` — старые формулировки законны внутри помеченных Superseded
     ADR, в этом их смысл.
+
+Отдельно проверяется адресность ссылок на ADR из кода: после развода двух серий
+`CONCEPT.md` и `docs/05_adr_log.md` номер «ADR-014» стал неоднозначным, и docstring,
+ссылавшийся на «ADR-014 п. 1», молча сменил бы смысл, нигде не упав.
 """
 
 from __future__ import annotations
@@ -113,3 +117,30 @@ def test_concept_and_adr_log_agree_on_superseded_status(repo_root: Path) -> None
         assert "Superseded" in block.group(0), (
             f"{adr}: CONCEPT.md помечает Superseded, а ADR-лог — нет. Лог здесь SSOT."
         )
+
+
+def test_code_adr_references_resolve_to_adr_log(repo_root: Path) -> None:
+    """Номер ADR, процитированный в коде, должен существовать в журнале.
+
+    Найдено при разводе серий: `CONCEPT.md` и `docs/05_adr_log.md` имели по своей серии
+    с 014-го номера, поэтому «ADR-014» без указания файла означал разные решения. Точки
+    роста уехали в журнал как ADR-033/034, и ссылка в docstring на «ADR-014 п. 1»
+    (эмиссия метрик там, где значение вычислено) молча сменила бы смысл. Проверка
+    ловит именно класс «перенумеровали ADR, а код остался с прежним номером».
+    """
+    log = (repo_root / "docs" / "05_adr_log.md").read_text(encoding="utf-8")
+    known = set(re.findall(r"^## (ADR-\d+):", log, re.MULTILINE))
+    assert len(known) >= 30, "в ADR-логе подозрительно мало записей — проверка ослабла"
+
+    cited: dict[str, list[str]] = {}
+    for path in sorted((repo_root / "prototype" / "src").rglob("*.py")):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+            for adr in re.findall(r"ADR-\d+", line):
+                cited.setdefault(adr, []).append(f"{path.relative_to(repo_root)}:{number}")
+
+    assert cited, "в prototype/src нет ссылок на ADR — проверка ослабла"
+    unknown = {adr: refs for adr, refs in cited.items() if adr not in known}
+    assert not unknown, (
+        "ссылки на номера, которых нет в ADR-логе: "
+        + "; ".join(f"{adr} → {', '.join(refs)}" for adr, refs in sorted(unknown.items()))
+    )
