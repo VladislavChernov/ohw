@@ -449,7 +449,6 @@ def wait_jobs(
     last_seen: dict[str, dict[str, Any]] = {}
     signatures: dict[str, tuple[Any, ...]] = {}
     last_progress: dict[str, float] = {}
-    last_progress_any = started
     unreachable_since: float | None = None
 
     while len(statuses) < len(job_ids):
@@ -478,7 +477,6 @@ def wait_jobs(
             if signatures.get(job_id) != signature:
                 signatures[job_id] = signature
                 last_progress[job_id] = current
-                last_progress_any = current
             status = str(resp.get("status", ""))
             if status in TERMINAL_JOB_STATUSES:
                 statuses[job_id] = resp
@@ -1557,7 +1555,7 @@ def build_config_state(
     return {
         "profile_fingerprints": fingerprints,
         "profile_fingerprint": distinct[0] if distinct else None,
-        "profile_pinned_at": sorted(pinned_at.values())[0] if pinned_at else None,
+        "profile_pinned_at": min(pinned_at.values()) if pinned_at else None,
         # Право на устаревание объявлено явно, а не подразумевается: пока сессия идёт,
         # конфигурация неизменна, и «устаревшая» конфигурация в артефакте означает, что
         # правило нарушено, а не что кто-то не обновился.
@@ -2155,16 +2153,16 @@ def main() -> None:
         reports[key] = _run_mode(mode, all_records)
 
     config_state = build_config_state(reports, all_records)
-    for mode_key in reports:
-        reports[mode_key]["config"] = config_state
+    for mode_report in reports.values():
+        mode_report["config"] = config_state
 
     judge_active = judge is not None and generate
     # Отчёт ingest строится ДО подсчёта вердикта: потеря LLM-слоя инвалидирует
     # прогон, и вердикт обязан знать о ней, а не узнавать о ней постфактум в паспорте.
     ingest_summary = build_ingest_report(submitted, statuses) if submitted else None
     ingest_quality = build_ingest_quality(ingest_summary)
-    for mode_key in reports:
-        reports[mode_key]["ingest_quality"] = ingest_quality
+    for mode_report in reports.values():
+        mode_report["ingest_quality"] = ingest_quality
     report = lift_report(
         baseline=reports.get("baseline", {}),
         target=reports.get("target", {}),
