@@ -8,7 +8,8 @@
 
       1. проверяет/поднимает стенд (`up -d --wait`);
       2. запускает фоновый сборщик ресурсов (eval_sample_resources.ps1);
-      3. выполняет `docker compose run --rm eval-runner run_eval.py ...`;
+      3. выполняет `docker compose run --rm eval-runner run_eval.py ...`, попутно
+         перехватывая stdout и stderr раннера в logs/runner.log;
       4. останавливает сборщик и пишет resources.json (старт/пик/финал);
       5. выгружает логи сервисов в logs/*.log — иначе они умрут вместе с prune;
       6. дописывает строку прогона в reports/INDEX.md и reports/index.json.
@@ -82,6 +83,9 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $infraDir)
 $composeFile = Join-Path $infraDir 'compose.eval-minimal.yaml'
 $reportsRoot = Join-Path (Split-Path -Parent $infraDir) 'reports'
 $samplerScript = Join-Path $scriptDir 'eval_sample_resources.ps1'
+# Перехват вывода нативной команды вынесен отдельно: ловушки PowerShell 5.1 в нём
+# задокументированы и проверяются прогоном, а не пересказом здесь.
+. (Join-Path $scriptDir 'Invoke-Captured.ps1')
 
 if (-not $RunName) {
     $RunName = 'run-{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $Mode
@@ -90,6 +94,7 @@ $runDir = Join-Path $reportsRoot $RunName
 $samplesPath = Join-Path $runDir 'resources.samples.jsonl'
 $stopFile = Join-Path $runDir 'resources.stop'
 $logsDir = Join-Path $runDir 'logs'
+$runnerLog = Join-Path $logsDir 'runner.log'
 
 function Get-GitTreeState {
     <#
@@ -194,8 +199,20 @@ Write-Host "==> прогон $RunName"
 # в ОДИН аргумент, и python получает «--domain it --mode both ...» одной строкой,
 # отвечая `unknown option`. Проверено: 6 элементов вместо 11.
 $evalTail = $evalArgs[1..($evalArgs.Count - 1)]
-Invoke-Compose 'run' '--rm' '--no-deps' 'eval-runner' 'python' @evalTail
-$runExit = $LASTEXITCODE
+# Вывод раннера перехватывается в logs/runner.log по ходу прогона. Без этого прогон
+# на полном корпусе нечем разбирать: логи сервисов выгружаются позже и переживают
+# prune, а stdout раннера жил только в консоли и терялся вместе с окном.
+# Код возврата берётся ИЗ ВЫЗОВА, а не из конвейера, и перехват не имеет права
+# бросить скрипт на строке stderr — обе оговорки разобраны в Invoke-Captured.ps1.
+$runExit = Invoke-Captured -LogPath $runnerLog -Header @(
+    "# run: $RunName",
+    "# commit: $env:RUN_CODE_COMMIT",
+    "# tree: $env:RUN_CODE_TREE",
+    "# command: $hostCommand",
+    "# started: $($startedAt.ToString('o'))"
+) -Command {
+    Invoke-Compose 'run' '--rm' '--no-deps' 'eval-runner' 'python' @evalTail
+}
 $finishedAt = Get-Date
 
 # --- 4. resources.json ----------------------------------------------------
@@ -369,6 +386,7 @@ if (-not $KeepStack) {
 Write-Host ''
 Write-Host "Прогон: $RunName"
 Write-Host "Папка:  $runDir"
+Write-Host "Лог:    $runnerLog"
 if ($resources) {
     Write-Host ("Пик RAM: {0} ГБ | VRAM: {1} МБ | Время: {2} с" -f `
             $resources.host_used_peak_gb, $resources.gpu_peak_used_mb, $resources.wall_time_s)
