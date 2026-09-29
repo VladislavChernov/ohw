@@ -144,6 +144,15 @@ retrieval:
   # подмножество Cypher — см. InMemoryGraphStore (ограниченная грамматика).
   # Тумблер графовой оси: false — только векторный поиск (env RETRIEVAL_GRAPH_ENABLED перекрывает).
   graph_search_enabled: true
+  # Глубина обхода по умолчанию: середина допустимого диапазона 1..6, а не «максимум,
+  # к которому стремимся». Решение владельца 2026-09-29. Документированная партономия
+  # (страна -> область -> район -> город -> улица -> дом) требует 5 хопов от дома до
+  # страны, то есть дефолт 3 её НЕ открывает - она включается запросом или повышением
+  # этого числа. Значение - намерение, а не ограничение сверху: потолок живёт в
+  # MAX_EXPANSION_DEPTH, и зажим объявляется в трассировке (`depth_clamped`).
+  # Кодовый фолбэк (2) ниже намеренно меньше: профиль не загрузился - лучше меньше
+  # контекста, чем больше.
+  max_depth: 3
   cypher_template: |
     MATCH (n) WHERE any(t IN $terms WHERE toLower(n.canonical_name) CONTAINS toLower(t) OR toLower(n.name) CONTAINS toLower(t) OR toLower(n.id) CONTAINS toLower(t))
     OPTIONAL MATCH (n)-[r]-(m) WHERE m:{node_labels}

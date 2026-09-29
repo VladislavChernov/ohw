@@ -146,6 +146,23 @@ def profile_fingerprint(profile: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
 
 
+def _request_depth(value: int | None) -> int | None:
+    """Глубина обхода, заданная запросом. `None` - «не задана», и тогда решает конфигурация.
+
+    Проверяются тип и знак, но НЕ верхняя граница. Просьба «дальше, чем готов обойти» -
+    это не дефект запроса, а объявление о намерении, поэтому она зажимается и
+    объявляется (`depth_clamped` в ответе и в трассировке), а не отвергается. Потолок
+    принадлежит системе и живёт в `MAX_EXPANSION_DEPTH`, а не в проверке запроса.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("max_depth должен быть целым числом")
+    if value < 1:
+        raise ValueError("max_depth должен быть не меньше 1")
+    return value
+
+
 def _validate_runtime_profile(profile: dict[str, Any]) -> None:
     if not isinstance(profile, dict):
         raise ProfileError("Domain Profile должен быть mapping")
@@ -267,8 +284,15 @@ class QueryPipeline:
         revision: str | None = None,
         generate: bool = True,
         trace: bool = False,
+        max_depth: int | None = None,
     ) -> dict[str, Any]:
         """Полный retrieval-цикл; `revision` — ревизия данных домена (ADR-026).
+
+        `max_depth` — глубина обхода, заданная запросом (ADR-036). Она ВЫШЕ конфигурации:
+        запрос -> Config Service -> профиль -> кодовый фолбэк. Значение проверяется типом и
+        знаком; всё, что выше `MAX_EXPANSION_DEPTH`, зажимается и объявляется в ответе
+        (`max_depth_effective`, `depth_clamped`), чтобы урезание не было молчаливым.
+        `None` оставляет цепочку конфигурации нетронутой.
 
         Ревизия участвует в epoch-bump кэша и попадает в `done.revision` как
         fingerprint среза для Eval (ADR-015). Hit эпохи `revision` означает, что
@@ -284,6 +308,8 @@ class QueryPipeline:
         emit = emit or _noop_emit
         if self._closed:
             raise RuntimeError("QueryPipeline закрыт")
+        # Проверяем ДО эмбеддинга: негодная глубина не должна стоить обращения к модели.
+        request_depth = _request_depth(max_depth)
         total_started = time.monotonic()
         trace_events: list[dict[str, Any]] = []
 
@@ -337,8 +363,15 @@ class QueryPipeline:
         if expansion_kinds_raw is not None and cfg_expansion_kinds is None:
             config_fallbacks.append("retrieval.expansion_kinds")
         cfg_direction = str(retrieval_cfg.get("expansion_direction", "both"))
+        # Считается один раз и здесь: и отчёт, и трассировка, и сам обход обязаны говорить
+        # об одном и том же числе, иначе «ч�� показал отчёт» и «что сделал обход» разъедутся.
+        requested_depth = cfg_max_depth if request_depth is None else request_depth
+        effective_depth = _expand_depth(requested_depth)
         effective_retrieval: dict[str, Any] = {
             "max_depth": cfg_max_depth,
+            "max_depth_requested": requested_depth,
+            "max_depth_effective": effective_depth,
+            "depth_clamped": effective_depth != requested_depth,
             "max_fanout": cfg_max_fanout,
             "max_graph_nodes": cfg_max_graph_nodes,
             "graph_boost": cfg_boost,
@@ -513,8 +546,6 @@ class QueryPipeline:
                     # Здесь только работа с графом: отказы рантайма деградируют, дефекты
                     # конфигузации разобраны выше и сюда не доходят.
                     expansion_kinds = cfg_expansion_kinds
-                    requested_depth = cfg_max_depth
-                    effective_depth = _expand_depth(requested_depth)
                     expanded_rows = graph_retriever.expand(
                         unique_seed_ids,
                         direction=cfg_direction,

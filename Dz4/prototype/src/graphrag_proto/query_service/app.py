@@ -51,6 +51,21 @@ def create_app(
         domain = metadata.get("domain")
         if domain is not None and not isinstance(domain, str):
             raise HTTPException(status_code=422, detail="metadata.domain должен быть строкой")
+        # Глубина обхода - параметр запроса (ADR-036). Проверяются тип и знак; верхняя
+        # граница - забота системы, и превышение не отвергается, а зажимается с объявлением
+        # в ответе. Отвергать здесь - значит тратить обращение пользователя на ошибку,
+        # которую можно было поймать на входе.
+        max_depth = payload.get("max_depth")
+        if max_depth is not None:
+            if isinstance(max_depth, bool) or not isinstance(max_depth, int):
+                raise HTTPException(
+                    status_code=422, detail="max_depth должен быть целым числом"
+                )
+            if max_depth < 1:
+                raise HTTPException(
+                    status_code=422, detail="max_depth должен быть не меньше 1"
+                )
+            metadata["max_depth"] = max_depth
 
         task_id = new_task_id()
         store.create(task_id, domain or "", query)

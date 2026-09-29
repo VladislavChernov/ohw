@@ -227,8 +227,16 @@ def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
         def active_domain(self) -> str:
             return "it"
 
-        def run(self, query: str, domain: str | None, emit, revision: str | None = None):
+        def run(
+            self,
+            query: str,
+            domain: str | None,
+            emit,
+            revision: str | None = None,
+            max_depth: int | None = None,
+        ):
             seen["revision"] = revision
+            seen["max_depth"] = max_depth
             return {"text": "ok", "revision": revision}
 
     store.create("q_rev", "it", "вопрос")
@@ -241,7 +249,9 @@ def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
     )
     assert worker.process_one() is True
     assert store.get("q_rev")["status"] == "succeeded"
-    assert seen == {"revision": "revA"}
+    # `max_depth: None` - тоже утверждение: запрос не задавал глубину, значит воркер обязан
+    # передать None, и решает цепочка конфигурации (ADR-025).
+    assert seen == {"revision": "revA", "max_depth": None}
 
 
 def test_worker_resolves_active_domain_before_revision_lookup(tmp_path: Path) -> None:
@@ -253,9 +263,17 @@ def test_worker_resolves_active_domain_before_revision_lookup(tmp_path: Path) ->
         def active_domain(self) -> str:
             return "it"
 
-        def run(self, query: str, domain: str | None, emit, revision: str | None = None):
+        def run(
+            self,
+            query: str,
+            domain: str | None,
+            emit,
+            revision: str | None = None,
+            max_depth: int | None = None,
+        ):
             seen["domain"] = domain
             seen["revision"] = revision
+            seen["max_depth"] = max_depth
             return {"text": "ok", "revision": revision}
 
     store.create("q_active", "", "вопрос")
@@ -267,7 +285,7 @@ def test_worker_resolves_active_domain_before_revision_lookup(tmp_path: Path) ->
         revisions=_StubRevisions(),
     )
     assert worker.process_one() is True
-    assert seen == {"domain": "it", "revision": "revA"}
+    assert seen == {"domain": "it", "revision": "revA", "max_depth": None}
 
 
 def test_worker_metrics_snapshot_includes_revisions(tmp_path: Path, caplog) -> None:
@@ -285,3 +303,56 @@ def test_worker_metrics_snapshot_includes_revisions(tmp_path: Path, caplog) -> N
     assert '"topology_poll_errors_total": 2' in snapshot
     assert '"revision_poll_errors_total": 0' in snapshot
     assert '"revisions": {"it": "revA", "cpp": "revB"}' in snapshot
+
+
+def test_submit_accepts_max_depth_and_rides_to_the_task(tmp_path: Path) -> None:
+    """Глубина из тела запроса доезжает до задачи: иначе воркеру нечего применять."""
+    client, queue, _ = make_app(tmp_path)
+
+    resp = client.post("/query", headers=headers(), json={"query": "вопрос", "max_depth": 4})
+
+    assert resp.status_code == 202, resp.text
+    task = queue.claim(worker_id="test", timeout_s=0.1)
+    assert task is not None
+    assert task.metadata["max_depth"] == 4
+
+
+def test_submit_without_max_depth_leaves_metadata_clean(tmp_path: Path) -> None:
+    """Отсутствие параметра не должно выглядеть как «глубина запрошена = None»."""
+    client, queue, _ = make_app(tmp_path)
+
+    client.post("/query", headers=headers(), json={"query": "вопрос"})
+
+    task = queue.claim(worker_id="test", timeout_s=0.1)
+    assert task is not None
+    assert "max_depth" not in task.metadata
+
+
+def test_submit_refuses_malformed_max_depth(tmp_path: Path) -> None:
+    """Негодное значение отвергается на входе, а не внутри задачи.
+
+    Отказ здесь, а не в воркере, потому что он ничего не стоит: не создаётся задача,
+    не занимается очередь и не тратится обращение к модели. Зажим сверху (99) при этом
+    НЕ отвергается - это объявление о намерении, см. ADR-036.
+    """
+    client, queue, _ = make_app(tmp_path)
+
+    for bad in (0, -1, 2.5, "3", True):
+        resp = client.post("/query", headers=headers(), json={"query": "вопрос", "max_depth": bad})
+        assert resp.status_code == 422, f"{bad!r} -> {resp.status_code}"
+
+    assert queue.claim(worker_id="test", timeout_s=0.1) is None, (
+        "негодный запрос не должен создавать задачу"
+    )
+
+
+def test_submit_accepts_depth_above_cap_without_refusing(tmp_path: Path) -> None:
+    """Просьба глубже потолка принимается и уйдёт в конвейер, где будет зажата."""
+    client, queue, _ = make_app(tmp_path)
+
+    resp = client.post("/query", headers=headers(), json={"query": "вопрос", "max_depth": 99})
+
+    assert resp.status_code == 202, resp.text
+    task = queue.claim(worker_id="test", timeout_s=0.1)
+    assert task is not None
+    assert task.metadata["max_depth"] == 99

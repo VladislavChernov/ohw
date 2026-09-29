@@ -9,7 +9,11 @@ from typing import Any
 
 import pytest
 
-from graphrag_proto.retrieval.adapters.base import GraphStoreProvider, Reranker
+from graphrag_proto.retrieval.adapters.base import (
+    MAX_EXPANSION_DEPTH,
+    GraphStoreProvider,
+    Reranker,
+)
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryVectorStore
 from graphrag_proto.retrieval.adapters.llm import FakeLLM
@@ -643,3 +647,82 @@ def test_epoch_bump_hit_only_same_revision() -> None:
     done_bump = pipe.run("как устроена база данных", revision="revB")
     assert done_bump["cache_hit"] is False
     assert done_bump["revision"] == "revB"
+
+
+# --- Глубина обхода как параметр запроса (ADR-036) ------------------------------------------
+#
+# Проверяется не «прошло ли», а четыре вещи, на которых стоит контракт: запрос ВЫШЕ
+# конфигурации, превышение потолка объявляется, отсутствие параметра оставляет цепочку
+# конфигурации нетронутой, а негодное значение отсекается до работы. Молчаливый зажим
+# здесь и есть главный риск: именно он сделал бы потолок незаметным.
+
+
+def _depth_pipeline() -> tuple[QueryPipeline, _CountingGraphStore]:
+    """Конвейер с настоящими сидами обхода: без них `expand` просто не вызывается."""
+    graph = _CountingGraphStore()
+    return (
+        _pipeline(PROFILE, graph, vector_store=_RecordingVectorStore(_vector_rows())),
+        graph,
+    )
+
+
+def test_absent_request_depth_leaves_config_chain_untouched() -> None:
+    pipe, _ = _depth_pipeline()
+    done = pipe.run("вопрос", domain="it", generate=False)
+
+    assert done["effective_retrieval"]["max_depth"] == 2, "без параметра решает профиль"
+    assert done["effective_retrieval"]["max_depth_requested"] == 2
+    assert done["effective_retrieval"]["max_depth_effective"] == 2
+    assert done["effective_retrieval"]["depth_clamped"] is False
+
+
+def test_request_depth_overrides_profile_and_reaches_the_walk() -> None:
+    pipe, graph = _depth_pipeline()
+    done = pipe.run("вопрос", domain="it", generate=False, max_depth=4)
+
+    # Запрос выше профиля: до обхода дошло именно запрошенное.
+    assert graph.expansion_calls[0][1]["max_depth"] == 4
+    assert done["effective_retrieval"]["max_depth"] == 2, "конфигурация остаётся конфигурацией"
+    assert done["effective_retrieval"]["max_depth_requested"] == 4
+    assert done["effective_retrieval"]["max_depth_effective"] == 4
+    assert done["effective_retrieval"]["depth_clamped"] is False
+
+
+def test_request_depth_above_cap_is_clamped_and_declared() -> None:
+    """Просьба «дальше, чем готов обойти» - не ошибка запроса, но и не молчалка."""
+    pipe, _ = _depth_pipeline()
+    done = pipe.run("вопрос", domain="it", generate=False, max_depth=99)
+
+    assert done["effective_retrieval"]["max_depth_requested"] == 99
+    assert done["effective_retrieval"]["max_depth_effective"] == MAX_EXPANSION_DEPTH == 6
+    assert done["effective_retrieval"]["depth_clamped"] is True
+
+
+def test_cap_allows_documented_parthood_chain() -> None:
+    """Потолок 6 обязан пропускать партономию: 5 хопов от дома до страны (docs/01 §2)."""
+    pipe, _ = _depth_pipeline()
+    done = pipe.run("вопрос", domain="it", generate=False, max_depth=5)
+
+    assert done["effective_retrieval"]["max_depth_effective"] == 5
+    assert done["effective_retrieval"]["depth_clamped"] is False
+
+
+def test_request_depth_is_reported_in_trace() -> None:
+    pipe, _ = _depth_pipeline()
+    done = pipe.run("вопрос", domain="it", generate=False, max_depth=99, trace=True)
+
+    expansion = [event for event in done["trace"] if event.get("stage") == "graph_expansion"]
+    assert expansion, "событие graph_expansion обязано быть в трассировке"
+    assert expansion[0]["requested_depth"] == 99
+    assert expansion[0]["effective_depth"] == MAX_EXPANSION_DEPTH
+    assert expansion[0]["depth_clamped"] is True
+
+
+def test_invalid_request_depth_is_refused_before_any_work() -> None:
+    """Ноль, отрицательное, дробное, строка и bool - разные поводы отказать."""
+    pipe, graph = _depth_pipeline()
+    for bad in (0, -1, 2.5, "3", True):
+        with pytest.raises((TypeError, ValueError)):
+            pipe.run("вопрос", domain="it", generate=False, max_depth=bad)  # type: ignore[arg-type]
+
+    assert graph.expansion_calls == [], "негодная глубина обязана отсекаться до обхода"

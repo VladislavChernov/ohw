@@ -297,11 +297,19 @@ class Neo4jGraphStore(GraphStoreProvider):
         with self._session() as session:
             rows = session.run(query, parameters=parameters).data()
         result: list[dict[str, Any]] = []
+        # Ограничение ветвления считается ПО УЗЛУ, из которого пошли ребра, - так же, как
+        # в InMemoryGraphStore, где счётчик сбрасывается на каждом текущем узле. Раньше
+        # здесь счётчик жил по ключу `seed`, то есть ограничивал суммарное число строк на
+        # одну стартовую точку; при глубине больше 1 это делало параметр почти бессмысленным
+        # (промежуточные узлы разветвлялись как угодно), и один и тот же параметр значил
+        # разные вещи в двух адаптерах. Ключ - предшественник в пути, а не seed.
         fanout_counts: dict[str, int] = {}
         for row in rows:
             path = list(row.get("path") or [])
-            seed = str(path[0]) if path else ""
-            if fanout_counts.get(seed, 0) >= max_fanout:
+            # `*1..depth` даёт путь из двух и более узлов, поэтому предшественник есть
+            # всегда; fallback на seed - страховка на неожиданную форму пути.
+            branch_point = str(path[-2]) if len(path) >= 2 else (str(path[0]) if path else "")
+            if fanout_counts.get(branch_point, 0) >= max_fanout:
                 continue
             node = row.get("node")
             props = dict(node) if node is not None else {}
@@ -320,7 +328,7 @@ class Neo4jGraphStore(GraphStoreProvider):
                     "properties": dict(props.get("properties") or {}),
                 }
             )
-            fanout_counts[seed] = fanout_counts.get(seed, 0) + 1
+            fanout_counts[branch_point] = fanout_counts.get(branch_point, 0) + 1
             if len(result) >= max_nodes:
                 break
         return result

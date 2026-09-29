@@ -329,6 +329,13 @@ def test_expansion_depth_cap_is_identical_in_both_adapters() -> None:
     from graphrag_proto.retrieval.adapters.base import MAX_EXPANSION_DEPTH, _expand_depth
 
     store = InMemoryGraphStore()
+    # Цепочка ДЛИННЕЕ потолка, и это условие проверяется явно. Раньше цепочка была из
+    # 5 узлов, а потолок 3, и тест проходил; после подъёма потолка до 6 цепочка стала
+    # короче него, ограничителем перестал быть потолок - и тест стал проходить даже с
+    # ПОЛНОСТЬЮ отключённым ограничением, то есть проверял уже не то. Теперь любой
+    # потолок снова упирается в цепочку, и проверка не может выродиться незаметно.
+    chain_length = MAX_EXPANSION_DEPTH + 2
+    assert chain_length > MAX_EXPANSION_DEPTH
     store.upsert_nodes(
         [
             {
@@ -342,7 +349,7 @@ def test_expansion_depth_cap_is_identical_in_both_adapters() -> None:
                     "chunk_ids": ["chk:abc"],
                 },
             }
-            for name in ("n0", "n1", "n2", "n3", "n4", "n5")
+            for name in (f"n{index}" for index in range(chain_length))
         ]
     )
     store.upsert_edges(
@@ -356,17 +363,20 @@ def test_expansion_depth_cap_is_identical_in_both_adapters() -> None:
                     "chunk_ids": ["chk:abc"],
                 },
             }
-            for index in range(5)
+            for index in range(chain_length - 1)
         ]
     )
 
     beyond_cap = MAX_EXPANSION_DEPTH + 10
-    rows = store.expand(["tag:it:n0"], max_depth=beyond_cap, max_nodes=32)
+    rows = store.expand(["tag:it:n0"], max_depth=beyond_cap, max_nodes=chain_length * 4)
 
     assert rows, "цепочка рёбер должна находиться"
     assert max(row["depth"] for row in rows) == MAX_EXPANSION_DEPTH
     assert len(rows) == MAX_EXPANSION_DEPTH
     assert _expand_depth(beyond_cap) == MAX_EXPANSION_DEPTH
+    # Глубина 6 обязана быть достижима: иначе «потолок 6» ничего не разрешает и
+    # документированная партономия (5 хопов от дома до страны) остаётся недостижимой.
+    assert _expand_depth(MAX_EXPANSION_DEPTH) == 6
 
 
 def test_remove_source_clears_edge_provenance() -> None:
@@ -786,3 +796,96 @@ def test_openai_adapter_http_connect_error_is_runtime() -> None:
 
     with pytest.raises(RuntimeError):
         list(adapter.generate("hi"))
+
+
+def test_neo4j_fanout_is_counted_per_branch_point_not_per_seed() -> None:
+    """Ветвление ограничивается ПО УЗЛУ, как в in-memory, а не суммарно на старт.
+
+    Различие не косметическое. При счёте по seed ограничение съедалось ближайшими
+    строками: на глубине больше 1 промежуточный узел разветвлялся как угодно, и глубина
+    почти не добавляла ответа. При счёте по узлу 8 - это «не больше 8 соседей от каждого
+    узла», то есть ровно то, что делает in-memory, и параметр наконец значит одно и то же
+    в обоих адаптерах.
+    """
+    rows = [
+        # Три соседа n0: при лимите 2 третьй отбрасывается.
+        {"path": ["tag:it:n0", "tag:it:a1"], "node": {"node_id": "tag:it:a1"}, "depth": 1},
+        {"path": ["tag:it:n0", "tag:it:a2"], "node": {"node_id": "tag:it:a2"}, "depth": 1},
+        {"path": ["tag:it:n0", "tag:it:a3"], "node": {"node_id": "tag:it:a3"}, "depth": 1},
+        # По одному ребру из a1 и a2: лимит считается от КАЖДОГО из них, а не от n0,
+        # поэтому при счёте по seed эти строки были бы отброшены как третьи и четвёртые.
+        {
+            "path": ["tag:it:n0", "tag:it:a1", "tag:it:b1"],
+            "node": {"node_id": "tag:it:b1"},
+            "depth": 2,
+        },
+        {
+            "path": ["tag:it:n0", "tag:it:a2", "tag:it:b2"],
+            "node": {"node_id": "tag:it:b2"},
+            "depth": 2,
+        },
+    ]
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return rows
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    found = store.expand(["tag:it:n0"], max_depth=2, max_fanout=2, max_nodes=10)
+    ids = [row["node_id"] for row in found]
+
+    assert ids == ["tag:it:a1", "tag:it:a2", "tag:it:b1", "tag:it:b2"], ids
+    assert "tag:it:a3" not in ids, "третий сосед n0 превышает лимит ветвления"
+    assert "tag:it:b1" in ids, "ребро из a1 не должно съедать лимит n0"
+
+
+def test_neo4j_fanout_limit_applies_per_node_on_one_chain() -> None:
+    """На цепочке лимит 1 - это один сосед от КАЖДОГО узла, а не одна строка на старт.
+
+    Контраст с прежним счётом по seed резкий: при счёте по seed из цепочки
+    n0 -> n1 -> n2 прошла бы только n1, и глубина 2 была бы недостижима в принципе.
+    """
+    rows = [
+        {
+            "path": ["tag:it:n0", "tag:it:n1"],
+            "node": {"node_id": "tag:it:n1"},
+            "depth": 1,
+        },
+        {
+            "path": ["tag:it:n0", "tag:it:n1", "tag:it:n2"],
+            "node": {"node_id": "tag:it:n2"},
+            "depth": 2,
+        },
+    ]
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return rows
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    found = store.expand(["tag:it:n0"], max_depth=2, max_fanout=1, max_nodes=10)
+    assert [row["node_id"] for row in found] == ["tag:it:n1", "tag:it:n2"]
