@@ -202,3 +202,132 @@ def test_orphan_cleanup_table_created_on_legacy_database(tmp_path: Path) -> None
     )
 
     assert registry.orphan_cleanup("job-1") is not None
+
+
+def _analyzer(reg: Any, graph: Any, vector: Any) -> Any:
+    from graphrag_proto.ingestion_service.pipeline.orchestrator import (
+        Analyzer,
+        ChunkStage,
+        CommitStage,
+        ContractStage,
+        DedupStage,
+        EmbedStage,
+        ExtractStage,
+        IngestStage,
+        NormalizeStage,
+        ValidateStage,
+    )
+    from graphrag_proto.ingestion_service.readers.registry import TxtReader
+
+    return Analyzer(
+        [
+            IngestStage({"txt": TxtReader()}),
+            ChunkStage(),
+            EmbedStage(),
+            ExtractStage(),
+            NormalizeStage(""),
+            DedupStage(),
+            ContractStage(),
+            ValidateStage(),
+            CommitStage(reg, graph_store=graph, vector_store=vector, graph_optional=True),
+        ]
+    )
+
+
+def test_manual_link_is_supported_while_its_document_is_alive(tmp_path: Path) -> None:
+    """Ручная связь держится на чанках документа и переживает уборку, пока документ жив.
+
+    Регрессия на дыру из `docs/02`: `chunk_ids` проставлялись сущностям, но не связям, и
+    предикат отбора опирается именно на `chunk_ids`. Связь без него неотличима от
+    структурной, то есть ручное утверждение пользователя неубираемо навсегда: ни снятие
+    тега, ни снятие самой связи ничего бы не удаляли.
+    """
+    from graphrag_proto.ingestion_service.pipeline.orchestrator import PipelineContext
+    from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
+    from graphrag_proto.retrieval.adapters.inmemory import (
+        InMemoryGraphStore,
+        InMemoryVectorStore,
+    )
+
+    reg = DocumentRegistry(tmp_path / "r.db")
+    graph = InMemoryGraphStore()
+    vector = InMemoryVectorStore()
+    analyzer = _analyzer(reg, graph, vector)
+    src = tmp_path / "d.txt"
+    src.write_text("требование контракт сроки согласование договор", encoding="utf-8")
+    tags = [
+        {"tag_id": "tag:it:требование", "canonical_name": "требование"},
+        {"tag_id": "tag:it:контракт", "canonical_name": "контракт"},
+    ]
+    link = {"from_id": "tag:it:требование", "to_id": "tag:it:контракт", "type": "RELATED"}
+
+    ctx = PipelineContext(
+        job_id="j1",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        source_path=str(src),
+        tags=tags,
+        links=[link],
+    )
+    analyzer.run(ctx)
+
+    assert graph.verify_edge("tag:it:требование", "tag:it:контракт", "RELATED")
+    assert graph.delete_orphans("it", dry_run=False) == 0, "опора связи потеряна, уборка съела живое"
+    assert graph.verify_edge("tag:it:требование", "tag:it:контракт", "RELATED")
+
+
+def test_manual_link_dies_with_the_version_that_asserted_it(tmp_path: Path) -> None:
+    """Снятие документа убирает и его ручную связь: опора была только от него.
+
+    Вторая половина той же регрессии: проставить опору мало, надо чтобы при перезагрузке
+    версии она снималась. Предикат здесь — `chunk_ids` (ADR-014 п. 16), а снятие источника
+    чистит `chunk_ids` и у нод, и у рёбер (второй запрос `_remove_source`).
+    """
+    from graphrag_proto.ingestion_service.pipeline.orchestrator import PipelineContext
+    from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
+    from graphrag_proto.retrieval.adapters.inmemory import (
+        InMemoryGraphStore,
+        InMemoryVectorStore,
+    )
+
+    reg = DocumentRegistry(tmp_path / "r.db")
+    graph = InMemoryGraphStore()
+    vector = InMemoryVectorStore()
+    analyzer = _analyzer(reg, graph, vector)
+    src = tmp_path / "d.txt"
+    src.write_text("требование контракт сроки согласование договор", encoding="utf-8")
+    tags = [
+        {"tag_id": "tag:it:требование", "canonical_name": "требование"},
+        {"tag_id": "tag:it:контракт", "canonical_name": "контракт"},
+    ]
+    link = {"from_id": "tag:it:требование", "to_id": "tag:it:контракт", "type": "RELATED"}
+
+    analyzer.run(
+        PipelineContext(
+            job_id="j1",
+            domain="it",
+            doc_type="txt",
+            source_url="src://d.txt",
+            source_path=str(src),
+            tags=tags,
+            links=[link],
+        )
+    )
+    assert graph.verify_edge("tag:it:требование", "tag:it:контракт", "RELATED")
+
+    src.write_text("совершенно другой текст без прежних утверждений", encoding="utf-8")
+    analyzer.run(
+        PipelineContext(
+            job_id="j2",
+            domain="it",
+            doc_type="txt",
+            source_url="src://d.txt",
+            source_path=str(src),
+            tags=tags,
+        )
+    )
+
+    removed = graph.delete_orphans("it", dry_run=False)
+    assert removed >= 1, "связь, которую сняли вместе с версией документа, осталась в графе"
+    assert not graph.verify_edge("tag:it:требование", "tag:it:контракт", "RELATED")

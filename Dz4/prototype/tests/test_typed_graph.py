@@ -247,12 +247,16 @@ def test_extract_llm_produces_generic_context_nodes_and_edge(
     assert all(entity["origin"] == "ai" for entity in ctx.entities)
     assert {entity["confidence"] for entity in ctx.entities} == {0.82, 0.76}
     assert all(entity["extractor_version"] == "llm:extract_context_v1" for entity in ctx.entities)
-    assert {
-        "from": "требование",
-        "to": "индексирование",
-        "kind": "depends_on",
-        "origin": "ai",
-    } in [dict(edge) for edge in ctx.entity_edges]
+    edges = [dict(edge) for edge in ctx.entity_edges]
+    assert any(
+        {key: edge.get(key) for key in ("from", "to", "kind", "origin")}
+        == {"from": "требование", "to": "индексирование", "kind": "depends_on", "origin": "ai"}
+        for edge in edges
+    ), edges
+    # Опору связи проставляет платформа, а не модель: промпт запрещает `chunk_ids` в
+    # relationships. Экстракция почанковая, поэтому связь опирается на свой чанк, и без
+    # этой опоры предикат уборки её не видел бы никогда (`docs/02` §4.5).
+    assert all(edge.get("chunk_ids") for edge in edges), edges
 
 
 def test_llm_origin_is_forced_to_ai(monkeypatch: Any) -> None:
@@ -335,17 +339,22 @@ def test_context_edges_accept_canonical_addressing_and_preserve_ai_provenance(
         profile_fetcher=lambda _domain: _ai_profile(),
     ).run(ctx)
 
-    assert ctx.entity_edges == [
-        {
-            "from": "требование",
-            "to": "индексирование",
-            "kind": "depends_on",
-            "origin": "ai",
-            "confidence": 0.73,
-            "source_ids": ["src://d.txt"],
-            "properties": {"weight": 0.9},
-        }
-    ]
+    assert len(ctx.entity_edges) == 1
+    edge = dict(ctx.entity_edges[0])
+    assert {key: edge.pop(key) for key in ("from", "to", "kind", "origin", "confidence", "properties", "source_ids")} == {
+        "from": "требование",
+        "to": "индексирование",
+        "kind": "depends_on",
+        "origin": "ai",
+        "confidence": 0.73,
+        "properties": {"weight": 0.9},
+        "source_ids": ["src://d.txt"],
+    }
+    # Происхождение добавляет платформа, а не модель: промпт запрещает `chunk_ids` в
+    # relationships, поэтому в ответе модели их нет, а в связи — обязаны быть, иначе
+    # предикат уборки её не увидит (`docs/02` §4.5).
+    assert list(edge) == ["chunk_ids"]
+    assert edge["chunk_ids"]
 
 
 def test_context_edges_reject_model_invented_tag_id_addressing(

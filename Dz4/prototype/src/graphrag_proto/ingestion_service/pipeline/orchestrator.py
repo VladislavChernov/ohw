@@ -711,6 +711,14 @@ class ExtractStage(Stage):
                     if key in relation:
                         edge[key] = relation[key]
                 edge["origin"] = "ai"
+                # Происхождение ставит платформа, а не модель: промпт прямо запрещает
+                # `chunk_ids` в relationships, потому что концы задаются именами. Но связь —
+                # утверждение, и у него должна быть опора, иначе её нечем чистить: предикат
+                # отбора опирается на `chunk_ids` (`docs/02` §4.5), и без них ни одна доменная
+                # связь не является кандидатом на уборку. Экстракция почанковая, и нужный
+                # `chunk_id` здесь в области видимости.
+                edge.setdefault("source_ids", [ctx.source_url])
+                edge["chunk_ids"] = [chunk_id]
                 ctx.entity_edges.append(edge)
         if ctx.model_tag_ids_ignored:
             # Одна строка на документ, а не на сущность: при ~77 сущностях на чанк
@@ -1336,6 +1344,14 @@ class CommitStage(Stage):
         for entity in entities:
             if entity.get("tag_id") and not _entity_chunk_ids(entity):
                 entity["chunk_ids"] = list(all_chunk_ids)
+        # Связь — такое же утверждение в этом документе, как тег, и получает опору здесь
+        # же. Раньше `chunk_ids` проставлялись только сущностям, и ручная связь оставалась
+        # неотличимой от структурной по предикату `chunk_ids IS NOT NULL`, то есть
+        # неубираемой навсегда (`docs/02` §4.5, дыра зафиксирована там же). Уже
+        # проставленную опору не трогаем: у извлечённой связи она своя, почанковая.
+        for relation in entity_edges:
+            if not relation.get("chunk_ids"):
+                relation["chunk_ids"] = list(all_chunk_ids)
 
         nodes: list[dict[str, Any]] = [
             {
