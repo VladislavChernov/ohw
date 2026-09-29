@@ -234,6 +234,76 @@ def _analyzer(reg: Any, graph: Any, vector: Any) -> Any:
     )
 
 
+class _CapturingGraph(InMemoryGraphStore):
+    """Запоминает, какие рёбра реально ушли в хранилище.
+
+    Инвариант проверяется на границе, а не на промежуточном списке `entity_edges`.
+    Именно на этой границе опора терялась: `chunk_ids` проставлялись связям в оркестраторе,
+    но не копировались в свойства ребра, и в хранилище попадала связь без опоры - то есть
+    неотличимая от структурной. Тест, смотрящий только на промежуточный список или
+    проверяющий, что уборка пощадила связь, проходил: пощадить её было нечего, кандидатом
+    она не была никогда.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.edge_batches: list[list[dict[str, Any]]] = []
+
+    def upsert_edges(self, edges: list[dict[str, Any]]) -> None:
+        self.edge_batches.append([dict(edge) for edge in edges])
+        super().upsert_edges(edges)
+
+    def edge_properties(self, from_id: str, to_id: str) -> dict[str, Any] | None:
+        for batch in self.edge_batches:
+            for edge in batch:
+                if edge.get("from_id") == from_id and edge.get("to_id") == to_id:
+                    return dict(edge.get("properties") or {})
+        return None
+
+
+def test_relation_reaches_the_store_with_chunk_support(tmp_path: Path) -> None:
+    """Связь должна доходить до хранилища с непустым `chunk_ids`.
+
+    Регрессия на дыру, найденную E2E-прогоном: `chunk_ids` проставлялись связям, но не
+    попадали в свойства ребра. Предикат уборки опирается именно на это свойство, а связь
+    без него неотличима от структурной (`chunk_ids IS NULL`) - то есть весь отбор по
+    политике `current_only` оказывался пустым на любом корпусе, а уборка не могла удалить
+    ничего. Юнит-тесты этого не видели: они строили рёбра руками, уже с `chunk_ids`.
+    """
+    from graphrag_proto.ingestion_service.pipeline.orchestrator import PipelineContext
+    from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
+    from graphrag_proto.retrieval.adapters.inmemory import InMemoryVectorStore
+
+    reg = DocumentRegistry(tmp_path / "r.db")
+    graph = _CapturingGraph()
+    analyzer = _analyzer(reg, graph, InMemoryVectorStore())
+    src = tmp_path / "d.txt"
+    src.write_text("требование контракт сроки согласование договор", encoding="utf-8")
+    tags = [
+        {"tag_id": "tag:it:требование", "canonical_name": "требование"},
+        {"tag_id": "tag:it:контракт", "canonical_name": "контракт"},
+    ]
+
+    analyzer.run(
+        PipelineContext(
+            job_id="j1",
+            domain="it",
+            doc_type="txt",
+            source_url="src://d.txt",
+            source_path=str(src),
+            tags=tags,
+            links=[{"from_id": "tag:it:требование", "to_id": "tag:it:контракт", "type": "RELATED"}],
+        )
+    )
+
+    properties = graph.edge_properties("tag:it:требование", "tag:it:контракт")
+    assert properties is not None, "ручная связь не дошла до хранилища"
+    assert properties.get("chunk_ids"), (
+        "у связи нет chunk_ids в свойствах ребра: предикат уборки её не увидит, "
+        f"получено {sorted(properties)}"
+    )
+
+
 def test_manual_link_is_supported_while_its_document_is_alive(tmp_path: Path) -> None:
     """Ручная связь держится на чанках документа и переживает уборку, пока документ жив.
 

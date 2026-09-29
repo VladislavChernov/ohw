@@ -970,7 +970,12 @@ def test_manual_tags_and_links_preserve_generic_provenance(
     assert node["properties"] == {"language": "en"}
     edge_key = ("tag:it:quicksort", "tag:it:sorting", "DEPENDS_ON")
     assert edge_key in graph._edges
-    assert graph._edges[edge_key] == {
+    edge = graph._edges[edge_key]
+    # `chunk_ids` обязателен: без него связь неотличима от структурной
+    # (`chunk_ids IS NULL`), и предикат уборки её не видит. Остальные свойства
+    # приходят из ручного ввода без изменений.
+    assert edge.pop("chunk_ids"), "у ручной связи нет опоры в свойствах ребра"
+    assert edge == {
         "kind": "depends_on",
         "weight": 0.7,
         "domain": "it",
