@@ -1,0 +1,137 @@
+[
+  {
+    "job_id": "a0f412bb-8e86-43a2-9bc3-04d2ab4c3f51",
+    "stage": "CHUNK",
+    "duration_ms": 153
+  },
+  {
+    "job_id": "a0f412bb-8e86-43a2-9bc3-04d2ab4c3f51",
+    "stage": "COMMIT",
+    "duration_ms": 3902
+  },
+  {
+    "job_id": "a0f412bb-8e86-43a2-9bc3-04d2ab4c3f51",
+    "stage": "CONTRACT",
+    "duration_ms": 90
+  },
+  {
+    "job_id": "a0f412bb-8e86-43a2-9bc3-04d2ab4c3f51",
+    "stage": "DEDUP",
+    "duration_ms": 84
+  },
+  {
+    "job_id": "a0f412bb-8e86-43a2-9bc3-04d2ab4c3f51",
+    "stage": "EMBED",
+    "duration_ms": 12705
+  },
+  {
+    "job_id": "a0f412bb-8e86-43a2-9bc3-04d2ab4c3f51",
+    "stage": "EXTRACT",
+    "duration_ms": 34754
+  },
+  {
+    "job_id": "a0f412bb-8e86-43a2-9bc3-04d2ab4c3f51",
+    "stage": "INGEST",
+    "duration_ms": 69
+  },
+  {
+    "job_id": "a0f412bb-8e86-43a2-9bc3-04d2ab4c3f51",
+    "stage": "NORMALIZE",
+    "duration_ms": 139
+  },
+  {
+    "job_id": "a0f412bb-8e86-43a2-9bc3-04d2ab4c3f51",
+    "stage": "VALIDATE",
+    "duration_ms": 90
+  },
+  {
+    "job_id": "b88f07c1-a08d-45da-a31e-5bb681918ed7",
+    "stage": "CHUNK",
+    "duration_ms": 153
+  },
+  {
+    "job_id": "b88f07c1-a08d-45da-a31e-5bb681918ed7",
+    "stage": "COMMIT",
+    "duration_ms": 2302
+  },
+  {
+    "job_id": "b88f07c1-a08d-45da-a31e-5bb681918ed7",
+    "stage": "CONTRACT",
+    "duration_ms": 134
+  },
+  {
+    "job_id": "b88f07c1-a08d-45da-a31e-5bb681918ed7",
+    "stage": "DEDUP",
+    "duration_ms": 171
+  },
+  {
+    "job_id": "b88f07c1-a08d-45da-a31e-5bb681918ed7",
+    "stage": "EMBED",
+    "duration_ms": 486
+  },
+  {
+    "job_id": "b88f07c1-a08d-45da-a31e-5bb681918ed7",
+    "stage": "EXTRACT",
+    "duration_ms": 17836
+  },
+  {
+    "job_id": "b88f07c1-a08d-45da-a31e-5bb681918ed7",
+    "stage": "INGEST",
+    "duration_ms": 79
+  },
+  {
+    "job_id": "b88f07c1-a08d-45da-a31e-5bb681918ed7",
+    "stage": "NORMALIZE",
+    "duration_ms": 255
+  },
+  {
+    "job_id": "b88f07c1-a08d-45da-a31e-5bb681918ed7",
+    "stage": "VALIDATE",
+    "duration_ms": 245
+  },
+  {
+    "job_id": "e5daf8f7-2afe-4813-9525-cf005a49e1b2",
+    "stage": "CHUNK",
+    "duration_ms": 95
+  },
+  {
+    "job_id": "e5daf8f7-2afe-4813-9525-cf005a49e1b2",
+    "stage": "COMMIT",
+    "duration_ms": 655
+  },
+  {
+    "job_id": "e5daf8f7-2afe-4813-9525-cf005a49e1b2",
+    "stage": "CONTRACT",
+    "duration_ms": 79
+  },
+  {
+    "job_id": "e5daf8f7-2afe-4813-9525-cf005a49e1b2",
+    "stage": "DEDUP",
+    "duration_ms": 82
+  },
+  {
+    "job_id": "e5daf8f7-2afe-4813-9525-cf005a49e1b2",
+    "stage": "EMBED",
+    "duration_ms": 507
+  },
+  {
+    "job_id": "e5daf8f7-2afe-4813-9525-cf005a49e1b2",
+    "stage": "EXTRACT",
+    "duration_ms": 1566
+  },
+  {
+    "job_id": "e5daf8f7-2afe-4813-9525-cf005a49e1b2",
+    "stage": "INGEST",
+    "duration_ms": 79
+  },
+  {
+    "job_id": "e5daf8f7-2afe-4813-9525-cf005a49e1b2",
+    "stage": "NORMALIZE",
+    "duration_ms": 98
+  },
+  {
+    "job_id": "e5daf8f7-2afe-4813-9525-cf005a49e1b2",
+    "stage": "VALIDATE",
+    "duration_ms": 79
+  }
+]

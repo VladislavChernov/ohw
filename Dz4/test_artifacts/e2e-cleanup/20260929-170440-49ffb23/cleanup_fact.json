@@ -1,0 +1,56 @@
+{
+  "cleanups": [
+    {
+      "request": {
+        "method": "POST",
+        "url": "http://ingestion-api:8002/api/v1/maintenance/orphan-cleanup",
+        "body": {
+          "domain": "it"
+        }
+      },
+      "data_revision_before": {
+        "revision": "cf65a7f8b4bfdc77dfec50da6ad01b6ab831d55cf591ed6140f04ff489089e1f",
+        "updated_at": "2026-09-29T14:06:07+00:00"
+      },
+      "container": "ohw-eval-qwen3b-ingestion-api-1",
+      "response": {
+        "job_id": "maintenance:59eb6d0d-eb8b-47ce-9e76-cd9beb45e409",
+        "domain": "it",
+        "created_at": "2026-09-29T14:06:09+00:00",
+        "mode": "current_only",
+        "skipped": false,
+        "planned_relations": 1,
+        "removed_relations": 1,
+        "planned_nodes": 0,
+        "removed_nodes": 0
+      },
+      "raw_stdout": "{\"job_id\":\"maintenance:59eb6d0d-eb8b-47ce-9e76-cd9beb45e409\",\"domain\":\"it\",\"created_at\":\"2026-09-29T14:06:09+00:00\",\"mode\":\"current_only\",\"skipped\":false,\"planned_relations\":1,\"removed_relations\":1,\"planned_nodes\":0,\"removed_nodes\":0}"
+    },
+    {
+      "request": {
+        "method": "POST",
+        "url": "http://ingestion-api:8002/api/v1/maintenance/orphan-cleanup",
+        "body": {
+          "domain": "it"
+        }
+      },
+      "data_revision_before": {
+        "revision": "cf65a7f8b4bfdc77dfec50da6ad01b6ab831d55cf591ed6140f04ff489089e1f",
+        "updated_at": "2026-09-29T14:06:07+00:00"
+      },
+      "container": "ohw-eval-qwen3b-ingestion-api-1",
+      "response": {
+        "job_id": "maintenance:7eabe818-eb62-4320-ba9c-3d27324bbdf1",
+        "domain": "it",
+        "created_at": "2026-09-29T14:06:09+00:00",
+        "mode": "current_only",
+        "skipped": false,
+        "planned_relations": 0,
+        "removed_relations": 0,
+        "planned_nodes": 0,
+        "removed_nodes": 0
+      },
+      "raw_stdout": "{\"job_id\":\"maintenance:7eabe818-eb62-4320-ba9c-3d27324bbdf1\",\"domain\":\"it\",\"created_at\":\"2026-09-29T14:06:09+00:00\",\"mode\":\"current_only\",\"skipped\":false,\"planned_relations\":0,\"removed_relations\":0,\"planned_nodes\":0,\"removed_nodes\":0}"
+    }
+  ]
+}

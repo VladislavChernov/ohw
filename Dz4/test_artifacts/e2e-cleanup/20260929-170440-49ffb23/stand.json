@@ -1,0 +1,10 @@
+{
+  "compose_files": "compose.eval-minimal.yaml+compose.eval-qwen3b.yaml",
+  "project": "ohw-eval-qwen3b",
+  "ingestion_url": "http://ingestion-api:8002",
+  "domain": "it",
+  "extract_llm": "true",
+  "retention_mode": "",
+  "llm_model": "qwen2.5-3b-instruct-q4_k_m",
+  "started_at": "2026-09-29T14:04:42+00:00"
+}
