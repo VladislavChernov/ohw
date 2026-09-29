@@ -39,6 +39,7 @@ from graphrag_proto.ingestion_service.projection import (
     try_build_projection_state_store,
 )
 from graphrag_proto.ingestion_service.readers.registry import factory as readers_factory
+from graphrag_proto.ingestion_service.retention_policy import run_orphan_cleanup
 from graphrag_proto.ingestion_service.storage.registry import (
     STATUS_DELETED,
     DocumentRegistry,
@@ -425,6 +426,32 @@ def create_app(
         return {
             "revision": registry.data_revision(domain),
             "updated_at": registry.data_revision_updated_at(domain),
+        }
+
+    @app.post("/api/v1/maintenance/orphan-cleanup", dependencies=[Depends(require_key)])
+    def maintenance_orphan_cleanup(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+        """Один проход уборки сиротских связей и узлов по домену (ADR-014, B3+C).
+
+        Маршрут существует, потому что уборка без маршрута не воспроизводима: прогон,
+        где её вызвали руками и не оставили следа, не отвечает на вопрос «что именно
+        удалилось». Здесь вызов возвращает подсчёты и `job_id`, а факт уборки пишется
+        в реестр — то есть след есть и в ответе, и в данных.
+
+        Отдельного планировщика нет намеренно: уборка фоновая, а её цена - молчаливая
+        потеря данных в графе, поэтому решение о моменте остаётся за оператором.
+        Режим политики (`DATA_RETENTION_MODE`) не переопределяется здесь: он свойство
+        развёртывания, см. `docs/02` §4.3.
+        """
+        domain = payload.get("domain")
+        if not domain:
+            raise HTTPException(status_code=422, detail="query-поле domain обязательно")
+        job_id = f"maintenance:{uuid.uuid4()}"
+        fact = run_orphan_cleanup(graph_store, jobs, job_id=job_id, domain=str(domain))
+        return {
+            "job_id": job_id,
+            "domain": domain,
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            **fact,
         }
 
     return app

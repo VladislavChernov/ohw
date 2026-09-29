@@ -85,13 +85,19 @@ class RetentionPolicy:
 
 def run_orphan_cleanup(
     graph_store: Any,
-    registry: Any,
+    fact_store: Any,
     *,
     job_id: str,
     domain: str,
     policy: RetentionPolicy | None = None,
 ) -> dict[str, Any]:
     """Один проход уборки: подсчёт, затем удаление, затем факт в реестре.
+
+    `fact_store` - именно `JobStore` (`record_orphan_cleanup` живёт там, а не в
+    `DocumentRegistry`). Параметр называется `fact_store`, а не `registry` сознательно:
+    под старым именем в маршруте был передан `DocumentRegistry`, у которого такого метода
+    нет, и вызов падал бы на записи факта - то есть уборка прошла бы, а след остался бы
+    нет. Дыру не нашёл ни один тест, потому что вызывающего кода не существовало.
 
     Порядок зафиксирован в `docs/02` §4.5 и не переставляется:
 
@@ -135,8 +141,8 @@ def run_orphan_cleanup(
         "planned_nodes": 0,
         "removed_nodes": 0,
     }
-    if registry is not None:
-        registry.record_orphan_cleanup(
+    if fact_store is not None:
+        fact_store.record_orphan_cleanup(
             job_id,
             domain,
             planned_relations=planned,
