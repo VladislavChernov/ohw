@@ -33,6 +33,10 @@ from graphrag_proto.ingestion_service.pipeline.profile_contract import (
     PROFILE_PROBLEM_LOG,
     validate_ingestion_profile,
 )
+from graphrag_proto.ingestion_service.pipeline.prompt_renderer import (
+    extraction_identity,
+    render_instruction,
+)
 from graphrag_proto.ingestion_service.projection import (
     ProjectionState,
     ProjectionStateStore,
@@ -629,8 +633,13 @@ class ExtractStage(Stage):
 
     def _extract_llm(self, ctx: PipelineContext) -> None:
         template = _extraction_template(ctx.profile or {})
-        prompt_id = str(template.get("id") or "extract")
-        extractor_version = f"llm:{prompt_id}"
+        # Схема в инструкции не пишется руками: она генерируется из профиля, иначе вид
+        # связи, добавленный в `ontology.edge_types` и забытый в прозе, оказывается
+        # объявленным и никогда не извлекаемым - и выглядит как «модель не выдаёт связи».
+        # `prompt_id` остаётся человекочитаемой подписью в отчёте, но идентичностью
+        # извлечения не является: версия считается от содержимого инструкции.
+        instruction = render_instruction(ctx.profile or {}, str(template.get("user") or ""))
+        extractor_version = extraction_identity(ctx.profile or {}, instruction)
         entity_payloads = {
             "tags": CONTEXT_NODE_LABEL,
             "entities": CONTEXT_NODE_LABEL,
@@ -648,7 +657,7 @@ class ExtractStage(Stage):
         for index, chunk in enumerate(ctx.chunks):
             chunk_id = self._chunk_id(ctx, index)
             prompt = (
-                f"{template['user']}\n\n"
+                f"{instruction}\n\n"
                 f"Текст документа для извлечения (чанк {index + 1}):\n{chunk}"
             )
             # Граница с моделью: ровно здесь всё, что пришло извне, становится

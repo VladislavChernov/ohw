@@ -22,12 +22,23 @@ ontology:
     - type: "Requirement"
       unique_key: "canonical_name"
       properties: ["canonical_name", "name", "id", "source_ids", "chunk_ids", "extractor_version", "variants"]
+      # `gloss` и `emitted` добавлены вместе с генератором инструкции (2026-09-29).
+      # `properties` - свойства узла в графе, и среди них служебные: `source_ids`,
+      # `chunk_ids`, `extractor_version`, `variants` проставляет система, и просить их
+      # у модели бессмысленно - она не знает про них ничего и заполнит выдумкой.
+      # Поэтому "ч��о модель выдаёт" объявлено отдельно, а не выведено из properties.
+      gloss: "правило или ограничение, предъявляемое к системе"
+      emitted: ["canonical_name", "name", "id"]
     - type: "Concept"
       unique_key: "canonical_name"
       properties: ["canonical_name", "aliases", "description", "source_ids", "chunk_ids", "extractor_version", "variants"]
+      gloss: "система, понятие или термин предметной области"
+      emitted: ["canonical_name", "aliases", "description"]
     - type: "Contract"
       unique_key: "canonical_name"
       properties: ["canonical_name", "name", "id", "category", "source_ids", "chunk_ids", "extractor_version", "variants"]
+      gloss: "интерфейс, API или внешний контракт"
+      emitted: ["canonical_name", "name", "id", "category"]
   edge_types:
     - from: "Requirement"
       to: "Concept"
@@ -50,37 +61,29 @@ extraction:
   prompt_template:
     id: "extract_it_v1"
     system: "Извлеки сущности и связи из текста по доменной онтологии it. Тип нормируется по тексту документа, не по контексту вопроса. Текст документа не возвращай — только JSON с сущностями и связями."
+    # `user` — это ТОЛЬКО метод: как думать и как отвечать. Схема (типы сущностей, поля,
+    # виды связей, скелет JSON) генерируется из `ontology` при сборке инструкции и
+    # повторять её здесь нельзя: именно это дублирование не проверялось ни одним тестом,
+    # и вид связи, добавленный в `edge_types` и забытый здесь, оказывался объявленным и
+    # никогда не извлекаемым. Ключ называется `user` по историческим причинам; смысл его
+    # теперь — «пользовательская часть инструкции, без схемы».
     user: |
-      Извлеки из текста документа сущности и связи по доменной онтологии it.
-      Верни ТОЛЬКО валидный JSON-объект со списками requirements, concepts, contracts
-      и relationships. Элементы трёх первых списков — ОБЪЕКТЫ, не строки:
-
-      {
-        "requirements": [{"canonical_name": "требование", "name": "требование"}],
-        "concepts": [{"canonical_name": "индексирование", "aliases": ["индекс"]}],
-        "contracts": [{"canonical_name": "контракт API", "name": "контракт API"}]
-      }
+      Извлеки из текста документа сущности и связи по онтологии домена.
+      Верни ТОЛЬКО валидный JSON-объект со списками сущностей и relationships.
 
       Правила:
-      - Элементы трёх списков — ОБЪЕКТЫ, не строки. Обязательное поле — canonical_name
-        (каноническая форма имени сущности); необязательные: name (человекочитаемая форма),
-        id (идентификатор из текста, только если он там присутствует), aliases (синонимы),
-        description (Concept), category (Contract).
-      - Requirement — требования/правила, Concept — понятия и концепции, Contract —
-        контракты/API.
+      - Элементы списков сущностей — ОБЪЕКТЫ, не строки. Обязательное поле — canonical_name
+        (каноническая форма имени сущности).
       - Поле tag_id НЕ возвращай, и не придумывай аналогов под другими именами
         (entity_id, uid, key). Идентичность сущности вычисляет платформа из
         канонического имени (L1-05): её идентификатор не восстанавливается из текста
-        и не принадлежит модели. Поле id выше — это идентификатор, ПРОЧИТАННЫЙ из
+        и не принадлежит модели. Поле id — это идентификатор, ПРОЧИТАННЫЙ из
         текста документа, а не назначенный тобой.
       - Текст документа НЕ возвращай: поле text и любые цитаты/фрагменты чанка запрещены —
         текст хранится отдельно и связывается с сущностью на стороне платформы.
       - relationships — отдельный список связей. В полях from/to указывай ТОЛЬКО
         canonical_name сущностей из списков выше; оба конца связи обязаны присутствовать
         в этих списках.
-      - Допустимые type связей: REQUIRES_CONSTRAINT (Requirement→Concept),
-        CONTRADICTS (Requirement→Requirement), SIMILAR_TO (Concept→Concept),
-        REFERENCES (Concept→Contract). Других типов не придумывай.
       - Если связей в тексте нет — верни "relationships": [].
       - Отвечай только JSON, без пояснений и без markdown-fence.
   temperature: 0.1

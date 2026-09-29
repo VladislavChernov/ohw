@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from copy import deepcopy
 from pathlib import Path
@@ -246,7 +247,16 @@ def test_extract_llm_produces_generic_context_nodes_and_edge(
     assert all("tag_id" not in entity for entity in ctx.entities)
     assert all(entity["origin"] == "ai" for entity in ctx.entities)
     assert {entity["confidence"] for entity in ctx.entities} == {0.82, 0.76}
-    assert all(entity["extractor_version"] == "llm:extract_context_v1" for entity in ctx.entities)
+    # `extractor_version` считается от содержимого инструкции, а не от ручной метки
+    # `prompt_template.id`. Метка не меняется при правке текста промпта, поэтому по графу
+    # было бы невозможно отличить два разных извлечения; теперь версия несёт профиль и
+    # отпечаток инструкции.
+    versions = {entity["extractor_version"] for entity in ctx.entities}
+    assert len(versions) == 1, versions
+    version = versions.pop()
+    assert version.startswith("llm:"), version
+    assert "extract_context_v1" not in version, f"версия всё ещё зашита от метки шаблона: {version}"
+    assert re.fullmatch(r"llm:[^:@]+@\d+:[0-9a-f]{12}", version), version
     edges = [dict(edge) for edge in ctx.entity_edges]
     assert any(
         {key: edge.get(key) for key in ("from", "to", "kind", "origin")}
