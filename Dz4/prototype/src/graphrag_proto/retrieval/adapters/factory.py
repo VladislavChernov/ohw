@@ -149,6 +149,14 @@ _LLM_SETTINGS: dict[str, str] = {
     "temperature": "LLM_TEMPERATURE",
     "max_tokens": "LLM_MAX_TOKENS",
     "timeout_s": "LLM_TIMEOUT_S",
+    # `context_window` был объявлен в профиле и не читался нигде, из-за чего у
+    # `max_tokens` не было ни одной точки сверки: значение могло превышать окно модели,
+    # и тогда каждый ответ обрывался по длине, а обрыв не проверялся и выглядел как
+    # битый JSON, а для EXTRACT с optional_failure - как тихая деградация.
+    "context_window": "LLM_CONTEXT_WINDOW",
+    # Необязательный: нужен только при ненулевой температуре. При `temperature = 0`
+    # жадный декодер детерминирован и seed ничего не добавляет.
+    "seed": "LLM_SEED",
 }
 
 _LLM_PROFILE_PATH = "infra/config/namespaces.yaml"
@@ -209,18 +217,84 @@ def llm_setting(key: str) -> str:
     return _llm_setting(key, _llm_profile())
 
 
-def _build_llm(kind: str) -> LLMInference:
+def _optional_llm_setting(key: str, profile: Mapping[str, object]) -> str:
+    """Значение настройки, которой может не быть, - молча, без ошибки.
+
+    Отдельная функция, а не `os.environ.get(...)` в одну строку, потому что рядом стоит
+    `_llm_setting`, который по замыслу **обязателен**: отсутствие - ошибка конфигурации.
+    Смешивать эти два поведения в одном хелпере нельзя, иначе либо сломается любой профиль
+    без необязательного ключа, либо необязательный ключ станет обязательным молча.
+    `context_window` именно необязательный: это метаданные для сверки, а не параметр
+    адаптера, и профиль без него остаётся рабочим - просто проверить бюджет нечем.
+    """
+    value = os.environ.get(_LLM_SETTINGS.get(key, key), "").strip()
+    return value or str(profile.get(key) or "").strip()
+
+
+def _check_token_budget(profile: Mapping[str, object]) -> None:
+    """`max_tokens` обязан влезать в окно модели — иначе ответ будет обрезан всегда.
+
+    Проверка на сборке, а не на запросе: подсчитать токены промпта без токенизатора
+    можно только эвристикой по символам, а ложное срабатывание на кириллице хуже, чем
+    грубая, но однозначная ошибка конфигурации. Фактический обрыв ловится отдельно, по
+    `finish_reason` в ответе.
+
+    Значения берутся тем же разрешением env > профиль, что и при сборке адаптера: раньше
+    в этой функции читался сырой профиль, и проверка молча проходила, когда стенд задавал
+    `max_tokens` через переменную окружения, то есть ровно в том случае, ради которого
+    проверка и нужна. Сама сверка необязательна: нет окна - нечего сверять.
+    """
+    raw_window = _optional_llm_setting("context_window", profile)
+    raw_budget = _optional_llm_setting("max_tokens", profile)
+    if not raw_window or not raw_budget:
+        return
+    try:
+        window = int(raw_window)
+        budget = int(raw_budget)
+    except ValueError:
+        return
+    if window <= 0 or budget <= window:
+        return
+    message = (
+        f"LLM_MAX_TOKENS={budget} больше окна модели ({_LLM_SETTINGS['context_window']}={window}). "
+        f"Каждый ответ будет обрезан по длине."
+    )
+    logging.getLogger(__name__).error(message)
+    raise RuntimeError(message)
+
+
+def _build_llm(
+    kind: str,
+    *,
+    temperature: float | None = None,
+) -> LLMInference:
     kind = kind.strip().lower()
     if kind == "fake":
         return FakeLLM()
     if kind == "openai":
         profile = _llm_profile()
+        _check_token_budget(profile)
+        raw_seed = _optional_llm_setting("seed", profile)
+        seed: int | None = None
+        if raw_seed:
+            # Передаётся, а не хранится: при `temperature = 0` жадный декодер и так
+            # детерминирован, и seed не нужен. Нужен он ровно тогда, когда кто-то осознанно
+            # вернул ненулевую температуру - и тогда без него воспроизводимости нет.
+            try:
+                seed = int(raw_seed)
+            except ValueError as exc:
+                message = f"{_LLM_SETTINGS['seed']}={raw_seed!r} не целое число"
+                logging.getLogger(__name__).error(message)
+                raise RuntimeError(message) from exc
         return OpenAICompatibleAdapter(
             base_url=_llm_setting("base_url", profile),
             model=_llm_setting("model", profile),
-            temperature=float(_llm_number("temperature", profile, float)),
+            temperature=float(_llm_number("temperature", profile, float))
+            if temperature is None
+            else temperature,
             max_tokens=int(_llm_number("max_tokens", profile, int)),
             timeout_s=float(_llm_number("timeout_s", profile, float)),
+            seed=seed,
         )
     raise ValueError(f"llm={kind!r}: допустимо {', '.join(ADAPTER_CATALOG[SLOT_LLM])}")
 
@@ -274,5 +348,12 @@ def build_reranker() -> Reranker:
     return _build_reranker(_resolve_slot(SLOT_RERANKER, None))
 
 
-def build_llm() -> LLMInference:
-    return _build_llm(_resolve_slot(SLOT_LLM, None))
+def build_llm(*, temperature: float | None = None) -> LLMInference:
+    """Адаптер LLM для потребителя.
+
+    `temperature` - точечное переопределение, а не глобальная настройка: извлечению нужна
+    детерминированность, генерации ответа на вопрос - нет. Кто вызывает и с каким
+    значением, видно в точке вызова, а не спрятано в профиле, где одна величина обслуживала
+    оба случая.
+    """
+    return _build_llm(_resolve_slot(SLOT_LLM, None), temperature=temperature)

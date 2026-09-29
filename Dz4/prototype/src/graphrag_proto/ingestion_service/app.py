@@ -106,6 +106,35 @@ def _strict_profile_loading() -> bool:
     return os.environ.get("EXTRACT_LLM", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+#: Переопределение температуры именно для извлечения. Общая `LLM_TEMPERATURE` остаётся
+#: для генерации ответов на вопросы: там ненулевая температура осмысленна, здесь - нет.
+EXTRACTION_LLM_TEMPERATURE_ENV = "EXTRACTION_LLM_TEMPERATURE"
+
+
+def _extraction_temperature() -> float:
+    """Температура для стадии EXTRACT, отдельно от генерации ответов.
+
+    Извлечение - структурированный JSON, и семплирование здесь неуместно: при
+    `temperature` из профиля (0.3) выход модели гулял между прогонами на одном и том же
+    корпусе - от 15 до 214 связей, - то есть результат зависел от случайности, а не от
+    кода. Генерация ответа на вопрос с `0.3` разумна, поэтому переопределение точечное, а
+    не глобальное.
+
+    Дефолт здесь - сознательное решение, а не молчаливое значение: он виден в коде и
+    переопределяется переменной окружения, если понадобится осознанно семплировать.
+    """
+    raw = os.environ.get(EXTRACTION_LLM_TEMPERATURE_ENV, "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{EXTRACTION_LLM_TEMPERATURE_ENV}={raw!r} не число: температура извлечения "
+            f"обязана быть разбираемым числом, иначе поведение зависит от опечатки в конфиге"
+        ) from exc
+
+
 def build_analyzer(
     registry: DocumentRegistry,
     glossary_url: str,
@@ -124,7 +153,7 @@ def build_analyzer(
             ChunkStage(chunker, profile_fetcher=profile_fetcher),
             EmbedStage(embedder or build_embedder()),
             ExtractStage(
-                llm=llm if llm is not None else build_llm(),
+                llm=llm if llm is not None else build_llm(temperature=_extraction_temperature()),
                 profile_fetcher=profile_fetcher,
                 optional_failure=True,
             ),

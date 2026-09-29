@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from graphrag_proto.ingestion_service.app import EXTRACTION_LLM_TEMPERATURE_ENV
 from graphrag_proto.retrieval.adapters.llm import (
     LLMAdapterError,
     LLMHTTPError,
@@ -224,6 +225,131 @@ def test_factory_openai_adapter_hits_stub(monkeypatch: Any) -> None:
         assert deltas == ["factory", " ok"]
     finally:
         server.shutdown()
+
+
+def test_truncated_answer_is_reported_as_such() -> None:
+    """Обрыв по `max_tokens` обязан называться, а не выглядеть как битый JSON.
+
+    Регрессия на молчаливую деградацию. Сервер честно присылает
+    `finish_reason: "length"` и обрезанный посреди объекта JSON, но поле не читалось, и
+    дальше срабатывал `json.JSONDecodeError`. Для стадии EXTRACT с
+    `optional_failure=True` это означало, что документ попадал в граф успешно, просто без
+    извлечённых сущностей, а `enrichment.cause` не позволял отличить обрыв по длине от
+    таймаута. Теперь причина названа прямо.
+    """
+    body = json.dumps(
+        {"choices": [{"message": {"content": '{"requirements": [{"canonical_name": "обр'}, "finish_reason": "length"}]}
+    )
+    handler = _make_handler({"/v1/chat/completions": (200, body)})
+    server, port = _start_server(handler)
+    try:
+        adapter = OpenAICompatibleAdapter(base_url=f"http://127.0.0.1:{port}", model="m")
+        # `generate` - генератор, поэтому оборачивать надо вычитку: обернутое создание
+        # генератора не исполняет ни строчки его тела, и проверка прошла бы, ничего не
+        # проверив. Это тот же урок, что и с проверкой на границе, только в интерфейсе.
+        with pytest.raises(LLMResponseError, match="length"):
+            "".join(adapter.generate("вопрос", stream=False))
+    finally:
+        server.shutdown()
+
+
+def test_finish_reason_absent_is_tolerated() -> None:
+    """Сервер, не присылающий `finish_reason`, не должен ломаться.
+
+    Иначе проверка обрыва превратилась бы в требование к конкретной реализации: часть
+    OpenAI-совместимых серверов это поле не отдаёт, и тогда нормальный ответ падал бы.
+    """
+    body = json.dumps({"choices": [{"message": {"content": "ok"}}]})
+    handler = _make_handler({"/v1/chat/completions": (200, body)})
+    server, port = _start_server(handler)
+    try:
+        adapter = OpenAICompatibleAdapter(base_url=f"http://127.0.0.1:{port}", model="m")
+        assert "".join(adapter.generate("вопрос", stream=False)) == "ok"
+    finally:
+        server.shutdown()
+
+
+def test_max_tokens_larger_than_context_window_is_refused(monkeypatch: Any) -> None:
+    """`max_tokens` больше окна модели - ошибка конфигурации, а не молчаливый обрыв.
+
+    `context_window` был объявлен в профиле и не читался нигде, поэтому у `max_tokens`
+    не было ни одной точки сверки. Теперь сверка есть на сборке адаптера: подсчитать
+    токены промпта без токенизатора можно только эвристикой по символам, а ложное
+    срабатывание на кириллице хуже грубой, но однозначной ошибки.
+    """
+    from graphrag_proto.retrieval.adapters.factory import build_llm
+
+    monkeypatch.setenv("LLM_ADAPTER", "openai")
+    monkeypatch.setenv("LLM_BASE_URL", "http://llm:8080")
+    monkeypatch.setenv("LLM_MODEL", "m")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+    monkeypatch.setenv("LLM_CONTEXT_WINDOW", "2048")
+    with pytest.raises(RuntimeError, match="больше окна модели"):
+        build_llm()
+
+    monkeypatch.setenv("LLM_MAX_TOKENS", "1024")
+    assert build_llm() is not None
+
+
+def test_extraction_temperature_is_zero_and_overridable(monkeypatch: Any) -> None:
+    """Извлечение обязано быть детерминированным, а генерация - нет.
+
+    `temperature` была одна на оба случая и задавалась из профиля (0.3). Для структурированного
+    JSON это означало семплирование: выход модели на одном и том же корпусе гулял между
+    прогонами (измерено на стенде: 15 против 214 связей), то есть результат зависел от
+    случайности, а не от кода. Поэтому дефолт для стадии EXTRACT - 0, переопределяется
+    явно и виден в точке вызова.
+    """
+    from graphrag_proto.ingestion_service.app import _extraction_temperature
+
+    monkeypatch.delenv(EXTRACTION_LLM_TEMPERATURE_ENV, raising=False)
+    assert _extraction_temperature() == 0.0, "извлечение по умолчанию недетерминировано"
+
+    monkeypatch.setenv(EXTRACTION_LLM_TEMPERATURE_ENV, "0.7")
+    assert _extraction_temperature() == 0.7
+
+    monkeypatch.setenv(EXTRACTION_LLM_TEMPERATURE_ENV, "тепло")
+    with pytest.raises(RuntimeError, match="не число"):
+        _extraction_temperature()
+
+
+def test_seed_reaches_request_body(monkeypatch: Any) -> None:
+    """`seed` передаётся в теле запроса, а не хранится в адаптере молча.
+
+    Нужен ровно при ненулевой температуре: при `temperature = 0` жадный декодер
+    детерминирован и seed ничего не добавляет.
+    """
+    seen: list[dict[str, Any]] = []
+
+    def _handler_for(seen: list[dict[str, Any]]):
+        class _H(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                seen.append(json.loads(self.rfile.read(length).decode("utf-8")))
+                payload = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: Any) -> None:
+                pass
+
+        return _H
+
+    server, port = _start_server(_handler_for(seen))
+    try:
+        without_seed = OpenAICompatibleAdapter(base_url=f"http://127.0.0.1:{port}", model="m")
+        "".join(without_seed.generate("вопрос", stream=False))
+        with_seed = OpenAICompatibleAdapter(
+            base_url=f"http://127.0.0.1:{port}", model="m", seed=4242
+        )
+        "".join(with_seed.generate("вопрос", stream=False))
+    finally:
+        server.shutdown()
+
+    assert "seed" not in seen[0], "seed без явной настройки не должен попадать в запрос"
+    assert seen[1]["seed"] == 4242
 
 
 def test_llm_model_must_be_declared(monkeypatch, tmp_path):

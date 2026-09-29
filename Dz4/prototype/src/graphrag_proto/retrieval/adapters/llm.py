@@ -74,6 +74,7 @@ class OpenAICompatibleAdapter(LLMInference):
         temperature: float = 0.3,
         max_tokens: int = 2048,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        seed: int | None = None,
     ) -> None:
         """`model` обязателен и не имеет дефолта намеренно.
 
@@ -88,6 +89,7 @@ class OpenAICompatibleAdapter(LLMInference):
         self._temperature = temperature
         self._max_tokens = max_tokens
         self._timeout_s = timeout_s
+        self._seed = seed
 
     def generate(self, prompt: str, system: str = "", stream: bool = True) -> Iterator[str]:
         body = {
@@ -100,6 +102,11 @@ class OpenAICompatibleAdapter(LLMInference):
             "max_tokens": self._max_tokens,
             "stream": stream,
         }
+        # `seed` полеется в тело, а не задаётся заголовком: разные OpenAI-совместимые
+        # серверы понимают его по-разному, а лишнее поле у тех, кто его не знает, просто
+        # игнорируется. При `temperature = 0` он не нужен - жадный декодер детерминирован.
+        if self._seed is not None:
+            body["seed"] = self._seed
         req = urllib.request.Request(
             f"{self._base_url}/v1/chat/completions",
             data=json.dumps(body).encode("utf-8"),
@@ -144,7 +151,9 @@ class OpenAICompatibleAdapter(LLMInference):
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
             raise LLMResponseError("в ответе LLM нет непустого choices")
-        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        first = choices[0] if isinstance(choices[0], dict) else {}
+        _reject_truncation(first.get("finish_reason"))
+        message = first.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
             raise LLMResponseError("в ответе LLM нет строкового choices[0].message.content")
@@ -152,6 +161,7 @@ class OpenAICompatibleAdapter(LLMInference):
 
     @staticmethod
     def _iter_stream(resp: Any, deadline: float | None = None) -> Iterator[str]:
+        finish_reason: str | None = None
         for raw_line in resp:
             if deadline is not None and time.monotonic() >= deadline:
                 raise LLMTimeoutError("LLM stream timeout")
@@ -160,23 +170,54 @@ class OpenAICompatibleAdapter(LLMInference):
                 continue
             raw = line[len("data:"):].strip()
             if raw == "[DONE]":
-                return
-            delta = _extract_delta(raw)
+                break
+            delta, chunk_finish = _extract_delta(raw)
+            if chunk_finish:
+                finish_reason = chunk_finish
             if delta:
                 yield delta
+        # Проверка после `break`, а не внутри цикла: в потоковом ответе причина
+        # завершения приезжает последним фрагментом, и проверка на каждом чанке
+        # обрывала бы нормальный поток на первом же куске без причины.
+        _reject_truncation(finish_reason)
 
 
-def _extract_delta(raw: str) -> str:
+def _reject_truncation(finish_reason: object) -> None:
+    """Обрыв ответа по длине должен быть виден, а не молча давать битый JSON.
+
+    Сервер присылает `finish_reason: "length"`, когда ответ упёрся в `max_tokens`. Раньше
+    это поле не читалось, `content` оставался строкой - просто обрезанной посреди JSON, -
+    и дальше срабатывал `json.JSONDecodeError`. Для стадии EXTRACT с
+    `optional_failure=True` это означало тихую деградацию к детерминированному пути:
+    документ попадал в граф успешно, просто без извлечённых сущностей. Отказ выглядел
+    как успех, и `enrichment.cause` не мог отличить обрыв по длине от таймаута.
+
+    Поле отсутствует у части серверов, поэтому отсутствие - не повод для ошибки: молчаливый
+    отказ там, где сервер просто не сообщает причину, был бы хуже.
+    """
+    if not isinstance(finish_reason, str) or not finish_reason or finish_reason == "stop":
+        return
+    raise LLMResponseError(
+        f"ответ LLM неполон: finish_reason={finish_reason!r}. "
+        f"Почти всегда это обрыв по max_tokens - увеличьте его либо уменьшите чанк, "
+        f"иначе JSON не распарсится и извлечение молча деградирует к детерминированному пути."
+    )
+
+
+def _extract_delta(raw: str) -> tuple[str, str | None]:
+    """Дельта текущего фрагмента и причина завершения, если сервер её прислал."""
     try:
         chunk = json.loads(raw)
     except json.JSONDecodeError:
-        return ""
+        return "", None
     choices = chunk.get("choices") or []
     if not choices:
-        return ""
-    delta = choices[0].get("delta") or {}
-    content = delta.get("content")
-    return content if isinstance(content, str) else ""
+        return "", None
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    reason = first.get("finish_reason")
+    delta = first.get("delta") or {}
+    content = delta.get("content") if isinstance(delta, dict) else None
+    return (content if isinstance(content, str) else ""), (reason if isinstance(reason, str) else None)
 
 
 class FakeLLM(LLMInference):
