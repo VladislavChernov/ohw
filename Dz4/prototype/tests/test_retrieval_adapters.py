@@ -751,7 +751,7 @@ def test_fake_llm_deltas_and_full_text() -> None:
 def test_openai_adapter_http_connect_error_is_runtime() -> None:
     from graphrag_proto.retrieval.adapters.llm import OpenAICompatibleAdapter
 
-    adapter = OpenAICompatibleAdapter(base_url="http://127.0.0.1:1", timeout_s=0.2)
+    adapter = OpenAICompatibleAdapter(model="test-model", base_url="http://127.0.0.1:1", timeout_s=0.2)
 
     with pytest.raises(RuntimeError):
         list(adapter.generate("hi"))

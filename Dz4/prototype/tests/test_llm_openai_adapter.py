@@ -224,3 +224,58 @@ def test_factory_openai_adapter_hits_stub(monkeypatch: Any) -> None:
         assert deltas == ["factory", " ok"]
     finally:
         server.shutdown()
+
+
+def test_llm_model_must_be_declared(monkeypatch, tmp_path):
+    """Имя модели приходит из профиля или env; своего дефолта у кода нет.
+
+    Проверяется то, что стоило дороже всего: LLM-сервер принимает в поле `model` любое
+    значение и отдаёт загруженную модель, поэтому угаданное имя не даёт ошибки, а тихо
+    работает. Значит отсутствие объявления обязано падать, а не подставлять 7B.
+    """
+    import pytest
+
+    from graphrag_proto.retrieval.adapters.factory import build_llm
+
+    profile = tmp_path / "namespaces.yaml"
+    profile.write_text(
+        'llm:\n  base_url: "http://from-profile:8080"\n  model: "from-profile"\n'
+        '  temperature: 0.7\n  max_tokens: 111\n  timeout_s: 42\n',
+        encoding="utf-8",
+    )
+    for name in (
+        "LLM_BASE_URL",
+        "LLM_MODEL",
+        "LLM_TEMPERATURE",
+        "LLM_MAX_TOKENS",
+        "LLM_TIMEOUT_S",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setenv("NAMESPACES_PATH", str(profile))
+    monkeypatch.setenv("LLM_ADAPTER", "openai")
+    llm = build_llm()
+    assert llm._model == "from-profile"
+    assert llm._base_url == "http://from-profile:8080"
+    assert llm._max_tokens == 111
+
+    # env переопределяет профиль: стенд объявляет свою модель явно.
+    monkeypatch.setenv("LLM_MODEL", "from-env")
+    assert build_llm()._model == "from-env"
+
+    # Профиль без `model` - ошибка конфигурации, а не зашитое имя.
+    without_model = tmp_path / "without_model.yaml"
+    without_model.write_text(
+        'llm:\n  base_url: "http://x:8080"\n  temperature: 0.7\n'
+        '  max_tokens: 111\n  timeout_s: 42\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("NAMESPACES_PATH", str(without_model))
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    with pytest.raises(RuntimeError, match="LLM_MODEL"):
+        build_llm()
+
+    # Совсем нет профиля и нет env - тоже ошибка, а не зашитое имя.
+    monkeypatch.setenv("NAMESPACES_PATH", str(tmp_path / "absent.yaml"))
+    with pytest.raises(RuntimeError, match="обязана объявляться явно"):
+        build_llm()

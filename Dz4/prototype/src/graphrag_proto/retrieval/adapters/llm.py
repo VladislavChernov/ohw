@@ -70,11 +70,19 @@ class OpenAICompatibleAdapter(LLMInference):
     def __init__(
         self,
         base_url: str,
-        model: str = "qwen2.5-coder-7b-instruct-abliterated-q4_k_m",
+        model: str,
         temperature: float = 0.3,
         max_tokens: int = 2048,
         timeout_s: float = DEFAULT_TIMEOUT_S,
     ) -> None:
+        """`model` обязателен и не имеет дефолта намеренно.
+
+        Здесь стояло `qwen2.5-coder-7b-instruct-abliterated-q4_k_m`, и это худшее из всех
+        мест для такого имени: прямой вызов конструктора минует фабрику и молча получал
+        7B-модель, а LLM-сервер в поле `model` принимает что угодно и отдаёт загруженную -
+        то есть подмена модели не давала ошибки. Имя модели приходит из профиля
+        `infra/config/namespaces.yaml` или из env стенда, см. `factory._build_llm`.
+        """
         self._base_url = base_url.rstrip("/")
         self._model = model
         self._temperature = temperature

@@ -8,6 +8,13 @@ import pytest
 
 from graphrag_proto.demo_ui.client import DemoClient, Settings
 
+# Имя модели LLM обязано приходить из окружения: в коде больше нет зашитого имени,
+# потому что llama.cpp-сервер принимает в поле `model` любое значение и отдаёт ту
+# модель, что загружена - опечатка не давала ошибки, а тихо работала. Здесь
+# объявляется фиктивное значение для юнит-тестов, где реальный HTTP-вызов не
+# делается; сам контраст проверяет test_llm_model_must_be_declared.
+os.environ.setdefault("LLM_MODEL", "test-model-not-used-for-http")
+
 
 def pytest_addoption(parser: Any) -> None:
     parser.addoption("--e2e-ingest", action="store", default=None, help="Ingestion API base URL (e2e)")

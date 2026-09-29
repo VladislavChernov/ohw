@@ -129,6 +129,9 @@ services:
       # без флага извлечение детерминированное (Entity-слова), и настройки осей из
       # domain_profile.yaml к графу не применяются (типизированные узлы не создаются).
       EXTRACT_LLM: "true"
+      # Имя модели обязательно объявляет сервис: в коде больше нет зашитого имени,
+      # отсутствие LLM_MODEL - ошибка конфигурации, а не повод угадать.
+      LLM_MODEL: "${LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}"
       # EXTRACT генерирует полный JSON по документу — токенов по умолчанию (2048) мало.
       LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-4096}"
       LLM_TIMEOUT_S: "${LLM_TIMEOUT_S:-600}"
@@ -196,7 +199,7 @@ services:
       LLM_ADAPTER: openai
       EVAL_LLM_ADAPTER: openai
       LLM_BASE_URL: http://llm:8080
-      LLM_MODEL: qwen2.5-coder-7b-instruct-abliterated-q4_k_m
+      LLM_MODEL: "${LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}"
       LLM_TEMPERATURE: "0"
       LLM_TIMEOUT_S: "300"
       RUN_CODE_COMMIT: "${RUN_CODE_COMMIT:?RUN_CODE_COMMIT must be provided by the host}"

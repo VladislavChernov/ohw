@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from graphrag_proto.retrieval.adapters.base import (
     Embedder,
@@ -27,7 +29,6 @@ from graphrag_proto.retrieval.adapters.bge import BgeM3ServiceAdapter, BgeRerank
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
 from graphrag_proto.retrieval.adapters.llm import (
-    DEFAULT_TIMEOUT_S,
     FakeLLM,
     OpenAICompatibleAdapter,
 )
@@ -138,17 +139,88 @@ def _build_reranker(kind: str) -> Reranker:
     raise ValueError(f"reranker={kind!r}: допустимо {', '.join(ADAPTER_CATALOG[SLOT_RERANKER])}")
 
 
+logger = logging.getLogger(__name__)
+
+# Ключ в профиле `llm` -> имя переменной окружения, которой стенд может переопределить
+# профиль. Порядок разрешения: env (явное намерение стенда) > профиль > ошибка.
+_LLM_SETTINGS: dict[str, str] = {
+    "base_url": "LLM_BASE_URL",
+    "model": "LLM_MODEL",
+    "temperature": "LLM_TEMPERATURE",
+    "max_tokens": "LLM_MAX_TOKENS",
+    "timeout_s": "LLM_TIMEOUT_S",
+}
+
+_LLM_PROFILE_PATH = "infra/config/namespaces.yaml"
+
+
+def _llm_profile() -> Mapping[str, object]:
+    """Блок `llm` из SSOT-профиля `infra/config/namespaces.yaml` (docs/04 §5)."""
+    from graphrag_proto.config_service.namespaces import load_namespaces
+
+    env = os.environ.get("NAMESPACES_PATH", "").strip()
+    block = load_namespaces(Path(env) if env else Path(_LLM_PROFILE_PATH)).get("llm")
+    return block if isinstance(block, Mapping) else {}
+
+
+def _llm_setting(key: str, profile: Mapping[str, object]) -> str:
+    """Настройка LLM из env или профиля. Инлайновых дефолтов нет намеренно.
+
+    Раньше здесь стояли `http://llm:8080`, `qwen2.5-coder-7b-instruct-abliterated-
+    q4_k_m`, 0.3, 2048 и таймаут, и это плохо работало. LLM-сервер принимает в поле
+    `model` любое значение и отдаёт ту модель, что загружена, поэтому опечатка в имени
+    не давала ошибки, а тихо работала; опечатка в адресе уводила на другой стенд или
+    в никуда. Угадывать значение значит превратить ошибку конфигурации в тихую
+    неверную работу, поэтому отсутствие ключа - это ошибка с логом, а не повод
+    подставить что-нибудь.
+    """
+    env_name = _LLM_SETTINGS[key]
+    raw = os.environ.get(env_name, "").strip() or str(profile.get(key, "")).strip()
+    if not raw:
+        source = os.environ.get("NAMESPACES_PATH", "").strip() or _LLM_PROFILE_PATH
+        message = (
+            f"{env_name} не задан, и ключа `{key}` нет в блоке `llm` профиля ({source}). "
+            f"Настройка LLM обязана объявляться явно: env переопределяет профиль."
+        )
+        logger.error(message)
+        raise RuntimeError(message)
+    return raw
+
+
+def _llm_number(
+    key: str, profile: Mapping[str, object], cast: Callable[[str], float | int]
+) -> float | int:
+    raw = _llm_setting(key, profile)
+    try:
+        return cast(raw)
+    except ValueError as exc:
+        message = f"{_LLM_SETTINGS[key]}={raw!r} не приводится к {cast.__name__}: {exc}"
+        logger.error(message)
+        raise RuntimeError(message) from exc
+
+
+def llm_setting(key: str) -> str:
+    """Разрешённое значение настройки LLM: env стенда > профиль > ошибка.
+
+    Публично, потому что правило разрешения должно быть одно. `run_eval.py` строит
+    адаптер для судьи мимо фабрики, и своя копия этого правила разъехалась бы с
+    фабрикой при первой же правке - сначала env, потом профиль или наоборот.
+    """
+    return _llm_setting(key, _llm_profile())
+
+
 def _build_llm(kind: str) -> LLMInference:
     kind = kind.strip().lower()
     if kind == "fake":
         return FakeLLM()
     if kind == "openai":
+        profile = _llm_profile()
         return OpenAICompatibleAdapter(
-            base_url=_env("LLM_BASE_URL", "http://llm:8080"),
-            model=_env("LLM_MODEL", "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"),
-            temperature=_env_float("LLM_TEMPERATURE", 0.3),
-            max_tokens=_env_int("LLM_MAX_TOKENS", 2048),
-            timeout_s=_env_float("LLM_TIMEOUT_S", DEFAULT_TIMEOUT_S),
+            base_url=_llm_setting("base_url", profile),
+            model=_llm_setting("model", profile),
+            temperature=float(_llm_number("temperature", profile, float)),
+            max_tokens=int(_llm_number("max_tokens", profile, int)),
+            timeout_s=float(_llm_number("timeout_s", profile, float)),
         )
     raise ValueError(f"llm={kind!r}: допустимо {', '.join(ADAPTER_CATALOG[SLOT_LLM])}")
 

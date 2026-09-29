@@ -35,10 +35,17 @@ normalizer:
   unicode_normalization: true
   log_normalization: true
 
+# Настройки LLM читает `factory._build_llm` (для слота `llm: openai`): env переопределяет
+# профиль, профиль - источник по умолчанию, отсутствие ключа - ошибка конфигурации.
+# Инлайновых дефолтов в коде нет намеренно, поэтому блок ниже обязан быть полным:
+# раньше `base_url` и `timeout_s` отсутствовали, и код подставлял их у себя, из-за чего
+# опечатка в адресе или имени модели не давала ошибки, а тихо работала.
 llm:
+  base_url: "http://llm:8080"
   model: "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"
   temperature: 0.3
   max_tokens: 2048
+  timeout_s: 600
   context_window: 32768
 
 embeddings:

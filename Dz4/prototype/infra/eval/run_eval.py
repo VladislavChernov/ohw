@@ -44,6 +44,7 @@ from graphrag_proto.eval.metrics import (
     lift_report,
     retrieval_metrics,
 )
+from graphrag_proto.retrieval.adapters.factory import llm_setting
 
 INGESTION_URL = os.environ.get("INGESTION_URL", "http://localhost:8002")
 QUERY_URL = os.environ.get("QUERY_URL", "http://localhost:8000")
@@ -928,9 +929,10 @@ def build_judge() -> Any | None:
         return None
     if adapter_kind == "openai":
         from graphrag_proto.retrieval.adapters.llm import OpenAICompatibleAdapter
+
         return OpenAICompatibleAdapter(
-            base_url=os.environ.get("LLM_BASE_URL", "http://llm:8080"),
-            model=os.environ.get("LLM_MODEL", "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"),
+            base_url=llm_setting("base_url"),
+            model=llm_setting("model"),
             timeout_s=float(os.environ.get("LLM_TIMEOUT_S", "600")),
         )
     raise ValueError(f"EVAL_LLM_ADAPTER={adapter_kind!r}: допустимо fake|none|openai")
@@ -965,6 +967,7 @@ def _embedding_dimensions() -> int:
     return 1024 if os.environ.get("EMBEDDER", "deterministic") == "bge_m3_service" else 8
 
 
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -983,6 +986,17 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _generation_model(adapter_kind: str) -> str | None:
+    """Модель, которой отвечал генератор, - по тому же правилу, что и адаптер.
+
+    При не-openai адаптере LLM не вызывается, и имя модели не объявляется: тогда в
+    манифесте честное `null`, а не зашитое имя от другого стенда.
+    """
+    if adapter_kind.strip().lower() != "openai":
+        return None
+    return llm_setting("model")
 
 
 def mode_graph_enabled(mode_arg: str) -> list[bool]:
@@ -1097,9 +1111,11 @@ def build_run_manifest(
         },
         "generation": {
             "llm_adapter": os.environ.get("LLM_ADAPTER", "openai"),
-            "model": os.environ.get(
-                "LLM_MODEL", "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"
-            ),
+            # Фактическое значение, а не зашитое: манифест - запись о прогоне, и
+            # подставлять сюда имя модели значило бы записать в артефакт модель, которая
+            # не участвовала. `null` бывает только при не-openai адаптере, где LLM не
+            # вызывается и имя модели не объявляется.
+            "model": _generation_model(os.environ.get("LLM_ADAPTER", "openai")),
             "temperature": _env_float("LLM_TEMPERATURE", 0.3),
             "judge_adapter": "none" if judge is None else os.environ.get("EVAL_LLM_ADAPTER", "openai"),
         },
