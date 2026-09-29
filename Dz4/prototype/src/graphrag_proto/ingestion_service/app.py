@@ -110,6 +110,11 @@ def _strict_profile_loading() -> bool:
 #: для генерации ответов на вопросы: там ненулевая температура осмысленна, здесь - нет.
 EXTRACTION_LLM_TEMPERATURE_ENV = "EXTRACTION_LLM_TEMPERATURE"
 
+#: Префикс паспорта извлечения в сообщении стадии. Префикс, а не отдельное поле, потому
+#: что канал для машинных значений один - `signals`, и вводить второй значило бы дать
+#: потребителю два механизма там, где он рассчитывает на один.
+EXTRACTION_PASSPORT_PREFIX = "extraction_passport: "
+
 
 def _extraction_temperature() -> float:
     """Температура для стадии EXTRACT, отдельно от генерации ответов.
@@ -261,6 +266,14 @@ class Executor:
                 if stage_name == "INGEST":
                     self._analyzer.try_noop(ctx)
                 if stage_name == "EXTRACT":
+                    # Паспорт извлечения: всё, чем выполнялся разбор, кроме текста
+                    # документа. Пишется на каждой джобе, прошедшей EXTRACT, а не только
+                    # при деградации, - иначе «чем именно извлечено» остаётся неизвестным
+                    # именно там, где всё прошло хорошо и расходиться не с чем.
+                    if ctx.extraction_passport:
+                        passport = ctx.extraction_passport
+                        self._jobs.record_extraction_passport(job_id, passport)
+                        self._jobs.set_signal(job_id, stage_name, f"extraction:{passport['identity']}")
                     # Факты об объёме пишутся на КАЖДОЙ джобе, прошедшей EXTRACT, а не
                     # только при деградации: объём LLM-слоя — это знаменатель для
                     # «записей на документ», и без него доля считается по документам,

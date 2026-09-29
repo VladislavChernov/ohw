@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,69 @@ def test_identity_changes_with_instruction_content(path: Path | None = None) -> 
         "идентичность не зависит от содержимого инструкции: по графу нельзя будет "
         "отличить два разных извлечения"
     )
+
+
+def test_passport_is_written_for_every_extracting_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Паспорт пишется на каждой джобе, прошедшей EXTRACT, а не только при деградации.
+
+    Иначе «чем именно извлечено» остаётся неизвестным именно там, где всё прошло хорошо и
+    расходиться не с чем: паспорт, который появляется только при ошибке, читается как
+    журнал инцидентов, а не как описание воспроизводимости.
+
+    Проверяется сквозным путём до хранилища, потому что запись может разъехаться с
+    собиранием паспорта так же незаметно, как раньше разъезжалась опора у связей.
+    """
+    from fastapi.testclient import TestClient
+
+    from graphrag_proto.ingestion_service.app import create_app
+
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    # Ключ передаётся параметром: env его читает только `main()`, поэтому подстановка
+    # через `monkeypatch.setenv` здесь молча дала бы 401.
+    app = create_app(
+        upload_dir=tmp_path / "u", db_path=tmp_path / "i.db", api_key="k"
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/v1/ingestion/documents",
+            json={"source_url": "src://d.md", "domain": "it", "doc_type": "md", "content": "x"},
+            headers={"X-API-Key": "k"},
+        )
+    assert resp.status_code == 202, resp.text
+    job_id = resp.json()["job_id"]
+
+    # Джоба выполняется асинхронно: 202 - это «поставлено в очередь», а не «готово».
+    # Без ожидания тест читал бы базу до того, как EXTRACT вообще случился, и падал бы
+    # с сообщением, похожим на «паспорт не пишется», то есть вводил бы в заблуждение.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        job = client.get(f"/api/v1/ingestion/jobs/{job_id}", headers={"X-API-Key": "k"}).json()
+        if str(job.get("status")) in {"succeeded", "failed", "cancelled"}:
+            break
+        time.sleep(0.2)
+    assert str(job.get("status")) == "succeeded", job
+
+    from graphrag_proto.ingestion_service.storage.registry import JobStore
+
+    jobs = JobStore(tmp_path / "i.db")
+    try:
+        passport = jobs.extraction_passport(job_id)
+        assert passport is not None, "паспорт не записан на успешной джобе"
+        # Значения берутся из адаптера, а не из профиля: `extraction.*` в профиле
+        # объявлены, но не читаются. Запись профильных означала бы записать неправду.
+        assert passport["domain"] == "it"
+        assert passport["source_url"] == "src://d.md"
+        assert passport["model"], "модель не записана - паспорт без неё бесполезен"
+        assert passport["temperature"] == "0.0", (
+            f"извлечение обязано быть детерминированным, записано {passport['temperature']!r}"
+        )
+        assert passport["identity"].startswith("llm:it@1:")
+        assert passport["instruction"], "инструкция не записана: её нечем переиграть"
+        assert "REQUIRES_CONSTRAINT" in passport["instruction"]
+    finally:
+        jobs.close()
 
 
 def test_instruction_is_pure_function_of_profile(path: Path | None = None) -> None:

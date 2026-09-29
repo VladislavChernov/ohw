@@ -57,7 +57,18 @@ READ_BY_INGEST: frozenset[str] = frozenset(
 #: Ключи внутри `ontology`, которые читаются (в `retrievers.py` — мёртвым путём, но
 #: читаются). `unique_key`, `properties`, `edge_types`, `chunk_entity_edge` не читаются:
 #: `unique_key` упоминается только в `ensure_schema`, который ingest не вызывает никогда.
-READ_BY_INGEST_NODE_KEYS: frozenset[str] = frozenset({"type"})
+READ_BY_INGEST_NODE_KEYS: frozenset[str] = frozenset({"type", "gloss", "emitted"})
+
+#: Ключи `ontology`, которые читает ingest. Обновлено 2026-09-29 вместе с генератором
+#: инструкции: `edge_types`, `chunk_entity_edge`, `gloss` и `emitted` теперь читаются
+#: `prompt_renderer` при сборке промпта, и без этого внесения контракт кричал бы о них
+#: как о нечитаемых. Предупреждение, которое врёт, хуже отсутствующего: именно этим
+#: предупреждением была найдена рассинхронизация `extraction.temperature`.
+#: `unique_key` и `properties` остаются нечитаемыми для ingest - их применяет только
+#: `ensure_schema`, который ingest не вызывает.
+READ_BY_INGEST_ONTOLOGY_KEYS: frozenset[str] = frozenset(
+    {"node_types", "edge_types", "chunk_entity_edge"}
+)
 
 #: Ключи внутри `extraction`, которые реально читает ingest.
 READ_BY_INGEST_EXTRACTION_KEYS: frozenset[str] = frozenset(
@@ -271,7 +282,8 @@ def _inert_ontology_keys(profile: dict[str, Any]) -> list[str]:
         return []
     ontology_map: dict[str, Any] = ontology
     out = [
-        f"ontology.{key} не читается ingest" for key in sorted(set(ontology_map) - {"node_types"})
+        f"ontology.{key} не читается ingest"
+        for key in sorted(set(ontology_map) - READ_BY_INGEST_ONTOLOGY_KEYS)
     ]
     node_types = ontology_map.get("node_types")
     if not isinstance(node_types, list):

@@ -35,6 +35,7 @@ from graphrag_proto.ingestion_service.pipeline.profile_contract import (
 )
 from graphrag_proto.ingestion_service.pipeline.prompt_renderer import (
     extraction_identity,
+    instruction_fingerprint,
     render_instruction,
 )
 from graphrag_proto.ingestion_service.projection import (
@@ -373,6 +374,7 @@ class PipelineContext:
     # Причина деградации (`CAUSE_*`), а не её текст: текст можно переформулировать
     # вместе с причиной, имя — нет.
     enrichment_cause: str | None = None
+    extraction_passport: dict[str, Any] | None = None
     model_tag_ids_ignored: int = 0
     ambiguous_aliases: int = 0
     graph_projection_status: str = "not_requested"
@@ -534,6 +536,47 @@ def _degradation_cause(exc: Exception) -> str:
     return CAUSE_MODEL_ERROR
 
 
+def _extraction_passport(
+    ctx: PipelineContext, llm: Any, instruction: str, identity: str
+) -> dict[str, Any]:
+    """Паспорт извлечения: чем выполнялся разбор, кроме текста документа.
+
+    **Единица воспроизведения — документ и его версия, а не джоба.** Это решение владельца
+    от 2026-09-29, и выбор неочевиден: `job_id` тоже уникален, но воспроизводим только при
+    повторе той же джобы, чего на практике не делает никто, а при ретрае он меняется - то
+    есть паспорт оказался бы нестабилен ровно там, где нужнее. `source_url` плюс версия
+    переживают ретрай, и «переизвлечь этот документ и получить то же» работает.
+
+    Значения, влияющие на извлечение, читаются из адаптера, а не из профиля: `extraction.*`
+    в профиле объявлены, но не читаются, а действующие числа живут в блоке `llm`. Записать
+    в паспорт профильные означало бы записать неправду - это и есть то расхождение
+    (0.1 против 0.3), из-за которого паспорт и понадобился.
+
+    Обращение к приватным полям адаптера осознанно: это единственный источник правды о том,
+    с чем он реально пойдёт к серверу, а любые параллельные настройки разъедутся с ним же -
+    и паспорт начнёт описывать не то, что выполнялось.
+    """
+    profile = ctx.profile or {}
+    raw_meta = profile.get("profile")
+    meta = raw_meta if isinstance(raw_meta, Mapping) else {}
+    return {
+        "domain": ctx.domain,
+        "source_url": ctx.source_url,
+        "document_version": int(getattr(ctx, "document_version", 0) or 0),
+        "profile": f"{meta.get('name') or '?'!s}@{meta.get('version') or '0'!s}",
+        "llm_enabled": _profile_llm_enabled(profile),
+        "model": str(getattr(llm, "_model", "") or ""),
+        "temperature": getattr(llm, "_temperature", ""),
+        "max_tokens": getattr(llm, "_max_tokens", ""),
+        "timeout_s": getattr(llm, "_timeout_s", ""),
+        "seed": getattr(llm, "_seed", None) or "не задан (temperature=0 делает его ненужным)",
+        "instruction_fingerprint": instruction_fingerprint(instruction),
+        "identity": identity,
+        # Инструкция целиком: она и есть переиспользуемая часть, текст чанков уже в `Chunk`.
+        "instruction": instruction,
+    }
+
+
 class ExtractStage(Stage):
     """EXTRACT: LLM или детерминированный fallback."""
 
@@ -640,6 +683,7 @@ class ExtractStage(Stage):
         # извлечения не является: версия считается от содержимого инструкции.
         instruction = render_instruction(ctx.profile or {}, str(template.get("user") or ""))
         extractor_version = extraction_identity(ctx.profile or {}, instruction)
+        ctx.extraction_passport = _extraction_passport(ctx, self._llm, instruction, extractor_version)
         entity_payloads = {
             "tags": CONTEXT_NODE_LABEL,
             "entities": CONTEXT_NODE_LABEL,

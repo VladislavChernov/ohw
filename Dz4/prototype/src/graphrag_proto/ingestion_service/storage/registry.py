@@ -349,6 +349,32 @@ class JobStore:
             "ts TEXT NOT NULL"
             ")"
         )
+        # Паспорт извлечения - отдельной таблицей по тем же основаниям, что и факты выше:
+        # это числа и имена, которые должен сравнивать потребитель, а не текст, который
+        # он разбирает. `message` стадии занят причиной деградации, и `note_stage`
+        # перетирает - закреплено тестом, - поэтому паспорт не мог бы туда поместиться.
+        # Инструкция хранится целиком: она и есть переиспользуемая часть, а текст чанков
+        # уже лежит в узлах `Chunk`, и вторая копия корпуса в базе джоб была бы дороже
+        # пользы. `CREATE TABLE IF NOT EXISTS` - как и у соседних таблиц, миграций нет.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_extraction_passport ("
+            "job_id TEXT PRIMARY KEY, "
+            "domain TEXT NOT NULL, "
+            "source_url TEXT NOT NULL, "
+            "document_version INTEGER NOT NULL DEFAULT 0, "
+            "profile TEXT NOT NULL, "
+            "llm_enabled INTEGER NOT NULL DEFAULT 0, "
+            "model TEXT NOT NULL, "
+            "temperature TEXT NOT NULL, "
+            "max_tokens TEXT NOT NULL, "
+            "timeout_s TEXT NOT NULL, "
+            "seed TEXT NOT NULL, "
+            "instruction_fingerprint TEXT NOT NULL, "
+            "identity TEXT NOT NULL, "
+            "instruction TEXT NOT NULL, "
+            "ts TEXT NOT NULL"
+            ")"
+        )
         self._conn.commit()
 
     def close(self) -> None:
@@ -570,11 +596,87 @@ class JobStore:
         вернул бы stage в состояние `running` у уже финальной джобы.
         """
         with self._lock:
+            # Перетирание, а не дописывание: закреплено тестом
+            # `test_job_signals_are_structural_and_independent_of_message`, где две
+            # последовательные пометки дают в итоге последнюю. Докстринг выше утверждал
+            # обратное, и на него поведёт ли паспорт извлечения - но спецификация
+            # здесь это тест, и он прав. Поэтому паспорт пишется в собственную таблицу,
+            # а не конкурирует за `message`: одна ячейка на стадию - один факт.
             self._conn.execute(
                 "UPDATE job_stages SET message=? WHERE job_id=? AND stage=?",
                 (message, job_id, stage),
             )
             self._conn.commit()
+
+    def record_extraction_passport(self, job_id: str, passport: dict[str, Any]) -> None:
+        """Паспорт извлечения: чем выполнялся разбор, кроме текста документа.
+
+        **Единица воспроизведения — документ и его версия, а не джоба** (решение владельца
+        2026-09-29). `job_id` уникален, но воспроизводим только при повторе той же джобы,
+        чего на практике не делает никто, а при ретрае он меняется; `source_url` плюс версия
+        переживают ретрай, и «переизвлечь этот документ и получить то же» работает.
+
+        Значения влияющих параметров приходят из адаптера, а не из профиля: `extraction.*`
+        в профиле объявлены, но не читаются, и действующие числа живут в блоке `llm`.
+        Записать профильные означало бы записать неправду - это и есть то расхождение
+        (0.1 против 0.3), ради которого паспорт и понадобился.
+        """
+        from datetime import datetime
+
+        def _text(key: str) -> str:
+            # Не `or ""`: температура извлечения равна 0.0, а ноль ложен, и пустая строка
+            # съедала бы ровно то значение, ради которого паспорт и писался. В базу
+            # кладём текст, потому что SQLite хранит числа REAL и потерял бы 0.0 против
+            # NULL неразличимо, а «не задано» и «ноль» здесь — разные вещи.
+            value = passport.get(key)
+            return "" if value is None else str(value)
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_extraction_passport ("
+                "job_id, domain, source_url, document_version, profile, llm_enabled, "
+                "model, temperature, max_tokens, timeout_s, seed, "
+                "instruction_fingerprint, identity, instruction, ts"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    _text("domain"),
+                    _text("source_url"),
+                    int(passport.get("document_version") or 0),
+                    _text("profile"),
+                    1 if passport.get("llm_enabled") else 0,
+                    _text("model"),
+                    _text("temperature"),
+                    _text("max_tokens"),
+                    _text("timeout_s"),
+                    _text("seed"),
+                    _text("instruction_fingerprint"),
+                    _text("identity"),
+                    _text("instruction"),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def extraction_passport(self, job_id: str) -> dict[str, Any] | None:
+        """Паспорт джобы, `None` - если извлечение не дошло до LLM-пути.
+
+        Отсутствие паспорта - не ноль: это разные вещи, и путать их нельзя, потому что
+        «извлечение не запускалось» и «запускалось с такой-то моделью» требуют разных
+        действий.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM job_extraction_passport WHERE job_id=?", (job_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        keys = [
+            "job_id", "domain", "source_url", "document_version", "profile",
+            "llm_enabled", "model", "temperature", "max_tokens", "timeout_s", "seed",
+            "instruction_fingerprint", "identity", "instruction", "ts",
+        ]
+        return dict(zip(keys, row, strict=False))
 
     def record_orphan_cleanup(
         self,
