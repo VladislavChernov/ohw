@@ -75,6 +75,7 @@ class OpenAICompatibleAdapter(LLMInference):
         max_tokens: int = 2048,
         timeout_s: float = DEFAULT_TIMEOUT_S,
         seed: int | None = None,
+        context_window: int | str | None = None,
     ) -> None:
         """`model` обязателен и не имеет дефолта намеренно.
 
@@ -90,6 +91,7 @@ class OpenAICompatibleAdapter(LLMInference):
         self._max_tokens = max_tokens
         self._timeout_s = timeout_s
         self._seed = seed
+        self._context_window = context_window
 
     def generate(self, prompt: str, system: str = "", stream: bool = True) -> Iterator[str]:
         body = {

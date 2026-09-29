@@ -304,6 +304,82 @@ def test_relation_reaches_the_store_with_chunk_support(tmp_path: Path) -> None:
     )
 
 
+def test_user_scoped_link_outlives_the_document_that_declared_it(tmp_path: Path) -> None:
+    """Связь с `scope: "user"` переживает ревизию документа, документная - нет.
+
+    Решение владельца от 2026-09-29. Различие не вводится отдельным правилом уборки, а
+    следует из уже существующего дискриминатора: связь получает опору на чанки документа,
+    и тогда `chunk_ids IS NOT NULL` делает её кандидатом, а связь без опоры остаётся
+    структурной и уборкой не трогается. Поэтому `scope` - это признак происхождения
+    утверждения, а не новая логика удаления.
+
+    Проверяются оба случая на одном графе и одной ревизии, иначе тест показал бы, что
+    одна из половин не работает, не показав, что другая работает.
+    """
+    from graphrag_proto.ingestion_service.pipeline.orchestrator import PipelineContext
+    from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
+    from graphrag_proto.retrieval.adapters.inmemory import (
+        InMemoryGraphStore,
+        InMemoryVectorStore,
+    )
+
+    reg = DocumentRegistry(tmp_path / "r.db")
+    graph = InMemoryGraphStore()
+    analyzer = _analyzer(reg, graph, InMemoryVectorStore())
+    src = tmp_path / "d.txt"
+    src.write_text("требование контракт сроки согласование договор", encoding="utf-8")
+    tags = [
+        {"tag_id": "tag:it:требование", "canonical_name": "требование"},
+        {"tag_id": "tag:it:контракт", "canonical_name": "контракт"},
+    ]
+    links = [
+        # Документная: по умолчанию, объявлять нечего.
+        {"from_id": "tag:it:требование", "to_id": "tag:it:контракт", "type": "DOC_SCOPED"},
+        # Пользовательская: принадлежит человеку, а не документу.
+        {
+            "from_id": "tag:it:контракт",
+            "to_id": "tag:it:требование",
+            "type": "USER_SCOPED",
+            "scope": "user",
+        },
+    ]
+
+    analyzer.run(
+        PipelineContext(
+            job_id="j1",
+            domain="it",
+            doc_type="txt",
+            source_url="src://d.txt",
+            source_path=str(src),
+            tags=tags,
+            links=links,
+        )
+    )
+    assert graph.verify_edge("tag:it:требование", "tag:it:контракт", "DOC_SCOPED")
+    assert graph.verify_edge("tag:it:контракт", "tag:it:требование", "USER_SCOPED")
+
+    # Ревизия того же документа без ручного ввода: документная опора исчезает.
+    src.write_text("совершенно другой текст без прежних утверждений", encoding="utf-8")
+    analyzer.run(
+        PipelineContext(
+            job_id="j2",
+            domain="it",
+            doc_type="txt",
+            source_url="src://d.txt",
+            source_path=str(src),
+            tags=tags,
+        )
+    )
+    graph.delete_orphans("it", dry_run=False)
+
+    assert not graph.verify_edge("tag:it:требование", "tag:it:контракт", "DOC_SCOPED"), (
+        "документная связь пережила ревизию: она должна уйти вместе с документом"
+    )
+    assert graph.verify_edge("tag:it:контракт", "tag:it:требование", "USER_SCOPED"), (
+        "пользовательская связь удалена вместе с документом: scope не дал ей отличиться"
+    )
+
+
 def test_manual_link_is_supported_while_its_document_is_alive(tmp_path: Path) -> None:
     """Ручная связь держится на чанках документа и переживает уборку, пока документ жив.
 

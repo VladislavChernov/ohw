@@ -42,8 +42,6 @@ extraction:
   prompt_template:
     id: "extract_cinema_v1"
     system: "Извлеки сущности и связи по онтологии cinema (фильмы, режиссёры, жанры)."
-  temperature: 0.1
-  max_tokens: 4096
 
 validation:
   rules: []
@@ -66,7 +64,6 @@ context_assembly:
   template:
     id: "context_cinema_v1"
     priorities: ["graph", "vector"]
-  max_tokens: 4096
   eviction: "drop_lowest_reranker_score"
 
 retrieval:

@@ -54,6 +54,12 @@ from graphrag_proto.retrieval.adapters.llm import (
     LLMUnavailableError,
 )
 
+#: ??? ??????? ???????????. `document` - ?????? ? ????????? ? ???????? ?? ????
+#: ?????????; `user` - ??????????? ???????????? ? ?????????? ??????? ?????????.
+#: ??????? ????????? 2026-09-29, `docs/02` 1.2.
+SCOPE_DOCUMENT = "document"
+SCOPE_USER = "user"
+
 EXTRACTOR_VERSION = "deterministic:v1"
 
 SOURCE_LABEL = "Source"
@@ -573,6 +579,7 @@ def _extraction_passport(
         "model": str(getattr(llm, "_model", "") or ""),
         "temperature": getattr(llm, "_temperature", ""),
         "max_tokens": getattr(llm, "_max_tokens", ""),
+        "context_window": getattr(llm, "_context_window", "") or "?? ????????? ???????",
         "timeout_s": getattr(llm, "_timeout_s", ""),
         "seed": getattr(llm, "_seed", None) or "не задан (temperature=0 делает его ненужным)",
         "instruction_fingerprint": instruction_fingerprint(instruction),
@@ -1395,7 +1402,21 @@ class CommitStage(Stage):
             if isinstance(link, dict):
                 relation = dict(link)
                 relation.setdefault("origin", "user")
-                relation.setdefault("source_ids", [source_url])
+                # `scope` различает два вида ручных утверждений (решение владельца
+                # 2026-09-29). По умолчанию связь документная: она пришла с загрузкой и
+                # держится на этом документе. Явный `scope: "user"` - утверждение,
+                # принадлежащее пользователю, а не документу.
+                #
+                # Различие не выдумано, а следует из уже существующей механики. Документная
+                # связь получает в опору чанки документа, и тогда `chunk_ids IS NOT NULL`
+                # делает её кандидатом на уборку. Пользовательская не получает ничьей опоры
+                # и, что важнее, не претендует на `source_ids` документа: `_remove_source`
+                # снимает происхождение по этому списку, и будь он там - ревизия удалила бы
+                # пользовательское утверждение вместе с документом, то есть различие было бы
+                # только наполовину и выглядело бы работающим.
+                relation.setdefault("scope", SCOPE_DOCUMENT)
+                if relation["scope"] != SCOPE_USER:
+                    relation.setdefault("source_ids", [source_url])
                 entity_edges.append(relation)
 
         all_chunk_ids = [str(meta["chunk_id"]) for meta in ctx.chunks_meta]
@@ -1408,6 +1429,12 @@ class CommitStage(Stage):
         # неубираемой навсегда (`docs/02` §4.5, дыра зафиксирована там же). Уже
         # проставленную опору не трогаем: у извлечённой связи она своя, почанковая.
         for relation in entity_edges:
+            # Пользовательское утверждение опоры не получает: оно не привязано к документу,
+            # и `chunk_ids IS NULL` делает его структурным для предиката уборки, то есть
+            # переживающим ревизию. Документная связь, включая любую извлечённую, опору
+            # получает - иначе предикат её не увидит.
+            if relation.get("scope") == SCOPE_USER:
+                continue
             if not relation.get("chunk_ids"):
                 relation["chunk_ids"] = list(all_chunk_ids)
 
@@ -1460,9 +1487,16 @@ class CommitStage(Stage):
             relation_type = kind.upper() if kind.replace("_", "").isalnum() else "RELATED"
             edge_properties = dict(relation.get("properties") or {})
             edge_properties.setdefault("kind", kind)
+            if relation.get("scope"):
+                edge_properties.setdefault("scope", str(relation["scope"]))
             edge_properties.setdefault("domain", domain)
             edge_properties.setdefault("origin", "system")
-            edge_properties.setdefault("source_ids", [source_url])
+            # Пользовательское утверждение не претендует на документ, поэтому и
+            # `source_ids` документа ему не достаётся: `_remove_source` снимает
+            # происхождение по этому списку, и будь он там - ревизия удалила бы связь,
+            # которая должна пережить документ.
+            if relation.get("scope") != SCOPE_USER:
+                edge_properties.setdefault("source_ids", [source_url])
             for key in ("origin", "confidence", "source_ids"):
                 if key in relation:
                     edge_properties[key] = relation[key]

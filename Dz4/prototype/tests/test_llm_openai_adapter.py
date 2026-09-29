@@ -283,7 +283,7 @@ def test_max_tokens_larger_than_context_window_is_refused(monkeypatch: Any) -> N
     monkeypatch.setenv("LLM_BASE_URL", "http://llm:8080")
     monkeypatch.setenv("LLM_MODEL", "m")
     monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
-    monkeypatch.setenv("LLM_CONTEXT_WINDOW", "2048")
+    monkeypatch.setenv("LLM_CTX_SIZE", "2048")
     with pytest.raises(RuntimeError, match="больше окна модели"):
         build_llm()
 

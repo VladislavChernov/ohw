@@ -986,9 +986,12 @@ def test_manual_tags_and_links_preserve_generic_provenance(
     assert edge_key in graph._edges
     edge = graph._edges[edge_key]
     # `chunk_ids` обязателен: без него связь неотличима от структурной
-    # (`chunk_ids IS NULL`), и предикат уборки её не видит. Остальные свойства
-    # приходят из ручного ввода без изменений.
+    # (`chunk_ids IS NULL`), и предикат уборки её не видит.
     assert edge.pop("chunk_ids"), "у ручной связи нет опоры в свойствах ребра"
+    # `scope` различает документное и пользовательское утверждение (решение владельца
+    # 2026-09-29). Ручная связь из загрузки документная, и это значение по умолчанию:
+    # без явного `scope` поведение не меняется, E2E-сценарий остаётся рабочим.
+    assert edge.pop("scope") == "document"
     assert edge == {
         "kind": "depends_on",
         "weight": 0.7,

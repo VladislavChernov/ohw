@@ -370,27 +370,58 @@ def test_expansion_depth_cap_is_identical_in_both_adapters() -> None:
 
 
 def test_remove_source_clears_edge_provenance() -> None:
+    """Снятие источника чистит опору, но НЕ создаёт её там, где её не было.
+
+    Разделение существенно. Связь, у которой опора была и осталась пустой, обязана стать
+    кандидатом на уборку - это и есть ретракция утверждения. А связь, у которой опоры не
+    было никогда (пользовательское утверждение, структурная связь), обязана её не получить:
+    появление `chunk_ids = []` превращало нетронутую связь в кандидата, то есть обновление
+    документа само порождало мусор, который затем съедала уборка.
+
+    Прежняя версия теста проверяла только первый случай и проходила на втором случайно:
+    у ребра фикстуры `chunk_ids` не было, код его создавал, и проверка видела ожидаемое
+    `[]`. То есть тест закреплял поведение, которое и было дырой.
+    """
     store = InMemoryGraphStore()
     _seed(store)
+    # Свои идентификаторы, а не узлы фикстуры: у фикстуры уже есть ребро с `origin: user`
+    # на ключе (database, storage, RELATED), и `upsert_edges` сольётся с ним, сохранив
+    # ручное происхождение и выбросив `chunk_ids` из входящих свойств. Тест на ретракцию
+    # не должен зависеть от чужого приоритета слияния.
+    with_support = ("tag:it:probe_a", "tag:it:probe_b", "PROBE_WITH_SUPPORT")
+    without_support = ("tag:it:probe_c", "tag:it:probe_d", "PROBE_WITHOUT_SUPPORT")
     store.upsert_edges(
         [
             {
-                "from_id": "tag:it:database",
-                "to_id": "tag:it:storage",
-                "type": "RELATED",
+                "from_id": "tag:it:probe_a",
+                "to_id": "tag:it:probe_b",
+                "type": "PROBE_WITH_SUPPORT",
                 "properties": {
                     "source_ids": ["src://a.txt"],
                     "chunk_ids": ["chk:abc"],
                 },
-            }
+            },
+            {
+                "from_id": "tag:it:probe_c",
+                "to_id": "tag:it:probe_d",
+                "type": "PROBE_WITHOUT_SUPPORT",
+                "properties": {"source_ids": ["src://a.txt"], "scope": "user"},
+            },
         ]
     )
+    assert store._edges[with_support]["chunk_ids"] == ["chk:abc"]
+    assert "chunk_ids" not in store._edges[without_support]
 
     store.remove_source_from_entities("it", "src://a.txt", ["chk:abc"])
 
-    edge = store._edges[("tag:it:database", "tag:it:storage", "RELATED")]
-    assert edge["source_ids"] == []
-    assert edge["chunk_ids"] == []
+    # Опора была и стала пустой - это кандидат, и так должно быть.
+    assert store._edges[with_support]["source_ids"] == []
+    assert store._edges[with_support].get("chunk_ids") == []
+    # Связи без опоры снятие источника не должно награждать пустым списком.
+    assert "chunk_ids" not in store._edges[without_support], (
+        "связи без опоры создано chunk_ids: [] - она стала кандидатом на уборку, "
+        "хотя документ её не утверждал"
+    )
 
 
 def test_inmemory_context_expansion_without_seeds_returns_empty() -> None:

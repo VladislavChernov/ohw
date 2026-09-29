@@ -113,11 +113,13 @@ class InMemoryGraphStore(GraphStoreProvider):
                     continue
                 if isinstance(source_values, list):
                     properties["source_ids"] = [value for value in source_values if value != source_url]
-                properties["chunk_ids"] = [
-                    value
-                    for value in (chunk_values if isinstance(chunk_values, list) else [])
-                    if value not in chunk_ids
-                ]
+                # Только если свойство уже было: создание `chunk_ids = []` превращало
+                # нетронутую структурную сущность в кандидата на уборку, то есть обновление
+                # документа само порождало мусор, который затем съедала уборка.
+                if isinstance(chunk_values, list):
+                    properties["chunk_ids"] = [
+                        value for value in chunk_values if value not in chunk_ids
+                    ]
             for _key, properties in list(self._edges.items()):
                 edge_domain = properties.get("domain")
                 if edge_domain is not None and edge_domain != domain:
@@ -132,11 +134,13 @@ class InMemoryGraphStore(GraphStoreProvider):
                     properties["source_ids"] = [
                         value for value in source_values if value != source_url
                     ]
-                properties["chunk_ids"] = [
-                    value
-                    for value in (chunk_values if isinstance(chunk_values, list) else [])
-                    if value not in chunk_ids
-                ]
+                # Только если свойство уже было: создание `chunk_ids = []` превращало
+                # нетронутую структурную связь в кандидата на уборку, то есть обновление
+                # документа само порождало мусор, который затем съедала уборка.
+                if isinstance(chunk_values, list):
+                    properties["chunk_ids"] = [
+                        value for value in chunk_values if value not in chunk_ids
+                    ]
         elif kind == "upsert_edges":
             for edge in arg:
                 key = (edge["from_id"], edge["to_id"], edge["type"])

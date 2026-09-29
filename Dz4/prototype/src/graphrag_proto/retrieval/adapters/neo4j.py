@@ -498,9 +498,16 @@ def _remove_source(runner: Any, values: dict[str, Any]) -> None:
     # ("Cannot subtract `List` from `List`"), поэтому membership через ANY.
     runner.run(
         "MATCH (n) WHERE n.domain = $domain AND $source_url IN coalesce(n.source_ids, []) "
-        "SET n.source_ids = [value IN coalesce(n.source_ids, []) WHERE value <> $source_url], "
-        "n.chunk_ids = [value IN coalesce(n.chunk_ids, []) "
-        "WHERE NOT any(c IN $chunk_ids WHERE c = value)]",
+        "SET n.source_ids = [value IN coalesce(n.source_ids, []) WHERE value <> $source_url] "
+        # `chunk_ids` переписывается ТОЛЬКО если свойство уже есть. Безусловный `SET`
+        # создавал его, и это ломало дискриминатор уборки: сущность, у которой опоры не
+        # было вовсе (пользовательское утверждение), после обновления получала
+        # `chunk_ids = []`, а пустой непустой-список - это ровно признак кандидата на
+        # удаление. То есть обновление документа превращало нетронутую связь в мусор и
+        # уборка затем её съедала. `FOREACH` с пустым списком условия ничего не делает.
+        "FOREACH (_ IN CASE WHEN n.chunk_ids IS NULL THEN [] ELSE [1] END | "
+        "SET n.chunk_ids = [value IN coalesce(n.chunk_ids, []) "
+        "WHERE NOT any(c IN $chunk_ids WHERE c = value)])",
         parameters=values,
     ).consume()
     runner.run(
@@ -509,9 +516,10 @@ def _remove_source(runner: Any, values: dict[str, Any]) -> None:
         "$source_url IN coalesce(r.source_ids, []) "
         "OR any(value IN coalesce(r.chunk_ids, []) "
         "WHERE any(c IN $chunk_ids WHERE c = value))) "
-        "SET r.source_ids = [value IN coalesce(r.source_ids, []) WHERE value <> $source_url], "
-        "r.chunk_ids = [value IN coalesce(r.chunk_ids, []) "
-        "WHERE NOT any(c IN $chunk_ids WHERE c = value)]",
+        "SET r.source_ids = [value IN coalesce(r.source_ids, []) WHERE value <> $source_url] "
+        "FOREACH (_ IN CASE WHEN r.chunk_ids IS NULL THEN [] ELSE [1] END | "
+        "SET r.chunk_ids = [value IN coalesce(r.chunk_ids, []) "
+        "WHERE NOT any(c IN $chunk_ids WHERE c = value)])",
         parameters=values,
     ).consume()
 
