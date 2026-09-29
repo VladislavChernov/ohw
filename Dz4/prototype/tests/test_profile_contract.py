@@ -52,16 +52,44 @@ def test_valid_profile_has_no_problems() -> None:
     assert not bool(verdict) is True
 
 
-def test_llm_enabled_true_with_missing_template_is_error() -> None:
-    """Явное «включено» + битый шаблон = нарушение контракта, названное по полям."""
+def test_llm_enabled_true_with_missing_system_is_error() -> None:
+    """`llm_enabled: true` + шаблон без `system` = неполный шаблон, понятная ошибка.
+
+    Проверяется именно `system`, а не `user`: с 2026-09-29 `user` необязателен, потому
+    что метод извлечения живёт в генераторе инструкции и одинаков для всех доменов.
+    Прежняя проверка требовала непустой `user` и тем самым обязывала каждый профиль
+    дублировать метод - то есть возвращала то дублирование, ради устранения которого
+    генератор и вводился.
+    """
+    profile = copy.deepcopy(BASE)
+    del profile["extraction"]["prompt_template"]["system"]
+
+    verdict = validate_ingestion_profile(profile)
+
+    assert len(verdict.errors) == 1
+    assert "extraction.prompt_template.system" in verdict.errors[0]
+    assert "llm_enabled: true" in verdict.errors[0]
+
+
+def test_absent_user_is_legal() -> None:
+    """Отсутствующий `user` - не ошибка: метод даёт генератор инструкции."""
     profile = copy.deepcopy(BASE)
     del profile["extraction"]["prompt_template"]["user"]
 
     verdict = validate_ingestion_profile(profile)
 
-    assert len(verdict.errors) == 1
-    assert "extraction.prompt_template.user" in verdict.errors[0]
-    assert "llm_enabled: true" in verdict.errors[0]
+    assert not any("prompt_template.user" in e for e in verdict.errors)
+
+
+def test_user_present_but_not_a_string_is_error() -> None:
+    """Заданный, но нестроковый `user` - ошибка: молча выбросить его нельзя."""
+    profile = copy.deepcopy(BASE)
+    profile["extraction"]["prompt_template"]["user"] = ["не", "строка"]
+
+    verdict = validate_ingestion_profile(profile)
+
+    assert any("prompt_template.user" in e for e in verdict.errors)
+
 
 
 def test_empty_template_field_is_error_not_pass() -> None:
@@ -85,7 +113,7 @@ def test_absent_flag_and_incomplete_template_is_error() -> None:
     """
     profile = copy.deepcopy(BASE)
     profile["extraction"].pop("llm_enabled")
-    del profile["extraction"]["prompt_template"]["user"]
+    del profile["extraction"]["prompt_template"]["system"]
 
     verdict = validate_ingestion_profile(profile)
 
@@ -116,12 +144,12 @@ def test_explicit_false_with_incomplete_template_is_only_warning() -> None:
     """
     profile = copy.deepcopy(BASE)
     profile["extraction"]["llm_enabled"] = False
-    del profile["extraction"]["prompt_template"]["user"]
+    del profile["extraction"]["prompt_template"]["system"]
 
     verdict = validate_ingestion_profile(profile)
 
     assert verdict.errors == ()
-    assert any("llm_enabled: false" in w and "user" in w for w in verdict.warnings)
+    assert any("llm_enabled: false" in w and "system" in w for w in verdict.warnings)
 
 
 def test_flag_of_wrong_type_is_error() -> None:

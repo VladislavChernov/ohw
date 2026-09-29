@@ -137,8 +137,13 @@ def _extraction_template(profile: dict[str, Any]) -> dict[str, Any]:
     template = extraction.get("prompt_template") if isinstance(extraction, dict) else None
     if not isinstance(template, dict):
         raise ExtractionConfigError("в профиле отсутствует extraction.prompt_template")
-    if not isinstance(template.get("user"), str) or not isinstance(template.get("system"), str):
-        raise ExtractionConfigError("extraction.prompt_template должен содержать system и user")
+    if not isinstance(template.get("system"), str):
+        raise ExtractionConfigError("extraction.prompt_template должен содержать system")
+    # `user` необязателен с 2026-09-29: метод извлечения добавляет генератор инструкции,
+    # и требование его здесь означало бы, что профиль обязан дублировать метод в прозе.
+    # Заданный, но нестроковый `user` - ошибка, отсутствующий - законен.
+    if "user" in template and not isinstance(template.get("user"), str):
+        raise ExtractionConfigError("extraction.prompt_template.user задан, но не является строкой")
     return template
 
 

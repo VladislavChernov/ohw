@@ -581,7 +581,11 @@ def test_invalid_profile_is_reported_as_config_not_as_model(monkeypatch: Any) ->
     """
     monkeypatch.setenv("EXTRACT_LLM", "true")
     profile = _ai_profile()
-    del profile["extraction"]["prompt_template"]["user"]
+    # Неполнота шаблона делается удалением `system`, а не `user`: с 2026-09-29 `user`
+    # необязателен (метод даёт генератор инструкции), и удаление его больше не делает
+    # профиль невалидным. Смысл теста - «невалидный профиль это ошибка конфигурации, а не
+    # модели» - сохраняется любым способом поломки, поэтому берём заведомо обязательный ключ.
+    del profile["extraction"]["prompt_template"]["system"]
     ctx = PipelineContext(
         job_id="j",
         domain="it",

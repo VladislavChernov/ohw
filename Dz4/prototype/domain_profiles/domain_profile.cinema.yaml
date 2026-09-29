@@ -13,10 +13,19 @@ ontology:
   node_types:
     - type: "Movie"
       unique_key: "canonical_name"
+      # `gloss` и `emitted` добавлены вместе с генератором инструкции (2026-09-29),
+      # см. `domain_profile.it.yaml`: пояснения и «что выдаёт модель» живут в данных.
+      gloss: "фильм; ремейки и сиквелы - SIMILAR_TO, а не тот же объект"
+      emitted: ["canonical_name", "name"]
     - type: "Director"
       unique_key: "canonical_name"
+      gloss: "режиссёр; варианты написания имени склеиваются глоссарием"
+      emitted: ["canonical_name"]
     - type: "Genre"
       unique_key: "canonical_name"
+      gloss: "жанр или тематическая категория"
+      emitted: ["canonical_name"]
+  chunk_entity_edge: "MENTIONS"
   edge_types:
     - from: "Director"
       to: "Movie"

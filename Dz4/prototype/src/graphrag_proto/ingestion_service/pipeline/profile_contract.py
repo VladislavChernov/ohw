@@ -148,13 +148,22 @@ def _is_nonempty_str(value: object) -> bool:
 
 
 def _template_gaps(template: object) -> list[str]:
-    """Каких обязательных частей шаблона не хватает, поимённо."""
+    """Каких обязательных частей шаблона не хватает, поимённо.
+
+    `user` с 2026-09-29 **не обязателен**: метод извлечения (один JSON, один ответ на чанк,
+    не выдумывать типы, неопределённость в имени) живёт в генераторе инструкции и
+    одинаков для всех доменов. Требование непустого `user` было верно, пока схема и метод
+    лежали в прозе профиля; после разделения оно означало бы, что каждый профиль обязан
+    продублировать метод, чтобы пройти проверку, - то есть вернуть ровно то дублирование,
+    ради устранения которого всё затевалось. Пустой или отсутствующий `user` законен;
+    ошибочным остаётся `user`, который задан, но не является непустой строкой.
+    """
     if not _is_mapping(template):
         return ["extraction.prompt_template"]
     missing: list[str] = []
     if not _is_nonempty_str(template.get("system")):
         missing.append("extraction.prompt_template.system")
-    if not _is_nonempty_str(template.get("user")):
+    if "user" in template and not _is_nonempty_str(template.get("user")):
         missing.append("extraction.prompt_template.user")
     return missing
 
