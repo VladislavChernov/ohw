@@ -25,6 +25,7 @@ from graphrag_proto.retrieval.adapters.base import (
     _expand_depth,
     _expand_direction,
     _expand_kinds,
+    _node_properties,
 )
 from graphrag_proto.retrieval.adapters.schemas import (
     normalize_graph_row,
@@ -325,7 +326,7 @@ class Neo4jGraphStore(GraphStoreProvider):
                     "domain": props.get("domain"),
                     "origin": props.get("origin"),
                     "confidence": props.get("confidence"),
-                    "properties": dict(props.get("properties") or {}),
+                    "properties": _node_properties(props.get("properties")),
                 }
             )
             fanout_counts[branch_point] = fanout_counts.get(branch_point, 0) + 1

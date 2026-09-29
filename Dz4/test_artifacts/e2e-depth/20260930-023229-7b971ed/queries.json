@@ -1,0 +1,170 @@
+[
+  {
+    "id": "T9",
+    "why": "один хоп: якорь и первое звено",
+    "question": "Zvonkyi Hvorist Ukladu",
+    "seed": "tag:it:chain_a",
+    "requested_depth": 1,
+    "max_depth_requested": 1,
+    "max_depth_effective": 1,
+    "depth_clamped": false,
+    "cache_hit": false,
+    "walk_seed": "tag:it:chain_a",
+    "walk_max_fanout": 32,
+    "walk_max_nodes": 64,
+    "walk_rows": 1,
+    "walk_hop_depths": [
+      1
+    ],
+    "chain_nodes_walked": [
+      "tag:it:chain_a",
+      "tag:it:chain_b"
+    ],
+    "chain_node_count": 2,
+    "chain_documents": [
+      "depth-probe/anchor.md",
+      "depth-probe/second.md"
+    ],
+    "chain_document_count": 2,
+    "response_chain_documents": [
+      "depth-probe/anchor.md",
+      "depth-probe/second.md",
+      "depth-probe/tail.md",
+      "depth-probe/third.md"
+    ],
+    "pipeline_expansion_events": 0,
+    "expect_node_count": 2,
+    "expect_document_count": 2,
+    "expect_clamped": false
+  },
+  {
+    "id": "T10",
+    "why": "два хопа: якорь и два звена",
+    "question": "Zvonkyi Hvorist Ukladu, вторая проверка",
+    "seed": "tag:it:chain_a",
+    "requested_depth": 2,
+    "max_depth_requested": 2,
+    "max_depth_effective": 2,
+    "depth_clamped": false,
+    "cache_hit": false,
+    "walk_seed": "tag:it:chain_a",
+    "walk_max_fanout": 32,
+    "walk_max_nodes": 64,
+    "walk_rows": 19,
+    "walk_hop_depths": [
+      1,
+      2
+    ],
+    "chain_nodes_walked": [
+      "tag:it:chain_a",
+      "tag:it:chain_b",
+      "tag:it:chain_c"
+    ],
+    "chain_node_count": 3,
+    "chain_documents": [
+      "depth-probe/anchor.md",
+      "depth-probe/second.md",
+      "depth-probe/third.md"
+    ],
+    "chain_document_count": 3,
+    "response_chain_documents": [
+      "depth-probe/anchor.md",
+      "depth-probe/second.md",
+      "depth-probe/tail.md",
+      "depth-probe/third.md"
+    ],
+    "pipeline_expansion_events": 0,
+    "expect_node_count": 3,
+    "expect_document_count": 3,
+    "expect_clamped": false
+  },
+  {
+    "id": "T11",
+    "why": "просьба дальше потолка: зажим обязателен и обязан быть объявлен",
+    "question": "Zvonkyi Hvorist Ukladu, третья проверка",
+    "seed": "tag:it:chain_a",
+    "requested_depth": 99,
+    "max_depth_requested": 99,
+    "max_depth_effective": 6,
+    "depth_clamped": true,
+    "cache_hit": false,
+    "walk_seed": "tag:it:chain_a",
+    "walk_max_fanout": 32,
+    "walk_max_nodes": 64,
+    "walk_rows": 51,
+    "walk_hop_depths": [
+      2,
+      4,
+      5,
+      6
+    ],
+    "chain_nodes_walked": [
+      "tag:it:chain_a",
+      "tag:it:chain_b",
+      "tag:it:chain_c",
+      "tag:it:chain_d"
+    ],
+    "chain_node_count": 4,
+    "chain_documents": [
+      "depth-probe/anchor.md",
+      "depth-probe/second.md",
+      "depth-probe/tail.md",
+      "depth-probe/third.md"
+    ],
+    "chain_document_count": 4,
+    "response_chain_documents": [
+      "depth-probe/anchor.md",
+      "depth-probe/second.md",
+      "depth-probe/tail.md",
+      "depth-probe/third.md"
+    ],
+    "pipeline_expansion_events": 0,
+    "expect_node_count": 4,
+    "expect_document_count": 4,
+    "expect_clamped": true
+  },
+  {
+    "id": "T12",
+    "why": "та же полная глубина без зажима: тот же результат, но depth_clamped нет",
+    "question": "Zvonkyi Hvorist Ukladu, четвёртая проверка",
+    "seed": "tag:it:chain_a",
+    "requested_depth": 3,
+    "max_depth_requested": 3,
+    "max_depth_effective": 3,
+    "depth_clamped": false,
+    "cache_hit": false,
+    "walk_seed": "tag:it:chain_a",
+    "walk_max_fanout": 32,
+    "walk_max_nodes": 64,
+    "walk_rows": 31,
+    "walk_hop_depths": [
+      1,
+      2,
+      3
+    ],
+    "chain_nodes_walked": [
+      "tag:it:chain_a",
+      "tag:it:chain_b",
+      "tag:it:chain_c",
+      "tag:it:chain_d"
+    ],
+    "chain_node_count": 4,
+    "chain_documents": [
+      "depth-probe/anchor.md",
+      "depth-probe/second.md",
+      "depth-probe/tail.md",
+      "depth-probe/third.md"
+    ],
+    "chain_document_count": 4,
+    "response_chain_documents": [
+      "depth-probe/anchor.md",
+      "depth-probe/second.md",
+      "depth-probe/tail.md",
+      "depth-probe/third.md"
+    ],
+    "pipeline_expansion_events": 0,
+    "expect_node_count": 4,
+    "expect_document_count": 4,
+    "expect_clamped": false
+  }
+]

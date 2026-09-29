@@ -15,8 +15,9 @@
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
 from typing import Any, Literal, Protocol
 
@@ -32,6 +33,37 @@ def _expand_direction(direction: str) -> str:
     if value in {"in", "incoming", "related", "down"}:
         return "in"
     return "both"
+
+
+def _node_properties(value: object) -> dict[str, Any]:
+    """Свойства узла приводятся к отображению МОЛЧА, любым способом.
+
+    На живом графе `properties` приходит строкой (`"{}"`), потому что ingest пишет его
+    JSON-текстом, а `dict("{}")` падает с ValueError. Это нашлось E2E-прогоном глубины на
+    стенде, а не тестом: юнит-тесты строили узлы руками и клали туда отображение, а
+    `expand()` на живых данных до этого никто не вызывал - предыдущие E2E-сценарии ходили
+    в Neo4j напрямую. Ровно тот класс, что и с `chunk_ids`: механизм написан, на реальных
+    данных не исполнялся.
+
+    Отсюда правило: значение, которое не удалось прочитать как отображение, даёт пустое
+    отображение, а не исключение. Обход не должен падать из-за чужого свойства.
+
+    Формы, которые действительно приходят от Neo4j, - отображение и JSON-текст (его пишет
+    ingest). Ветки для «списка пар» здесь нет намеренно: она была написана на умозаключении
+    и оказалась неверной - цели распаковки в компренхшене связываются ДО проверки условия,
+    а `Sequence` включает `str` и `bytes`, так что она падала и на словаре, и на байтах.
+    """
+    if isinstance(value, Mapping):
+        return dict(value)
+    if isinstance(value, (bytes, bytearray)):
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return {}
+        return dict(parsed) if isinstance(parsed, Mapping) else {}
+    return {}
 
 
 def _expand_kinds(kinds: Sequence[str] | None) -> frozenset[str] | None:

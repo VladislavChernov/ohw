@@ -6,7 +6,10 @@ from typing import Self
 
 import pytest
 
-from graphrag_proto.retrieval.adapters.base import VectorStoreProvider
+from graphrag_proto.retrieval.adapters.base import (
+    VectorStoreProvider,
+    _node_properties,
+)
 from graphrag_proto.retrieval.adapters.deterministic import (
     DeterministicEmbedder,
     deterministic_embedding,
@@ -889,3 +892,59 @@ def test_neo4j_fanout_limit_applies_per_node_on_one_chain() -> None:
 
     found = store.expand(["tag:it:n0"], max_depth=2, max_fanout=1, max_nodes=10)
     assert [row["node_id"] for row in found] == ["tag:it:n1", "tag:it:n2"]
+
+
+def test_node_properties_tolerates_json_string_from_ingest() -> None:
+    """Свойства узла, пришедшие строкой, читаются как отображение, а не роняют обход.
+
+    Находка E2E-прогона глубины на стенде: ingest пишет `properties` JSON-текстом, поэтому
+    на живом графе это строка `"{}"`, и `dict("{}")` падает с ValueError. Юнит-тесты этого
+    не видели: они строили узлы руками и клали туда отображение. Ровно тот класс, что и с
+    `chunk_ids`, - механизм написан, на реальных данных не исполнялся.
+    """
+    assert _node_properties({"a": 1}) == {"a": 1}
+    assert _node_properties('{"a": 1}') == {"a": 1}
+    assert _node_properties("{}") == {}
+    assert _node_properties("не json") == {}
+    assert _node_properties("") == {}
+    assert _node_properties(None) == {}
+    assert _node_properties(42) == {}
+    # Байты - это тоже Sequence, как и строка, и перебирать их нельзя: на первой же
+    # распаковке цели падало бы. Ветки для «списка пар» нет намеренно, её писали на
+    # умозаключении, и она была неверной.
+    assert _node_properties(b"{}") == {}
+    assert _node_properties([("a", 1)]) == {}
+
+
+def test_neo4j_expand_survives_string_properties_on_live_nodes() -> None:
+    """Тот же случай на уровне адаптера: обход не должен падать из-за чужого свойства."""
+    rows = [
+        {
+            "path": ["tag:it:seed", "tag:it:n1"],
+            # Именно то, что отдаёт живой ingest: properties строкой, а не отображением.
+            "node": {"node_id": "tag:it:n1", "properties": "{}", "domain": "it"},
+            "depth": 1,
+        }
+    ]
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return rows
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    found = store.expand(["tag:it:seed"], max_depth=1, max_nodes=4)
+
+    assert [row["node_id"] for row in found] == ["tag:it:n1"]
+    assert found[0]["properties"] == {}, "непрочитанное свойство даёт пустое отображение"

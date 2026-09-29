@@ -1,0 +1,11 @@
+{
+  "compose_files": "compose.eval-minimal.yaml+compose.eval-qwen3b.yaml",
+  "project": "ohw-eval-qwen3b",
+  "ingestion_url": "http://ingestion-api:8002",
+  "domain": "it",
+  "extract_llm": "true",
+  "llm_model": "qwen2.5-3b-instruct-q4_k_m",
+  "query_api_present": false,
+  "query_api_note": "query-api на eval-стенде отсутствует; конвейер собран через query_service.runtime.build_pipeline - тот же factory",
+  "started_at": "2026-09-29T22:39:14+00:00"
+}

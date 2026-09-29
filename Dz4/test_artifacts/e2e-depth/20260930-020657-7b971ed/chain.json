@@ -1,0 +1,27 @@
+{
+  "edges": [
+    {
+      "from_id": "tag:it:chain_a",
+      "to_id": "tag:it:chain_b",
+      "kind": "REFERENCES",
+      "origin": "user",
+      "scope": "user"
+    },
+    {
+      "from_id": "tag:it:chain_b",
+      "to_id": "tag:it:chain_c",
+      "kind": "REFERENCES",
+      "origin": "user",
+      "scope": "user"
+    },
+    {
+      "from_id": "tag:it:chain_c",
+      "to_id": "tag:it:chain_d",
+      "kind": "REFERENCES",
+      "origin": "user",
+      "scope": "user"
+    }
+  ],
+  "merged": 3,
+  "note": "рёбра созданы MERGE в Neo4j, не через links контракта загрузки"
+}

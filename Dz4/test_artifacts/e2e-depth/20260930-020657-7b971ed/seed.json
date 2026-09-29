@@ -1,0 +1,30 @@
+[
+  {
+    "node_id": "tag:it:chain_a",
+    "source_url": "depth-probe/anchor.md",
+    "tag_id": "chain_a",
+    "job_id": "ca0811bd-53d0-408c-91fa-7973fb43d121",
+    "status": "succeeded"
+  },
+  {
+    "node_id": "tag:it:chain_b",
+    "source_url": "depth-probe/second.md",
+    "tag_id": "chain_b",
+    "job_id": "4cf11680-90ab-4882-83cf-77c7ddff6c2b",
+    "status": "succeeded"
+  },
+  {
+    "node_id": "tag:it:chain_c",
+    "source_url": "depth-probe/third.md",
+    "tag_id": "chain_c",
+    "job_id": "fb8d1dc3-186b-435a-8bdf-a3a090832704",
+    "status": "succeeded"
+  },
+  {
+    "node_id": "tag:it:chain_d",
+    "source_url": "depth-probe/tail.md",
+    "tag_id": "chain_d",
+    "job_id": "3cfcb751-7ccb-46f8-b9fe-574c7903d7fd",
+    "status": "succeeded"
+  }
+]
