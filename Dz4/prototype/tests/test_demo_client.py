@@ -4,6 +4,9 @@ import pytest
 import requests
 
 from graphrag_proto.demo_ui.client import (
+    DEFAULT_SLIDER_DEPTH,
+    DEPTH_MAX,
+    DEPTH_MIN,
     DemoClient,
     Settings,
     _raise_for_status,
@@ -104,3 +107,79 @@ def test_submit_query_payload_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.submit_query("вопрос про домен", "doc") == "t1"
     assert captured["url"] == "http://query:8000/query"
     assert captured["json"] == {"query": "вопрос про домен", "metadata": {"domain": "doc"}}
+
+
+def test_submit_query_sends_max_depth_when_chosen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Выбранная глубина едет в запрос явным полем, а не «в metadata мимоходом»."""
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, headers: dict[str, str], json: object, timeout: object) -> requests.Response:
+        captured["json"] = json
+        return _response(202, '{"task_id": "t1"}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    client = DemoClient(Settings(query_url="http://query:8000", api_key="k"))
+
+    assert client.submit_query("вопрос", "doc", max_depth=5) == "t1"
+    payload = captured["json"]
+    assert isinstance(payload, dict)
+    assert payload["max_depth"] == 5
+    assert payload["metadata"] == {"domain": "doc"}
+
+
+def test_submit_query_omits_max_depth_when_not_chosen(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Отсутствие значения - это «решает конфигурация», а не «глубина 0» и не «глубина None».
+
+    Поле не должно уезжать в запрос вовсе: иначе конвейер примет его за намерение и
+    заменит профиль значением по умолчанию из UI, то есть профиль перестанет решать.
+    """
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, headers: dict[str, str], json: object, timeout: object) -> requests.Response:
+        captured["json"] = json
+        return _response(202, '{"task_id": "t1"}')
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    client = DemoClient(Settings(query_url="http://query:8000", api_key="k"))
+
+    client.submit_query("вопрос", "doc")
+    payload = captured["json"]
+    assert isinstance(payload, dict)
+    assert "max_depth" not in payload
+
+
+def test_slider_bounds_come_from_the_cap_not_from_markup() -> None:
+    """Границы ползунка - тот же потолок, что и у обхода.
+
+    Второе число в UI означало бы второе место, где живёт предел, и именно это расхождение
+    ползунок обязан устранять, а не воспроизводить.
+    """
+    from graphrag_proto.retrieval.adapters.base import MAX_EXPANSION_DEPTH
+
+    assert DEPTH_MAX == MAX_EXPANSION_DEPTH
+    assert DEPTH_MIN == 1
+    assert DEPTH_MIN < DEFAULT_SLIDER_DEPTH <= DEPTH_MAX
+
+
+def test_slider_default_matches_profiles() -> None:
+    """Начальное положение ползунка не должно разойтись с профилями.
+
+    Профили объявляют `retrieval.max_depth: 3`, и UI показывает 3. Если это число
+    разъедется, человек будет стартовать с другого значения, чем система применяет по
+    умолчанию, и расхождение обнаружится только в ответе. Тест читает настоящие профили,
+    а не их копию.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    profiles = Path(__file__).resolve().parents[1] / "domain_profiles"
+    files = sorted(profiles.glob("domain_profile.*.yaml"))
+    assert files, f"профили не найдены: {profiles}"
+    for path in files:
+        profile = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        declared = (profile.get("retrieval") or {}).get("max_depth")
+        assert declared == DEFAULT_SLIDER_DEPTH, (
+            f"{path.name}: retrieval.max_depth={declared!r}, а ползунок стартует с "
+            f"{DEFAULT_SLIDER_DEPTH}"
+        )

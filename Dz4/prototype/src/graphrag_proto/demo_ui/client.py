@@ -17,10 +17,24 @@ from typing import Any
 
 import requests
 
+from graphrag_proto.retrieval.adapters.base import MAX_EXPANSION_DEPTH
+
 INGESTION_URL = os.environ.get("INGESTION_URL", "http://localhost:8002")
 QUERY_URL = os.environ.get("QUERY_URL", "http://localhost:8000")
 CONFIG_URL = os.environ.get("CONFIG_URL", "http://localhost:8001")
 X_API_KEY = os.environ.get("X_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
+
+#: Границы ползунка глубины берутся из кода, а не пишутся в разметке: второе число в UI
+#: означало бы второе место, где живёт потолок, и ровно то расхождение, которое ползунок
+#: должен устранить.
+DEPTH_MIN = 1
+DEPTH_MAX = MAX_EXPANSION_DEPTH
+
+#: Начальное положение ползунка. Это НЕ конфигурация: запрос из UI всегда несёт значение
+#: явно, поэтому профиль не участвует. Авторитетное значение остаётся в профиле, а
+#: ползунок показывает то, что реально применилось, из `effective_retrieval` ответа.
+#: Расхождение с профилями ловит тест `test_slider_default_matches_profiles`.
+DEFAULT_SLIDER_DEPTH = 3
 
 
 @dataclass(frozen=True)
@@ -126,11 +140,21 @@ class DemoClient:
         _raise_for_status(response)
         return _json_dict(response)
 
-    def submit_query(self, query: str, domain: str) -> str:
+    def submit_query(self, query: str, domain: str, max_depth: int | None = None) -> str:
+        """Отправить вопрос. `max_depth` — глубина обхода (ADR-036).
+
+        `None` означает «не задавать»: поле не уходит в запрос, и глубину решает конфигурация
+        (Config Service -> профиль -> кодовый фолбэк). Это не то же самое, что `0` или
+        отсутствие слайдера, поэтому здесь именно `None`, и поле добавляется только когда
+        значение задано.
+        """
+        payload: dict[str, Any] = {"query": query, "metadata": {"domain": domain}}
+        if max_depth is not None:
+            payload["max_depth"] = int(max_depth)
         response = requests.post(
             f"{self._settings.query_url}/query",
             headers=self._headers,
-            json={"query": query, "metadata": {"domain": domain}},
+            json=payload,
             timeout=10,
         )
         _raise_for_status(response)

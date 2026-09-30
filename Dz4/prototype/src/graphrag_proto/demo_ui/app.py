@@ -15,6 +15,9 @@ import streamlit as st
 
 from graphrag_proto.demo_ui.client import (
     CONFIG_URL,
+    DEFAULT_SLIDER_DEPTH,
+    DEPTH_MAX,
+    DEPTH_MIN,
     INGESTION_URL,
     QUERY_URL,
     X_API_KEY,
@@ -23,6 +26,20 @@ from graphrag_proto.demo_ui.client import (
 )
 
 TERMINAL_INGEST = {"succeeded", "failed", "cancelled"}
+
+#: Подсказка ползунка. Формулировка про то, что человек получит, а не про механизм: слова
+#: «глубина обхода по связи» приглашают пользователя считать хопы, а ему это не нужно.
+#: Про то, что значение выше предела не отвергается, сказано прямо, потому что зажим
+#: объявляется и без пояснения выглядит как ошибка.
+DEPTH_HELP = (
+    "Насколько широко опрашивать граф вокруг найденного. Меньше - быстрее и точнее; "
+    f"больше - больше контекста и медленнее. Дальше {DEPTH_MAX} не пройти: значение "
+    "обрежется до предела, и об этом будет сказано под ответом."
+)
+
+
+def _depth_from_state() -> int:
+    return int(st.session_state.get("query_max_depth", DEFAULT_SLIDER_DEPTH))
 
 
 def _event_body(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -151,17 +168,62 @@ def _render_documents(client: DemoClient, domains: list[str]) -> None:
                 st.success(f"Источник {source_url} снят с поиска (его чанки убраны из retrieval).")
 
 
+def _render_depth_control() -> int:
+    """Ползунок глубины. Границы приходят из кода, начальное положение - из состояния сессии."""
+    left, right = st.columns([3, 1])
+    with left:
+        depth = st.slider(
+            "Глубина поиска",
+            min_value=DEPTH_MIN,
+            max_value=DEPTH_MAX,
+            value=_depth_from_state(),
+            key="query_max_depth",
+            help=DEPTH_HELP,
+        )
+    with right:
+        st.caption(f"1 = только прямые связи, {DEPTH_MAX} = максимум")
+    return int(depth)
+
+
+def _render_effective_depth(done: dict[str, Any]) -> None:
+    """Показать, какая глубина реально применилась, и объявить зажим.
+
+    Без этого ползунок врёт: человек ставит 6, а получает ответ, собранный на 3, и не
+    понимает почему. Зажим объявляется в ответе (`depth_clamped`), и здесь он
+    превращается в предупреждение, а не остаётся полем в JSON.
+    """
+    effective = done.get("effective_retrieval")
+    if not isinstance(effective, dict):
+        # Ответа может не быть: попадание в семантический кэш не отдаёт effective_retrieval,
+        # и об этом стоит сказать, иначе человек решит, что ползунок сработал.
+        st.warning(
+            "Ответ собран из кэша: запрошенная глубина не применялась. "
+            "Переформулируйте вопрос или прокрутите кэш.",
+        )
+        return
+    requested = effective.get("max_depth_requested")
+    applied = effective.get("max_depth_effective")
+    clamped = effective.get("depth_clamped")
+    st.caption(f"Глубина: запрошено {requested}, применено {applied}")
+    if clamped:
+        st.warning(
+            f"Запрошенная глубина {requested} выше предела {DEPTH_MAX}: применено {applied}. "
+            f"Дальше {DEPTH_MAX} обход не идёт.",
+        )
+
+
 def _render_queries(client: DemoClient, domains: list[str]) -> None:
     st.subheader("Запросы к графу")
     domain = st.selectbox("Домен вопроса", options=domains, key="query_domain")
     query = st.text_input("Вопрос", key="query_text", placeholder="Например: что регулирует HSTPA?")
+    depth = _render_depth_control()
     if st.button("Отправить запрос", type="primary"):
         if not query.strip():
             st.info("Введите текст вопроса.")
         else:
             started = time.monotonic()
             try:
-                task_id = client.submit_query(query.strip(), domain)
+                task_id = client.submit_query(query.strip(), domain, max_depth=depth)
             except RuntimeError as exc:
                 st.error(str(exc))
             else:
@@ -170,6 +232,7 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                         "task_id": task_id,
                         "query": query.strip(),
                         "domain": domain,
+                        "depth": depth,
                         "status": "running",
                     }
                 )
@@ -206,6 +269,7 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                             record["status"] = "done"
                     st.markdown("### Ответ")
                     st.markdown(str(done.get("text", "")) or "_пусто_")
+                    _render_effective_depth(done)
                     caption = f"task {task_id} · e2e {elapsed:.1f} с"
                     retrieval_s = done.get("retrieval_time_s")
                     total_s = done.get("total_time_s")
@@ -240,6 +304,7 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                 "task_id": str(item.get("task_id", "")),
                 "query": str(item.get("query", "")),
                 "domain": str(item.get("domain", "")),
+                "глубина": str(item.get("depth", "")),
                 "status": str(item.get("status", "")),
             }
             for item in history
