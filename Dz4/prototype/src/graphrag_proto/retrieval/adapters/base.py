@@ -149,7 +149,13 @@ class LLMInference(ABC):
     """Инференс LLM. Возвращает стрим дельт текста (для SSE token-событий)."""
 
     @abstractmethod
-    def generate(self, prompt: str, system: str = "", stream: bool = True) -> Iterator[str]:
+    def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> Iterator[str]:
         """Итератор текстовых дельт; stream=False — один дельта с полным ответом."""
 
 

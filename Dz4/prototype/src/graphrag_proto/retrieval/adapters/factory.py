@@ -272,6 +272,7 @@ def _build_llm(
     kind: str,
     *,
     temperature: float | None = None,
+    exchange_stage: str = "llm",
 ) -> LLMInference:
     kind = kind.strip().lower()
     if kind == "fake":
@@ -300,10 +301,11 @@ def _build_llm(
             max_tokens=int(_llm_number("max_tokens", profile, int)),
             timeout_s=float(_llm_number("timeout_s", profile, float)),
             seed=seed,
-            # ???? ???????? ?? ????????, ????? ??????? ????????? ???????????
-            # ????????, ? ?? ??, ??? ???-?? ???????? ??? ?????. ???????? ???? ?????? ??
-            # ????? ?? ?????, ??????? ???????? ???? ? ????????? ??? ?? ?????.
-            context_window=_optional_llm_setting("context_window", profile) or None,
+# Окно приходит из профиля, а не из аргумента, и это не только про извлечение:
+    # адаптер один и тот же и для извлечения, и для генерации, и конструктор не должен
+    # решать, кто он. Значение профиля может быть строкой - приводится здесь, один раз.
+    context_window=_optional_llm_setting("context_window", profile) or None,
+            exchange_stage=exchange_stage,
         )
     raise ValueError(f"llm={kind!r}: допустимо {', '.join(ADAPTER_CATALOG[SLOT_LLM])}")
 
@@ -357,7 +359,7 @@ def build_reranker() -> Reranker:
     return _build_reranker(_resolve_slot(SLOT_RERANKER, None))
 
 
-def build_llm(*, temperature: float | None = None) -> LLMInference:
+def build_llm(*, temperature: float | None = None, exchange_stage: str = "llm") -> LLMInference:
     """Адаптер LLM для потребителя.
 
     `temperature` - точечное переопределение, а не глобальная настройка: извлечению нужна
@@ -365,4 +367,11 @@ def build_llm(*, temperature: float | None = None) -> LLMInference:
     значением, видно в точке вызова, а не спрятано в профиле, где одна величина обслуживала
     оба случая.
     """
-    return _build_llm(_resolve_slot(SLOT_LLM, None), temperature=temperature)
+    # exchange_stage - метка стадии в журнале обмена (docs/llm_exchange_log.md). Её
+    # знает вызывающий, а не адаптер: из ingest его зовёт извлечение, из query-service -
+    # генерация, и в журнале это обязано различаться.
+    return _build_llm(
+        _resolve_slot(SLOT_LLM, None),
+        temperature=temperature,
+        exchange_stage=exchange_stage,
+    )

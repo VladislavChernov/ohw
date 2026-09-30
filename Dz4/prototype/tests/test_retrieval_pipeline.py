@@ -540,7 +540,13 @@ class _CountingLLM:
         self.call_count = 0
         self.token_count = 0
 
-    def generate(self, prompt: str, system: str = "", stream: bool = True):
+    def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ):
         self.call_count += 1
         for delta in self._text.split(" "):
             self.token_count += 1

@@ -46,6 +46,7 @@
 | Документ | Описание |
 |----------|----------|
 | [06_operations_and_risks.md](./06_operations_and_risks.md) | Масштабирование, метрики, профили и матрица рисков |
+| [llm_exchange_log.md](./llm_exchange_log.md) | Журнал обмена с LLM: уровни, что попадает в лог, как включить |
 | [operations_requirements.md](./operations_requirements.md) | Эксплуатационные требования: бэкап, retention, reconciliation, аудит, A/B |
 | [infrastructure_stack.md](./infrastructure_stack.md) | Технологический стек: контейнеры, языки, СУБД, профили, лицензии |
 | [security.md](./security.md) | Безопасность: аутентификация, роли, транспорт, секреты, лимиты |

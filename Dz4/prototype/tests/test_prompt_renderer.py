@@ -201,7 +201,13 @@ def test_prompt_sent_to_model_carries_profile_types(monkeypatch: pytest.MonkeyPa
     sent: list[str] = []
 
     class _CapturingLLM:
-        def generate(self, prompt: str, system: str = "", stream: bool = True) -> list[str]:
+        def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> list[str]:
             sent.append(prompt)
             return ['{"requirements": [], "concepts": [], "contracts": [], "relationships": []}']
 

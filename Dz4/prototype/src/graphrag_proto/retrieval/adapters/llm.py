@@ -7,11 +7,15 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from graphrag_proto.retrieval.adapters.base import LLMInference
@@ -58,7 +62,31 @@ class LLMResponseError(LLMAdapterError):
     проверки: пустой или иной объект давал `KeyError`, который на границе выглядел как
     «модель вернула ерунду». Теперь это названная ошибка с проверкой формы: сервис нарушил
     контракт, а не модель плохо ответила.
+
+    `raw` - то, что прислал сервер, в усечённом виде. Нужен для диагностики обрыва по
+    длине: раньше текст, на котором JSON не закрылся, исчезал вместе с исключением, и
+    вопрос «что именно модель пишет в ответ» был неотвечаемым без нового прогона. Теперь
+    улика едет в сообщении ошибки и оказывается в записи джобы.
     """
+
+    def __init__(self, message: str, raw: str | None = None) -> None:
+        super().__init__(message)
+        self.raw = raw
+
+
+#: Сколько символов сырого ответа едет в ошибку. Без предела в записи джобы оказался бы
+#: многосоткилобайтный текст, и запись перестала бы читаться; с пределом видно начало
+#: вывода, где модель ещё пишет осмысленно, и хвост, где она уже зациклилась.
+RAW_EXCERPT_LIMIT = 2000
+
+
+def _excerpt(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    if len(raw) <= RAW_EXCERPT_LIMIT:
+        return raw
+    half = RAW_EXCERPT_LIMIT // 2
+    return f"{raw[:half]}…[середина усечена]…{raw[-half:]}"
 
 
 DEFAULT_TIMEOUT_S = 600.0
@@ -76,6 +104,7 @@ class OpenAICompatibleAdapter(LLMInference):
         timeout_s: float = DEFAULT_TIMEOUT_S,
         seed: int | None = None,
         context_window: int | str | None = None,
+        exchange_stage: str = "llm",
     ) -> None:
         """`model` обязателен и не имеет дефолта намеренно.
 
@@ -92,8 +121,33 @@ class OpenAICompatibleAdapter(LLMInference):
         self._timeout_s = timeout_s
         self._seed = seed
         self._context_window = context_window
+        # Учёт токенов последнего вызова. `generate` - генератор, и вернуть значение из
+        # него без переписывания всех вызывающих нельзя, поэтому состояние явное и
+        # одноимённое: относится к ПОСЛЕДНЕМУ вызову и обнуляется в его начале.
+        self.last_usage: dict[str, int] | None = None
+        self._exchange = _ExchangeLog()
+        self._exchange_stage = exchange_stage
 
-    def generate(self, prompt: str, system: str = "", stream: bool = True) -> Iterator[str]:
+    def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> Iterator[str]:
+        """Обмен с моделью. `labels` — метки вызывающего для журнала обмена.
+
+        В метках кладются **идентификаторы** (источник, чанк), а не текст: по ним записи
+        соединяются с документом, и без этого следующая обработка получает строки, которые
+        нечем сгруппировать. Текст чанка в журнал не пишется.
+
+        Стоит понимать про уровень `full`: промпт извлечения САМ содержит текст чанка,
+        поэтому `full` = «текст документа попал в лог». Если нужен только вывод модели
+        без раздувания журнала, есть уровень `response` - он пишет ответ и не пишет
+        промпт. Это осознанный выбор на момент включения, а не свойство журнала;
+        `LLM_EXCHANGE_LOG_FILE` позволяет увести записи из stdout и из Loki.
+        """
+        self.last_usage = None
         body = {
             "model": self._model,
             "messages": [
@@ -117,15 +171,46 @@ class OpenAICompatibleAdapter(LLMInference):
         )
         try:
             deadline = time.monotonic() + self._timeout_s if self._timeout_s > 0 else None
+            started = time.monotonic()
+            collected: list[str] = []
             with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
                 if stream:
-                    yield from self._iter_stream(resp, deadline)
+                    yield from self._iter_stream(resp, deadline, collected)
                 else:
-                    yield self._extract_content(resp.read().decode("utf-8"))
-        except LLMAdapterError:
+                    # НЕ `text = yield ...`: в генераторе такая запись присваивает значение,
+                    # которое потребитель отправляет через send(), а `"".join(...)` не
+                    # отправляет ничего. Текст берётся ДО yield - иначе в журнал уходит None
+                    # вместо ответа, то есть ровно в том случае, когда он нужен.
+                    text = self._extract_content(resp.read().decode("utf-8"))
+                    collected.append(text)
+                    yield text
+            self._exchange.record(
+                model=self._model,
+                stage=self._exchange_stage,
+                stream=stream,
+                system=system,
+                prompt=prompt,
+                response="".join(collected),
+                usage=self.last_usage,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                labels=labels,
+            )
+        except LLMAdapterError as exc:
             # Уже классифицировано: перечитывать текст префикса, чтобы угадать причину,
             # значит вернуть ту самую неразличимость, ради устранения которой типы и
-            # введены.
+            # ошибок введены. Но обмен в журнал пишется ДО re-raise: иначе именно тот
+            # случай, ради которого журнал и включают, не был бы виден в журнале.
+            self._exchange.record(
+                model=self._model,
+                stage=self._exchange_stage,
+                stream=stream,
+                system=system,
+                prompt=prompt,
+                response=getattr(exc, "raw", None),
+                usage=self.last_usage,
+                error=type(exc).__name__,
+                labels=labels,
+            )
             raise
         except TimeoutError as exc:
             # ПЕРЕД `OSError`: socket.timeout — подкласс OSError, и без этого порядка
@@ -136,8 +221,7 @@ class OpenAICompatibleAdapter(LLMInference):
         except (urllib.error.URLError, OSError) as exc:
             raise LLMUnavailableError(f"LLM недоступен ({self._base_url}): {exc}") from exc
 
-    @staticmethod
-    def _extract_content(raw: str) -> str:
+    def _extract_content(self, raw: str) -> str:
         """Достать текст ответа, проверив форму.
 
         Проверка обязательна: без неё неверное тело даёт `KeyError`/`IndexError` из
@@ -154,16 +238,30 @@ class OpenAICompatibleAdapter(LLMInference):
         if not isinstance(choices, list) or not choices:
             raise LLMResponseError("в ответе LLM нет непустого choices")
         first = choices[0] if isinstance(choices[0], dict) else {}
-        _reject_truncation(first.get("finish_reason"))
         message = first.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str):
             raise LLMResponseError("в ответе LLM нет строкового choices[0].message.content")
+        # Учёт токенов снимается здесь, а не у вызывающего: сервер OpenAI-совместимого
+        # режима (llama.cpp) возвращает `usage` в том же теле, и это точные числа для этой
+        # модели, а не оценка чужим токенизатором. Раньше поле не читалось вовсе, поэтому
+        # вопрос «кто жрёт токены - промпт или ответ» не имел ответа.
+        usage = payload.get("usage")
+        self.last_usage = _normalize_usage(usage)
+        _reject_truncation(first.get("finish_reason"), content)
         return content
 
     @staticmethod
-    def _iter_stream(resp: Any, deadline: float | None = None) -> Iterator[str]:
+    def _iter_stream(
+        resp: Any,
+        deadline: float | None = None,
+        collected: list[str] | None = None,
+    ) -> Iterator[str]:
         finish_reason: str | None = None
+        # Ответ накапливается, хотя и отдаётся по частям: без накопленного текста обрыв по
+        # длине в потоковом режиме уносит с собой всю улику. Список передаётся вызывающим,
+        # чтобы журнал обмена увидел то же, что получит пайплайн, а не отдельную копию.
+        sink = collected if collected is not None else []
         for raw_line in resp:
             if deadline is not None and time.monotonic() >= deadline:
                 raise LLMTimeoutError("LLM stream timeout")
@@ -177,14 +275,147 @@ class OpenAICompatibleAdapter(LLMInference):
             if chunk_finish:
                 finish_reason = chunk_finish
             if delta:
+                sink.append(delta)
                 yield delta
         # Проверка после `break`, а не внутри цикла: в потоковом ответе причина
         # завершения приезжает последним фрагментом, и проверка на каждом чанке
         # обрывала бы нормальный поток на первом же куске без причины.
-        _reject_truncation(finish_reason)
+        _reject_truncation(finish_reason, "".join(sink))
 
 
-def _reject_truncation(finish_reason: object) -> None:
+#: Уровни режима логирования обмена с моделью. `off` - умолчание, и это не осторожность:
+#: полный обмен - это весь промпт и весь ответ, то есть потенциально весь документ в логах.
+#:
+#: `response` отвечает на вопрос «что модель выдаёт» и НЕ содержит текста документа: в
+#: извлечении текст чанка лежит внутри промпта, поэтому «ответ без промпта» - это ровно
+#: «лог без раздувания». `full` добавляет промпт и системную инструкцию, и включается
+#: осознанно: с этого момента текст документа попадает в журнал.
+_EXCHANGE_LEVELS = {"off": 0, "meta": 1, "response": 2, "full": 3}
+
+
+class _ExchangeLog:
+    """Журнал обмена с моделью: отдельный режим вместо «запишем всё всегда».
+
+    Зачем он нужен. Пользовательский UI показывает ответ модели в потоке, и из этого
+    разговора видно, что нехватка ответа - обычное дело, а не редкий сбой. Из ingest
+    обмена видно не было ничего: при обрыве по длине текст исчезал вместе с исключением,
+    и вопрос «что именно модель пишет в ответ» требовал нового прогона каждый раз.
+
+    Три уровня, и третий включается осознанно:
+      * `off` (по умолчанию) - ничего;
+      * `meta` - модель, расход токенов, причина завершения, длины. Без содержимого;
+      * `response` - плюс текст ОТВЕТА. Текста документа в записи нет: он лежит в промпте,
+        а промпт на этом уровне не пишется;
+      * `full` - плюс промпт и системная инструкция, то есть текст документа.
+
+    Куда писать: в stdout (тот же structlog-конвейер, что и остальное, `docs/06` §2) либо в
+    файл, если он задан через `LLM_EXCHANGE_LOG_FILE`. Файл - это случай «хочу посмотреть
+    глазами весь обмен по конкретному прогону»: в Loki такой объём не кладут.
+
+    Логирование не должно ломать разбор: ошибка записи журнала молча игнорируется, иначе
+    включённая диагностика могла бы уронить джобы, ради которых включена.
+    """
+
+    def __init__(self) -> None:
+        level = os.environ.get("LLM_EXCHANGE_LOG", "off").strip().lower() or "off"
+        self.level = _EXCHANGE_LEVELS.get(level, 0)
+        self.path = os.environ.get("LLM_EXCHANGE_LOG_FILE", "").strip()
+        try:
+            self.limit = max(0, int(os.environ.get("LLM_EXCHANGE_LOG_MAX_CHARS", "8000")))
+        except ValueError:
+            self.limit = 8000
+        self._log = logging.getLogger("graphrag_proto.llm.exchange")
+
+    def _clip(self, text: str) -> tuple[str, bool]:
+        """Текст и признак усечения. Само усечение помечается, иначе следующая обработка
+        примет обрезанный ответ за полный и посчитает выводы по неполным данным."""
+        if not self.limit or len(text) <= self.limit:
+            return text, False
+        return f"{text[: self.limit]}…[усечено, всего {len(text)} символов]", True
+
+    def record(
+        self,
+        *,
+        model: str,
+        stage: str,
+        stream: bool,
+        system: str = "",
+        prompt: str = "",
+        response: str | None = None,
+        finish_reason: str | None = None,
+        usage: dict[str, int] | None = None,
+        error: str | None = None,
+        duration_ms: int | None = None,
+        labels: dict[str, str] | None = None,
+    ) -> None:
+        if not self.level:
+            return
+        record: dict[str, Any] = {
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+            "model": model,
+            "stage": stage,
+            "stream": stream,
+            "finish_reason": finish_reason,
+            "usage": usage,
+            "prompt_chars": len(prompt),
+            "response_chars": len(response or ""),
+            "error": error,
+            "duration_ms": duration_ms,
+        }
+        if self.level >= _EXCHANGE_LEVELS["response"]:
+            response_text, response_cut = self._clip(response or "")
+            record["response"] = response_text
+        truncated: dict[str, bool] = {}
+        if self.level >= _EXCHANGE_LEVELS["response"]:
+            truncated["response"] = response_cut
+        if self.level >= _EXCHANGE_LEVELS["full"]:
+            prompt_text, prompt_cut = self._clip(prompt)
+            system_text, system_cut = self._clip(system)
+            record["system"] = system_text
+            record["prompt"] = prompt_text
+            truncated["system"] = system_cut
+            truncated["prompt"] = prompt_cut
+        # Признаки усечения обязательны: «полный обмен» и «усечённый обмен» - разные
+        # данные, и молча склеивать их нельзя. На уровне `response` промпта в записи нет,
+        # поэтому и признака усечения промпта нет - ключ не выдумывается.
+        if truncated:
+            record["truncated"] = truncated
+        # Метки вызывающего. Без них записи не соединяются с документом и чанком, а
+        # следующая обработка получает строки, которые нечем сгруппировать.
+        if labels:
+            record["labels"] = {str(k): str(v) for k, v in labels.items()}
+        line = json.dumps(record, ensure_ascii=False)
+        try:
+            if self.path:
+                with Path(self.path).open("a", encoding="utf-8") as handle:
+                    handle.write(line + "\n")
+            else:
+                self._log.info("llm exchange %s", line)
+        except OSError as exc:
+            # Диагностика не должна ломать разбор: ошибка записи журнала - это ошибка
+            # журнала, а не документа, и ронять из-за неё джобы нельзя.
+            self._log.warning("не удалось записать журнал обмена с LLM: %s", exc)
+
+
+def _normalize_usage(usage: object) -> dict[str, int] | None:
+    """`usage` приводится к целым числам, а отсутствие остаётся отсутствием.
+
+    Приводить нужно осторожно: часть серверов отдаёт `usage: null` в стриме, а часть -
+    числа строкой. Нечитаемое значение даёт `None`, а не ноль: ноль означал бы «модель не
+    потратила токены», то есть выглядел бы как ответ без содержимого.
+    """
+    if not isinstance(usage, dict):
+        return None
+    result: dict[str, int] = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        result[key] = value
+    return result or None
+
+
+def _reject_truncation(finish_reason: object, raw: str | None = None) -> None:
     """Обрыв ответа по длине должен быть виден, а не молча давать битый JSON.
 
     Сервер присылает `finish_reason: "length"`, когда ответ упёрся в `max_tokens`. Раньше
@@ -196,14 +427,21 @@ def _reject_truncation(finish_reason: object) -> None:
 
     Поле отсутствует у части серверов, поэтому отсутствие - не повод для ошибки: молчаливый
     отказ там, где сервер просто не сообщает причину, был бы хуже.
+
+    Сырой ответ едет вместе с ошибкой: обрыв виден, но что модель наговорила до него -
+    нет, а без этого любой разбор упирается в «нужно ещё раз прогнать».
     """
     if not isinstance(finish_reason, str) or not finish_reason or finish_reason == "stop":
         return
-    raise LLMResponseError(
+    excerpt = _excerpt(raw)
+    message = (
         f"ответ LLM неполон: finish_reason={finish_reason!r}. "
         f"Почти всегда это обрыв по max_tokens - увеличьте его либо уменьшите чанк, "
         f"иначе JSON не распарсится и извлечение молча деградирует к детерминированному пути."
     )
+    if excerpt:
+        message = f"{message}\n--- начало/конец ответа модели ---\n{excerpt}"
+    raise LLMResponseError(message, raw=raw)
 
 
 def _extract_delta(raw: str) -> tuple[str, str | None]:
@@ -239,7 +477,16 @@ class FakeLLM(LLMInference):
         self._deltas = re.split(r"(\s+)", text) if (by_words and text) else [text]
         self.is_fake = is_fake
 
-    def generate(self, prompt: str, system: str = "", stream: bool = True) -> Iterator[str]:
+    def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> Iterator[str]:
+        # `labels` принимается и не используется: сигнатура обязана совпадать с настоящим
+        # адаптером, иначе вызывающий, который честно передаёт метки, падает на тестах.
+        del prompt, system, stream, labels
         yield from self._deltas
 
     @property

@@ -171,7 +171,13 @@ class _RecordingLLM(FakeLLM):
         super().__init__(text=text, is_fake=False)
         self.calls: list[tuple[str, str]] = []
 
-    def generate(self, prompt: str, system: str = "", stream: bool = True) -> Any:
+    def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> Any:
         self.calls.append((prompt, system))
         yield from self._deltas
 
@@ -190,7 +196,13 @@ class _PerChunkLLM:
         self._texts = list(texts)
         self.calls = 0
 
-    def generate(self, prompt: str, system: str = "", stream: bool = True) -> Any:
+    def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> Any:
         index = self.calls
         self.calls += 1
         if index >= len(self._texts):
@@ -206,7 +218,13 @@ class _NoSchemaGraph(InMemoryGraphStore):
 class _RaisingLLM:
     is_fake = False
 
-    def generate(self, prompt: str, system: str = "", stream: bool = True) -> Any:
+    def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> Any:
         raise RuntimeError("LLM failed")
         yield
 
@@ -648,7 +666,13 @@ def test_transport_failures_get_distinct_causes(monkeypatch: Any) -> None:
         class _Failing:
             is_fake = False
 
-            def generate(self, prompt: str, system: str = "", stream: bool = True) -> Any:
+            def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> Any:
                 return _raise()
 
         ExtractStage(

@@ -158,7 +158,12 @@ def build_analyzer(
             ChunkStage(chunker, profile_fetcher=profile_fetcher),
             EmbedStage(embedder or build_embedder()),
             ExtractStage(
-                llm=llm if llm is not None else build_llm(temperature=_extraction_temperature()),
+                llm=llm if llm is not None else build_llm(
+            temperature=_extraction_temperature(),
+            # Метка стадии в журнале обмена: из ingest модель зовёт только извлечение, и
+            # без метки записи обмена не отличить от вызовов генерации в query-service.
+            exchange_stage="extract",
+        ),
                 profile_fetcher=profile_fetcher,
                 optional_failure=True,
             ),

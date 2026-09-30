@@ -54,9 +54,10 @@ from graphrag_proto.retrieval.adapters.llm import (
     LLMUnavailableError,
 )
 
-#: ??? ??????? ???????????. `document` - ?????? ? ????????? ? ???????? ?? ????
-#: ?????????; `user` - ??????????? ???????????? ? ?????????? ??????? ?????????.
-#: ??????? ????????? 2026-09-29, `docs/02` 1.2.
+#: Вид ручного утверждения. `document` - принадлежит документу и живёт с ним: получает
+#: опору на чанки, теряет её при ревизии и убирается как кандидат. `user` - принадлежит
+#: пользователю: опоры не получает и переживает ревизию документа, потому что для
+#: предиката уборки остаётся структурной. Решение владельца от 2026-09-29, `docs/02` §1.2.
 SCOPE_DOCUMENT = "document"
 SCOPE_USER = "user"
 
@@ -386,6 +387,10 @@ class PipelineContext:
     # вместе с причиной, имя — нет.
     enrichment_cause: str | None = None
     extraction_passport: dict[str, Any] | None = None
+    # Фактический расход токенов последнего вызова LLM, как его сообщил сервер. Нужен,
+    # чтобы отвечать на вопрос «кто жрёт токены - промпт или ответ» по числам, а не по
+    # ощущению: раньше расход не снимался вовсе.
+    llm_usage: dict[str, Any] | None = None
     model_tag_ids_ignored: int = 0
     ambiguous_aliases: int = 0
     graph_projection_status: str = "not_requested"
@@ -579,11 +584,15 @@ def _extraction_passport(
         "model": str(getattr(llm, "_model", "") or ""),
         "temperature": getattr(llm, "_temperature", ""),
         "max_tokens": getattr(llm, "_max_tokens", ""),
-        "context_window": getattr(llm, "_context_window", "") or "?? ????????? ???????",
+        "context_window": getattr(llm, "_context_window", "") or "не объявлено стендом",
         "timeout_s": getattr(llm, "_timeout_s", ""),
         "seed": getattr(llm, "_seed", None) or "не задан (temperature=0 делает его ненужным)",
         "instruction_fingerprint": instruction_fingerprint(instruction),
         "identity": identity,
+        # Фактический расход токенов, если сервер его сообщил. Это единственное место, где
+        # видно, во сколько обошёлся разбор: без него паспорт описывает, ЧЕМ выполнялось,
+        # но не СКОЛЬКО стоило, и вопрос «кто жрёт токены» не имеет ответа по числам.
+        "usage": dict(ctx.llm_usage) if isinstance(ctx.llm_usage, dict) and ctx.llm_usage else None,
         # Инструкция целиком: она и есть переиспользуемая часть, текст чанков уже в `Chunk`.
         "instruction": instruction,
     }
@@ -725,12 +734,32 @@ class ExtractStage(Stage):
             # не сможет отличить «стенд не отвечает» от «модель ответила ерундой».
             try:
                 raw = "".join(
-                    llm.generate(prompt, system=str(template["system"]), stream=False)
+                    llm.generate(
+                        prompt,
+                        system=str(template["system"]),
+                        stream=False,
+                        # Идентификаторы, а не текст: по ним запись обмена соединяется с
+                        # документом и чанком. Текст чанка в журнал не пишется.
+                        labels={
+                            "source_url": str(ctx.source_url),
+                            "chunk_id": str(chunk_id),
+                        },
+                    )
                 )
             except LLMAdapterError as exc:
-                raise ExtractionModelError(f"вызов LLM не удался: {exc}") from exc
+                # Улика едет в текст ошибки, а не теряется: `ExtractionModelError` попадает
+                # в запись джобы, и по нему видно, что модель успела наговорить до обрыва.
+                # Без этого вопрос «что именно модель пишет в ответ» был неотвечаемым.
+                detail = getattr(exc, "raw", None)
+                raise ExtractionModelError(
+                    f"вызов LLM не удался: {exc}"
+                    + (f"\n--- ответ модели (усечён) ---\n{detail}" if detail else "")
+                ) from exc
             except Exception as exc:  # граница с внешним адаптером, ловится намеренно
                 raise ExtractionModelError(f"вызов LLM не удался: {exc}") from exc
+            usage = getattr(llm, "last_usage", None)
+            if isinstance(usage, dict) and usage:
+                ctx.llm_usage = usage
             payload = _parse_extraction_payload(raw)
             records: list[dict[str, Any]] = []
             unknown_fields = set(payload) - allowed_fields

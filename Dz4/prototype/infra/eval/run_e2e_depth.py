@@ -365,11 +365,13 @@ def run_check(pipeline: Any, retriever: Any, check: dict[str, Any]) -> dict[str,
         generate=False,
     )
     effective = done.get("effective_retrieval") or {}
-    expansion = [
-        event
-        for event in (done.get("trace") or [])
-        if event.get("stage") == "graph_expansion"
-    ]
+    trace = done.get("trace") or []
+    expansion = [event for event in trace if event.get("stage") == "graph_expansion"]
+# Готовность проекции - отдельное событие `graph_readiness`, и раньше сценарий его не
+        # смотрел, фильтруя только `graph_expansion`. Из-за этого прогон выглядел так, будто
+        # причина отключения графовой оси нигде не записывается, и диагноз был неполным:
+        # причина есть, просто в другом событии.
+    readiness = [event for event in trace if event.get("stage") == "graph_readiness"]
     return {
         "id": check["id"],
         "why": check["why"],
@@ -391,6 +393,19 @@ def run_check(pipeline: Any, retriever: Any, check: dict[str, Any]) -> dict[str,
         "chain_document_count": len(documents),
         "response_chain_documents": sorted(by_url),
         "pipeline_expansion_events": len(expansion),
+        # Причина отключения графовой оси пишется в `projection_status` ответа и отдельным
+        # событием `graph_readiness`. Оба сохраняются: без них прогон выглядит как «обход не
+        # сработал, потому что сломалось», а не как «обход не включался, и вот почему».
+        "projection_status": done.get("projection_status"),
+        "graph_degraded": done.get("graph_degraded"),
+        "graph_readiness": [
+            {
+                "status": event.get("status"),
+                "degraded": event.get("degraded"),
+                "projection_revision": event.get("projection_revision"),
+            }
+            for event in readiness
+        ],
         "expect_node_count": check["expect_nodes"],
         "expect_document_count": check["expect_documents"],
         "expect_clamped": check["expect_clamped"],

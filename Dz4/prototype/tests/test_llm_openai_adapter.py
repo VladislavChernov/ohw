@@ -18,6 +18,7 @@ from graphrag_proto.retrieval.adapters.llm import (
     LLMTimeoutError,
     LLMUnavailableError,
     OpenAICompatibleAdapter,
+    _ExchangeLog,
 )
 
 
@@ -405,3 +406,188 @@ def test_llm_model_must_be_declared(monkeypatch, tmp_path):
     monkeypatch.setenv("NAMESPACES_PATH", str(tmp_path / "absent.yaml"))
     with pytest.raises(RuntimeError, match="обязана объявляться явно"):
         build_llm()
+
+
+def _exchange(tmp_path, monkeypatch, level: str, limit: str = "8000") -> Any:
+    """Журнал обмена, включённый на уровень `level`, пишущий в файл."""
+    log = tmp_path / "exchange.jsonl"
+    monkeypatch.setenv("LLM_EXCHANGE_LOG", level)
+    monkeypatch.setenv("LLM_EXCHANGE_LOG_FILE", str(log))
+    monkeypatch.setenv("LLM_EXCHANGE_LOG_MAX_CHARS", limit)
+    return _ExchangeLog()
+
+
+def _read(path: Any) -> dict[str, Any]:
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(lines) == 1, lines
+    return json.loads(lines[0])
+
+
+def test_exchange_log_off_by_default_writes_nothing(tmp_path, monkeypatch) -> None:
+    """Молчание - это дефолт, и оно осознанное: полный обмен - это текст документа."""
+    monkeypatch.delenv("LLM_EXCHANGE_LOG", raising=False)
+    monkeypatch.delenv("LLM_EXCHANGE_LOG_FILE", raising=False)
+    log = _ExchangeLog()
+
+    log.record(model="m", stage="extract", stream=False, prompt="документ", response="ответ")
+
+    assert log.level == 0
+    assert not list(tmp_path.iterdir()), "выключенный журнал не должен создавать файлов"
+
+
+def test_exchange_meta_level_has_numbers_but_no_content(tmp_path, monkeypatch) -> None:
+    """`meta` отвечает на вопрос «сколько стоило», не раскрывая содержимое."""
+    log = _exchange(tmp_path, monkeypatch, "meta")
+
+    log.record(
+        model="m",
+        stage="extract",
+        stream=False,
+        prompt="текст чанка",
+        response="ответ модели",
+        usage={"prompt_tokens": 100, "completion_tokens": 20},
+    )
+
+    record = _read(tmp_path / "exchange.jsonl")
+    assert record["usage"] == {"prompt_tokens": 100, "completion_tokens": 20}
+    assert record["prompt_chars"] == len("текст чанка")
+    assert record["response_chars"] == len("ответ модели")
+    assert "prompt" not in record
+    assert "response" not in record
+    assert "truncated" not in record
+
+
+def test_exchange_full_level_keeps_content_and_marks_truncation(tmp_path, monkeypatch) -> None:
+    """Усечение обязано быть помечено: иначе следующая обработка примет обрезку за полное."""
+    log = _exchange(tmp_path, monkeypatch, "full", limit="10")
+
+    log.record(
+        model="m",
+        stage="extract",
+        stream=False,
+        prompt="длинный промпт извлечения",
+        response="длинный ответ модели",
+        labels={"source_url": "s://a", "chunk_id": "chk:1"},
+    )
+
+    record = _read(tmp_path / "exchange.jsonl")
+    assert record["prompt"].startswith("длинный пр")
+    assert "усечено" in record["prompt"]
+    assert record["truncated"] == {"system": False, "prompt": True, "response": True}
+    # Полная длина остаётся рядом с усечённой, иначе потерян сам масштаб потери.
+    assert record["prompt_chars"] == len("длинный промпт извлечения")
+    assert record["labels"] == {"source_url": "s://a", "chunk_id": "chk:1"}
+
+
+def test_exchange_limit_zero_means_no_truncation(tmp_path, monkeypatch) -> None:
+    """Для разбора «что модель пишет» усечение недопустимо, поэтому 0 - это «не резать»."""
+    log = _exchange(tmp_path, monkeypatch, "full", limit="0")
+
+    log.record(model="m", stage="extract", stream=False, prompt="x" * 5000, response="y" * 5000)
+
+    record = _read(tmp_path / "exchange.jsonl")
+    assert record["truncated"] == {"system": False, "prompt": False, "response": False}
+    assert len(record["response"]) == 5000
+
+
+def test_exchange_records_failure_with_raw_response(tmp_path, monkeypatch) -> None:
+    """Именно этот случай и есть смысл журнала: обрыв виден, и видно, что модель наговорила."""
+    payload = {
+        "choices": [
+            {
+                "message": {"content": '{"entities": ['},
+                "finish_reason": "length",
+            }
+        ],
+        "usage": {"prompt_tokens": 900, "completion_tokens": 4096},
+    }
+    server, port = _start_server(
+        _make_handler({"/v1/chat/completions": (200, json.dumps(payload))})
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    # Адаптер сам подхватывает настройки журнала из env - присваивать ему `_exchange`
+    # вручную не нужно, иначе тест проверял бы не то подключение, которым пользуется сервис.
+    _exchange(tmp_path, monkeypatch, "full")
+    adapter = OpenAICompatibleAdapter(base_url=f"http://127.0.0.1:{port}", model="m")
+    try:
+        with pytest.raises(LLMResponseError):
+            list(adapter.generate("промпт", system="система", stream=False, labels={"chunk_id": "chk:9"}))
+    finally:
+        server.shutdown()
+
+    record = _read(tmp_path / "exchange.jsonl")
+    assert record["error"] == "LLMResponseError"
+    assert record["response"] == '{"entities": ['
+    assert record["labels"] == {"chunk_id": "chk:9"}
+    assert (record["usage"] or {}).get("completion_tokens") == 4096
+
+
+def test_exchange_records_usage_on_success(tmp_path, monkeypatch) -> None:
+    """Расход токенов попадает в журнал при УСПЕШНОМ вызове - это основной случай."""
+    payload = {
+        "choices": [{"message": {"content": '{"entities": []}'}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 812, "completion_tokens": 37, "total_tokens": 849},
+    }
+    server, port = _start_server(
+        _make_handler({"/v1/chat/completions": (200, json.dumps(payload))})
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    _exchange(tmp_path, monkeypatch, "full")
+    adapter = OpenAICompatibleAdapter(base_url=f"http://127.0.0.1:{port}", model="m")
+    try:
+        text = "".join(adapter.generate("промпт", system="система", stream=False))
+    finally:
+        server.shutdown()
+
+    assert text == '{"entities": []}'
+    record = _read(tmp_path / "exchange.jsonl")
+    assert record["usage"] == {"prompt_tokens": 812, "completion_tokens": 37, "total_tokens": 849}
+    assert record["finish_reason"] is None or record["error"] is None
+
+
+def test_exchange_survives_unwritable_path(tmp_path, monkeypatch) -> None:
+    """Включённая диагностика не должна ронять джобы, ради которых включена."""
+    monkeypatch.setenv("LLM_EXCHANGE_LOG", "full")
+    monkeypatch.setenv("LLM_EXCHANGE_LOG_FILE", str(tmp_path / "нет" / "такого" / "x.jsonl"))
+    log = _ExchangeLog()
+
+    log.record(model="m", stage="extract", stream=False, prompt="p", response="r")
+
+
+def test_exchange_response_level_keeps_document_text_out(tmp_path, monkeypatch) -> None:
+    """Уровень `response` отвечает на вопрос «что модель выдаёт», не раздувая журнал текстом.
+
+    В извлечении текст чанка лежит внутри промпта, поэтому «ответ без промпта» - это ровно
+    «запись без текста документа». Отдельного «чанка» в журнале нет и не нужно: лишний
+    дубль текста только раздувает файл и создаёт второй источник правды о документе.
+    """
+    log = _exchange(tmp_path, monkeypatch, "response", limit="0")
+
+    log.record(
+        model="m",
+        stage="extract",
+        stream=False,
+        system="системная инструкция",
+        prompt="текст чанка документа",
+        response="ответ модели",
+        labels={"source_url": "s://a"},
+    )
+
+    record = _read(tmp_path / "exchange.jsonl")
+    assert record["response"] == "ответ модели"
+    assert "prompt" not in record
+    assert "system" not in record
+    # Длина промпта остаётся: это число полезно само по себе и текста не раскрывает.
+    assert record["prompt_chars"] == len("текст чанка документа")
+    assert record["truncated"] == {"response": False}
+    assert record["labels"] == {"source_url": "s://a"}
+    assert "текст чанка" not in json.dumps(record, ensure_ascii=False)
+
+
+def test_exchange_level_names_are_closed_set(tmp_path, monkeypatch) -> None:
+    """Неизвестное значение молча не превращается в дефолт: журнал включается и выключается
+    только названными уровнями, и опечатка не должна приводить к неожиданному «всё пишем»."""
+    monkeypatch.setenv("LLM_EXCHANGE_LOG", "FULL-ОПЕЧАТКА")
+    assert _ExchangeLog().level == 0

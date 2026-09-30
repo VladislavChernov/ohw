@@ -289,6 +289,14 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
 `retrieval.context_size`, `max_vector_chunks`, `reranker_enabled` | передаются в сервисы через параметры подключения, а не через YAML |
 `storage.*`, `auth.*`, `adapters.*`, `projection.lease_seconds` | читаются env и compose; YAML используется как документация и дефолт |
 
+Журнал обмена с LLM - отдельный режим, а не строчка в таблице: у него четыре уровня, и
+выбор уровня решает, попадет ли текст документа в лог. Переменные `LLM_EXCHANGE_LOG`
+(`off` / `meta` / `response` / `full`), `LLM_EXCHANGE_LOG_FILE`,
+`LLM_EXCHANGE_LOG_MAX_CHARS`; по умолчанию все выключено. Уровень `response` пишет
+ответ модели без промпта, а в извлечении текст чанка лежит внутри промпта - поэтому
+«без текста документа» означает «без промпта», а не отдельную настройку. Подробно:
+[`llm_exchange_log.md`](./llm_exchange_log.md).
+
 Параметры retrieval в текущем коде живут в секции `retrieval` Domain Profile
 (`graph_boost`, `expansion_direction`, `expansion_kinds`, `max_depth`, `max_fanout`,
 `max_graph_nodes`, `graph_source_relevance`). Это соответствует правилу 5.0 для параметров

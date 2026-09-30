@@ -18,7 +18,13 @@ from graphrag_proto.eval.metrics import (
 class _StubJudge:
     """Фейк-judge: детерминированные вердикты для groundedness/coverage."""
 
-    def generate(self, prompt: str, system: str = "", stream: bool = True) -> Iterator[str]:
+    def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> Iterator[str]:
         if "Подтверждается ли" in prompt or "Содержится ли" in prompt:
             yield "yes"
         else:
