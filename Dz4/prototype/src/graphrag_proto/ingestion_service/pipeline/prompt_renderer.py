@@ -124,6 +124,24 @@ def render_schema_block(profile: Mapping[str, Any]) -> str:
     lines.append("Формат ответа — строго один JSON-объект без пояснений и без markdown.")
     if skeleton:
         lines.append(f"Ключи сущностей: {skeleton}, \"relationships\": [...].")
+        # Форма объекта связи задавалась здесь же: массив был назван, но содержимое - нет.
+        # Из-за этого модель выдавала {from, to} БЕЗ kind, код молча превращал его в
+        # RELATED, а связи между фрагментами оказывались неразрешимыми. Правило про оба
+        # конца здесь, пока валидация требует именно этого; как только неизвестный конец
+        # станет отложенной ссылкой, а не отказом (ADR-037), правило меняется на
+        # обратное: выводи связь даже если сущности нет среди объявленных здесь.
+        lines.append("")
+        lines.append("Каждая связь — объект с тремя обязательными полями:")
+        lines.append('- "from" и "to": canonical_name сущностей, объявленных ТОЛЬКО в этом ответе,')
+        lines.append("  дословно как в поле canonical_name (регистр и пробелы как в ответе);")
+        if edge_types:
+            allowed = ", ".join(str(edge.get("type")) for edge in edge_types)
+            lines.append(f'- "kind": ровно один вид из списка ({allowed});')
+        else:
+            lines.append('- "kind": вид связи;')
+        lines.append('- "confidence": число от 0 до 1.')
+        lines.append("")
+        lines.append("Связь без обоих концов среди объявленных здесь сущностей не выводи.")
     return "\n".join(lines).strip()
 
 
