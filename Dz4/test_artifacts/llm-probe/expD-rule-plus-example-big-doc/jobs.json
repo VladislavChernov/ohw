@@ -1,0 +1,17 @@
+[
+  {
+    "source_url": "01_ontology_and_domain_profile.md",
+    "chars": 10582,
+    "job_id": "11f1419e-b191-4cfc-a8dc-862a2a60c6c8",
+    "status": "succeeded",
+    "error": null,
+    "enrichment": {
+      "cause": "model_error",
+      "lost_entities": 0,
+      "lost_edges": 0,
+      "llm_records": 0,
+      "llm_edges": 0
+    },
+    "degraded": true
+  }
+]

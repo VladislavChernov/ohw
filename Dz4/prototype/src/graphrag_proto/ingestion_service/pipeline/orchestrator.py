@@ -17,7 +17,7 @@ import sys
 import time
 import unicodedata
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
@@ -262,6 +262,71 @@ def _safe_entity_description(value: object, ctx: PipelineContext) -> str | None:
     return value
 
 
+#: Поля записи, из которых берётся имя сущности при проверке концов связи.
+#:
+#: `id` здесь отсутствует **намеренно и по контракту**: `id` — идентификатор в пределах
+#: домена, а не имя. Именно из `id` модель брала концы в прогоне expA, где они оказались
+#: выдуманными (`REQ-1..3`, `CON-1..4`) и не разрешились ни один: 12 концов из 12. Включение
+#: `id` в список создало бы второй канал именования и сделало бы разрешимость зависящей от
+#: того, какое поле модель заполнила, то есть выдумка became бы неотличима от имени.
+#: Правильный ремонт — промт (объявить `id` прочитанным из текста, а не назначаемым именем)
+#: плюс запись неразрешённого конца фактом вместо сноса слоя (ADR-037).
+#:
+#: Контракт закреплён тестом `tests/test_grounding_verdicts.py`. Если он когда-нибудь перестанет
+#: быть правдой, тест и этот список меняются вместе, а тест не отключается: иначе он станет
+#: защитой от исправления.
+ENTITY_NAME_FIELDS: tuple[str, ...] = ("tag_id", "canonical", "canonical_name", "name")
+
+#: Поле, которое валидация считает каноническим. Объявлено отдельно от ролей, потому что это
+#: единственное утверждение о полях, которое обязано выстоять при правке состава списка.
+ENTITY_CANONICAL_FIELD: str = "canonical"
+
+#: Роль каждого поля в соглашении об именах. Нужна рядом со списком, потому что именно из неё
+#: берётся **положительная** формулировка контракта: «поле, которое онтология называет
+#: каноническим, обязано быть источником имени». Такая формулировка переживает правку состава
+#: списка, тогда как проверка «`id` не входит» замораживала бы сегодняшний перечень и первая же
+#: правка онтологии упёрлась бы в тест как в ошибку.
+ENTITY_FIELD_ROLES: dict[str, str] = {
+    "tag_id": "tagger-assigned identifier, used only when the model did not name the entity",
+    "canonical": "the name the ontology declares canonical; written by _entity_record from canonical_name or canonical or name",
+    "canonical_name": "model-written canonical name; folded into `canonical` by _entity_record",
+    "name": "display name; falls back to `canonical` when absent",
+}
+
+#: Поля ответа модели, которые не являются именем, но в которых модель всё равно писала
+#: концы. Нужны для измерения, а не для валидации: их присутствие в ответе означает, что
+#: модель назвала сущность не тем полем. `category` добавлен по прогону expD.
+NON_NAME_FIELDS: tuple[str, ...] = ("id", "category", "description")
+
+
+def _entity_names_from_item(item: Mapping[str, Any]) -> tuple[str, str]:
+    """`(canonical, name)` из ответа модели — ровно так, как их кладёт `_entity_record`.
+
+    Вынесено отдельно, потому что прибор, считающий разрешимость, обязан разрешать имя
+    **тем же** способом. Расхождение двух реализаций уже стоило одного неверного вывода:
+    прибор, взявший больше полей, чем валидатор, показал «0 неразрешённых» там, где их было 12.
+    """
+    canonical = item.get("canonical_name") or item.get("canonical") or item.get("name")
+    name = item.get("name")
+    if not isinstance(name, str) or not name.strip():
+        name = canonical
+    return (
+        canonical if isinstance(canonical, str) else "",
+        name if isinstance(name, str) else "",
+    )
+
+
+def _declared_names(records: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Ключи идентичности имён, которые валидация считает объявленными."""
+    known: set[str] = set()
+    for record in records:
+        for key in ENTITY_NAME_FIELDS:
+            value = record.get(key)
+            if isinstance(value, str) and value:
+                known.add(_identity_key(value))
+    return known
+
+
 def _entity_record(
     entity_type: str,
     item: dict[str, Any],
@@ -269,12 +334,9 @@ def _entity_record(
     chunk_id: str,
     extractor_version: str,
 ) -> dict[str, Any]:
-    canonical = item.get("canonical_name") or item.get("canonical") or item.get("name")
-    if not isinstance(canonical, str) or not canonical.strip():
-        raise ValueError(f"сущность {entity_type} должна иметь имя")
-    name = item.get("name")
-    if not isinstance(name, str) or not name.strip():
-        name = canonical
+    canonical, name = _entity_names_from_item(item)
+    if not canonical.strip():
+        raise ValueError(f"сущность {entity_type} без канонического имени")
     record: dict[str, Any] = {
         "type": entity_type,
         "name": name,
@@ -837,12 +899,7 @@ class ExtractStage(Stage):
     ) -> None:
         if not isinstance(relations, list):
             raise ExtractionModelError("EXTRACT поле relationships должно быть списком")
-        known: set[str] = set()
-        for record in records:
-            for key in ("tag_id", "canonical", "canonical_name", "name"):
-                value = record.get(key)
-                if isinstance(value, str) and value:
-                    known.add(_identity_key(value))
+        known: set[str] = _declared_names(records)
         for relation in relations:
             if not isinstance(relation, dict):
                 raise ExtractionModelError("EXTRACT relationship должен быть объектом")

@@ -1,0 +1,116 @@
+{
+  "instrument": "offline-grounding-v3",
+  "criterion": {
+    "instrument": "offline-grounding-v3",
+    "written_before_run": true,
+    "counts_over": "distinct names, not declarations: the model repeats one name across buckets (34 declarations = 8 distinct in the baseline)",
+    "ladder": [
+      "EXACT: the name occurs verbatim in the document",
+      "FOLDED: NFKC + Yo/yo->Ye/e + casefold + whitespace collapse; found in the document",
+      "SEP: additionally drops separators; found in the document",
+      "PROMPT-ONLY: absent from the document at every rung, present in the prompt",
+      "UNGROUNDED: not found in the document nor in the prompt"
+    ],
+    "ladder_merge": "best rung wins, so one name declared in several buckets is not counted as MIXED",
+    "two_questions_never_conflated": "GROUNDING asks whether a name occurs in the DOCUMENT. RESOLVABILITY asks whether it is among the names declared in THIS response, which is all _validate_edges can see: the stage has no access to the document. The two come apart - CACHE_LIMIT in expC is absent from the document yet declared in the response, so it is ungrounded and resolvable at once, and that run did not degrade. Only unresolvable slots can cost the LLM layer; a ground verdict never can.",
+    "not_defects": "FOLDED and SEP are not extraction defects. FOLDED is absorbed by the existing _identity_key by design; SEP is a merge problem whose only sanctioned repair is a glossary alias. Neither may appear in an acceptance criterion.",
+    "name_source_contract": "The fields a name may come from are ENTITY_NAME_FIELDS in the orchestrator, and the instrument imports them rather than keeping its own list: it once read more fields than validation did and reported 0 unresolvable where there were 12. ENTITY_FIELD_ROLES states the same contract positively - the field the ontology calls canonical must resolve endpoints - so that editing the list is not a test failure. `id` is a domain identifier and is never a name source; it is the field expA's 12 invented endpoints came from, which is why widening the list would hide the defect instead of fixing it.",
+    "denominator": "ends_unresolvable is counted over endpoint SLOTS, and ends_total is that denominator. Counting over relations doubled every ratio once: expA read as 12 of 5 relations instead of 12 of 12 endpoints, expD as 4 of 5 instead of 4 of 10. Each relation has two endpoints, and in expA all 6 lost both.",
+    "name_classes_not_gated_here": "PROMPT-ONLY and UNGROUNDED are different classes with different owners. Pass/fail for them belongs in the run manifest written before the run.",
+    "structure_is_measured_not_gated": "loops, mutual_pairs and hub are a measured fact, not a gate. No hub threshold is introduced: choosing one after seeing 0.889 against 0.5 against 0.143 would be a criterion written after the result.",
+    "known_method_limits": "PROMPT-ONLY means 'absent from the document but present in the prompt'. The prompt is NOT split into instruction and chunk, so chunk_tail_in_doc reports whether the chunk is still consistent with the current document file; false means the document changed after the run and every name verdict for that record is suspect.",
+    "rejected_normalization": "casefold alone and mapping a separator to a space both FAIL on camel<->snake (dedupstage vs dedup stage). Only DROPPING separators works. Recorded because the non-working version was proposed twice.",
+    "constants": "See CONSTANTS in the tool source. Every value is hand-checked against a raw response and carries seen_in_raw."
+  },
+  "name_source_fields": [
+    "tag_id",
+    "canonical",
+    "canonical_name",
+    "name"
+  ],
+  "name_field_roles": {
+    "tag_id": "tagger-assigned identifier, used only when the model did not name the entity",
+    "canonical": "the name the ontology declares canonical; written by _entity_record from canonical_name or canonical or name",
+    "canonical_name": "model-written canonical name; folded into `canonical` by _entity_record",
+    "name": "display name; falls back to `canonical` when absent"
+  },
+  "canonical_name_field": "canonical",
+  "run": "expC-rule-plus-example",
+  "attributable": true,
+  "attribution_note": "",
+  "summary": [
+    {
+      "record_index": 1,
+      "source_url": "cosine-dedup.md",
+      "chunk_id": "chk:b381f36436e0",
+      "doc_matched": true,
+      "doc_path": "/repo/docs/plans/cosine-dedup.md",
+      "chunk_tail_in_doc": true,
+      "names": {
+        "distinct": 8,
+        "declarations": 18,
+        "UNKNOWN": 0,
+        "EXACT": 3,
+        "FOLDED": 3,
+        "SEP": 0,
+        "PROMPT-ONLY": 2,
+        "UNGROUNDED": 0
+      },
+      "names_detail": {
+        "SEP": [],
+        "PROMPT-ONLY": [
+          "cache_eviction",
+          "cache_limit"
+        ],
+        "UNGROUNDED": []
+      },
+      "ends": {
+        "total": 12,
+        "distinct": 6,
+        "UNKNOWN": 0,
+        "EXACT": 3,
+        "FOLDED": 1,
+        "SEP": 0,
+        "PROMPT-ONLY": 2,
+        "UNGROUNDED": 0
+      },
+      "ends_detail": {
+        "PROMPT-ONLY": [
+          "cache_eviction",
+          "cache_limit"
+        ],
+        "UNGROUNDED": []
+      },
+      "ends_resolution": {
+        "question": "is the endpoint among the names declared in THIS response? this is what _validate_edges checks, and the only thing that can cost the LLM layer",
+        "key": "orchestrator._identity_key, imported, not reimplemented; name fields are ENTITY_NAME_FIELDS from the same module, so this cannot drift from the code",
+        "resolvable_slots": 12,
+        "unresolvable_slots": 0,
+        "unresolvable_names": [],
+        "unresolvable_matching_non_name_field": [],
+        "unresolvable_by_field": {},
+        "non_name_fields_watched": [
+          "id",
+          "category",
+          "description"
+        ],
+        "non_name_field_note": "non-empty means the model named the endpoint by a field that is not a name (`id`, `category`). That is a measurable fact, not a guess: expA is `id`, expD is `category`. `unresolvable_by_field` separates a systematic lean into one field (a prompt candidate) from a scatter across fields (a response-shape defect)."
+      },
+      "current_code_loses_llm_layer": false,
+      "structure": {
+        "is_gate": false,
+        "relations": 6,
+        "self_loops": 0,
+        "self_loop_names": [],
+        "mutual_pairs": 1,
+        "mutual_pair_names": [
+          "similar_to|similar_to_threshold"
+        ],
+        "hub_fan_in": 3,
+        "hub_share": 0.5,
+        "hub_name": "similar_to",
+        "note": "measured fact, not a gate; no hub threshold is defined"
+      }
+    }
+  ]
+}
