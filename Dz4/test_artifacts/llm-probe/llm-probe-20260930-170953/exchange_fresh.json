@@ -1,0 +1,26 @@
+[
+  {
+    "ts": "2026-09-30T14:17:01+00:00",
+    "model": "qwen2.5-3b-instruct-q4_k_m",
+    "stage": "extract",
+    "stream": false,
+    "finish_reason": null,
+    "usage": {
+      "prompt_tokens": 1871,
+      "completion_tokens": 900,
+      "total_tokens": 2771
+    },
+    "prompt_chars": 5232,
+    "response_chars": 2999,
+    "error": null,
+    "duration_ms": 46220,
+    "response": "{\n  \"requirements\": [\n    {\n      \"canonical_name\": \"DEDUP_STAGE\",\n      \"id\": \"DedupStage\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_AUTO_THRESHOLD\",\n      \"id\": \"dedup_auto_threshold\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_LLM_THRESHOLD\",\n      \"id\": \"dedup_llm_threshold\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO_THRESHOLD\",\n      \"id\": \"similar_to_threshold\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_AUTO\",\n      \"id\": \"DEDUP_AUTO\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_LLM\",\n      \"id\": \"DEDUP_LLM\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO\",\n      \"id\": \"SIMILAR_TO\"\n    }\n  ],\n  \"concepts\": [\n    {\n      \"canonical_name\": \"DEDUP_STAGE\",\n      \"aliases\": [\n        \"DedupStage\"\n      ],\n      \"description\": \"Сущность, которая сливает сущности при точном совпадении нормализованного canonical key (_identity_key).\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_AUTO\",\n      \"aliases\": [\n        \"DEDUP_AUTO\"\n      ],\n      \"description\": \"Константа, задающая порог точного совпадения для дедупликации.\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_LLM\",\n      \"aliases\": [\n        \"DEDUP_LLM\"\n      ],\n      \"description\": \"Константа, задающая порог точного совпадения для дедупликации с использованием LLM.\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO\",\n      \"aliases\": [\n        \"SIMILAR_TO\"\n      ],\n      \"description\": \"Константа, задающая порог схождения для косинусного разрешения сущностей.\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO_THRESHOLD\",\n      \"aliases\": [\n        \"SIMILAR_TO_THRESHOLD\"\n      ],\n      \"description\": \"Порог схождения для косинусного разрешения сущностей.\"\n    }\n  ],\n  \"contracts\": [\n    {\n      \"canonical_name\": \"DEDUP_STAGE\",\n      \"name\": \"DedupStage\",\n      \"id\": \"DedupStage\",\n      \"category\": \"ingestion_service/pipeline/orchestrator.py\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_AUTO\",\n      \"name\": \"DEDUP_AUTO\",\n      \"id\": \"DEDUP_AUTO\",\n      \"category\": \"namespace: normalizer\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_LLM\",\n      \"name\": \"DEDUP_LLM\",\n      \"id\": \"DEDUP_LLM\",\n      \"category\": \"namespace: normalizer\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO\",\n      \"name\": \"SIMILAR_TO\",\n      \"id\": \"SIMILAR_TO\",\n      \"category\": \"namespace: normalizer\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO_THRESHOLD\",\n      \"name\": \"SIMILAR_TO_THRESHOLD\",\n      \"id\": \"SIMILAR_TO_THRESHOLD\",\n      \"category\": \"namespace: normalizer\"\n    }\n  ],\n  \"relationships\": [\n    {\n      \"from\": \"DEDUP_STAGE\",\n      \"to\": \"DEDUP_STAGE\"\n    },\n    {\n      \"from\": \"DEDUP_AUTO\",\n      \"to\": \"DEDUP_AUTO\"\n    },\n    {\n      \"from\": \"DEDUP_LLM\",\n      \"to\": \"DEDUP_LLM\"\n    },\n    {\n      \"from\": \"SIMILAR_TO\",\n      \"to\": \"SIMILAR_TO\"\n    },\n    {\n      \"from\": \"DEDUP_AUTO_THRESHOLD\",\n      \"to\": \"DEDUP_AUTO_THRESHOLD\"\n    },\n    {\n      \"from\": \"DEDUP_LLM_THRESHOLD\",\n      \"to\": \"DEDUP_LLM_THRESHOLD\"\n    },\n    {\n      \"from\": \"SIMILAR_TO_THRESHOLD\",\n      \"to\": \"SIMILAR_TO_THRESHOLD\"\n    }\n  ]\n}",
+    "truncated": {
+      "response": false
+    },
+    "labels": {
+      "source_url": "docs/plans/cosine-dedup.md",
+      "chunk_id": "chk:daa34cdf7ee7"
+    }
+  }
+]
