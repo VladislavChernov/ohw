@@ -42,6 +42,12 @@ def _log(message: str) -> None:
     print(f"[{datetime.now(UTC).strftime('%H:%M:%S')}] {message}", flush=True)
 
 
+def _opt(name: str) -> str | None:
+    """Необязательная переменная: пустое значение и отсутствие равнозначны."""
+    value = os.environ.get(name, "").strip()
+    return value or None
+
+
 def _request(
     method: str,
     url: str,
@@ -93,7 +99,7 @@ def ingest(source_url: str, domain: str, content: str) -> dict[str, Any]:
     while time.monotonic() < deadline:
         job = _ingestion("GET", f"/api/v1/ingestion/jobs/{job_id}")
         if str(job.get("status")) in TERMINAL:
-            return job
+            return dict(job)
         time.sleep(3)
     raise RuntimeError(f"джоба {job_id} не завершилась за 30 минут")
 
@@ -201,6 +207,35 @@ def main() -> int:
     )
     (out / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    # Артефакт без критерия — это лог. Манифест делает прогон самодостаточным: без него
+    # через месяц нельзя понять, что проверялось, на каком коде и почему verdict такой.
+    manifest = {
+        "variant": _opt("PROBE_VARIANT"),
+        "hypothesis": _opt("PROBE_HYPOTHESIS"),
+        "criteria": [
+            line.strip()
+            for line in (_opt("PROBE_CRITERION") or "").splitlines()
+            if line.strip()
+        ],
+        "code_version": _opt("PROBE_CODE_VERSION"),
+        "profile_variant": _opt("PROBE_PROFILE_NOTE"),
+        "sources": _opt("PROBE_SOURCES"),
+        "ingestion_url": _opt("INGESTION_URL"),
+        "documents": [
+            {
+                "source_url": job["source_url"],
+                "status": job["status"],
+                "cause": (job["enrichment"] or {}).get("cause"),
+                "degraded": job["degraded"],
+            }
+            for job in jobs
+        ],
+        "verdict": "degraded" if any(job["degraded"] for job in jobs) else "clean",
+        "metrics": summary,
+    }
+    (out / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
 
     _log("=== СВОДКА ПО СВЕЖИМ ЗАПИСЯМ ===")

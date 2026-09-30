@@ -1,0 +1,17 @@
+[
+  {
+    "source_url": "cosine-dedup.md",
+    "chars": 2762,
+    "job_id": "1ec5433c-0236-4365-bf06-fecfbbdba311",
+    "status": "succeeded",
+    "error": null,
+    "enrichment": {
+      "cause": "model_error",
+      "lost_entities": 0,
+      "lost_edges": 0,
+      "llm_records": 0,
+      "llm_edges": 0
+    },
+    "degraded": true
+  }
+]
