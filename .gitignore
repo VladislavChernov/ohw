@@ -1,6 +1,12 @@
 # Local AI-editor state
 .opencode/
 
+# The exception is the published harness canon under kit/harness/.opencode/:
+# it is a source, not local editor state, and must be tracked. Re-include the
+# directory itself (not its files) — git cannot re-include a file whose parent
+# directory is excluded, and it silently ignores the whole copy otherwise.
+!/kit/harness/.opencode/
+
 # Личные методички по теме проекта — не исходники проекта.
 # Уже отслеживаемые файлы остаются под git (правило действует только на новые).
 learning/

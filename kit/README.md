@@ -1,5 +1,10 @@
 # ohw-kit
 
+> `kit/` holds two independent things: this Python package, and
+> [`harness/`](#harness--the-opencode-workflow-harness) — the opencode workflow
+> harness published next to it. They share the folder, not the purpose: the
+> package is shared *code*, the harness is shared *process*.
+
 Shared, reusable Python building blocks for the `ohw` homework projects.
 
 The kit owns the machinery that homeworks keep re-implementing by hand:
@@ -103,3 +108,57 @@ tests/              # unit tests (httpx.MockTransport, no live Ollama)
 ```
 
 Tests use mocked HTTP, so the suite runs without a running Ollama service.
+
+---
+
+## `harness/` — the opencode workflow harness
+
+**What this is.** `kit/harness/.opencode/` is an [opencode](https://opencode.ai)
+project configuration: the workflow the AI assistant follows when working on
+these homeworks. It is four files, no runtime code:
+
+| Path | Type | Purpose |
+|---|---|---|
+| `skills/openspec-propose/SKILL.md` | skill | Create a change bundle (`proposal.md` + `tasks.md`, optionally `design.md`/`spec.md`) by hand |
+| `skills/openspec-apply/SKILL.md` | skill | Implement a bundle's tasks, verify each one, tick the checkboxes |
+| `agent/reviewer.md` | subagent | Adversarial read-only reviewer: verifies each suspicion against the real code before reporting it, never edits |
+| `command/review.md` | command | `/review` — run the reviewer over the current diff |
+
+No `openspec` CLI is required; the skills write `openspec/changes/<name>/`
+files directly, which is how the bundles in this monorepo were made.
+
+**Why it lives here.** Until 2026-10-01 the harness was local-only and never
+published: the canonical copy sat at `D:\Otus\harness\.opencode` and every
+homework installed its own copy from there. That had a cost worth naming — the
+process conventions were reviewable only on one machine and drifted silently,
+and the same reviewer logic was re-entered per project instead of being fixed
+once. Publishing the canon makes it reviewable in a diff and fixes it once.
+
+**What it is not.** Not part of any homework's deliverable. It is not the
+`ohw_kit` package, it shares no code with it, and installing it into a homework
+adds no dependency.
+
+**Install into a homework.** From the homework folder (not the kit folder —
+opencode resolves config from the opened project):
+
+```powershell
+Copy-Item D:\Otus\ohw\kit\harness\.opencode .opencode -Recurse
+```
+
+Restart opencode in that folder: the skills appear by name, and `/review` runs
+the adversarial self-review on the current diff.
+
+**This is a snapshot, dated.** The copy here is the harness **as of
+2026-10-01** and is not updated automatically. The canonical copy remains
+`D:\Otus\harness\.opencode`; changing the harness means editing the canon
+first, then re-copying here and into each homework, so that the published copy
+is a deliberate publication step rather than a side effect of local work.
+
+**Known gap.** The canon also carries a conventions document
+(`.opencode/README.md`, ~370 lines of process and environment rules). It is
+deliberately **not** duplicated here — it is the harness's own README, and it
+still states that the harness is not published to this monorepo, which is no
+longer true. It stays in the canonical copy until it is rewritten for
+publication. Reading it is not a prerequisite for using the harness above;
+installing from this folder gives you the four files that actually drive
+opencode.
