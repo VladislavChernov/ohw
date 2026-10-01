@@ -121,16 +121,16 @@ def test_id_is_not_a_name_source(tool: Any) -> None:
     ADR меняются вместе, а тест не отключается. Иначе он перестанет охранять утверждение и
     станет защитой от его исправления — то есть останется зелёным на лжи.
     """
-    from graphrag_proto.ingestion_service.pipeline.orchestrator import (
-        ExtractionModelError,
-        ExtractStage,
-    )
+    from graphrag_proto.ingestion_service.pipeline.orchestrator import ExtractStage
 
     records = [{"canonical_name": "REAL", "name": "REAL", "id": "INVENTED"}]
-    with pytest.raises(ExtractionModelError):
-        ExtractStage._validate_edges([{"from": "REAL", "to": "INVENTED"}], records)
-    # Объявленное имя, взятое из `id` же, разрешается: `id` не имя, но и не помеха.
-    ExtractStage._validate_edges([{"from": "REAL", "to": "REAL"}], records)
+    # Концы из `id` не разрешаются. Раньше это поднимало ошибку; теперь возвращается
+    # неразрешённым (ADR-037, случай 3), и контракт проверяется на возвращаемом значении:
+    # важно, что `id` не попал в объявленные имена, а не то, чем за это платили.
+    unresolved = ExtractStage._validate_edges([{"from": "REAL", "to": "INVENTED"}], records)
+    assert [fact["endpoint_name"] for fact in unresolved] == ["INVENTED"]
+    # Объявленное имя разрешается: `id` не имя, но и не помеха.
+    assert ExtractStage._validate_edges([{"from": "REAL", "to": "REAL"}], records) == []
 
 
 def test_the_field_the_ontology_calls_canonical_is_always_a_name_source(tool: Any) -> None:
@@ -155,7 +155,6 @@ def test_expA_signature_is_declared_ids(tool: Any, verdicts: dict[str, list[dict
     resolution = record["ends_resolution"]
     assert resolution["unresolvable_slots"] == 12
     assert resolution["unresolvable_matching_non_name_field"] == resolution["unresolvable_names"]
-    assert record["code_behaviour"]["loses_llm_layer"] is True
 
 
 def test_expD_signature_is_category(tool: Any, verdicts: dict[str, list[dict[str, Any]]]) -> None:
@@ -198,10 +197,39 @@ def test_measurement_does_not_move_with_the_code(tool: Any, verdicts: dict[str, 
     record = verdicts["expA-req-n-example-failed"][0]
     measured = {key: value for key, value in record.items() if key != "code_behaviour"}
     assert {"ends", "ends_resolution", "names", "structure", "doc_matched"} <= set(measured)
-    assert record["code_behaviour"]["loses_llm_layer"] is True
-    assert record["code_behaviour"]["would_write_facts"] == len(record["ends_resolution"]["unresolvable_names"])
-    # Счётчик фактов совпадает с числом неразрешённых имён, а не со слотами: один факт на имя.
+    # Счётчик фактов совпадает с числом неразрешённых ИМЁН, а не со слотами: один факт на
+    # имя, тогда как один конец может встретиться в нескольких слотах (expA: 12 и 7).
+    assert record["code_behaviour"]["would_write_facts"] == len(
+        record["ends_resolution"]["unresolvable_names"]
+    )
     assert record["ends_resolution"]["unresolvable_slots"] > record["code_behaviour"]["would_write_facts"]
+
+
+def test_lost_layer_prediction_is_asked_of_the_code_not_asserted(
+    tool: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«Потерялся ли слой» спрашивается у кода, а не берётся из константы прибора.
+
+    Предикат, который никто не сверяет с кодом, начинает врать ровно тогда, когда в коде
+    что-то меняют, — а это единственный момент, когда он важен. Смена ADR-037 показала
+    это буквально: `loses_layer` в трёх константах надо было переписать с `True` на
+    `False`, и единственное, что это поймало, — сверка с живым кодом.
+
+    Проверяется подменой: при подставленном предопределении «код поднимает исключение»
+    прибор обязан вернуть `True`, то есть поле вычисляется, а не зашито.
+    """
+    relations = [{"from": "REAL", "to": "INVENTED", "kind": "depends_on"}]
+    records = [{"canonical": "REAL", "name": "REAL"}]
+    assert tool._code_raises_on(relations, records) is False
+
+    def _raises(*_args: object, **_kwargs: object) -> None:
+        raise tool.ExtractionModelError("relationship ссылается на неизвестную сущность")
+
+    # Подмена через monkeypatch, а не присваиванием с восстановлением: `staticmethod`
+    # при обратном присваивании превратился бы в обычный метод, и `_validate_edges` получил
+    # бы лишний `self`. Такая поломка пережила бы тест и упала бы позже, в другом файле.
+    monkeypatch.setattr(tool.ExtractStage, "_validate_edges", staticmethod(_raises))
+    assert tool._code_raises_on(relations, records) is True
 
 
 def test_end_keys_match_the_validator(tool: Any) -> None:
@@ -299,15 +327,19 @@ def test_name_verdicts_are_not_silently_unknown(verdicts: dict[str, list[dict[st
                 assert record["names"]["UNKNOWN"] == 0, f"{run}: документ есть, мерить можно"
 
 
-def test_loses_layer_agrees_with_jobs(verdicts: dict[str, list[dict[str, Any]]]) -> None:
-    """`jobs.degraded` — независимый источник правды о том, что было гейт-падение.
+def test_degraded_runs_had_unresolvable_endpoints(verdicts: dict[str, list[dict[str, Any]]]) -> None:
+    """`jobs.degraded` — независимый источник: у деградировавшего прогона КОНЦЫ БЫЛИ.
 
-    Сверка обязательна: прибор, считающий по документу, однажды показал «0 неразрешённых»
-    при `degraded = true`, то есть правдоподобную неправду.
+    Прежде здесь стояла сверка в другую сторону — «деградация равна потере слоя». После
+    ADR-037 случай 3 она стала ложной, и молча снять её было бы ошибкой: расхождение
+    перестало существовать не потому, что стало совпадением, а потому, что изменился код.
+    Осталась проверка, которая верна в обе стороны: деградация в журнале означает, что
+    неразрешённые концы были, иначе причина деградации была бы другой.
     """
     import json
 
     root = tool_probe_root()
+    checked = 0
     for run, records in verdicts.items():
         jobs_path = root / run / "jobs.json"
         if not jobs_path.exists():
@@ -315,11 +347,18 @@ def test_loses_layer_agrees_with_jobs(verdicts: dict[str, list[dict[str, Any]]])
         for job in json.loads(jobs_path.read_text(encoding="utf-8")):
             if not job.get("degraded"):
                 continue
-            assert any(
-                record["code_behaviour"]["loses_llm_layer"]
+            checked += 1
+            matching = [
+                record
                 for record in records
                 if record["source_url"].endswith(job["source_url"].split("/")[-1])
-            ), f"{run}: degraded у {job['source_url']}, но ни одна запись не теряет слой"
+            ]
+            assert matching, f"{run}: деградация есть, а записей в вердикте нет"
+            assert any(record["ends_resolution"]["unresolvable_slots"] > 0 for record in matching), (
+                f"{run}: {job['source_url']} деградировал, но неразрешённых концов не найдено — "
+                f"значит причина деградации другая, и вывод «неразрешённые концы» неверен"
+            )
+    assert checked, "ни один деградировавший прогон не проверен — тест молчал бы"
 
 
 def test_structure_is_not_a_gate(tool: Any, verdicts: dict[str, list[dict[str, Any]]]) -> None:

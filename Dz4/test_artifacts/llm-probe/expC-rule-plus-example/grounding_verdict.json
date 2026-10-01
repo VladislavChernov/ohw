@@ -1,6 +1,6 @@
 {
   "instrument": "offline-grounding-v4",
-  "code_behaviour": "unresolved endpoint raises ExtractionModelError and drops the LLM layer",
+  "code_behaviour": "unresolved endpoint is recorded as a fact, the edge is kept out of the graph",
   "measurement_is_version_independent": "Everything in `summary` except the `code_behaviour` block is a measurement of the recorded log: the name ladder, resolvability, grounding, loops, mutual pairs and the hub. None of it moves when the code changes, because the log does not change. `code_behaviour` is the single prediction that depends on the code version, and it says which version it predicts. That separation is what keeps --check meaningful: after ADR-037 case 3 lands, only the prediction differs, and the diff says so by name instead of reporting a mismatch.",
   "criterion": {
     "instrument": "offline-grounding-v4",
@@ -100,8 +100,9 @@
         "non_name_field_note": "non-empty means the model named the endpoint by a field that is not a name (`id`, `category`). That is a measurable fact, not a guess: expA is `id`, expD is `category`. `unresolvable_by_field` separates a systematic lean into one field (a prompt candidate) from a scatter across fields (a response-shape defect)."
       },
       "code_behaviour": {
-        "predicts": "unresolved endpoint raises ExtractionModelError and drops the LLM layer",
+        "predicts": "unresolved endpoint is recorded as a fact, the edge is kept out of the graph",
         "unresolvable_slots": 0,
+        "code_raises": false,
         "loses_llm_layer": false,
         "would_write_facts": 0,
         "note": "loses_llm_layer reflects the behaviour named in `predicts` and is expected to become false once unresolved endpoints are recorded as facts (ADR-037 case 3); would_write_facts is what that code path would store instead. Everything outside this block is a measurement of the log and does not change with the code."

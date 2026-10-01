@@ -385,16 +385,20 @@ def test_context_edges_accept_canonical_addressing_and_preserve_ai_provenance(
     assert edge["chunk_ids"]
 
 
-def test_context_edges_reject_model_invented_tag_id_addressing(
+def test_context_edges_record_model_invented_tag_id_addressing_as_fact(
     monkeypatch: Any,
 ) -> None:
-    """Строгий режим: связь, адресованная модельным `tag_id`, отвергается явно.
+    """Строгий режим: связь, адресованная модельным `tag_id`, не отвергается, а помечается.
 
-    Это НЕ продовый путь: прод собирает `ExtractStage(optional_failure=True)`
-    (`app.py`), и там поведение другое — см. следующий тест. Здесь зафиксирован
-    именно строгий режим, потому что он объясняет, откуда берётся
-    `ExtractionModelError`: негодный ответ модели — именованная ошибка модели, а не
-    `ValueError` «неизвестно что», потому что по этому типу решается, чинить ли промпт.
+    **Поведение изменено решением ADR-037, случай 3.** Раньше здесь поднималось
+    `ExtractionModelError` («relationship ссылается на неизвестную сущность»), и в продовом
+    пути это сносило весь LLM-слой документа. Теперь `tag_id` — доменной идентификатор, а не
+    имя (см. `ENTITY_NAME_FIELDS` в `orchestrator.py`), связь адресована неразрешённым концом,
+    и она записывается фактом: строка сохраняется с пометкой, рядом факт с именем.
+
+    Проверяется в строгом режиме (`optional_failure=False`), потому что именно он раньше
+    показывал, откуда берётся `ExtractionModelError`: негодная ФОРМА ответа по-прежнему
+    поднимает её — см. `test_malformed_extraction_answer_raises_in_strict_mode`.
     """
     monkeypatch.setenv("EXTRACT_LLM", "true")
     payload = deepcopy(_AI_CONTEXT)
@@ -413,39 +417,67 @@ def test_context_edges_reject_model_invented_tag_id_addressing(
         chunks=["требование индексировать документы"],
     )
 
-    with pytest.raises(ExtractionModelError, match="неизвестную сущность"):
+    ExtractStage(
+        llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: _ai_profile(),
+    ).run(ctx)
+
+    assert ctx.enrichment_degraded is False
+    assert {fact["endpoint_name"] for fact in ctx.unresolved_endpoints} == {
+        "tag:it:requirement",
+        "tag:it:indexing",
+    }
+    assert ctx.entity_edges[0]["endpoint_unresolved"] is True
+
+
+def test_malformed_extraction_answer_raises_in_strict_mode(monkeypatch: Any) -> None:
+    """Строгий режим по-прежнему падает на НЕГОДНОЙ ФОРМЕ ответа.
+
+    Отделено от предыдущего теста намеренно. Смена решения касалась разрешимости концов, а
+    не JSON: `relationships`, который не список, — это дефект на нашей границе с моделью, и
+    притворяться фактом он не станет. Если бы и это перестало поднимать ошибку, «слой не
+    потерян» означало бы «мы не знаем, что модель вернула», и это разные утверждения.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    payload = deepcopy(_AI_CONTEXT)
+    payload["links"] = "не список"
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование"],
+    )
+
+    with pytest.raises(ExtractionModelError, match="relationships должно быть списком"):
         ExtractStage(
             llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
             profile_fetcher=lambda _domain: _ai_profile(),
         ).run(ctx)
 
 
-def test_optional_failure_wipes_whole_ai_layer_not_one_edge(
+def test_optional_failure_wipes_whole_ai_layer_on_malformed_answer(
     monkeypatch: Any,
 ) -> None:
-    """Продовый путь: одна нерезолвимая связь уничтожает весь LLM-слой документа.
+    """Продовый путь: НЕГОДНАЯ ФОРМА ответа уничтожает весь LLM-слой документа.
 
-    Это не «отбросить ребро», а четвёртый, неназванный вариант гранулярности сброса,
-    и он существовал до запрета `tag_id`. Документ при этом остаётся успешным: статус
-    `succeeded`, AI-слоя нет, признак — `enrichment_degraded` с причиной.
+    **Поведение изменено решением ADR-037, случай 3.** Раньше этот тест использовал связь,
+    адресованную модельным `tag_id`, и снос слоя случался из-за неразрешённого конца. Теперь
+    неразрешённый конец — факт, не сброс, и этот путь закрыт
+    (`test_optional_failure_keeps_layer_when_only_an_endpoint_is_unresolved`).
+
+    Снос слоя на негодной форме ответа ОСТАЁТСЯ: негодный JSON — это дефект на границе с
+    моделью, а не утверждение о домене, и сохранять из него нечего. Слой при этом теряется
+    целиком, а не по одной связи, и это до сих пор верно.
 
     Отказ сделан на ВТОРОМ чанке, чтобы потеря была измеримой: записи первого чанка к
     этому моменту уже в контексте, и именно они исчезают. Отказ на первом чанке не
     теряет ничего — это отдельный случай, и смешивать их в одном тесте нельзя, иначе
     флаг «слой потерян» снова начнёт означать «сработал сброс».
-
-    Зафиксировано как факт, а не как желание: пока гранулярность не решена, запрет
-    `tag_id` делает этот путь заметно чаще. Решение — ADR-032.
     """
     monkeypatch.setenv("EXTRACT_LLM", "true")
     bad = deepcopy(_AI_CONTEXT)
-    bad["links"] = [
-        {
-            "from_id": "tag:it:requirement",
-            "to_id": "tag:it:indexing",
-            "kind": "depends_on",
-        }
-    ]
+    bad["links"] = "не список"
     ctx = PipelineContext(
         job_id="j",
         domain="it",
@@ -471,7 +503,7 @@ def test_optional_failure_wipes_whole_ai_layer_not_one_edge(
     assert ctx.llm_layer_dropped is True
     assert ctx.llm_layer_lost_entities == len(_AI_CONTEXT["tags"])
     assert ctx.llm_layer_lost_edges == len(_AI_CONTEXT["links"])
-    assert "неизвестную сущность" in (ctx.enrichment_error or "")
+    assert "relationships должно быть списком" in (ctx.enrichment_error or "")
     # AI-слой ушёл целиком: остались только детерминированные сущности
     assert ctx.entity_edges == []
     assert ctx.entities
@@ -533,7 +565,7 @@ def test_layer_loss_implies_degradation(monkeypatch: Any) -> None:
     assert ctx_profile.enrichment_cause == CAUSE_PROFILE_UNAVAILABLE
 
     bad = deepcopy(_AI_CONTEXT)
-    bad["links"] = [{"from_id": "tag:it:requirement", "to_id": "tag:it:indexing"}]
+    bad["links"] = "не список"
     ctx_drop = PipelineContext(
         job_id="j2",
         domain="it",
@@ -567,7 +599,7 @@ def test_extraction_failure_before_any_record_is_degradation_without_loss(
     """
     monkeypatch.setenv("EXTRACT_LLM", "true")
     bad = deepcopy(_AI_CONTEXT)
-    bad["links"] = [{"from_id": "tag:it:requirement", "to_id": "tag:it:indexing"}]
+    bad["links"] = "не список"
     ctx = PipelineContext(
         job_id="j",
         domain="it",

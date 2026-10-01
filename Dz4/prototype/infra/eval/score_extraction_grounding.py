@@ -40,6 +40,8 @@ from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     ENTITY_FIELD_ROLES,
     ENTITY_NAME_FIELDS,
     NON_NAME_FIELDS,
+    ExtractionModelError,
+    ExtractStage,
     _entity_names_from_item,
     _identity_key,
 )
@@ -60,7 +62,11 @@ INSTRUMENT = "offline-grounding-v4"
 #: только неразрешённый конец начинает записываться фактом, `loses_llm_layer` станет `false` —
 #: и это не ошибка расчёта, а другой вопрос. Остальное (лестница имён, разрешимость, grounding,
 #: петли, хаб) измеряет журнал и от версии кода не зависит вовсе.
-CODE_BEHAVIOUR = "unresolved endpoint raises ExtractionModelError and drops the LLM layer"
+CODE_BEHAVIOUR = "unresolved endpoint is recorded as a fact, the edge is kept out of the graph"
+
+#: Имя второго, исторического поведения. Оно больше не в коде, но вердикты, сделанные до
+#: ADR-037 случая 3, предсказывают именно его, и по одному снимку это не прочитать.
+CODE_BEHAVIOUR_PRE_037 = "unresolved endpoint raises ExtractionModelError and drops the LLM layer"
 
 #: Разделители, которые выбрасываются на ступени SEP. Отображать их в пробел нельзя:
 #: `underscore -> space` даёт `dedupstage` против `dedup stage`, то есть не лечит camel/snake.
@@ -127,7 +133,7 @@ CONSTANTS: dict[str, dict[str, Any]] = {
         "relations": 5,
         "self_loops": 1,
         "mutual_pairs": 0,
-        "loses_layer": True,
+        "loses_layer": False,
         "seen_in_raw": "each 'to' is the category value the model wrote for that very entity: chunker parameters, entity extraction and links, node types, graph search enabled; plus glossary -> glossary",
     },
     "expA-req-n-example-failed": {
@@ -137,7 +143,12 @@ CONSTANTS: dict[str, dict[str, Any]] = {
         "relations": 6,
         "self_loops": 0,
         "mutual_pairs": 0,
-        "loses_layer": True,
+        # False: код больше не поднимает исключение, а записывает факт (ADR-037 случай 3).
+        # `jobs.degraded` в этом наборе остаётся `true`, и это НЕ расхождение: деградация
+        # случилась на старом коде и в журнале уже записана. Константа отвечает на вопрос
+        # «что сделал бы код СЕЙЧАС с этим ответом», и проверяется вызовом настоящего
+        # `_validate_edges`, а не объявлением.
+        "loses_layer": False,
         "seen_in_raw": "canonical_name holds the real identifiers (DEDUP_AUTO, DEDUP_AUTO_THRESHOLD, ...) and `id` holds the invented REQ-1..3 / CON-1..4: 7 distinct names, 12 endpoint slots. All 6 relations link by `id`, which _validate_edges does not read",
     },
     "llm-probe-20260930-172056": {
@@ -147,7 +158,7 @@ CONSTANTS: dict[str, dict[str, Any]] = {
         "relations_total": 21,
         "self_loops": 7,
         "mutual_pairs": 0,
-        "loses_layer": True,
+        "loses_layer": False,
         "seen_in_raw": "record 4 links to `document`, which appears only in `id`; the file is a five-element array of five separate chunks, one of which answers with empty lists",
     },
 }
@@ -344,6 +355,7 @@ def _verdict_for(exchange: Path, documents: dict[str, Path]) -> list[dict[str, A
         tail = prompt[-200:]
         entities = _entity_buckets(payload)
         relations = _relations(payload)
+        code_raises = _code_raises_on(relations, _records_for(entities))
 
         best_names: dict[str, int | None] = {}
         declarations = 0
@@ -427,8 +439,12 @@ def _verdict_for(exchange: Path, documents: dict[str, Path]) -> list[dict[str, A
             "code_behaviour": {
                 "predicts": CODE_BEHAVIOUR,
                 "unresolvable_slots": unresolvable_slots,
-                "loses_llm_layer": unresolvable_slots > 0,
-                "would_write_facts": len(unresolvable),
+                # Не константа, а вызов НАСТОЯЩЕГО `_validate_edges` на relations этой
+                # записи. Предикат, который никто не сверяет с кодом, — это молчащий ноль,
+                # ради которого прибор переписывался дважды.
+                "code_raises": code_raises,
+                "loses_llm_layer": unresolvable_slots > 0 and code_raises,
+                "would_write_facts": 0 if code_raises else len(unresolvable),
                 "note": "loses_llm_layer reflects the behaviour named in `predicts` and is expected "
                 "to become false once unresolved endpoints are recorded as facts (ADR-037 case "
                 "3); would_write_facts is what that code path would store instead. Everything "
@@ -438,6 +454,44 @@ def _verdict_for(exchange: Path, documents: dict[str, Path]) -> list[dict[str, A
             }
         )
     return out
+
+
+def _records_for(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Записи в том виде, в каком их собрал бы `_entity_record`.
+
+    Строятся здесь, а не вызываются настоящей функцией: она требует `PipelineContext` с
+    `source_url`, а прибор работает офлайн по журналу и контекста не имеет. Поля, которые
+    читает `_validate_edges`, воспроизведены точно — `canonical` и `name` через общий
+    `_entity_names_from_item`, то есть расхождение в соглашении об именах здесь невозможно
+    по построению.
+    """
+    records: list[dict[str, Any]] = []
+    for item in entities:
+        canonical, name = _entity_names_from_item(item)
+        if not canonical.strip():
+            continue
+        record: dict[str, Any] = {"canonical": canonical, "name": name}
+        tag_id = item.get("tag_id")
+        if isinstance(tag_id, str) and tag_id.strip():
+            record["tag_id"] = tag_id.strip()
+        records.append(record)
+    return records
+
+
+def _code_raises_on(relations: list[dict[str, Any]], records: list[dict[str, Any]]) -> bool:
+    """Поднимает ли НАСТОЯЩИЙ `_validate_edges` на этом ответе.
+
+    Вопрос «потеряется ли слой» нельзя закрыть константой: она начала бы врать ровно тогда,
+    когда в коде что-то поменяют, а это и есть единственный момент, когда она важна.
+    Прибор зовёт код и спрашивает его.
+    """
+    if not relations:
+        return False
+    try:
+        result = ExtractStage._validate_edges(relations, records)
+    except ExtractionModelError:
+        return True
+    return result is None
 
 
 def _by_field(unresolvable: list[str], non_name_fields: dict[str, set[str]]) -> dict[str, list[str]]:

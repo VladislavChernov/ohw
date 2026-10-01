@@ -349,6 +349,41 @@ class JobStore:
             "ts TEXT NOT NULL"
             ")"
         )
+        # Неразрешённые концы связей (ADR-037 случай 3, ADR-038). Имя таблицы говорит ровно
+        # то, что проверялось: «нет среди имён этого ответа», а НЕ «не существует в домене».
+        # Различие не в пользу безопасности - отсутствие ноды вероятнее её присутствия, и
+        # имя `job_unresolved_reference` читалось бы как доказательство отсутствия, чем
+        # факт не является. Проверка в коде отвечает только на вопрос про объявленный ответ.
+        #
+        # `endpoint_name` хранит ИМЯ КАК ЕГО НАПИСАЛА МОДЕЛЬ, а `endpoint_key` — ключ
+        # идентичности. Оба нужны: джоба уборки сопоставляет конец с текстом по имени, и по
+        # одному ключу она не найдёт ничего, потому что ключ уже потерял написание.
+        # Первичный ключ не содержит `endpoint_name`, поэтому два одинаковых конца из разных
+        # мест документа схлопываются: факт о НЕРАЗРЕШЁННОСТИ имени один, а не два.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_endpoint_missing_in_response ("
+            "job_id TEXT NOT NULL, "
+            "source_url TEXT NOT NULL, "
+            "chunk_id TEXT, "
+            "endpoint_name TEXT NOT NULL, "
+            "endpoint_key TEXT NOT NULL, "
+            "relation_kind TEXT NOT NULL, "
+            "other_endpoint_name TEXT, "
+            "ts TEXT NOT NULL, "
+            "PRIMARY KEY (job_id, endpoint_key, chunk_id, relation_kind)"
+            ")"
+        )
+        # Индекс по `endpoint_key` обязателен: джоба уборки обходит факты по нему, а не
+        # сканирует таблицу. Отдельный индекс по `job_id` — чтобы видеть неразрешённое по
+        # джобе, не выбирая все концы домена.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_missing_endpoint_key "
+            "ON job_endpoint_missing_in_response (endpoint_key)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_missing_endpoint_job "
+            "ON job_endpoint_missing_in_response (job_id)"
+        )
         # Паспорт извлечения - отдельной таблицей по тем же основаниям, что и факты выше:
         # это числа и имена, которые должен сравнивать потребитель, а не текст, который
         # он разбирает. `message` стадии занят причиной деградации, и `note_stage`
@@ -806,6 +841,69 @@ class JobStore:
                 ),
             )
             self._conn.commit()
+
+    def record_missing_endpoints(
+        self,
+        job_id: str,
+        source_url: str,
+        items: builtins.list[dict[str, Any]],
+    ) -> None:
+        """Записать неразрешённые концы связей (ADR-037 случай 3).
+
+        Пишется на каждой джобе, где такие концы были, и **не пишется**, где их не было:
+        пустая вставка не отличается от «экстракция не дошла до записи», и джоба уборки
+        потом не отличит «проверили и всё хорошо» от «не проверили». Отсутствие строк
+        здесь читается как «концы разрешились», и это допустимое утверждение только потому,
+        что стадия обязана была до этого дойти — а это уже видно по остальным таблицам.
+
+        `endpoint_key` приходит уже посчитанным: `_identity_key` живёт в оркестраторе, и
+        копия правила нормализации в хранилище была бы вторым соглашением об именах.
+        """
+        from datetime import datetime
+
+        if not items:
+            return
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO job_endpoint_missing_in_response "
+                "(job_id, source_url, chunk_id, endpoint_name, endpoint_key, relation_kind, "
+                "other_endpoint_name, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        job_id,
+                        source_url,
+                        item.get("chunk_id"),
+                        str(item.get("endpoint_name") or ""),
+                        str(item.get("endpoint_key") or ""),
+                        str(item.get("relation_kind") or ""),
+                        item.get("other_endpoint_name"),
+                        now,
+                    )
+                    for item in items
+                ],
+            )
+            self._conn.commit()
+
+    def missing_endpoints(self, job_id: str) -> builtins.list[dict[str, Any]]:
+        """Неразрешённые концы джобы; ``[]`` — их не было."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT chunk_id, endpoint_name, endpoint_key, relation_kind, "
+                "other_endpoint_name FROM job_endpoint_missing_in_response "
+                "WHERE job_id=? ORDER BY endpoint_key",
+                (job_id,),
+            ).fetchall()
+        return [
+            {
+                "chunk_id": r[0],
+                "endpoint_name": r[1],
+                "endpoint_key": r[2],
+                "relation_kind": r[3],
+                "other_endpoint_name": r[4],
+            }
+            for r in rows
+        ]
 
     def enrichment(self, job_id: str) -> dict[str, Any]:
         """Числовые факты обогащения; ``{}`` — их не было (EXTRACT не дошёл до записи)."""

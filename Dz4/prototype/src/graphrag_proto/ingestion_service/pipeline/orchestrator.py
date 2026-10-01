@@ -453,6 +453,14 @@ class PipelineContext:
     # чтобы отвечать на вопрос «кто жрёт токены - промпт или ответ» по числам, а не по
     # ощущению: раньше расход не снимался вовсе.
     llm_usage: dict[str, Any] | None = None
+    # Неразрешённые концы связей (ADR-037, случай 3). Заполняются вместо сноса слоя:
+    # каждый элемент — один конец с ИМЕНЕМ, как модель его написала, `chunk_id` и видом
+    # связи. Имя хранится исходным, а не ключом идентичности: джоба уборки обязана уметь
+    # сопоставить конец с текстом, а ключ для этого бесполезен.
+    #
+    # Отдельный список, а не флаг: «был неразрешённый конец» и «какие именно» — разные
+    # вопросы, и флагом второй не ответить.
+    unresolved_endpoints: list[dict[str, Any]] = field(default_factory=list)
     model_tag_ids_ignored: int = 0
     ambiguous_aliases: int = 0
     graph_projection_status: str = "not_requested"
@@ -846,8 +854,23 @@ class ExtractStage(Stage):
                         )
                     )
             relations = payload.get("relationships", payload.get("links", []))
-            self._validate_edges(relations, records)
+            unresolved = self._validate_edges(relations, records)
+            # Индекс по КЛЮЧИ неразрешённого имени — тем же `_identity_key`, каким
+            # пользуется валидация. Сопоставление по сырой строке было бы вторым,
+            # несовпадающим с кодом соглашением об именах, то есть ровно тем дефектом,
+            # который прибор уже ловил дважды.
+            unresolved_by_key = {
+                _identity_key(item["endpoint_name"]) for item in unresolved
+            }
             ctx.entities.extend(records)
+            ctx.unresolved_endpoints.extend(
+                {
+                    **item,
+                    "chunk_id": chunk_id,
+                    "endpoint_key": _identity_key(item["endpoint_name"]),
+                }
+                for item in unresolved
+            )
             for relation in relations:
                 edge: dict[str, Any] = {}
                 if relation.get("from") is not None:
@@ -875,6 +898,22 @@ class ExtractStage(Stage):
                 # `chunk_id` здесь в области видимости.
                 edge.setdefault("source_ids", [ctx.source_url])
                 edge["chunk_ids"] = [chunk_id]
+                # Неразрешённый конец: строка связи СОХРАНЯЕТСЯ с пометкой, иначе теряются
+                # `kind` и `confidence` — то есть ровно то, ради чего извлечение и делалось
+                # (ADR-038). Факт о неизвестном имени пишется отдельно, исходным именем.
+                if unresolved_by_key:
+                    missing = [
+                        side
+                        for side, keys in (("from", ("from", "from_id")), ("to", ("to", "to_id")))
+                        if any(
+                            _identity_key(relation.get(key) or "") in unresolved_by_key
+                            for key in keys
+                            if relation.get(key)
+                        )
+                    ]
+                    if missing:
+                        edge["endpoint_unresolved"] = True
+                        edge["unresolved_sides"] = missing
                 ctx.entity_edges.append(edge)
         if ctx.model_tag_ids_ignored:
             # Одна строка на документ, а не на сущность: при ~77 сущностях на чанк
@@ -896,10 +935,24 @@ class ExtractStage(Stage):
     def _validate_edges(
         relations: object,
         records: list[dict[str, Any]],
-    ) -> None:
+    ) -> list[dict[str, Any]]:
+        """Проверить концы связей и вернуть неразрешённые (ADR-037, случай 3).
+
+        Неразрешённый конец **не сносит слой**. Он возвращается наружу, чтобы вызывающий
+        записал факт; раньше здесь поднималось `ExtractionModelError`, и одна такая связь
+        уничтожала весь LLM-слой документа — вместе с `kind` и `confidence` тех связей,
+        которые были в порядке. Проверка «объявлено ли имя среди имён этого ответа»
+        продолжает работать ровно так же: она никуда не делась, изменилось то, что
+        происходит при её неудаче.
+
+        Форма негодного ответа (не список, не объект, пустой конец) по-прежнему
+        поднимает `ExtractionModelError`: это не вопрос разрешимости, это негодный JSON,
+        и притворяться, что мы его «записали фактом», нельзя.
+        """
         if not isinstance(relations, list):
             raise ExtractionModelError("EXTRACT поле relationships должно быть списком")
         known: set[str] = _declared_names(records)
+        unresolved: list[dict[str, Any]] = []
         for relation in relations:
             if not isinstance(relation, dict):
                 raise ExtractionModelError("EXTRACT relationship должен быть объектом")
@@ -907,8 +960,27 @@ class ExtractStage(Stage):
             target = relation.get("to") or relation.get("to_id")
             if not isinstance(source, str) or not source or not isinstance(target, str) or not target:
                 raise ExtractionModelError("relationship должен содержать from и to")
-            if _identity_key(source) not in known or _identity_key(target) not in known:
-                raise ExtractionModelError("relationship ссылается на неизвестную сущность")
+            missing = [
+                side
+                for side, value in (("from", source), ("to", target))
+                if _identity_key(value) not in known
+            ]
+            kind = str(relation.get("kind") or relation.get("type") or "RELATED")
+            # По одному факту на КАЖДЫЙ неразрешённый конец. Один факт на связь выглядел бы
+            # экономнее, но если неразрешённых концов два, второй потерял бы имя — и джоба
+            # уборки не смогла бы его сопоставить ни с чем.
+            for side, name, other in (("from", source, target), ("to", target, source)):
+                if side in missing:
+                    unresolved.append(
+                        {
+                            "unresolved_sides": missing,
+                            "unresolved_side": side,
+                            "endpoint_name": name,
+                            "other_endpoint_name": other,
+                            "relation_kind": kind,
+                        }
+                    )
+        return unresolved
 
     def _extract_deterministic(self, ctx: PipelineContext) -> None:
         seen: dict[str, dict[str, Any]] = {}
@@ -1564,11 +1636,21 @@ class CommitStage(Stage):
             )
 
         edges: list[dict[str, Any]] = []
+        skipped_unresolved = 0
         for relation in entity_edges:
             source = str(relation.get("from_id") or relation.get("from") or "")
             target = str(relation.get("to_id") or relation.get("to") or "")
             if not source or not target:
                 raise ValueError("COMMIT: link requires from_id and to_id")
+            # Связь с неразрешённым концом в граф НЕ пишется (ADR-038, п. 3): её второй
+            # конец не существует как нода, и обход упёрся бы в висящий конец. Раньше
+            # здесь был `raise`, и одна такая связь валила весь документ на COMMIT — то
+            # есть пункт 3 ADR-037 переносил потерю из EXTRACT в COMMIT, не устраняя её.
+            # Строка связи и факт о неразрешённости остаются в контексте и в отчёте джобы,
+            # то есть `kind` и `confidence` не теряются — они не попадают в обход.
+            if relation.get("endpoint_unresolved"):
+                skipped_unresolved += 1
+                continue
             kind = str(relation.get("kind") or relation.get("type") or "RELATED")
             relation_type = kind.upper() if kind.replace("_", "").isalnum() else "RELATED"
             edge_properties = dict(relation.get("properties") or {})
@@ -1611,6 +1693,14 @@ class CommitStage(Stage):
         for edge in edges:
             if edge["from_id"] not in known_ids or edge["to_id"] not in known_ids:
                 raise ValueError("COMMIT: link references unknown context node")
+        if skipped_unresolved:
+            # Видно на логе, а не только в таблице: «связь не записана» и «связи не было»
+            # — разные утверждения, и второе неверно.
+            _log.info(
+                "связи с неразрешённым концом не записаны в граф: %d, источник=%s",
+                skipped_unresolved,
+                source_url,
+            )
 
         vectors: list[dict[str, Any]] = []
         written_chunk_ids = [str(meta["chunk_id"]) for meta in ctx.chunks_meta]

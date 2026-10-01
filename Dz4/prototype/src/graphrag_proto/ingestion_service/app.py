@@ -291,6 +291,12 @@ class Executor:
                         llm_records=ctx.llm_records,
                         llm_edges=ctx.llm_edges,
                     )
+                    # Неразрешённые концы — фактом, а не поводом снести слой (ADR-037).
+                    # Пишутся на каждой джобе, где они были; джоба уборки обходит их по
+                    # `endpoint_key`, поэтому отдельная запись на конец, а не счётчик.
+                    self._jobs.record_missing_endpoints(
+                        job_id, source_url, ctx.unresolved_endpoints
+                    )
                 if ctx.enrichment_degraded:
                     # Оба факта идут ОДНИМ каналом — полем `signals`. Канал заводится
                     # один раз на оба флага: если один придёт полем, а другой текстом,
