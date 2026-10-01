@@ -49,7 +49,12 @@ SUPERSEDED_PATTERNS: dict[str, str] = {
 def _live_docs(repo_root: Path) -> list[Path]:
     docs = sorted((repo_root / "docs").glob("*.md"))
     docs = [p for p in docs if p.name != "history.md"]
-    return [*docs, repo_root / "CONCEPT.md", repo_root / "prototype" / "README.md"]
+    return [
+        *docs,
+        repo_root / "CONCEPT.md",
+        repo_root / "README-acceptance.md",
+        repo_root / "prototype" / "README.md",
+    ]
 
 
 def _tracked_docs(repo_root: Path) -> list[Path]:

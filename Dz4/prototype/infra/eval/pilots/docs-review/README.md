@@ -58,8 +58,8 @@ SQLite config — активный домен `it`. Профили и глосс
    `docker compose -p <project> -f compose.eval-minimal.yaml run --rm --no-deps eval-runner python /proposal/corpus_tools.py upload --out /reports/docs-review-upload.json`
 4. Проверить: 7 `succeeded` в receipt, ненулевую revision, Source/Chunk в Neo4j,
    отсутствие чужого корпуса; revision сверять до и после обеих веток.
-5. Запросы: для этого пилота используйте `questions.jsonl`; полный graph-эксперимент с
-   `questions_graph.jsonl` запускается отдельной командой из [../../README-minimal.md](../../README-minimal.md).
+5. Запросы: для этого пилота используйте `questions.jsonl`; полный graph-эксперимент на
+   золотом наборе запускается отдельной командой из [../../README-minimal.md](../../README-minimal.md).
    Snapshot в штатный `--corpus` не передавать: `source_url` станут `document-NN.md` и разметка сломается.
 
 ## Ограничения интерпретации

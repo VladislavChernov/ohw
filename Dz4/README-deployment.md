@@ -63,7 +63,7 @@ docker compose -p $project -f $compose run --rm eval-runner python /proposal/cor
 
 # 3. Полный graph experiment на публичном docs/корпусе
 $run = Get-Date -Format "yyyyMMdd-HHmmss"
-docker compose -p $project -f $compose run --rm --no-deps eval-runner python /app/infra/eval/run_eval.py --domain it --mode both --corpus /repo/docs --source-prefix docs --dataset /app/infra/eval/it/questions.jsonl --extra-dataset /app/infra/eval/it/questions_graph.jsonl --out "/reports/experiment-$run"
+docker compose -p $project -f $compose run --rm --no-deps eval-runner python /app/infra/eval/run_eval.py --domain it --mode both --corpus /repo/docs --source-prefix docs --dataset /app/infra/eval/it/questions.jsonl --out "/reports/experiment-$run"
 
 # 4. Остановка (volumes сохранятся)
 docker compose -p $project -f $compose down

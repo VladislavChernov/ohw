@@ -48,6 +48,7 @@ Topology UI и конфигуратор — задел; monitoring в Compose з
 
 | Документ | Описание |
 |----------|----------|
+| [README-acceptance.md](./README-acceptance.md) | **Приёмка: что измеряется и почему.** Короткая карта для новичка — прочитать первым |
 | [CONCEPT.md](./CONCEPT.md) | Главный архитектурный документ (концепция-база v5) |
 | [docs/00_hi_level_architecture.md](./docs/00_hi_level_architecture.md) | Высокоуровневая архитектура (Mermaid, v6) + [PNG](./docs/assets/hi_level_architecture_v6.png) |
 | [docs/01_ontology_and_domain_profile.md](./docs/01_ontology_and_domain_profile.md) | Онтология и спецификация Domain Profile |

@@ -49,7 +49,7 @@ docker compose -p $project -f $compose --profile eval config --quiet
 docker compose -p $project -f $compose build config-service embeddings-service llm
 docker compose -p $project -f $compose up -d --wait --wait-timeout 600
 $run = Get-Date -Format 'yyyyMMdd-HHmmss'
-docker compose -p $project -f $compose run --rm --no-deps eval-runner python /app/infra/eval/run_eval.py --domain it --mode both --corpus /repo/docs --source-prefix docs --dataset /app/infra/eval/it/questions.jsonl --extra-dataset /app/infra/eval/it/questions_graph.jsonl --out "/reports/experiment-$run"
+docker compose -p $project -f $compose run --rm --no-deps eval-runner python /app/infra/eval/run_eval.py --domain it --mode both --corpus /repo/docs --source-prefix docs --dataset /app/infra/eval/it/questions.jsonl --out "/reports/experiment-$run"
 ```
 
 Не задавайте профиль eval для `up`: runner — одноразовый. Вызов именованного `run eval-runner` сам активирует его профиль. Запуск минимального проекта не останавливает ранее поднятый full-стек: его модели продолжат занимать память. Останавливать старый стек следует отдельно по его имени, без удаления volumes.
@@ -92,20 +92,21 @@ gitignore**: артефакты машинно-зависимы и не верс
 
 Для полного графа эксперимента `eval-runner` получает read-only корень репозитория в `/repo`.
 Основной сценарий загружает публичный корпус `docs/` с префиксом `docs`, поэтому `golden_sources`
-из `it/questions.jsonl` и `it/questions_graph.jsonl` совпадают с `source_url` в Neo4j:
+из `it/questions.jsonl` совпадают с `source_url` в Neo4j. Набор один и описан в
+[README-dataset.md](./README-dataset.md):
 
 ```powershell
 $run = Get-Date -Format 'yyyyMMdd-HHmmss'
-docker compose -p $project -f $compose run --rm --no-deps eval-runner python /app/infra/eval/run_eval.py --domain it --mode both --corpus /repo/docs --source-prefix docs --dataset /app/infra/eval/it/questions.jsonl --extra-dataset /app/infra/eval/it/questions_graph.jsonl --out "/reports/experiment-$run"
+docker compose -p $project -f $compose run --rm --no-deps eval-runner python /app/infra/eval/run_eval.py --domain it --mode both --corpus /repo/docs --source-prefix docs --dataset /app/infra/eval/it/questions.jsonl --out "/reports/experiment-$run"
 if ($LASTEXITCODE -ne 0) { throw 'Run failed' }
 ```
 
 Пилотный 7-документный корпус и его `upload`-процедура остаются отдельным development-сценарием
 из [pilots/docs-review/README.md](./pilots/docs-review/README.md). Его нельзя использовать
-для `questions_graph.jsonl`: этот набор ссылается на публичные документы `docs/01`, `docs/02`,
+для основного набора: тот ссылается на публичные документы `docs/01`, `docs/02`,
 `docs/06`, `docs/data_model` и другие, которых нет в семидокументном pilot manifest.
 
-### Статус проверки графа в `questions_graph.jsonl`
+### Статус проверки графа в золотом наборе
 
 **Восемь вопросов с `evidence_policy: graph_required` написаны по проекту, а не измерены на
 стенде.** Они построены на механизме, проверенном по коду: `tag_id` выводится из canonical name,
@@ -158,7 +159,7 @@ LLM_TEMPERATURE=0 действует на генератор, но текущи�
 судье (остаётся дефолт). Пилотный корпус — development-подготовка, не минимум 50 вопросов
 по ADR-015. Положительные числа парного прогона показывают вклад graph expansion на срезе
 `golden_graph_evidence`, а не «пользу GraphRAG вообще»; trace должен содержать seed chunks,
-paths, depth и boost. Срез `golden_graph_evidence` сейчас покрыт **9 вопросами** из 66 —
+paths, depth и boost. Срез `golden_graph_evidence` сейчас покрыт **8 вопросами** из 74 —
 graph-lift опирается на малую выборку, это зафиксированное ограничение, а не результат.
 
 ## Остановка и ресурсы

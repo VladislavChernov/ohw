@@ -46,7 +46,9 @@ param(
     [int]$LimitDocs,
     [string]$Note = '',
     [string[]]$Dataset = @('/app/infra/eval/it/questions.jsonl'),
-    [string[]]$ExtraDataset = @('/app/infra/eval/it/questions_graph.jsonl'),
+    # Набор `it` один (ADR-040), поэтому по умолчанию ничего не добавляется.
+    # Параметр остаётся для доменов, у которых наборов несколько.
+    [string[]]$ExtraDataset = @(),
     [string]$SourcePrefix = 'docs',
     [switch]$NoJudge,
     [switch]$RetrievalOnly,

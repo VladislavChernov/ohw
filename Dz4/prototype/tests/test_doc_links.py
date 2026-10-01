@@ -54,6 +54,7 @@ def _live_docs(repo_root: Path) -> list[Path]:
     return [
         *docs,
         repo_root / "CONCEPT.md",
+        repo_root / "README-acceptance.md",
         repo_root / "prototype" / "README.md",
     ]
 
