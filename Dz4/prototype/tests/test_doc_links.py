@@ -33,6 +33,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.gitignore_filter import is_ignored
+
 DOCS_DIR_NAME = "docs"
 EXEMPT_FILES = {"history.md", "05_adr_log.md"}
 
@@ -49,7 +51,22 @@ _MIN_VALIDATED_SHARE = 0.25
 
 def _live_docs(repo_root: Path) -> list[Path]:
     docs = [p for p in sorted((repo_root / DOCS_DIR_NAME).glob("*.md")) if p.name not in EXEMPT_FILES]
-    return [*docs, repo_root / "CONCEPT.md", repo_root / "prototype" / "README.md"]
+    return [
+        *docs,
+        repo_root / "CONCEPT.md",
+        repo_root / "prototype" / "README.md",
+    ]
+
+
+def _tracked_docs(repo_root: Path) -> list[Path]:
+    """Только те документы, которые действительно попадают в репозиторий.
+
+    В `docs/` лежат личные материалы владельца, исключённые `.gitignore`. Они не являются
+    живыми документами проекта, и битая ссылка в таком файле не должна валить гейт чужой
+    работы. Фильтр по `.gitignore` — он самодостаточен и не требует пополнять список
+    исключений при каждом новом личном файле.
+    """
+    return [path for path in _live_docs(repo_root) if not is_ignored(repo_root, path)]
 
 
 def _section_index(path: Path) -> set[str]:
@@ -102,7 +119,7 @@ def _resolve(ref: str, file_map: dict[str, Path | None]) -> Path | None:
 
 def _scan(repo_root: Path) -> tuple[list[str], int, int]:
     """Возвращает (нарушения, проверено ссылок, всего ссылок)."""
-    docs = _live_docs(repo_root)
+    docs = _tracked_docs(repo_root)
     file_map = _build_file_map(docs)
     index = {path: _section_index(path) for path in docs}
     by_name = {path.name: path for path in docs}
@@ -144,7 +161,7 @@ def test_adr_references_exist(repo_root: Path) -> None:
     known = set(_ADR_REF.findall(adr_log))
     assert known, "не удалось извлечь ни одного ADR из лога - проверка ослабла"
     offenders: list[str] = []
-    for path in _live_docs(repo_root):
+    for path in _tracked_docs(repo_root):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             for found in _ADR_REF.findall(line):
                 if found not in known:
@@ -158,7 +175,7 @@ def test_invariant_references_exist(repo_root: Path) -> None:
     known = {f"{a}-{b}" for a, b in _INVARIANT_REF.findall(invariants)}
     assert known, "не удалось извлечь инварианты - проверка ослабла"
     offenders: list[str] = []
-    for path in _live_docs(repo_root):
+    for path in _tracked_docs(repo_root):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             for major, minor in _INVARIANT_REF.findall(line):
                 if f"{major}-{minor}" not in known:

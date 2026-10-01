@@ -114,8 +114,9 @@
       `as_of 2026-09-22`).
 - [x] 4.4. Новый `it/questions_graph.jsonl`: графо-специфичные/multi-hop,
       `golden_graph_evidence`, цель ≥ 15 вопросов с ≥ 8 `graph_required`. Реализовано:
-      16 вопросов, 9 `graph_required` с `golden_graph_evidence: true`; факты сверены с
-      `docs/*.md`; `test_it_questions_graph_dataset` зелёный.
+      24 вопроса, 8 `graph_required` с `golden_graph_evidence: true`; факты сверены с
+      `docs/*.md`; `test_it_questions_graph_dataset` зелёный. Числа поправлены 2026-10-01:
+      ранее здесь стояло «16 вопросов, 9 `graph_required`», что не соответствовало файлу.
 - [x] 4.5. Раннер: `--extra-dataset` (несколько наборов мержатся, id сохраняются).
       Реализовано: `merge_datasets` + флаг; тест на дедупликацию id зелёный.
 

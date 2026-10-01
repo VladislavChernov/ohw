@@ -24,6 +24,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.gitignore_filter import is_ignored
+
 # Паттерн — причина, по которой он недопустим в живых документах.
 SUPERSEDED_PATTERNS: dict[str, str] = {
     "9 этапов": "primitive-конвейер описан в CONCEPT.md §4.1 (6 этапов)",
@@ -48,6 +50,16 @@ def _live_docs(repo_root: Path) -> list[Path]:
     docs = sorted((repo_root / "docs").glob("*.md"))
     docs = [p for p in docs if p.name != "history.md"]
     return [*docs, repo_root / "CONCEPT.md", repo_root / "prototype" / "README.md"]
+
+
+def _tracked_docs(repo_root: Path) -> list[Path]:
+    """Только документы, которые попадают в репозиторий.
+
+    Личные материалы владельца лежат в `docs/` под `.gitignore`. Проверять их словарь —
+    значит ловить чужую рабочую работу и ронять гейт чужой сессии, что и случилось с
+    `docs/defense_notes_simplifications.md`.
+    """
+    return [path for path in _live_docs(repo_root) if not is_ignored(repo_root, path)]
 
 
 def _corrective_noted_lines(path: Path) -> frozenset[int]:
@@ -82,7 +94,7 @@ def test_live_docs_have_no_superseded_vocabulary(
     """Снятая формулировка не должна возвращаться в живые документы."""
     adr_log = repo_root / "docs" / "05_adr_log.md"
     offenders: list[str] = []
-    for path in _live_docs(repo_root):
+    for path in _tracked_docs(repo_root):
         noted = _corrective_noted_lines(path)
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if pattern not in line:
