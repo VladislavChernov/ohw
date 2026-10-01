@@ -17,6 +17,7 @@ import sys
 import time
 import unicodedata
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -293,6 +294,15 @@ ENTITY_FIELD_ROLES: dict[str, str] = {
     "name": "display name; falls back to `canonical` when absent",
 }
 
+#: Ключи конца связи и их алиасы — в том порядке, в каком их читает `_validate_edges`:
+#: `relation.get("from") or relation.get("from_id")`. Порядок обязателен: при обоих
+#: заполненных полях побеждает первое, и счётчик разрешимости обязан считать тот же конец.
+#:
+#: Список живёт здесь, а не в приборе измерения, потому что прибор играет этот же ответ:
+#: своя копия списка означала бы второе соглашение об именах ровно там, где расхождение
+#: молчит.
+ENDPOINT_KEYS: tuple[tuple[str, ...], ...] = (("from", "from_id"), ("to", "to_id"))
+
 #: Поля ответа модели, которые не являются именем, но в которых модель всё равно писала
 #: концы. Нужны для измерения, а не для валидации: их присутствие в ответе означает, что
 #: модель назвала сущность не тем полем. `category` добавлен по прогону expD.
@@ -461,6 +471,17 @@ class PipelineContext:
     # Отдельный список, а не флаг: «был неразрешённый конец» и «какие именно» — разные
     # вопросы, и флагом второй не ответить.
     unresolved_endpoints: list[dict[str, Any]] = field(default_factory=list)
+    # Счётчики разрешимости (ADR-039). Копятся по ходу EXTRACT, потому что знаменатели —
+    # объявленные сущности и концы — считаются там же, где их и разбирали. Пишутся в отчёт
+    # на КАЖДОЙ джобе, прошедшей EXTRACT, включая нули: без знаменателя доля не считается,
+    # а «концов нет» и «не считали» — разные утверждения.
+    resolvability: dict[str, Any] = field(default_factory=dict)
+    # Множества имён **на весь документ**. Считать «уникальные» суммой по чанкам нельзя:
+    # имя, встретившееся в двух чанках, было бы посчитано дважды, и число уехало бы вверх
+    # ровно там, где документ длиннее. Обратная величина, чем кажется: длинный документ дал бы
+    # больше «уникальных», хотя уникальных ровно столько же.
+    declared_name_keys: set[str] = field(default_factory=set)
+    endpoint_keys: set[str] = field(default_factory=set)
     model_tag_ids_ignored: int = 0
     ambiguous_aliases: int = 0
     graph_projection_status: str = "not_requested"
@@ -915,6 +936,9 @@ class ExtractStage(Stage):
                         edge["endpoint_unresolved"] = True
                         edge["unresolved_sides"] = missing
                 ctx.entity_edges.append(edge)
+            self._accumulate_resolvability(
+                ctx, records, relations, unresolved_by_key, unresolved
+            )
         if ctx.model_tag_ids_ignored:
             # Одна строка на документ, а не на сущность: при ~77 сущностях на чанк
             # поштучный лог дал бы десятки тысяч строк на документ.
@@ -924,6 +948,102 @@ class ExtractStage(Stage):
                 ctx.model_tag_ids_ignored,
                 ctx.source_url,
             )
+
+    @staticmethod
+    def _accumulate_resolvability(
+        ctx: PipelineContext,
+        records: list[dict[str, Any]],
+        relations: list[dict[str, Any]],
+        unresolved_by_key: set[str],
+        unresolved: list[dict[str, Any]],
+    ) -> None:
+        """Копнуть счётчики разрешимости по чанку (ADR-039).
+
+        Считаются **слоты концов**, а не связи: у связи два конца, и в expA все шесть потеряли
+        оба. Считать по связям удвоило долю, и числитель при этом был верным — то есть ошибка
+        пережила пересчёт.
+
+        Неразрешённые концы считаются и по слотам, и по именам, потому что это разные
+        величины: один и тот же конец встречается в нескольких слотах (expA — 12 и 7), и
+        агрегат по джобам суммирует именно слоты.
+
+        Структура (петли, взаимные пары, входящая связность) копится по тем же рёбрам и
+        от версии кода не зависит.
+        """
+        stats = ctx.resolvability
+        stats["chunks"] = int(stats.get("chunks") or 0) + 1
+        stats["entities_declared"] = int(stats.get("entities_declared") or 0) + len(records)
+        stats["relations"] = int(stats.get("relations") or 0) + len(relations)
+        ctx.declared_name_keys |= _declared_names(records)
+
+        declared_keys = _declared_names(records)
+        slot_keys: list[str] = []
+        for relation in relations:
+            for keys in ENDPOINT_KEYS:
+                for key in keys:
+                    value = relation.get(key)
+                    if isinstance(value, str) and value.strip():
+                        slot_keys.append(_identity_key(value.strip()))
+                        break
+        stats["endpoints_total"] = int(stats.get("endpoints_total") or 0) + len(slot_keys)
+        resolved_slots = sum(1 for key in slot_keys if key in declared_keys)
+        stats["endpoints_resolved"] = int(stats.get("endpoints_resolved") or 0) + resolved_slots
+        stats["endpoints_unresolved"] = int(stats.get("endpoints_unresolved") or 0) + (
+            len(slot_keys) - resolved_slots
+        )
+        ctx.endpoint_keys.update(slot_keys)
+        unresolved_names: set[str] = set()
+        stats["names_unresolved"] = int(stats.get("names_unresolved") or 0) + len(
+            unresolved_by_key
+        )
+        unresolved_names |= unresolved_by_key
+        stats["names_resolved"] = int(stats.get("names_resolved") or 0) + len(
+            {key for key in slot_keys} - unresolved_by_key
+        )
+
+        # Из какого поля модель взяла неразрешённое имя. Ключ -> поле, а не счётчик попаданий:
+        # уклон в одно поле и разнобой — разные дефекты с разными владельцами, и одно число их
+        # не различает. Сравнение по `_identity_key`, тем же, что у валидации.
+        by_field = dict(stats.get("by_field") or {})
+        non_name: dict[str, set[str]] = {}
+        for record in records:
+            for non_name_field in NON_NAME_FIELDS:
+                value = record.get(non_name_field)
+                if isinstance(value, str) and value.strip():
+                    non_name.setdefault(_identity_key(value.strip()), set()).add(non_name_field)
+        for fact in unresolved:
+            name_key = _identity_key(str(fact.get("endpoint_name") or ""))
+            for source_field in non_name.get(name_key, ()):
+                by_field[source_field] = int(by_field.get(source_field, 0)) + 1
+        stats["by_field"] = by_field
+
+        pairs = [
+            (
+                _identity_key(str(relation.get("from") or relation.get("from_id") or "")),
+                _identity_key(str(relation.get("to") or relation.get("to_id") or "")),
+            )
+            for relation in relations
+            if (relation.get("from") or relation.get("from_id"))
+            and (relation.get("to") or relation.get("to_id"))
+        ]
+        loops = {a for a, b in pairs if a == b}
+        stats["self_loops"] = int(stats.get("self_loops") or 0) + len(loops)
+        mutual = 0
+        for index, (a, b) in enumerate(pairs):
+            if a == b:
+                continue
+            for other in pairs[index + 1 :]:
+                if a == other[1] and b == other[0]:
+                    mutual += 1
+        stats["mutual_pairs"] = int(stats.get("mutual_pairs") or 0) + mutual
+        fan_in = Counter(target for _, target in pairs)
+        if fan_in:
+            peak = max(fan_in.values())
+            if peak > int(stats.get("max_fan_in") or 0):
+                stats["max_fan_in"] = peak
+        # «Уникальные» считаются на документ целиком, а не суммой по чанкам.
+        stats["entities_distinct"] = len(ctx.declared_name_keys)
+        stats["endpoints_distinct"] = len(ctx.endpoint_keys)
 
     def _chunk_id(self, ctx: PipelineContext, index: int) -> str:
         for meta in ctx.chunks_meta:

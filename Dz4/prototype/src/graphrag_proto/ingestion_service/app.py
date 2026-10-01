@@ -297,6 +297,10 @@ class Executor:
                     self._jobs.record_missing_endpoints(
                         job_id, source_url, ctx.unresolved_endpoints
                     )
+                    # Счётчики разрешимости пишутся на каждой джобе, прошедшей EXTRACT,
+                    # включая нули (ADR-039): без знаменателя доля не считается, а «концов
+                    # нет» и «не считали» — разные утверждения.
+                    self._jobs.record_resolvability(job_id, ctx.resolvability, stage=stage_name)
                 if ctx.enrichment_degraded:
                     # Оба факта идут ОДНИМ каналом — полем `signals`. Канал заводится
                     # один раз на оба флага: если один придёт полем, а другой текстом,

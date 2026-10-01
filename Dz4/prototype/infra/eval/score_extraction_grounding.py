@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
+    ENDPOINT_KEYS,
     ENTITY_CANONICAL_FIELD,
     ENTITY_FIELD_ROLES,
     ENTITY_NAME_FIELDS,
@@ -272,15 +273,16 @@ def _non_name_values(item: dict[str, Any]) -> list[tuple[str, str]]:
     return out
 
 
-#: Ключи конца связи и их алиасы — **в том порядке и наборе, как их читает валидация**:
-#: `_validate_edges` берёт `relation.get("from") or relation.get("from_id")`. Порядок важен,
-#: потому что при обоих заполненных полях побеждает первое, и прибор обязан считать тот же конец.
+#: Ключи конца связи и их алиасы — **импортированы из production-кода**, а не написаны здесь
+#: второй раз. `_validate_edges` берёт `relation.get("from") or relation.get("from_id")`, и
+#: порядок важен: при обоих заполненных полях побеждает первое, и прибор обязан считать тот же
+#: конец.
 #:
 #: Изначально здесь стояло `("from", "to")`, и это была дыра того же класса, что и лишние поля:
 #: связь, записанная как `from_id`/`to_id`, валидация принимает, а прибор её не видел вовсе и
 #: показывал по ней ноль концов вместо двух. В существующих прогонах таких ответов нет, поэтому
 #: цифры от исправления не меняются, — но дыра была настоящая.
-END_KEYS: tuple[tuple[str, ...], ...] = (("from", "from_id"), ("to", "to_id"))
+END_KEYS: tuple[tuple[str, ...], ...] = ENDPOINT_KEYS
 
 
 def _ends_of(relation: dict[str, Any]) -> list[str]:

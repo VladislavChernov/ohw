@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import builtins
 import hashlib
+import json
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -250,6 +251,9 @@ class JobStore:
         self._lock = threading.RLock()
         self._conn = connect_sqlite(db_path)
         self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        self._conn.execute(
             "CREATE TABLE IF NOT EXISTS jobs ("
             "job_id TEXT PRIMARY KEY, "
             "source_url TEXT NOT NULL, "
@@ -346,6 +350,40 @@ class JobStore:
             "planned_nodes INTEGER NOT NULL DEFAULT 0, "
             "removed_nodes INTEGER NOT NULL DEFAULT 0, "
             "mode TEXT NOT NULL, "
+            "ts TEXT NOT NULL"
+            ")"
+        )
+        # СЧЁТЧИКИ РАЗРЕШИМОСТИ (ADR-039). Отдельная таблица, а не столбцы в `job_enrichment`,
+        # и это не оформление: добавление столбца потребовало бы `ALTER` на каждой базе,
+        # где пайплайн уже отработал, а `CREATE TABLE IF NOT EXISTS` не нужен вовсе.
+        #
+        # Отдельная таблица **не дублирует** `job_enrichment`: объём слоя и факт его потери
+        # там и остаются, а здесь только то, чего там нет, — счётчики концов и структуры.
+        # Два источника одного числа разъедутся, поэтому числа живут в одном месте.
+        #
+        # `by_field_json` — распределение неразрешённых концов по полям, из которых модель
+        # их взяла (`id`, `category`). JSON, а не отдельные столбцы: набор полей задаёт модель
+        # ответа, а не схема, и столбец на каждый возможный ключ означал бы `ALTER` при
+        # каждом новом поле — то есть ровно то, чего эта таблица избегает.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_resolvability ("
+            "job_id TEXT PRIMARY KEY, "
+            "chunks INTEGER NOT NULL DEFAULT 0, "
+            "entities_declared INTEGER NOT NULL DEFAULT 0, "
+            "entities_distinct INTEGER NOT NULL DEFAULT 0, "
+            "relations INTEGER NOT NULL DEFAULT 0, "
+            "endpoints_total INTEGER NOT NULL DEFAULT 0, "
+            "endpoints_distinct INTEGER NOT NULL DEFAULT 0, "
+            "endpoints_resolved INTEGER NOT NULL DEFAULT 0, "
+            "endpoints_unresolved INTEGER NOT NULL DEFAULT 0, "
+            "names_resolved INTEGER NOT NULL DEFAULT 0, "
+            "names_unresolved INTEGER NOT NULL DEFAULT 0, "
+            "self_loops INTEGER NOT NULL DEFAULT 0, "
+            "mutual_pairs INTEGER NOT NULL DEFAULT 0, "
+            "max_fan_in INTEGER NOT NULL DEFAULT 0, "
+            "measured INTEGER NOT NULL DEFAULT 1, "
+            "measured_in_stage TEXT, "
+            "by_field_json TEXT NOT NULL DEFAULT '{}', "
             "ts TEXT NOT NULL"
             ")"
         )
@@ -841,6 +879,97 @@ class JobStore:
                 ),
             )
             self._conn.commit()
+
+    def record_resolvability(self, job_id: str, stats: dict[str, Any], stage: str = "") -> None:
+        """Записать счётчики разрешимости джобы (ADR-039).
+
+        Пишется на **каждой** джобе, прошедшей EXTRACT, включая нулевые значения: доля
+        неразрешённых концов не вычисляется без знаменателя, а «концов нет» и «не считали»
+        — разные утверждения. Отсутствие строки означало бы второе, то есть молчание.
+
+        `measured` отделён от нулевых счётчиков именно поэтому: он отвечает на вопрос
+        «считал ли кто-нибудь», а не «что насчитали». При отсутствии измерения он равен 0,
+        и читатель получает `unknown`, а не «дефекта не было».
+
+        `stage` — стадия, В КОТОРОЙ мерили, а не «стадия завершена». Имя `stage_completed`
+        утверждало бы второе, а это разные вещи: при прерванной стадии счётчики могли быть
+        собраны на неполном наборе чанков. Значение нужно, чтобы по строке отличить полное
+        измерение от неполного, не читая `jobs.status` — статус меняется позже и живёт в
+        другой таблице.
+        """
+        from datetime import datetime
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_resolvability (job_id, chunks, entities_declared, "
+                "entities_distinct, relations, endpoints_total, endpoints_distinct, "
+                "endpoints_resolved, endpoints_unresolved, names_resolved, names_unresolved, "
+                "self_loops, mutual_pairs, max_fan_in, measured, measured_in_stage, "
+                "by_field_json, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    int(stats.get("chunks") or 0),
+                    int(stats.get("entities_declared") or 0),
+                    int(stats.get("entities_distinct") or 0),
+                    int(stats.get("relations") or 0),
+                    int(stats.get("endpoints_total") or 0),
+                    int(stats.get("endpoints_distinct") or 0),
+                    int(stats.get("endpoints_resolved") or 0),
+                    int(stats.get("endpoints_unresolved") or 0),
+                    int(stats.get("names_resolved") or 0),
+                    int(stats.get("names_unresolved") or 0),
+                    int(stats.get("self_loops") or 0),
+                    int(stats.get("mutual_pairs") or 0),
+                    int(stats.get("max_fan_in") or 0),
+                    int(stats.get("measured", 1)),
+                    stage or None,
+                    json.dumps(stats.get("by_field") or {}, ensure_ascii=False, sort_keys=True),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def resolvability(self, job_id: str) -> dict[str, Any]:
+        """Счётчики разрешимости; `{}` — их не было (EXTRACT не дошёл до записи).
+
+        `measured == 0` означает «счётчики есть, но их не измеряли» — читатель обязан
+        трактовать такие числа как `unknown`, а не как ноль.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT chunks, entities_declared, entities_distinct, relations, "
+                "endpoints_total, endpoints_distinct, endpoints_resolved, endpoints_unresolved, "
+                "names_resolved, names_unresolved, self_loops, mutual_pairs, max_fan_in, "
+                "measured, measured_in_stage, by_field_json FROM job_resolvability WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return {}
+        try:
+            by_field = json.loads(row[15]) if row[15] else {}
+        except json.JSONDecodeError:
+            by_field = {}
+        keys = (
+            "chunks",
+            "entities_declared",
+            "entities_distinct",
+            "relations",
+            "endpoints_total",
+            "endpoints_distinct",
+            "endpoints_resolved",
+            "endpoints_unresolved",
+            "names_resolved",
+            "names_unresolved",
+            "self_loops",
+            "mutual_pairs",
+            "max_fan_in",
+        )
+        out: dict[str, Any] = {key: int(row[index]) for index, key in enumerate(keys)}
+        out["measured"] = int(row[13])
+        out["measured_in_stage"] = str(row[14]) if row[14] else None
+        out["by_field"] = by_field if isinstance(by_field, dict) else {}
+        return out
 
     def record_missing_endpoints(
         self,
