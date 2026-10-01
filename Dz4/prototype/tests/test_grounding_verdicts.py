@@ -165,6 +165,22 @@ def test_expD_signature_is_category(tool: Any, verdicts: dict[str, list[dict[str
     assert resolution["unresolvable_matching_non_name_field"] == resolution["unresolvable_names"]
 
 
+def test_end_keys_match_the_validator(tool: Any) -> None:
+    """Прибор читает те же ключи концов, что и валидация, и в том же порядке.
+
+    Дыра была в обе стороны и обе молчали. Прибор брал больше полей, чем валидация, и показывал
+    «0 неразрешённых» там, где их было 12. Потом брал меньше: `_validate_edges` принимает
+    `from_id`/`to_id` через `relation.get("from") or relation.get("from_id")`, а прибор знал
+    только `from`/`to` — и по такой связи показывал ноль концов вместо двух. Отсутствие данных
+    и отсутствие связи неразличимы по такому молчанию, поэтому оба случая закрыты здесь явно.
+    """
+    assert tool.END_KEYS == (("from", "from_id"), ("to", "to_id"))
+    # Порядок обязателен: при обоих полях валидация берёт первое, и прибор должен считать тот же конец.
+    assert tool._ends_of({"from": "A", "from_id": "B", "to": "C", "to_id": "D"}) == ["A", "C"]
+    # Алиас без основного поля — тоже конец, иначе связь выпала бы из счёта целиком.
+    assert tool._ends_of({"from_id": "A", "to_id": "C"}) == ["A", "C"]
+
+
 def test_denominator_is_endpoint_slots_not_relations(tool: Any, verdicts: dict[str, list[dict[str, Any]]]) -> None:
     """Знаменатель — число концов, а не число связей.
 

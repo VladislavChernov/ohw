@@ -159,6 +159,7 @@ CRITERION = {
     "not_defects": "FOLDED and SEP are not extraction defects. FOLDED is absorbed by the existing _identity_key by design; SEP is a merge problem whose only sanctioned repair is a glossary alias. Neither may appear in an acceptance criterion.",
     "name_source_contract": "The fields a name may come from are ENTITY_NAME_FIELDS in the orchestrator, and the instrument imports them rather than keeping its own list: it once read more fields than validation did and reported 0 unresolvable where there were 12. ENTITY_FIELD_ROLES states the same contract positively - the field the ontology calls canonical must resolve endpoints - so that editing the list is not a test failure. `id` is a domain identifier and is never a name source; it is the field expA's 12 invented endpoints came from, which is why widening the list would hide the defect instead of fixing it.",
     "denominator": "ends_unresolvable is counted over endpoint SLOTS, and ends_total is that denominator. Counting over relations doubled every ratio once: expA read as 12 of 5 relations instead of 12 of 12 endpoints, expD as 4 of 5 instead of 4 of 10. Each relation has two endpoints, and in expA all 6 lost both.",
+    "field_drift_is_the_recurring_failure": "The instrument has drifted from the code in both directions, and each time silently. It once read MORE name fields than validation and reported 0 unresolvable where there were 12, and it once read FEWER endpoint keys, missing from_id/to_id that _validate_edges accepts, reporting zero endpoints for such a relation. Both are the same defect: an instrument measuring a different thing than the code under test, where the difference is invisible and the number still looks right. Endpoint keys now come from END_KEYS with their aliases and order; name fields from ENTITY_NAME_FIELDS. Neither list is written twice.",
     "name_classes_not_gated_here": "PROMPT-ONLY and UNGROUNDED are different classes with different owners. Pass/fail for them belongs in the run manifest written before the run.",
     "structure_is_measured_not_gated": "loops, mutual_pairs and hub are a measured fact, not a gate. No hub threshold is introduced: choosing one after seeing 0.889 against 0.5 against 0.143 would be a criterion written after the result.",
     "known_method_limits": "PROMPT-ONLY means 'absent from the document but present in the prompt'. The prompt is NOT split into instruction and chunk, so chunk_tail_in_doc reports whether the chunk is still consistent with the current document file; false means the document changed after the run and every name verdict for that record is suspect.",
@@ -251,12 +252,26 @@ def _non_name_values(item: dict[str, Any]) -> list[tuple[str, str]]:
     return out
 
 
+#: Ключи конца связи и их алиасы — **в том порядке и наборе, как их читает валидация**:
+#: `_validate_edges` берёт `relation.get("from") or relation.get("from_id")`. Порядок важен,
+#: потому что при обоих заполненных полях побеждает первое, и прибор обязан считать тот же конец.
+#:
+#: Изначально здесь стояло `("from", "to")`, и это была дыра того же класса, что и лишние поля:
+#: связь, записанная как `from_id`/`to_id`, валидация принимает, а прибор её не видел вовсе и
+#: показывал по ней ноль концов вместо двух. В существующих прогонах таких ответов нет, поэтому
+#: цифры от исправления не меняются, — но дыра была настоящая.
+END_KEYS: tuple[tuple[str, ...], ...] = (("from", "from_id"), ("to", "to_id"))
+
+
 def _ends_of(relation: dict[str, Any]) -> list[str]:
+    """Концы связи в том же смысле, в каком их видит `_validate_edges`."""
     out: list[str] = []
-    for side in ("from", "to"):
-        value = relation.get(side)
-        if isinstance(value, str) and value.strip():
-            out.append(value.strip())
+    for keys in END_KEYS:
+        for key in keys:
+            value = relation.get(key)
+            if isinstance(value, str) and value.strip():
+                out.append(value.strip())
+                break
     return out
 
 
