@@ -155,7 +155,7 @@ def test_expA_signature_is_declared_ids(tool: Any, verdicts: dict[str, list[dict
     resolution = record["ends_resolution"]
     assert resolution["unresolvable_slots"] == 12
     assert resolution["unresolvable_matching_non_name_field"] == resolution["unresolvable_names"]
-    assert record["current_code_loses_llm_layer"] is True
+    assert record["code_behaviour"]["loses_llm_layer"] is True
 
 
 def test_expD_signature_is_category(tool: Any, verdicts: dict[str, list[dict[str, Any]]]) -> None:
@@ -163,6 +163,45 @@ def test_expD_signature_is_category(tool: Any, verdicts: dict[str, list[dict[str
     resolution = verdicts["expD-rule-plus-example-big-doc"][0]["ends_resolution"]
     assert resolution["unresolvable_slots"] == 4
     assert resolution["unresolvable_matching_non_name_field"] == resolution["unresolvable_names"]
+
+
+def test_code_prediction_is_not_measured_as_measurement(tool: Any, verdicts: dict[str, list[dict[str, Any]]]) -> None:
+    """Предсказание поведения кода обязано называть версию, а не выдавать себя за измерение.
+
+    Прибор переигрывает журнал через текущий код, поэтому ровно одно поле из всего вердикта
+    зависит от версии кода: `code_behaviour.loses_llm_layer`. Как только неразрешённый конец
+    начнёт записываться фактом (ADR-037, случай 3), поле станет `false` — и это не будет
+    ошибкой расчёта, это будет другой вопрос. Пока версия не названа, поле просто тихо
+    перестанет соответствовать действительности, а выглядеть будет так же.
+    """
+    assert tool.CODE_BEHAVIOUR in tool.CRITERION.values() or any(
+        "unresolvable" in str(value) for value in tool.CRITERION.values()
+    ), "предсказываемое поведение кода не описано в CRITERION"
+    for run, records in verdicts.items():
+        for record in records:
+            assert "code_behaviour" in record, f"{run}: поле предсказания отсутствует"
+            assert record["code_behaviour"]["predicts"] == tool.CODE_BEHAVIOUR
+            assert isinstance(record["code_behaviour"]["would_write_facts"], int)
+            # Старое имя поля означало «слой потерян» как свойство ответа. Его больше нет:
+            # ответ не теряет слой, теряет его код, и это разные утверждения.
+            assert "current_code_loses_llm_layer" not in record
+
+
+def test_measurement_does_not_move_with_the_code(tool: Any, verdicts: dict[str, list[dict[str, Any]]]) -> None:
+    """Всё, кроме `code_behaviour`, измеряет журнал и от версии кода не зависит.
+
+    Это различение держит `--check` честным: после пункта 3 рассинхронизируется только
+    предсказание, а измерения останутся прежними, и снимок будет отличаться ровно одним
+    предсказанием. Если бы от кода зависело что-то ещё, «устарело» и «сломано» стало бы
+    неразличимыми.
+    """
+    record = verdicts["expA-req-n-example-failed"][0]
+    measured = {key: value for key, value in record.items() if key != "code_behaviour"}
+    assert {"ends", "ends_resolution", "names", "structure", "doc_matched"} <= set(measured)
+    assert record["code_behaviour"]["loses_llm_layer"] is True
+    assert record["code_behaviour"]["would_write_facts"] == len(record["ends_resolution"]["unresolvable_names"])
+    # Счётчик фактов совпадает с числом неразрешённых имён, а не со слотами: один факт на имя.
+    assert record["ends_resolution"]["unresolvable_slots"] > record["code_behaviour"]["would_write_facts"]
 
 
 def test_end_keys_match_the_validator(tool: Any) -> None:
@@ -277,7 +316,7 @@ def test_loses_layer_agrees_with_jobs(verdicts: dict[str, list[dict[str, Any]]])
             if not job.get("degraded"):
                 continue
             assert any(
-                record["current_code_loses_llm_layer"]
+                record["code_behaviour"]["loses_llm_layer"]
                 for record in records
                 if record["source_url"].endswith(job["source_url"].split("/")[-1])
             ), f"{run}: degraded у {job['source_url']}, но ни одна запись не теряет слой"

@@ -51,7 +51,16 @@ _CORPUS = _DZ4 / "docs"
 #: Журналы обмена и вердикты.
 _PROBE = _DZ4 / "test_artifacts" / "llm-probe"
 
-INSTRUMENT = "offline-grounding-v3"
+INSTRUMENT = "offline-grounding-v4"
+
+#: Какое поведение кода предсказывает поле `code_behaviour.loses_llm_layer`.
+#:
+#: Прибор переигрывает журнал через текущий код, поэтому предсказание верно ровно до того
+#: момента, пока меняется код. Одно поле из всего вердикта связано с пунктом 3 ADR-037: как
+#: только неразрешённый конец начинает записываться фактом, `loses_llm_layer` станет `false` —
+#: и это не ошибка расчёта, а другой вопрос. Остальное (лестница имён, разрешимость, grounding,
+#: петли, хаб) измеряет журнал и от версии кода не зависит вовсе.
+CODE_BEHAVIOUR = "unresolved endpoint raises ExtractionModelError and drops the LLM layer"
 
 #: Разделители, которые выбрасываются на ступени SEP. Отображать их в пробел нельзя:
 #: `underscore -> space` даёт `dedupstage` против `dedup stage`, то есть не лечит camel/snake.
@@ -410,7 +419,21 @@ def _verdict_for(exchange: Path, documents: dict[str, Path]) -> list[dict[str, A
                     "non_name_fields_watched": list(NON_NAME_FIELDS),
                     "non_name_field_note": "non-empty means the model named the endpoint by a field that is not a name (`id`, `category`). That is a measurable fact, not a guess: expA is `id`, expD is `category`. `unresolvable_by_field` separates a systematic lean into one field (a prompt candidate) from a scatter across fields (a response-shape defect).",
                 },
-                "current_code_loses_llm_layer": unresolvable_slots > 0,
+                # Предсказание поведения кода, а НЕ измерение журнала. Журнал один и тот же
+            # при любой версии кода; меняется только то, что код с ним делает. Поле обязано
+            # называть версию, к которой относится, иначе после пункта 3 оно станет ложным
+            # не будучи неверным: факт-то будет записан, и «слой потерян» окажется неправдой
+            # без единой ошибки в расчёте.
+            "code_behaviour": {
+                "predicts": CODE_BEHAVIOUR,
+                "unresolvable_slots": unresolvable_slots,
+                "loses_llm_layer": unresolvable_slots > 0,
+                "would_write_facts": len(unresolvable),
+                "note": "loses_llm_layer reflects the behaviour named in `predicts` and is expected "
+                "to become false once unresolved endpoints are recorded as facts (ADR-037 case "
+                "3); would_write_facts is what that code path would store instead. Everything "
+                "outside this block is a measurement of the log and does not change with the code.",
+            },
                 "structure": _structure(relations),
             }
         )
@@ -507,7 +530,7 @@ _FIELDS = {
     "mutual_pairs": lambda r: _sum(r, "structure", "mutual_pairs"),
     "hub_fan_in": lambda r: _hub(r)[0],
     "hub_name": lambda r: _hub(r)[1],
-    "loses_layer": lambda r: any(record["current_code_loses_llm_layer"] for record in r),
+    "loses_layer": lambda r: any(record["code_behaviour"]["loses_llm_layer"] for record in r),
 }
 
 #: Поля, которые нельзя вывести из записей и которые прибор не проверяет сам.
@@ -560,6 +583,8 @@ def main(argv: list[str] | None = None) -> int:
         target = directory / "grounding_verdict.json"
         payload = {
             "instrument": INSTRUMENT,
+            "code_behaviour": CODE_BEHAVIOUR,
+            "measurement_is_version_independent": "Everything in `summary` except the `code_behaviour` block is a measurement of the recorded log: the name ladder, resolvability, grounding, loops, mutual pairs and the hub. None of it moves when the code changes, because the log does not change. `code_behaviour` is the single prediction that depends on the code version, and it says which version it predicts. That separation is what keeps --check meaningful: after ADR-037 case 3 lands, only the prediction differs, and the diff says so by name instead of reporting a mismatch.",
             "criterion": CRITERION,
             "name_source_fields": list(ENTITY_NAME_FIELDS),
             "name_field_roles": dict(ENTITY_FIELD_ROLES),
@@ -581,6 +606,26 @@ def main(argv: list[str] | None = None) -> int:
             written += 1
         else:
             existing = json.loads(target.read_text(encoding="utf-8")) if target.exists() else None
+            if existing is None:
+                print(
+                    f"[{directory.name}] вердикта нет на диске: пересчёт есть, снимка нет",
+                    file=sys.stderr,
+                )
+                return 1
+            stale = [key for key in ("instrument", "code_behaviour") if existing.get(key) != payload[key]]
+            if stale:
+                # Не «сломано» и не «устарело, и сойдёт». Расхождение названо явно, потому что
+                # снимок и пересчёт отличаются ровно тем, что между ними менялся смысл:
+                # снимок сделан другой версией прибора и предсказывает другое поведение кода.
+                # Молчание здесь было бы тем же дефектом, что и раньше: «не знаю» выдано за «совпало».
+                print(
+                    f"[{directory.name}] снимок сделан {existing.get('instrument')} "
+                    f"и предсказывает {existing.get('code_behaviour')!r}; "
+                    f"пересчёт делает {payload['instrument']} и предсказывает {payload['code_behaviour']!r} "
+                    f"(расходится: {', '.join(stale)})",
+                    file=sys.stderr,
+                )
+                return 1
             if existing != payload:
                 print(f"[{directory.name}] вердикт на диске расходится с пересчётом", file=sys.stderr)
                 return 1
