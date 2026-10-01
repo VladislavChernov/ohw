@@ -21,3 +21,6 @@ prototype/reports/
 
 # Eval pilot: локальный snapshot корпуса и квитанции загрузки (генерируются, не публикуются)
 prototype/infra/eval/pilots/docs-review/snapshot/
+
+# Материалы к защите (личные заметки, не публикуются)
+docs/defense_notes_*.md
