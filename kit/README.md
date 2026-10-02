@@ -113,34 +113,38 @@ Tests use mocked HTTP, so the suite runs without a running Ollama service.
 
 ## `harness/` — the opencode workflow harness
 
-**What this is.** `kit/harness/README.md` describes the workflow harness the AI
-assistant follows on these homeworks: spec-first changes as OpenSpec bundles,
-verification before a checkbox is ticked, and an adversarial read-only reviewer
-that runs over the diff before a commit.
+**What this is.** `kit/harness/` **is** the workflow harness the AI assistant
+follows: spec-first changes, verification before a checkbox is ticked, and an
+adversarial read-only reviewer that runs over the diff before a commit. It is a
+portable working tool and applies to any project, not only to these homeworks.
 
-**Only the description is published, not the harness.** The harness itself is
-opencode configuration — two skills, a reviewer subagent, and a `/review`
-command — and it stays machine-local. The split is deliberate: a public
-repository should carry the *process* so it can be reviewed in a diff, while the
-copy opencode actually loads is local tooling. Before 2026-10-01 the harness was
-local-only and undocumented, which meant its conventions were reviewable on one
-machine and drifted silently, and the same reviewer logic had to be re-entered
-per project instead of fixed once.
+**The harness is published here, not only described.** Until 2026-10-02 this
+folder carried a *description* of the harness while the tool itself stayed
+machine-local, on the reasoning that configuration does not belong in a public
+repository. That reasoning failed on measurement: nothing loaded the description,
+no artifact referenced it, no project had an `AGENTS.md`, and one homework's
+private copy fell **176 lines** behind without anything reporting it. A rules file
+nobody reads is not enforcement. The rules now go into `AGENTS.md` — the one file
+opencode loads on its own — and `check.ps1` reports drift.
 
-**What it is not.** Not part of any homework's deliverable. It shares no code
-with the `ohw_kit` package and installing it adds no dependency.
-
-**Install into a homework.** The canon is local, at `D:\Otus\harness\.opencode`.
-Copy it once into the homework folder (not the kit folder — opencode resolves
-config from the opened project), then restart opencode there:
+**Install.** The canon is this folder, not a machine-local path:
 
 ```powershell
-# from the homework dir, e.g. D:\Otus\Dz4
-Copy-Item D:\Otus\harness\.opencode .opencode -Recurse
+# from the homework or project dir, e.g. D:\Otus\ohw\Dz4
+powershell -ExecutionPolicy Bypass -File kit\harness\install.ps1 -Project .
 ```
 
-**Both files are dated snapshots.** This description is the harness **as of
-2026-10-01** and is not updated automatically. If a convention changes, it
-changes in the canon first, and `kit/harness/README.md` is republished
-separately — so the two going out of sync is a visible diff rather than a silent
-drift.
+Then verify — it exits non-zero on drift:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File kit\harness\check.ps1 -Project .
+```
+
+`install.ps1` copies `.opencode/` and embeds `rules/global.md` into the project's
+`AGENTS.md` between marker comments. Project-specific rules go **below** the closing
+marker and survive every reinstall. Edit the rules in `kit/harness/rules/global.md`,
+never inside a project.
+
+**What it is not.** Not part of any homework's deliverable. It shares no code with
+the `ohw_kit` package and installing it adds no dependency. Homeworks already
+submitted are not retrofitted — they are frozen artifacts.
