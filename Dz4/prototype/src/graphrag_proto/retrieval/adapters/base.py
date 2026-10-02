@@ -16,6 +16,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, nullcontext
@@ -106,6 +108,62 @@ VECTOR_METADATA_BACKFILL_KEYS = frozenset(
         "custom",
     }
 )
+
+# ADR-044: поля ноды, содержимое которых перезаписывается по порядку владельцев
+# (источник + версия), а не всегда. Список один на обе стороны: ингест проставляет
+# владельца, хранилище решает по нему. Копия списка в одном модуле означала бы
+# расхождение между тем, что помечено, и тем, что сравнивается.
+OWNED_ENTITY_FIELDS: tuple[str, ...] = ("id", "description", "category")
+
+_log = logging.getLogger(__name__)
+
+
+def source_priority(source_url: str) -> int:
+    """Приоритет источника для слияния содержимого (ADR-044, правка 2026-10-02).
+
+    Между **разными** источниками сравнивать версии бессмысленно: нумерация ведётся
+    внутри источника, и «версия 2» против «версии 1» у разных документов ничего не
+    значит. Поэтому приоритет — единственное сравнение, имеющее смысл между ними, а
+    версия остаётся сравнением внутри источника.
+
+    Приоритет **конфигурируется** (`PROJECTION_SOURCE_PRIORITY`, JSON `{url: int}`), по
+    умолчанию все источники равны. Произвольной константы в коде быть не должно: тогда
+    порядок станет тем, что он сейчас заменяет. Пустая конфигурация даёт прежнее
+    поведение — равенство приоритетов и лексикографический выбор источника.
+    """
+    mapping = _load_source_priority()
+    return int(mapping.get(source_url, 0))
+
+
+_SOURCE_PRIORITY_CACHE: dict[str, dict[str, int]] = {}
+
+
+def _load_source_priority() -> dict[str, int]:
+    """Разбор конфигурации приоритетов с кешем; нечитаемая или неверная — пусто.
+
+    Молчаливое игнорирование означало бы тихую деградацию к «все равны» без следа,
+    поэтому нечитаемая конфигурация пишет WARNING, а разбор кешируется по сырому
+    значению окружения.
+    """
+    raw = os.environ.get("PROJECTION_SOURCE_PRIORITY", "").strip()
+    if not raw:
+        return {}
+    cached = _SOURCE_PRIORITY_CACHE.get(raw)
+    if cached is not None:
+        return cached
+    parsed: dict[str, int] = {}
+    try:
+        payload = json.loads(raw)
+        if isinstance(payload, dict):
+            parsed = {str(key): int(value) for key, value in payload.items()}
+        else:
+            raise TypeError("ожидался объект {source_url: int}")
+    except (ValueError, TypeError) as exc:
+        _log.warning(
+            "PROJECTION_SOURCE_PRIORITY не разобран, все источники считаются равными: %s", exc
+        )
+    _SOURCE_PRIORITY_CACHE[raw] = parsed
+    return parsed
 
 
 class AtomicBatch(Protocol):

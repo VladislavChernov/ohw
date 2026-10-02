@@ -2061,6 +2061,7 @@ def test_neo4j_edge_custom_properties_are_json_encoded() -> None:
 
     _query, parameters = runner.calls[-1]
     assert json.loads(parameters["properties_value"]) == {"nested": {"x": 1}}
+    # Рёбра ADR-044 не менял: у них нет владельца и параметр остался прежним.
     assert "properties" not in parameters["scalar_properties"]
 
 
@@ -2111,7 +2112,7 @@ def test_neo4j_custom_properties_are_json_encoded_and_merged() -> None:
 
     query, parameters = runner.calls[-1]
     assert "SET n.properties = $properties_value" in query
-    assert "properties" not in parameters["scalar_properties"]
+    assert "properties" not in parameters["plain_properties"]
     assert json.loads(parameters["properties_value"]) == {
         "language": "en",
         "author": "bob",

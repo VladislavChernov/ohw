@@ -1357,6 +1357,17 @@ def _aggregate_graph_contribution(results: list[dict[str, Any]]) -> dict[str, An
             "mode": "not_measured",
             "questions": len([r for r in results if isinstance(r.get("graph_contribution"), dict)]),
             "degraded_questions": degraded_questions,
+            # ADR-045: причина попадает в артефакт. До этого она жила только в
+            # `qa_log.jsonl`, и при `degraded_questions = 0` отчёт не предупреждал ни о
+            # чём, хотя число `necessity = 0.0` печаталось в таблице. Ноль остаётся
+            # нулём — конвенция «ноль плюс флаг» (ADR-039) здесь не отменяется.
+            "projection_statuses": sorted(
+                {
+                    str(status)
+                    for r in results
+                    if (status := r.get("projection_status"))
+                }
+            ),
             "necessity": 0.0,
             "delta_recall": 0.0,
             "recall_graph": None,
@@ -1685,6 +1696,18 @@ def write_passport(
             f"- ⚠️ **degraded_questions = {gc.get('degraded_questions')}**: "
             "readiness-gate не открыл граф (см. `projection_status` в `qa_log.jsonl`)."
         )
+    # ADR-045: условие не зависит от счётчика. Раньше предупреждение появлялось только при
+    # `degraded_questions > 0`, и случай «вклад не считался, потому что нет графового среза»
+    # оставался без предупреждения при напечатанном `necessity = 0.0` — при том, что
+    # `docs/test_plan.md` §4 называет такой вывод ложноотрицательным.
+    if gc.get("mode") != "measured":
+        statuses = ", ".join(f"`{s}`" for s in (gc.get("projection_statuses") or [])) or "нет данных"
+        lines.append(
+            f"- ⚠️ **вклад графа не измерен** (`mode = {gc.get('mode')}`, "
+            f"вопросов с вырожденной осью: {gc.get('degraded_questions')}, "
+            f"статусы проекции: {statuses}). Число `necessity = 0.0` здесь означает "
+            "'не считали', а не 'граф ничего не дал'."
+        )
     # Причина вердикта печатается здесь же: вердикт без причины в артефакте не
     # отличим от сбоя раннера, и следующий читатель примет прогон за измерение.
     for reason in (report or {}).get("verdict_reasons") or []:
@@ -1866,6 +1889,17 @@ def write_lift_report(report: dict[str, Any], out_dir: Path, manifest: dict[str,
             lines.append("### Graph Contribution\n")
             for k, v in gc.items():
                 lines.append(f"- **{k}**: {v}\n")
+            # ADR-045: числа выше печатаются без оговорки, а при `mode != measured`
+            # означают «не считали». Оговорка ставится рядом с ними, а не только в паспорте.
+            if mode_name == "target" and gc.get("mode") != "measured":
+                statuses = (
+                    ", ".join(f"`{s}`" for s in (gc.get("projection_statuses") or []))
+                    or "нет данных"
+                )
+                lines.append(
+                    f"- ⚠️ **`mode` = `{gc.get('mode')}`, не `measured`**: числа выше — "
+                    f"это «не считали», а не результат. Статусы проекции: {statuses}.\n"
+                )
 
     lines.append("\n## Delta\n")
     for k, v in report.get("delta", {}).items():

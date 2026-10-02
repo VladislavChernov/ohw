@@ -1347,3 +1347,110 @@ def test_build_ingest_report_no_degradation_is_explicitly_false() -> None:
     assert doc["llm_layer_dropped"] is False
     assert report["enrichment_degraded_documents"] == 0
     assert report["llm_layer_dropped_documents"] == 0
+
+
+# --- ADR-045: «не измерено» всегда с причиной ---------------------------------
+
+
+def _contribution_record(mode: str, projection_status: str | None) -> dict[str, Any]:
+    return {
+        "graph_contribution": {"mode": mode},
+        "projection_status": projection_status,
+    }
+
+
+def test_unmeasured_aggregate_carries_the_cause_into_the_artifact() -> None:
+    """Позитивный контракт ADR-045: вклад не измерен — значит в артефакте есть причина.
+
+    Формулировка проверяет не «этих трёх поля не должно быть», а «причина обязана быть».
+    Причина живёт в `projection_status` по каждому вопросу, и раньше доходила только до
+    `qa_log.jsonl`, из-за чего случай без вырожденных вопросов оставался с напечатанным
+    `necessity = 0.0` и без единого предупреждения.
+    """
+    aggregate = _run_eval._aggregate_graph_contribution(
+        [
+            _contribution_record("degraded", "pending"),
+            _contribution_record("degraded", "pending"),
+        ]
+    )
+
+    assert aggregate["mode"] == "not_measured"
+    assert aggregate["projection_statuses"] == ["pending"]
+
+
+def test_measured_aggregate_reports_nothing_about_projection_statuses() -> None:
+    """Обратная сторона: при `measured` поле причин не появляется.
+
+    Условие теста, а не замороженный список: добавление нового режима не должно ломать
+    проверку, а потеря причины при `not_measured` — должна.
+    """
+    aggregate = _run_eval._aggregate_graph_contribution(
+        [
+            {
+                "graph_contribution": {
+                    "mode": "measured",
+                    "necessity": 0.5,
+                    "delta_recall": 0.25,
+                    "recall_graph": 0.5,
+                    "recall_vector": 0.25,
+                    "evidence_recall_graph": 0.5,
+                },
+                "projection_status": "ready",
+            }
+        ]
+    )
+
+    assert aggregate["mode"] == "measured"
+    assert "projection_statuses" not in aggregate
+
+
+def test_unmeasured_aggregate_warns_even_without_degraded_questions(tmp_path: Path) -> None:
+    """Оговорка ставится по `mode`, а не по счётчику.
+
+    Именно этот случай не был покрыт: `degraded_questions = 0` (среза в наборе нет),
+    `mode = not_measured`, число `0.0` напечатано — и рядом с ним ни одного слова о том,
+    что это «не считали». `docs/test_plan.md` §4 называет такой вывод ложноотрицательным.
+    """
+    aggregate = _run_eval._aggregate_graph_contribution(
+        [_contribution_record("not_measured", None)]
+    )
+    assert aggregate["degraded_questions"] == 0
+    report = {
+        "run_id": "r1",
+        "verdict": "n/a",
+        "target": {"graph_contribution": aggregate},
+        "retrieval": {},
+        "golden": {},
+        "config": {},
+    }
+
+    _run_eval.write_lift_report(report, tmp_path)
+    text = (tmp_path / "lift_report.md").read_text(encoding="utf-8")
+
+    assert "**necessity**: 0.0" in text
+    assert "это «не считали», а не результат" in text
+
+
+def test_measured_graph_contribution_carries_no_caveat(tmp_path: Path) -> None:
+    """Обратная сторона: при `measured` оговорки нет, иначе она станет шумом."""
+    report = {
+        "run_id": "r1",
+        "verdict": "n/a",
+        "target": {
+            "graph_contribution": {
+                "mode": "measured",
+                "questions": 8,
+                "necessity": 0.25,
+                "delta_recall": 0.1,
+            }
+        },
+        "retrieval": {},
+        "golden": {},
+        "config": {},
+    }
+
+    _run_eval.write_lift_report(report, tmp_path)
+    text = (tmp_path / "lift_report.md").read_text(encoding="utf-8")
+
+    assert "**necessity**: 0.25" in text
+    assert "не считали" not in text

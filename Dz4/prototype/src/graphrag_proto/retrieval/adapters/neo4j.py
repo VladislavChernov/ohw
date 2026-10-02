@@ -18,6 +18,9 @@ from contextlib import contextmanager
 from typing import Any
 
 from graphrag_proto.retrieval.adapters.base import (
+    OWNED_ENTITY_FIELDS as _OWNED_ENTITY_FIELDS,
+)
+from graphrag_proto.retrieval.adapters.base import (
     VECTOR_METADATA_BACKFILL_KEYS,
     Consistency,
     GraphStoreProvider,
@@ -26,6 +29,7 @@ from graphrag_proto.retrieval.adapters.base import (
     _expand_direction,
     _expand_kinds,
     _node_properties,
+    source_priority,
 )
 from graphrag_proto.retrieval.adapters.schemas import (
     normalize_graph_row,
@@ -589,12 +593,70 @@ def _upsert_nodes(runner: Any, nodes: list[dict[str, Any]]) -> None:
             for key, value in properties.items()
             if key not in _PROVENANCE_KEYS and key != "properties"
         }
+        # ADR-044: содержимое (id/description/category) перезаписывается не всегда, а по
+        # объявленному порядку владельцев. Остальные скалярные — как раньше, и защита
+        # `origin = 'user'` сохраняется для обеих групп.
+        owned_properties = {
+            key: value for key, value in scalar_properties.items() if key in _OWNED_ENTITY_FIELDS
+        }
+        plain_properties = {
+            key: value for key, value in scalar_properties.items() if key not in _OWNED_ENTITY_FIELDS
+        }
         set_clauses = [
             (
                 "SET n += CASE WHEN n.origin = 'user' AND $incoming_origin <> 'user' "
-                "THEN {} ELSE $scalar_properties END"
+                "THEN {} ELSE $plain_properties END"
             )
         ]
+        for field in _OWNED_ENTITY_FIELDS:
+            if field not in owned_properties:
+                continue
+            source_key = f"{field}_source_url"
+            version_key = f"{field}_version"
+            # ADR-044 (правка 2026-10-02): порядок полный, и версии сравниваются ТОЛЬКО
+            # внутри одного источника. Между источниками версии несравнимы, поэтому там
+            # сравнивается приоритет источника; при равенстве приоритетов — `source_url`,
+            # чтобы результат не зависел от порядка загрузки. Условие одно и то же для
+            # значения и для обоих полей владельца: иначе владелец мог бы смениться у
+            # значения, которое не переписано.
+            wins = (
+                f"(coalesce(n.{source_key}, '') = ''"
+                f" OR ($incoming_{source_key} = n.{source_key}"
+                f" AND $incoming_{version_key} > coalesce(n.{version_key}, -1))"
+                f" OR ($incoming_{source_key} <> n.{source_key}"
+                f" AND $incoming_{source_key}_priority > coalesce(n.{source_key}_priority, 0))"
+                f" OR ($incoming_{source_key} <> n.{source_key}"
+                f" AND $incoming_{source_key}_priority = coalesce(n.{source_key}_priority, 0)"
+                f" AND $incoming_{source_key} > n.{source_key}))"
+            )
+            guarded = "(n.origin = 'user' AND $incoming_origin <> 'user')"
+            set_clauses.append(
+                f"SET n.{field} = CASE"
+                f" WHEN {guarded} THEN n.{field}"
+                f" WHEN {wins} THEN ${field}_incoming"
+                f" ELSE n.{field} END"
+            )
+            set_clauses.append(
+                f"SET n.{source_key} = CASE"
+                f" WHEN {guarded} THEN n.{source_key}"
+                f" WHEN {wins} THEN $incoming_{source_key}"
+                f" ELSE n.{source_key} END"
+            )
+            set_clauses.append(
+                f"SET n.{version_key} = CASE"
+                f" WHEN {guarded} THEN n.{version_key}"
+                f" WHEN {wins} THEN $incoming_{version_key}"
+                f" ELSE n.{version_key} END"
+            )
+            # Приоритет хранится рядом с владельцем: иначе он был бы производным от
+            # окружения при каждой записи, и его нельзя было бы прочитать обратно —
+            # а без этого сравнение между источниками при следующей записи не восстановить.
+            set_clauses.append(
+                f"SET n.{source_key}_priority = CASE"
+                f" WHEN {guarded} THEN n.{source_key}_priority"
+                f" WHEN {wins} THEN $incoming_{source_key}_priority"
+                f" ELSE n.{source_key}_priority END"
+            )
         if "properties" in properties or existing_nested:
             set_clauses.append("SET n.properties = $properties_value")
         for key in _PROVENANCE_KEYS:
@@ -609,9 +671,17 @@ def _upsert_nodes(runner: Any, nodes: list[dict[str, Any]]) -> None:
         parameters: dict[str, Any] = {
             "node_id": node_id,
             "props": properties,
-            "scalar_properties": scalar_properties,
+            "plain_properties": plain_properties,
             "incoming_origin": incoming_origin,
         }
+        for field in _OWNED_ENTITY_FIELDS:
+            if field not in owned_properties:
+                continue
+            parameters[f"{field}_incoming"] = owned_properties[field]
+            incoming_source = str(properties.get(f"{field}_source_url") or "")
+            parameters[f"incoming_{field}_source_url"] = incoming_source
+            parameters[f"incoming_{field}_version"] = int(properties.get(f"{field}_version") or -1)
+            parameters[f"incoming_{field}_source_url_priority"] = source_priority(incoming_source)
         if "properties" in properties or existing_nested:
             parameters["properties_value"] = _encode_properties(nested)
         runner.run(

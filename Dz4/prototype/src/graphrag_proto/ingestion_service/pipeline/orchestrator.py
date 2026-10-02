@@ -45,7 +45,14 @@ from graphrag_proto.ingestion_service.projection import (
     projection_revision_for,
     projection_transition_allowed,
 )
-from graphrag_proto.retrieval.adapters.base import Embedder, GraphStoreProvider, VectorStoreProvider
+from graphrag_proto.retrieval.adapters.base import (
+    OWNED_ENTITY_FIELDS as _OWNED_ENTITY_FIELDS,
+)
+from graphrag_proto.retrieval.adapters.base import (
+    Embedder,
+    GraphStoreProvider,
+    VectorStoreProvider,
+)
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 from graphrag_proto.retrieval.adapters.llm import (
     LLMAdapterError,
@@ -1750,6 +1757,9 @@ class CommitStage(Stage):
             }
         ]
         entity_ids: dict[str, dict[str, Any]] = {}
+        # ADR-044: версия, которую присвоит эта загрузка (`registry.upsert` = current + 1).
+        # Считается под `source_lock`, поэтому две загрузки одного источника не сойдутся.
+        owner_version = self._registry.current_version(doc.domain, doc.source_url) + 1
         for entity in entities:
             canonical = str(
                 entity.get("canonical_name") or entity.get("canonical") or entity.get("name") or ""
@@ -1769,6 +1779,12 @@ class CommitStage(Stage):
             for key in ("id", "description", "category", "aliases", "origin", "confidence"):
                 if key in entity:
                     properties[key] = entity[key]
+            # ADR-044: содержимое помечается владельцем — источником и версией, которую
+            # получит эта загрузка. Версия считается один раз на документ, а не на ноду.
+            for key in _OWNED_ENTITY_FIELDS:
+                if key in properties:
+                    properties[f"{key}_source_url"] = source_url
+                    properties[f"{key}_version"] = owner_version
             nodes.append(
                 {
                     "node_id": entity_id,
