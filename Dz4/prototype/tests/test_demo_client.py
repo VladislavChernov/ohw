@@ -183,3 +183,77 @@ def test_slider_default_matches_profiles() -> None:
             f"{path.name}: retrieval.max_depth={declared!r}, а ползунок стартует с "
             f"{DEFAULT_SLIDER_DEPTH}"
         )
+
+
+# --- обслуживание (add-operator-maintenance-controls) ---------------------------
+
+
+def test_run_maintenance_builds_expected_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_post(url: str, headers: dict[str, str], json: object, timeout: object) -> requests.Response:
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return _response(
+            200,
+            '{"job_id": "maintenance:abc", "domain": "it", "mode": "current", "skipped": false,'
+            ' "planned_relations": 3, "removed_relations": 3,'
+            ' "planned_nodes": 0, "removed_nodes": 0}',
+        )
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    client = DemoClient(Settings(ingestion_url="http://ing:8002", api_key="k123"))
+
+    body = client.run_maintenance("it")
+
+    assert captured["url"] == "http://ing:8002/api/v1/maintenance/orphan-cleanup"
+    assert captured["headers"] == {"X-API-Key": "k123"}
+    assert captured["json"] == {"domain": "it"}
+    assert body["job_id"] == "maintenance:abc"
+    assert body["removed_relations"] == 3
+    assert body["skipped"] is False
+
+
+def test_run_maintenance_reports_skipped_rather_than_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Пропущенный проход и «удалять нечего» — разные результаты, и оба приходят кодом.
+
+    Проверяется то, что клиент **не теряет** признак `skipped`: если бы он его отбросил,
+    UI показал бы «готово» там, где уборка была запрещена политикой.
+    """
+    def fake_post(url: str, headers: dict[str, str], json: object, timeout: object) -> requests.Response:
+        return _response(
+            200,
+            '{"job_id": "maintenance:z", "domain": "it", "mode": "archive", "skipped": true,'
+            ' "planned_relations": 0, "removed_relations": 0,'
+            ' "planned_nodes": 0, "removed_nodes": 0}',
+        )
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    client = DemoClient(Settings(ingestion_url="http://ing:8002", api_key="k"))
+
+    body = client.run_maintenance("it")
+
+    assert body["skipped"] is True
+    assert body["removed_relations"] == 0
+
+
+def test_maintenance_response_fields_exist_in_the_route() -> None:
+    """Имена полей ответа зафиксированы по коду маршрута, а не придуманы.
+
+    `run_orphan_cleanup` (`ingestion_service/retention_policy.py:126-143`) отдаёт именно эти
+    ключи. Расхождение здесь означало бы, что UI читает поля, которых нет, и показывает
+    пустые нули вместо подсчётов. Ключи берутся из тела функции, а не из докстринга:
+    докстринг — это описание, а не контракт.
+    """
+    import inspect
+
+    from graphrag_proto.ingestion_service import retention_policy
+
+    body = inspect.getsource(retention_policy.run_orphan_cleanup)
+    for key in ("mode", "skipped", "planned_relations", "removed_relations"):
+        assert f'"{key}"' in body, f"маршрут не отдаёт {key}"
+    # Идентификатор прохода — параметр функции, но не ключ возвращаемого факта: маршрут
+    # добавляет его сам. Смешивать их нельзя, иначе «факт» станет привязан к вызову.
+    assert '"job_id":' not in body

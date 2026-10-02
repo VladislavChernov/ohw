@@ -5,6 +5,10 @@
 `GET /api/v1/ingestion/jobs/{job_id}`, `DELETE /api/v1/ingestion/documents`,
 `POST /query` (`{query, metadata:{domain}}`), `GET /query/tasks/{task_id}/stream`
 (SSE, конверт ADR-016), `DELETE /query/tasks/{task_id}`, список доменов Config Service.
+
+Плюс операторское обслуживание: `POST /api/v1/maintenance/orphan-cleanup`
+(`add-operator-maintenance-controls`). Планировщика нет намеренно — момент
+запуска выбирает оператор.
 """
 
 from __future__ import annotations
@@ -136,6 +140,29 @@ class DemoClient:
             headers=self._headers,
             params={"domain": domain, "source_url": source_url},
             timeout=10,
+        )
+        _raise_for_status(response)
+        return _json_dict(response)
+
+    def run_maintenance(self, domain: str) -> dict[str, Any]:
+        """Один проход уборки сиротских связей и узлов по домену.
+
+        Маршрут сознателен без планировщика: уборка удаляет данные из графа, цена
+        ошибки — молчаливая потеря, поэтому момент запуска выбирает оператор.
+
+        **Форма ответа читается по коду, а не по имени:** `run_orphan_cleanup`
+        возвращает `mode`, `skipped`, `planned_relations`, `removed_relations`,
+        `planned_nodes`, `removed_nodes`, а маршрут добавляет `job_id` и `domain`.
+        `removed_nodes` при этом всегда 0, а удалённые узлы входят в
+        `removed_relations` — дефект отчётности, ADR-047. Поля `skipped` и
+        `removed_relations` обязательны для показа: без них «готово» неотличимо от
+        «не разрешено» и «удалять нечего».
+        """
+        response = requests.post(
+            f"{self._settings.ingestion_url}/api/v1/maintenance/orphan-cleanup",
+            headers=self._headers,
+            json={"domain": domain},
+            timeout=120,
         )
         _raise_for_status(response)
         return _json_dict(response)

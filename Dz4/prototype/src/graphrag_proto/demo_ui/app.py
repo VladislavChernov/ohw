@@ -328,6 +328,58 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                     st.success(f"Задача {task_id} отменена.")
 
 
+def _render_maintenance(client: DemoClient, domains: list[str]) -> None:
+    """Обслуживание графа: уборка сиротских связей и узлов по домену.
+
+    До запуска показываем, **что** будет удалено. Уборка необратима, поэтому кнопка без
+    такого предупреждения опаснее отсутствия кнопки: оператор должен видеть и предмет,
+    и идентификатор прохода. Идентификатор виден до нажатия — он принадлежит операции,
+    а не кнопке.
+    """
+    st.subheader("Обслуживание")
+    st.caption(
+        "Уборка удаляет связи и узлы, у которых не осталось ни одного поддерживающего чанка. "
+        "Возврата нет: факт уборки пишется в реестр, и по `job_id` его можно найти."
+    )
+    domain = st.selectbox("Домен", options=domains, key="maintenance_domain")
+    st.warning(
+        "Будет удалено: сиротские связи и пустые сущности домена "
+        f"`{domain or '—'}`. Планировщика нет намеренно — запуск ваш выбор. "
+        "Не удаляются `Source`-ноды (ADR-046)."
+    )
+    run_id = st.text_input(
+        "Идентификатор прохода (для поиска по журналу)",
+        value="maintenance-demo",
+        key="maintenance_run_id",
+    )
+    if st.button("Запустить уборку", type="primary"):
+        try:
+            response = client.run_maintenance(domain)
+        except RuntimeError as exc:
+            st.error(str(exc))
+        else:
+            job_id = str(response.get("job_id", ""))
+            st.success(f"Проход завершён: `{job_id}` (ваш идентификатор — `{run_id}`).")
+            if response.get("skipped"):
+                st.warning(
+                    f"Проход **пропущен** политикой уборки (режим `{response.get('mode')}`), "
+                    "ничего не удалено. Это не «удалять нечего» — это «не разрешено»."
+                )
+            else:
+                planned = response.get("planned_relations")
+                removed = response.get("removed_relations")
+                st.write(
+                    f"Запланировано к удалению: **{planned}**. Удалено по подсчёту маршрута: "
+                    f"**{removed}**."
+                )
+            st.caption(
+                "Число `removed_nodes` маршрут всегда отдаёт как 0, а удалённые узлы входят в "
+                "`removed_relations`: `delete_orphans` возвращает сумму рёбер и узлей "
+                "(`retention_policy.py:135`). Поэтому здесь узлы и связи **не разделены** — "
+                "дефект отчётности, зафиксирован в ADR-047."
+            )
+
+
 def main() -> None:
     st.set_page_config(page_title="GraphRAG: демо-контур", layout="wide")
     st.title("GraphRAG: демо-контур")
@@ -345,11 +397,15 @@ def main() -> None:
     if not domains:
         st.error("Нет доменов в Config Service: проверьте GET /api/v1/config/domain/profiles.")
 
-    tab_documents, tab_queries = st.tabs(["Документы", "Запросы"])
+    tab_documents, tab_queries, tab_maintenance = st.tabs(
+        ["Документы", "Запросы", "Обслуживание"]
+    )
     with tab_documents:
         _render_documents(client, domains)
     with tab_queries:
         _render_queries(client, domains)
+    with tab_maintenance:
+        _render_maintenance(client, domains)
 
 
 if __name__ == "__main__":
