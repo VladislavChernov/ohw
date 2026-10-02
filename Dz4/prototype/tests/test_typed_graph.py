@@ -121,11 +121,10 @@ def _build_analyzer(
     analyzer = Analyzer(
         [
             IngestStage({"txt": TxtReader()}),
-            ChunkStage(profile_fetcher=profile_fetcher),
+            ChunkStage(),
             EmbedStage(),
             ExtractStage(
                 llm=llm,
-                profile_fetcher=profile_fetcher,
                 optional_failure=True,
             ),
             NormalizeStage(""),
@@ -136,10 +135,14 @@ def _build_analyzer(
                 registry,
                 graph_store=graph,
                 vector_store=vector,
-                profile_fetcher=profile_fetcher,
                 graph_optional=True,
             ),
-        ]
+        ],
+        # Фетчер - один, у Analyzer (ADR-041). Раньше его получали три стадии, и
+        # `_load_profile` выходил по `ctx.profile_loaded`, то есть авторитетом был
+        # тот, кто позвал первым: стадия без фетчера замораживала `profile={}`, и
+        # LLM-экстракция молча уходила в детерминированный путь с `cause=None`.
+        profile_fetcher=profile_fetcher,
     )
     return analyzer, registry
 

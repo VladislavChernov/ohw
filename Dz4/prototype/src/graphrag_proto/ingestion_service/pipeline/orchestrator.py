@@ -85,6 +85,16 @@ def _load_profile(ctx: PipelineContext, profile_fetcher: ProfileFetcher | None) 
     if profile_fetcher is None:
         ctx.profile = {}
         ctx.profile_loaded = True
+        # Пустой профиль - не «профиля нет», а «его не принесли». Разница выглядит
+        # как успех: LLM-экстракция уходит в детерминированный путь с `cause=None`,
+        # и по отчёте это читается как «извлечение отработало». Раньше такой отказ
+        # обнаруживался только потому, что тест спотыкался о него; в бою он был бы тихим.
+        _log.warning(
+            "профиль не передан: экстракция уйдёт в детерминированный путь, "
+            "домен=%s, источник=%s",
+            ctx.domain,
+            ctx.source_url,
+        )
         return
     try:
         profile = profile_fetcher(ctx.domain)
@@ -415,6 +425,11 @@ STAGES = (
     "VALIDATE",
     "COMMIT",
 )
+
+#: Стадии, которые читают профиль. `INGEST` его не читает, а джоба-noop не читает
+#: ничего: профиль загружается перед первой из этих, и только если работа не отпала
+#: как noop. Отсюда и «раз на джобу» - ровно один вызов фетчера на не-noop джобу.
+_PROFILE_CONSUMER_STAGES = frozenset({"CHUNK", "EXTRACT", "COMMIT"})
 
 
 @dataclass
@@ -1189,12 +1204,19 @@ class NormalizeStage(Stage):
                 ctx.source_url,
             )
         for edge in ctx.entity_edges:
-            if edge.get("from_id") is not None or edge.get("to_id") is not None:
-                continue
-            source = str(edge.get("from") or "")
-            target = str(edge.get("to") or "")
-            edge["from"] = mapping.get(_identity_key(source)) or source
-            edge["to"] = mapping.get(_identity_key(target)) or target
+            # Каждый конец переводится независимо. Раньше стоял `continue` на всю связь,
+            # если непуст **любой** из `from_id`/`to_id`, и это ломало смешанную форму
+            # `from` + `to` + `to_id`, которую модель отдаёт законно: `to_id` есть, значит
+            # стадия решила, что переводить нечего, и оставила `from` сырым именем. Дальше
+            # COMMIT сравнивал имя с множеством `tag:it:...` и валил весь документ
+            # (`docs/api_reference.md`: `from_id='Query API Contract'` при 38 узлах).
+            for name_key, id_key in (("from", "from_id"), ("to", "to_id")):
+                if edge.get(id_key) is not None:
+                    continue
+                value = str(edge.get(name_key) or "")
+                if not value:
+                    continue
+                edge[name_key] = mapping.get(_identity_key(value)) or value
         unique_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
         for edge in ctx.entity_edges:
             source = str(edge.get("from_id") or edge.get("from") or "")
@@ -1806,20 +1828,81 @@ class CommitStage(Stage):
                     "from_id": source,
                     "to_id": target,
                     "type": relation_type,
+                    # Имена концов сохраняются для диагностики: `from_id`/`to_id` к
+                    # этому моменту уже могут быть идентификаторами, и по ним одним
+                    # не отличить «модель дала имя» от «сущность не дожила».
+                    "from_name": relation.get("from"),
+                    "to_name": relation.get("to"),
                     "properties": edge_properties,
                 }
             )
         known_ids = set(entity_ids)
+        # Последний шанс перевести конец в идентификатор. NORMALIZE это уже делает, но
+        # сущность могла не дожить до COMMIT (слияние, подавленный неоднозначный алиас),
+        # и тогда имя осталось бы именем. Ключ здесь единственное место, где оба конца
+        # сравниваются с одним и тем же множеством, поэтому перевод делается тут.
         for edge in edges:
-            if edge["from_id"] not in known_ids or edge["to_id"] not in known_ids:
-                raise ValueError("COMMIT: link references unknown context node")
+            for id_key, name_key in (("from_id", "from_name"), ("to_id", "to_name")):
+                value = edge[id_key]
+                if value in known_ids:
+                    continue
+                resolved = entity_ids.get(_context_node_id(domain, {"canonical_name": value}))
+                if resolved is not None:
+                    edge[id_key] = resolved
+        dropped_edges: list[dict[str, Any]] = []
+        for edge in edges:
+            if edge["from_id"] in known_ids and edge["to_id"] in known_ids:
+                continue
+            # Решение владельца от 2026-10-02: конец вне идентификаторов - это факт
+            # (ADR-037), а не гибель документа. Раньше здесь был `raise`, и одна
+            # непереведённая связь валила весь документ на COMMIT.
+            missing = [
+                side
+                for side, value in (("from_id", edge["from_id"]), ("to_id", edge["to_id"]))
+                if value not in known_ids
+            ]
+            dropped_edges.append(
+                {
+                    "endpoint_name": str(edge[missing[0]]),
+                    "endpoint_key": _identity_key(str(edge[missing[0]])),
+                    "relation_kind": str(edge.get("kind") or edge["type"]),
+                    "other_endpoint_name": str(
+                        edge["to_name"] if missing[0] == "from_id" else edge["from_name"]
+                    ),
+                    "stage": "COMMIT",
+                }
+            )
+        if dropped_edges:
+            edges = [
+                edge
+                for edge in edges
+                if edge["from_id"] in known_ids and edge["to_id"] in known_ids
+            ]
+            # Счётчик не теряется: молчание здесь стоило недели работы. Пустой граф даёт
+            # `necessity = 0`, который читается как «граф не нужен», а не как «связи не
+            # записались». Поэтому потеря попадает и в лог, и в счётчик разрешимости.
+            ctx.unresolved_endpoints.extend(dropped_edges)
+            skipped_unresolved += len(dropped_edges)
+            _log.error(
+                "COMMIT: связи с концом вне идентификаторов не записаны: %d, источник=%s, "
+                "концы=%s",
+                len(dropped_edges),
+                source_url,
+                [item["endpoint_name"] for item in dropped_edges],
+            )
         if skipped_unresolved:
             # Видно на логе, а не только в таблице: «связь не записана» и «связи не было»
             # — разные утверждения, и второе неверно.
-            _log.info(
-                "связи с неразрешённым концом не записаны в граф: %d, источник=%s",
+            #
+            # Уровень ERROR и сами концы — решение владельца от 2026-10-02. INFO с одним
+            # счётчиком прятал потерю: в прогоне `docs/api_reference.md` молча не записалось
+            # 29 связей из 32, и в отчёте это выглядело как успех. Молчание здесь опаснее
+            # всего: пустой граф даёт `necessity = 0`, который читается как «граф не нужен».
+            _log.error(
+                "связи с неразрешённым концом не записаны в граф: %d, источник=%s, концы=%s",
                 skipped_unresolved,
                 source_url,
+                [fact.get("endpoint_name") for fact in ctx.unresolved_endpoints],
             )
 
         vectors: list[dict[str, Any]] = []
@@ -2237,21 +2320,45 @@ def _soft_delete_source_locked(
 
 
 class Analyzer:
-    """Оркестратор последовательного прогона этапов."""
-
-    def __init__(self, stages: list[Stage]) -> None:
+    """Полный конвейер джобы: стадии по `STAGES`."""
+    def __init__(self, stages: list[Stage], profile_fetcher: ProfileFetcher | None = None) -> None:
         self._stages = {s.name: s for s in stages}
+        # Профиль - свойство прогона, а не сборки стадий. Его грузили три стадии
+        # (CHUNK, EXTRACT, COMMIT), и каждая держала собственный фетчер, а
+        # `_load_profile` выходил по `ctx.profile_loaded`, то есть авторитетом
+        # становился **кто позвал первым**. Связка в `app.py` была правильной - один
+        # `profile_loader.load` на все три, - но свойство держалось на ней, а не на коде:
+        # стадия без фетчера замораживала `profile={}`, и LLM-экстракция молча
+        # выключалась с `cause=None`. Теперь грузит Analyzer, один раз, до стадий.
+        self._profile_fetcher = profile_fetcher
 
     def run(self, ctx: PipelineContext) -> None:
         for name in STAGES:
+            self._prepare_stage(name, ctx)
             self._stages[name].run(ctx)
             if name == "INGEST" and self.try_noop(ctx):
                 return
 
     def run_one(self, name: str, ctx: PipelineContext) -> None:
+        # Тот же профиль, что и в `run`: `Executor` идёт по стадиям через `run_one`, и
+        # грузил его только `run` - путь сервиса остался бы без профиля при полностью
+        # правильной сборке. Инициализация общая, иначе это свойство держится на том,
+        # какой из двух путей позвали.
+        self._prepare_stage(name, ctx)
         if ctx.noop and name not in {"INGEST", "COMMIT"}:
             return
         self._stages[name].run(ctx)
+
+    def _prepare_stage(self, name: str, ctx: PipelineContext) -> None:
+        """Грузит профиль перед первой стадией, которая его читает.
+
+        Не раньше и не при любой стадии: `INGEST` профиль не читает, а джоба, оказавшаяся
+        noop, не читает его вообще. Из-за безусловной загрузки на каждой стадии повторная
+        джоба на тот же `source_url` грузила профиль второй раз, и проверка «профиль
+        грузится раз на джобу» стала зависеть от порядка стадий, а не от решения.
+        """
+        if name in _PROFILE_CONSUMER_STAGES and not ctx.noop:
+            _load_profile(ctx, self._profile_fetcher)
 
     def try_noop(self, ctx: PipelineContext) -> bool:
         commit_stage = self._stages.get("COMMIT")

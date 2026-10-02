@@ -152,10 +152,12 @@ def build_analyzer(
     projection_state_store: ProjectionStateStore | None = None,
 ) -> Analyzer:
     readers = {doc_type: readers_factory(doc_type) for doc_type in sorted(ALLOWED_DOC_TYPES)}
+    # Фетчер профиля - один, у Analyzer. Стадии его больше не получают: профиль
+    # замораживается на прогон джобы, а не тем, кто из стадий позвал первым.
     return Analyzer(
         [
             IngestStage(readers),
-            ChunkStage(chunker, profile_fetcher=profile_fetcher),
+            ChunkStage(chunker),
             EmbedStage(embedder or build_embedder()),
             ExtractStage(
                 llm=llm if llm is not None else build_llm(
@@ -164,7 +166,6 @@ def build_analyzer(
             # без метки записи обмена не отличить от вызовов генерации в query-service.
             exchange_stage="extract",
         ),
-                profile_fetcher=profile_fetcher,
                 optional_failure=True,
             ),
             NormalizeStage(glossary_url),
@@ -175,11 +176,11 @@ def build_analyzer(
                 registry,
                 graph_store=graph_store,
                 vector_store=vector_store,
-                profile_fetcher=profile_fetcher,
                 graph_optional=True,
                 projection_state_store=projection_state_store,
             ),
-        ]
+        ],
+        profile_fetcher=profile_fetcher,
     )
 
 
