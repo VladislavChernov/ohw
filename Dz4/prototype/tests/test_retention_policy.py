@@ -135,6 +135,50 @@ def test_cleanup_records_fact_in_registry(tmp_path: Path) -> None:
     assert fact["mode"] == "current_only"
 
 
+def test_cleanup_reports_removed_nodes_separately_from_relations(tmp_path: Path) -> None:
+    """Удалённый узел обязан быть посчитан узлом, а не связью (ADR-047).
+
+    **Что было.** `delete_orphans` возвращал сумму рёбер и узлов, сумма попадала в
+    `removed_relations`, а `removed_nodes` проставлялся нулём. Измерение на живом графе с
+    посеянными сиротами: удалено 2 связи и 1 узел, отчёт показывал
+    `removed_relations=3`, `removed_nodes=0`. Поле называло узлы и всегда молчало.
+
+    Контракт сформулирован положительно — «удалённое посчитано тем, чем удалено» — а не
+    перечислением полей, поэтому добавление третьего вида удаления его не сломает.
+    """
+    graph = InMemoryGraphStore()
+    graph.upsert_edges([_edge("e-1", [], [])])
+    graph.upsert_nodes(
+        [
+            {
+                "node_id": "tag:it:осиротевший",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "domain": "it",
+                    "chunk_ids": [],
+                    "source_ids": ["src://a.md"],
+                },
+            }
+        ]
+    )
+    registry = JobStore(tmp_path / "jobs.db")
+    registry.create("job-1", source_url="docs://a.md", domain="it", doc_type="md")
+
+    fact = run_orphan_cleanup(graph, registry, job_id="job-1", domain="it")
+
+    assert fact["skipped"] is False
+    assert fact["planned_nodes"] == 1
+    assert fact["removed_nodes"] == 1
+    assert fact["removed_relations"] == 1
+    # Числа обязаны сходиться с реальностью: удалённое перечислено тем, чем удалено.
+    assert graph.get_node("tag:it:осиротевший") is None
+    assert not graph.verify_edge("e-1", "t-1", "REL")
+
+    recorded = registry.orphan_cleanup("job-1")
+    assert recorded is not None
+    assert recorded["removed_nodes"] == 1, "факт в реестре повторяет молчание отчёта"
+
+
 def test_cleanup_keeps_planned_and_removed_separate(tmp_path: Path) -> None:
     """Расхождение подсчёта и удаления — сигнал о гонке, и его нельзя терять.
 
@@ -419,7 +463,10 @@ def test_manual_link_is_supported_while_its_document_is_alive(tmp_path: Path) ->
     analyzer.run(ctx)
 
     assert graph.verify_edge("tag:it:требование", "tag:it:контракт", "RELATED")
-    assert graph.delete_orphans("it", dry_run=False) == 0, "опора связи потеряна, уборка съела живое"
+    # ADR-047: счётчики раздельные, поэтому сравниваем пару, а не число.
+    assert graph.delete_orphans("it", dry_run=False) == (0, 0), (
+        "опора связи потеряна, уборка съела живое"
+    )
     assert graph.verify_edge("tag:it:требование", "tag:it:контракт", "RELATED")
 
 
@@ -474,6 +521,8 @@ def test_manual_link_dies_with_the_version_that_asserted_it(tmp_path: Path) -> N
         )
     )
 
-    removed = graph.delete_orphans("it", dry_run=False)
-    assert removed >= 1, "связь, которую сняли вместе с версией документа, осталась в графе"
+    removed_edges, removed_nodes = graph.delete_orphans("it", dry_run=False)
+    assert removed_edges + removed_nodes >= 1, (
+        "связь, которую сняли вместе с версией документа, осталась в графе"
+    )
     assert not graph.verify_edge("tag:it:требование", "tag:it:контракт", "RELATED")

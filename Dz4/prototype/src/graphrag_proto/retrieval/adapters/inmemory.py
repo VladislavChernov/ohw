@@ -350,7 +350,7 @@ class InMemoryGraphStore(GraphStoreProvider):
             {"domain": domain, "source_url": source_url, "chunk_ids": list(chunk_ids)},
         )
 
-    def delete_orphans(self, domain: str, *, dry_run: bool) -> int:
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> tuple[int, int]:
         """Осиротевшие доменные связи и узлы (ADR-014, `docs/02` §4.5).
 
         Три правила зафиксированы до кода и здесь соблюдаются буквально:
@@ -387,7 +387,9 @@ class InMemoryGraphStore(GraphStoreProvider):
             )
         ]
 
-        planned = len(orphan_edges) + len(orphan_nodes)
+        # ADR-047: счётчики раздельные. Сумма попадала в поле связей, и удалённые узлы
+        # отчётом назывались связями.
+        planned = (len(orphan_edges), len(orphan_nodes))
         if dry_run:
             return planned
 

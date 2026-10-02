@@ -163,7 +163,7 @@ class Neo4jGraphStore(GraphStoreProvider):
             ).data()
         return [str(row["chunk_id"]) for row in rows]
 
-    def delete_orphans(self, domain: str, *, dry_run: bool) -> int:
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> tuple[int, int]:
         """Осиротевшие доменные связи и узлы (ADR-014, `docs/02` §4.5).
 
         Реализация обязана соблюдать три правила из контракта в `base.py`, иначе ошибка
@@ -199,7 +199,7 @@ class Neo4jGraphStore(GraphStoreProvider):
             edge_count = int(session.run(orphan_edges_cypher, parameters=values).single()["c"])
             node_count = int(session.run(orphan_nodes_cypher, parameters=values).single()["c"])
         if dry_run:
-            return edge_count + node_count
+            return (edge_count, node_count)
 
         # Удаление в одной транзакции: полуснятая осиротевшая связь — это и есть тот самый
         # «правдоподобный ноль», которого мы избегаем.
@@ -221,7 +221,9 @@ class Neo4jGraphStore(GraphStoreProvider):
                 parameters=values,
             ).consume()
             del tx
-        return edge_count + node_count
+        # ADR-047: раздельные счётчики. Сумма попадала в поле связей, из-за чего
+        # удалённые узлы отчётом назывались связями.
+        return (edge_count, node_count)
 
     def ensure_schema(self, node_types: list[dict[str, Any]]) -> None:
         """Schema-провижининг (стадия 1, design.md §0): `CREATE CONSTRAINT ... IS
@@ -452,7 +454,7 @@ class _TxGraph(GraphStoreProvider):
             {"domain": domain, "source_url": source_url, "chunk_ids": list(chunk_ids)},
         )
 
-    def delete_orphans(self, domain: str, *, dry_run: bool) -> int:
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> tuple[int, int]:
         """В буфере отложено не может быть: подсчёт обязан увидеть состояние на момент вызова.
 
         Попытка забуферизовать удаление дала бы «правдоподобный ноль» в отчёте: буфер
@@ -461,9 +463,10 @@ class _TxGraph(GraphStoreProvider):
         **факт удаления**, а не команда.
         """
         del dry_run
-        removed = self._outer.delete_orphans(domain, dry_run=False)
-        self._buffered("orphans_removed", removed)
-        return removed
+        removed_edges, removed_nodes = self._outer.delete_orphans(domain, dry_run=False)
+        # ADR-047: в буфер идёт пара, а не сумма. Сумма в отчёте читалась как «связи».
+        self._buffered("orphans_removed", (removed_edges, removed_nodes))
+        return (removed_edges, removed_nodes)
 
     def query(self, cypher: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         raise NotImplementedError("чтение в транзакции записи не поддерживается")

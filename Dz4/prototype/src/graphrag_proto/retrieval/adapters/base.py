@@ -184,7 +184,7 @@ class AtomicBatch(Protocol):
         source_url: str,
         chunk_ids: list[str],
     ) -> None: ...
-    def delete_orphans(self, domain: str, *, dry_run: bool) -> int: ...
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> tuple[int, int]: ...
 
 
 class Embedder(ABC):
@@ -273,7 +273,7 @@ class GraphStoreProvider(ABC):
         """Убрать soft-deleted source/chunk provenance из доменных узлов."""
         return
 
-    def delete_orphans(self, domain: str, *, dry_run: bool) -> int:
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> tuple[int, int]:
         """Удалить осиротевшие доменные связи и узлы домена (ADR-014, `docs/02` §4.5).
 
         Осиротевшим считается то, у чего **нет ни одного поддерживающего `chunk_id`**.
@@ -292,7 +292,10 @@ class GraphStoreProvider(ABC):
           до удаления обязателен: цена ошибки предиката — молчаливая потеря данных в графе,
           которую не откатит ни одна транзакция.
 
-        Возвращает число удалённых связей плюс узлов.
+        **Возвращает пару `(связи, узлы)`, а не сумму (ADR-047).** Сумма была причиной
+        расхождения между подписью и значением: удалённые узлы попадали в счётчик связей,
+        а счётчик узлов оставался нулём. Измерение на посеянных сиротах: удалено 2 связи и
+        1 узел, отчёт показывал `removed_relations=3`, `removed_nodes=0`.
         """
         raise NotImplementedError
 

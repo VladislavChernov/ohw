@@ -366,17 +366,17 @@ def _render_maintenance(client: DemoClient, domains: list[str]) -> None:
                     "ничего не удалено. Это не «удалять нечего» — это «не разрешено»."
                 )
             else:
-                planned = response.get("planned_relations")
-                removed = response.get("removed_relations")
+                planned_r = response.get("planned_relations")
+                removed_r = response.get("removed_relations")
+                planned_n = response.get("planned_nodes")
+                removed_n = response.get("removed_nodes")
                 st.write(
-                    f"Запланировано к удалению: **{planned}**. Удалено по подсчёту маршрута: "
-                    f"**{removed}**."
+                    f"Связи: запланировано **{planned_r}**, удалено **{removed_r}**. "
+                    f"Узлы: запланировано **{planned_n}**, удалено **{removed_n}**."
                 )
             st.caption(
-                "Число `removed_nodes` маршрут всегда отдаёт как 0, а удалённые узлы входят в "
-                "`removed_relations`: `delete_orphans` возвращает сумму рёбер и узлей "
-                "(`retention_policy.py:135`). Поэтому здесь узлы и связи **не разделены** — "
-                "дефект отчётности, зафиксирован в ADR-047."
+                "До ADR-047 узлы попадали в счётчик связей, а счётчик узлов всегда был нулём. "
+                "Теперь счётчики раздельные (ADR-047)."
             )
 
 

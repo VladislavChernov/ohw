@@ -726,9 +726,9 @@ def test_orphan_cleanup_keeps_edge_supported_by_other_document(tmp_path: Path) -
     store = InMemoryGraphStore()
     store.upsert_edges([_edge("it", ["chunk-b1", "chunk-b2"], ["docs://b.md", "docs://a-old.md"])])
 
-    removed = store.delete_orphans("it", dry_run=False)
+    removed_edges, removed_nodes = store.delete_orphans("it", dry_run=False)
 
-    assert removed == 0
+    assert (removed_edges, removed_nodes) == (0, 0)
     assert store.verify_edge("e-1", "e-2", "REL")
 
 
@@ -737,9 +737,9 @@ def test_orphan_cleanup_deletes_edge_with_no_supporting_chunk(tmp_path: Path) ->
     store = InMemoryGraphStore()
     store.upsert_edges([_edge("it", [], [])])
 
-    removed = store.delete_orphans("it", dry_run=False)
+    removed_edges, removed_nodes = store.delete_orphans("it", dry_run=False)
 
-    assert removed == 1
+    assert (removed_edges, removed_nodes) == (1, 0)
     assert not store.verify_edge("e-1", "e-2", "REL")
 
 
@@ -787,9 +787,9 @@ def test_orphan_cleanup_respects_domain_boundary(tmp_path: Path) -> None:
     store = InMemoryGraphStore()
     store.upsert_edges([_edge("legal", [], [])])
 
-    removed = store.delete_orphans("it", dry_run=False)
+    removed_edges, removed_nodes = store.delete_orphans("it", dry_run=False)
 
-    assert removed == 0
+    assert (removed_edges, removed_nodes) == (0, 0)
     assert store.verify_edge("e-1", "e-2", "REL")
 
 
@@ -818,9 +818,9 @@ def test_orphan_cleanup_dry_run_counts_and_deletes_nothing(tmp_path: Path) -> No
         ]
     )
 
-    planned = store.delete_orphans("it", dry_run=True)
+    planned_edges, planned_nodes = store.delete_orphans("it", dry_run=True)
 
-    assert planned == 1
+    assert (planned_edges, planned_nodes) == (1, 0)
     assert store.verify_edge("e-1", "e-2", "REL")
     assert store.verify_edge("e-3", "e-4", "REL")
 
@@ -864,8 +864,8 @@ def test_orphan_cleanup_is_idempotent(tmp_path: Path) -> None:
     first = store.delete_orphans("it", dry_run=False)
     second = store.delete_orphans("it", dry_run=False)
 
-    assert first == 1
-    assert second == 0
+    assert first == (1, 0)
+    assert second == (0, 0)
 
 
 def test_orphan_cleanup_uses_chunk_ids_not_source_ids(tmp_path: Path) -> None:
@@ -877,9 +877,9 @@ def test_orphan_cleanup_uses_chunk_ids_not_source_ids(tmp_path: Path) -> None:
     store = InMemoryGraphStore()
     store.upsert_edges([_edge("it", [], ["docs://a.md"])])
 
-    removed = store.delete_orphans("it", dry_run=False)
+    removed_edges, removed_nodes = store.delete_orphans("it", dry_run=False)
 
-    assert removed == 1
+    assert (removed_edges, removed_nodes) == (1, 0)
     assert not store.verify_edge("e-1", "e-2", "REL")
 
 

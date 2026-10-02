@@ -131,22 +131,25 @@ def run_orphan_cleanup(
             "removed_nodes": 0,
         }
 
-    planned = int(graph_store.delete_orphans(domain, dry_run=True))
-    removed = int(graph_store.delete_orphans(domain, dry_run=False))
+    # ADR-047: счётчики раздельные с обеих сторон. Раньше `delete_orphans` возвращал сумму,
+    # сумма попадала в `removed_relations`, а `removed_nodes` проставлялся нулём: измерение на
+    # посеянных сиротах давало «удалено 3 связи, 0 узлов» при фактических 2 связях и 1 узле.
+    planned_edges, planned_nodes = graph_store.delete_orphans(domain, dry_run=True)
+    removed_edges, removed_nodes = graph_store.delete_orphans(domain, dry_run=False)
     fact = {
         "mode": active.mode,
         "skipped": False,
-        "planned_relations": planned,
-        "removed_relations": removed,
-        "planned_nodes": 0,
-        "removed_nodes": 0,
+        "planned_relations": planned_edges,
+        "removed_relations": removed_edges,
+        "planned_nodes": planned_nodes,
+        "removed_nodes": removed_nodes,
     }
     if fact_store is not None:
         fact_store.record_orphan_cleanup(
             job_id,
             domain,
-            planned_relations=planned,
-            removed_relations=removed,
+            planned_relations=fact["planned_relations"],
+            removed_relations=fact["removed_relations"],
             planned_nodes=fact["planned_nodes"],
             removed_nodes=fact["removed_nodes"],
             mode=active.mode,

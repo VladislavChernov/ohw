@@ -153,9 +153,9 @@ class DemoClient:
         **Форма ответа читается по коду, а не по имени:** `run_orphan_cleanup`
         возвращает `mode`, `skipped`, `planned_relations`, `removed_relations`,
         `planned_nodes`, `removed_nodes`, а маршрут добавляет `job_id` и `domain`.
-        `removed_nodes` при этом всегда 0, а удалённые узлы входят в
-        `removed_relations` — дефект отчётности, ADR-047. Поля `skipped` и
-        `removed_relations` обязательны для показа: без них «готово» неотличимо от
+        Счётчики раздельные с ADR-047; до него узлы попадали в `removed_relations`, а
+        `removed_nodes` всегда был нулём. Поля `skipped`, `removed_relations` и
+        `removed_nodes` обязательны для показа: без них «готово» неотличимо от
         «не разрешено» и «удалять нечего».
         """
         response = requests.post(
