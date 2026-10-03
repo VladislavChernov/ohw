@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import sys
 import time
 import urllib.error
@@ -15,10 +16,15 @@ import urllib.request
 
 BASE = os.environ.get("INGEST_URL", "http://localhost:8002")
 KEY = os.environ["GRAPH_AUTH_API_KEY"]
+#: Файлы корпуса берём от корня репозитория, а не от текущего каталога: прибор запускали из
+#: `docs/`, и он падал с FileNotFoundError, хотя все три файла лежат в репозитории.
+#: Пути в `DOCS` — от корня репозитория (`docs/...`), а сам файл лежит в `prototype/infra/eval/`,
+#: поэтому подниматься нужно на три уровня, а не на два.
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 DOCS = [
-    ("docs/api_reference.md", "api_reference.md"),
-    ("docs/prototype_requirements.md", "prototype_requirements.md"),
-    ("docs/expert_reviews.md", "expert_reviews.md"),
+    "docs/api_reference.md",
+    "docs/prototype_requirements.md",
+    "docs/expert_reviews.md",
 ]
 DOMAIN = "it"
 
@@ -38,15 +44,15 @@ def call(method: str, path: str, payload: dict | None = None) -> tuple[int, dict
         return exc.code, json.loads(exc.read() or b"{}")
 
 
-def submit(name: str, filename: str) -> str | None:
+def submit(name: str) -> str | None:
     """Отправляет документ, повторяя при 429: `INGEST_MAX_CONCURRENT` по умолчанию 2,
     и корпус из трёх документов в него не помещается. Отказ по лимиту — не ошибка загрузки."""
-    with open(filename, encoding="utf-8") as handle:
+    with (REPO_ROOT / name).open(encoding="utf-8") as handle:
         content = handle.read()
     payload = {
         "source_url": name,
         "domain": DOMAIN,
-        "doc_type": filename.rsplit(".", 1)[-1],
+        "doc_type": name.rsplit(".", 1)[-1],
         "content": content,
     }
     for attempt in range(60):
@@ -64,8 +70,8 @@ def submit(name: str, filename: str) -> str | None:
 
 def main() -> int:
     jobs: dict[str, str] = {}
-    for name, filename in DOCS:
-        job_id = submit(name, filename)
+    for name in DOCS:
+        job_id = submit(name)
         if job_id is None:
             return 1
         jobs[job_id] = name
@@ -88,8 +94,15 @@ def main() -> int:
         print(f"FAIL не дождались: {sorted(pending.values())}")
         return 1
 
-    status, body = call("GET", "/api/v1/revision")
+    # Ревизия читается по боевому маршруту. Прежний путь `/api/v1/revision` не существует:
+    # прибор получал 404, печатал его и всё равно возвращал 0 — проверка внутри прибора была
+    # мёртвой, а прогон выглядел успешным. Проверка, которая не может провалиться, хуже её
+    # отсутствия: она сообщает «всё хорошо» о том, чего не спрашивала.
+    status, body = call("GET", f"/api/v1/ingestion/revision?domain={DOMAIN}")
     print(f"  /revision: {status} {body}")
+    if status != 200 or "revision" not in body:
+        print(f"FAIL ревизия домена {DOMAIN} не прочитана: {status} {body}")
+        return 1
     return 0
 
 
