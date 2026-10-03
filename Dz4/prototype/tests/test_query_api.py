@@ -4,10 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+import requests
 from fastapi.testclient import TestClient
 
+from graphrag_proto.query_service import revision_client
 from graphrag_proto.query_service.app import create_app
 from graphrag_proto.query_service.models import Task
+from graphrag_proto.query_service.revision_client import RevisionClient
 from graphrag_proto.query_service.store import STATUS_CANCELLED, STATUS_QUEUED, TaskStore
 from graphrag_proto.query_service.task_queue import InMemoryTaskQueue
 from graphrag_proto.query_service.worker import QueryWorker
@@ -215,6 +219,62 @@ class _StubRevisions:
 
     def known_revisions(self) -> dict[str, str | None]:
         return dict(self._known)
+
+
+def test_worker_survives_unreachable_ingestion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Недоступный ingestion не роняет обработку: fail-open проверяется на реальном клиенте.
+
+    Все прочие тесты воркера подставляют `_StubRevisions` с фиксированным ответом, то есть
+    ни один не проходит путь «transport упал». А это и есть граница гарантии из design.md
+    («fail-open ровно как TopologyClient»): если бы `_fetch` перестал ловить
+    `requests.RequestException`, задача начала бы падать в `pipeline_error`, и заметить это
+    можно было бы только на стенде с убитым ingestion.
+
+    Дубль здесь не нужен и был бы вреден: дубль повторил бы поведение клиента, а не
+    гарантию. Поэтому поднимается настоящий `RevisionClient` с транспортом, который всегда
+    отказывает, и проверяется весь путь от `requests.get` до `done` воркера.
+    """
+    queue = InMemoryTaskQueue()
+    store = TaskStore(tmp_path / "unreachable.sqlite")
+    seen: dict[str, str | None] = {}
+
+    def _refuse(*args: object, **kwargs: object):
+        raise requests.ConnectionError("ingestion недоступен")
+
+    monkeypatch.setattr(revision_client.requests, "get", _refuse)
+
+    class CapturingPipeline:
+        def active_domain(self) -> str:
+            return "it"
+
+        def run(
+            self,
+            query: str,
+            domain: str | None,
+            emit,
+            revision: str | None = None,
+            max_depth: int | None = None,
+        ):
+            seen["revision"] = revision
+            return {"text": "ok", "revision": revision}
+
+    client = RevisionClient("http://ingestion-api:8002", poll_interval_s=5.0)
+    store.create("q_down", "it", "вопрос")
+    queue.submit(Task(task_id="q_down", domain="it", query="вопрос"))
+    worker = QueryWorker(
+        queue=queue,
+        store=store,
+        pipeline=CapturingPipeline(),  # type: ignore[arg-type]
+        revisions=client,
+    )
+    assert worker.process_one() is True
+    assert store.get("q_down")["status"] == "succeeded"
+    assert seen == {"revision": None}
+    # Сбой не молчит: счётчик поллера обязан вырасти, иначе деградация невидима оператору.
+    assert client.revision_poll_errors_total == 1
+    assert client.known_revisions() == {}
 
 
 def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
