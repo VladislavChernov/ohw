@@ -26,11 +26,6 @@ def _seed(graph: InMemoryGraphStore) -> None:
     graph.upsert_nodes(
         [
             {
-                "node_id": "src:it:src://a.txt",
-                "labels": ["Source"],
-                "properties": {"source_url": "src://a.txt", "domain": "it"},
-            },
-            {
                 "node_id": "chk:abc",
                 "labels": ["Chunk"],
                 "properties": {
@@ -74,12 +69,6 @@ def _seed(graph: InMemoryGraphStore) -> None:
     )
     graph.upsert_edges(
         [
-            {
-                "from_id": "src:it:src://a.txt",
-                "to_id": "chk:abc",
-                "type": "CONTAINS",
-                "properties": {},
-            },
             {
                 "from_id": "tag:it:database",
                 "to_id": "tag:it:storage",
@@ -524,11 +513,13 @@ def test_delete_context_node_removes_incident_links() -> None:
     assert store.delete_node("tag:it:storage") is False
 
 
-def test_list_chunk_ids_of_source_returns_contains() -> None:
+def test_list_chunk_ids_of_source_selects_chunks_by_owner() -> None:
+    """ADR-046 п. 9: перечисление идёт по полю владельца на чанке, а не по связи CONTAINS."""
     store = InMemoryGraphStore()
     _seed(store)
 
-    assert store.list_chunk_ids_of_source("src:it:src://a.txt") == ["chk:abc"]
+    assert store.list_chunk_ids_of_source("src://a.txt", "it") == ["chk:abc"]
+    assert store.list_chunk_ids_of_source("src://missing.txt", "it") == []
 
 
 def test_remove_source_clears_context_node_provenance() -> None:

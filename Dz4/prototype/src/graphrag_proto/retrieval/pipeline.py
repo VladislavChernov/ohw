@@ -25,6 +25,7 @@ import os
 import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -36,9 +37,9 @@ from graphrag_proto.ingestion_service.projection import (
     ProjectionMetrics,
     ProjectionState,
     ProjectionStateStore,
-    projection_revision_for,
 )
 from graphrag_proto.retrieval.adapters.base import (
+    OWNERLESS_SOURCE,
     Embedder,
     GraphStoreProvider,
     LLMInference,
@@ -224,6 +225,106 @@ def _skeleton_source_urls(row: dict[str, Any]) -> list[str]:
     return urls
 
 
+@dataclass(frozen=True)
+class ProjectionReadiness:
+    """Пораздельная готовность домена (ADR-046 п. 3 и п. 6).
+
+    **Каждое поле — `int | None`, и `None` значит «не измерено», а не «ноль».** Разница между
+    «расхождений нет» и «измерять было нечем» — ровно та ошибка, из-за которой проект уже
+    получал `necessity = 0` вместо результата: уверенный ноль там, где данных нет.
+
+    `sources_active` здесь **нет намеренно**: активные источники знает реестр, а query-контур
+    реестра не видит — он получает только ревизии, опубликованные ингестом. Называть это
+    «активными источниками» было бы подменой единицы; см. ADR-046 п. 6.
+    """
+
+    sources_tracked: int
+    sources_without_graph: int | None
+    revision_mismatches: int | None
+    chunks_without_owner: int | None
+    chunks_total: int | None
+    reason: str
+
+    @property
+    def ready(self) -> bool:
+        return (
+            self.sources_tracked > 0
+            and self.sources_without_graph == 0
+            and self.revision_mismatches == 0
+            and self.chunks_without_owner == 0
+        )
+
+
+def evaluate_projection_readiness(
+    expected: dict[str, str],
+    observed: dict[str, dict[str, int]] | None,
+) -> ProjectionReadiness:
+    """Считает готовность пораздельно: журнал заявленных ревизий против ревизий в графе.
+
+    `observed is None` — адаптер не умеет отдавать данные, и это `unknown`, а не «всё хорошо».
+    """
+    if observed is None:
+        return ProjectionReadiness(
+            sources_tracked=len(expected),
+            sources_without_graph=None,
+            revision_mismatches=None,
+            chunks_without_owner=None,
+            chunks_total=None,
+            reason="projection_not_measurable",
+        )
+    chunks_total = sum(sum(revisions.values()) for revisions in observed.values())
+    if not expected:
+        return ProjectionReadiness(
+            sources_tracked=0,
+            sources_without_graph=None,
+            revision_mismatches=None,
+            chunks_without_owner=chunks_total if chunks_total else None,
+            chunks_total=chunks_total,
+            reason="no_tracked_sources",
+        )
+    mismatches = 0
+    for owner, revisions in observed.items():
+        want = expected.get(owner)
+        if want is None:
+            # Источник не опубликован ингестом: это «нет заявленной ревизии», а не «ревизия
+            # не та», и дефект другой. Считается в `chunks_without_owner`, иначе один и тот
+            # же чанк попал бы в два счётчика и сумма перестала бы что-то значить.
+            continue
+        mismatches += sum(count for revision, count in revisions.items() if revision != want)
+    without_owner = sum(
+        sum(revisions.values())
+        for owner, revisions in observed.items()
+        if owner == OWNERLESS_SOURCE or owner not in expected
+    )
+    without_graph = sum(1 for owner in expected if owner not in observed)
+    return ProjectionReadiness(
+        sources_tracked=len(expected),
+        sources_without_graph=without_graph,
+        revision_mismatches=mismatches,
+        chunks_without_owner=without_owner,
+        chunks_total=chunks_total,
+        reason="checked",
+    )
+
+
+def _counters_payload(readiness: ProjectionReadiness | None) -> dict[str, Any] | None:
+    """Счётчики готовности в отчёт прогона (ADR-046 п. 6: «в состояние и в отчёт»).
+
+    `None` превращается в `null`, а не в `0`: в JSON отчёта «не измерено» и «ноль»
+    обязаны различаться, иначе агрегатор отчётов сложит их вместе.
+    """
+    if readiness is None:
+        return None
+    return {
+        "sources_tracked": readiness.sources_tracked,
+        "sources_without_graph": readiness.sources_without_graph,
+        "revision_mismatches": readiness.revision_mismatches,
+        "chunks_without_owner": readiness.chunks_without_owner,
+        "chunks_total": readiness.chunks_total,
+        "reason": readiness.reason,
+    }
+
+
 class QueryPipeline:
     def __init__(
         self,
@@ -384,6 +485,7 @@ class QueryPipeline:
         projection_status = "not_requested" if not graph_requested else "not_tracked"
         projection_revision: str | None = None
         projection_state: ProjectionState | None = None
+        projection_counters: ProjectionReadiness | None = None
         if graph_requested and self._projection_state_store is None and self._projection_state_required:
             enabled = False
             graph_degraded = True
@@ -405,39 +507,44 @@ class QueryPipeline:
                     enabled = False
                     graph_degraded = True
                     projection_status = "revision_unknown"
-                elif projection_state.data_revision != revision:
-                    enabled = False
-                    graph_degraded = True
-                    projection_status = "stale"
                 elif projection_state.config_fingerprint != config_fingerprint:
                     enabled = False
                     graph_degraded = True
                     projection_status = "config_mismatch"
-                elif projection_state.projection_revision != projection_revision_for(
-                    revision,
-                    config_fingerprint,
-                ):
-                    enabled = False
-                    graph_degraded = True
-                    projection_status = "projection_revision_mismatch"
                 elif not projection_state.is_ready(revision, config_fingerprint):
                     enabled = False
                     graph_degraded = True
                     projection_status = projection_state.status
+                elif self._graph_store is None:
+                    enabled = False
+                    graph_degraded = True
+                    projection_status = "adapter_missing"
                 else:
+                    # ADR-046 п. 3 и п. 8: доменная ревизия больше не решает готовность —
+                    # она не может ответить на вопрос «изменились ли данные этого источника».
+                    # Проверка идёт пораздельная: журнал опубликованных ревизий против
+                    # ревизий, которые несут чанки, и всё это за один проход по графу.
                     try:
-                        vector_projection_valid = self._vector_store.verify_projection(
-                            active,
-                            projection_state.projection_revision,
-                        )
+                        expected = self._projection_state_store.source_revisions(active)
+                        observed = self._graph_store.chunk_revisions_by_source(active)
                     except Exception:  # noqa: BLE001
-                        vector_projection_valid = False
-                        projection_status = "projection_verification_error"
-                    if not vector_projection_valid:
+                        expected, observed = {}, None
+                    readiness = evaluate_projection_readiness(expected, observed)
+                    projection_counters = readiness
+                    if not readiness.ready:
                         enabled = False
                         graph_degraded = True
-                        if projection_status != "projection_verification_error":
-                            projection_status = "projection_metadata_mismatch"
+                        projection_status = (
+                            readiness.reason
+                            if readiness.reason != "checked"
+                            else (
+                                "sources_without_graph"
+                                if readiness.sources_without_graph
+                                else "revision_mismatch"
+                                if readiness.revision_mismatches
+                                else "chunks_without_owner"
+                            )
+                        )
                     else:
                         projection_status = "ready"
                         projection_revision = projection_state.projection_revision
@@ -454,6 +561,18 @@ class QueryPipeline:
                     "projection_revision": (
                         projection_state.projection_revision if projection_state is not None else None
                     ),
+                    # Счётчики идут в трассу даже когда всё хорошо: «нулей нет» и «измерять
+                    # было нечем» выглядят в логе одинаково, если не показать оба.
+                    "projection_counters": _counters_payload(projection_counters),
+                }
+            )
+        elif projection_counters is not None:
+            _trace(
+                {
+                    "stage": "graph_readiness",
+                    "degraded": False,
+                    "status": projection_status,
+                    "projection_counters": _counters_payload(projection_counters),
                 }
             )
         graph_cache_ready = (

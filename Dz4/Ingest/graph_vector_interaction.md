@@ -165,12 +165,8 @@ LIMIT $max_nodes
 Файл: `orchestrator.py:417-472`
 
 ```python
-# Source: всегда
-nodes = [{
-    "node_id": source_id,          # src:{domain}:{source_url}
-    "labels": [SOURCE_LABEL],      # "Source"
-    ...
-}]
+# Source: больше не пишется (ADR-046 п. 9 — якорь удалён как остаток двухуровневой
+# схемы). Владелец чанка выражен полем `source_url` на самом чанке.
 
 # Сущности: ВСЕгда одна метка "Entity"
 for entity in ctx.entities:
@@ -189,11 +185,12 @@ for entity in ctx.entities:
 
 | Узел | Метка | Откуда |
 |---|---|---|
-| Источник | `Source` | CommitStage._write |
+| Источник | — | ноды нет (ADR-046 п. 9) |
 | Сущность | `Entity` | CommitStage._write (все сущности — одна метка) |
 | Чанк | `Chunk` | CommitStage._write |
 
-Рёбра: только `Source -[CONTAINS]-> Chunk`. Между Entity-узлами рёбер нет.
+Рёбра между чанками и источником не пишутся: якорь и `CONTAINS` удалены (ADR-046 п. 9), связь
+заменена полем `Chunk.source_url`. Между Entity-узлами рёбер нет.
 
 ### b) Что обещает Domain Profile (онтология)
 

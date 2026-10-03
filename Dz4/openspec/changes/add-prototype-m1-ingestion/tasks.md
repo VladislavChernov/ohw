@@ -1,5 +1,11 @@
 # Задачи: M1 (add-prototype-m1-ingestion)
 
+> **Часть пунктов снята 2026-10-03 — ADR-046 п. 9.** Оформление ноды-якоря `Source` и ребра
+> `CONTAINS` отменено: сущности удалены из схемы и кода, владелец чанка задан полем
+> `Chunk.source_url`, L2-03 и L2-05 переписаны. Пункты этого бандла, перечислявшие
+> `Source`/`Chunk` anchors или ребро `CONTAINS`, помечены ниже как исторические. Причина
+> и расследование: `Ingest/analitic/manual_tags_and_ingest_open_questions.md` §3.17.
+
 > Toolchain — dev-контейнер `ohw-python:3.13` (Docker) или ВМ.
 > `[x]` — только после зелёной проверки (`uv run pytest/ruff/mypy`).
 

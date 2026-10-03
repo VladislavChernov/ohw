@@ -271,13 +271,14 @@ else:
 | `vector_search` | hit | `chunk_id`, `score`, `embedding`, `metadata` |
 
 MERGE-семантика по `node_id`/`chunk_id` (идемпотентность). Context node использует стабильный
-`tag_id`/`node_id`; `canonical_name` и aliases являются properties. `Source` и `Chunk` —
-технические anchors. `Chunk` получает `MENTIONS` от связанных ContextNode; текст хранится
-только в Chunk/vector. Произвольные properties и edge kinds сохраняются без whitelist.
+`tag_id`/`node_id`; `canonical_name` и aliases являются properties. `Chunk` — единственный
+технический anchor, владелец задаётся полем `source_url` на нём самом (ADR-046 п. 9). `Chunk`
+получает `MENTIONS` от связанных ContextNode; текст хранится только в Chunk/vector. Произвольные
+properties и edge kinds сохраняются без whitelist.
 
 #### 2.6.3. Soft-delete (L2-05)
 
-`GraphStoreProvider.list_chunk_ids_of_source(source_id)` — чанки по ребру CONTAINS; `delete_node(chunk_id)` удаляет узел и инцидентные рёбра (в том числе CONTAINS); `VectorStoreProvider.delete_vectors(chunk_ids)` снимает те же чанки с поиска. Узлы ContextNode и Source при soft-delete **сохраняются**, но `source_ids`/`chunk_ids` удалённого источника очищаются, поэтому его evidence не попадает в graph-контекст. Связи между контекстными узлами при этом не удаляются — снимается только provenance источника, а `upsert_edges` затем объединяет `source_ids` (см. `docs/data_model.md` §2.1). Эмиссии `SIMILAR_TO` по порогу в коде нет: этот вид приходит только из ответа модели.
+`GraphStoreProvider.list_chunk_ids_of_source(source_url, domain)` — чанки документа по полю владельца на самом чанке (ADR-046 п. 9; раньше — по ребру `CONTAINS` от ноды-якоря `Source`). Перечисление обязано идти союзом на обеих осях: ось, чьи записи уже пропали при частичном сбое, не перечислит остаток в другой; `delete_node(chunk_id)` удаляет узел и инцидентные рёбра (в том числе CONTAINS); `VectorStoreProvider.delete_vectors(chunk_ids)` снимает те же чанки с поиска. Узлы ContextNode и Source при soft-delete **сохраняются**, но `source_ids`/`chunk_ids` удалённого источника очищаются, поэтому его evidence не попадает в graph-контекст. Связи между контекстными узлами при этом не удаляются — снимается только provenance источника, а `upsert_edges` затем объединяет `source_ids` (см. `docs/data_model.md` §2.1). Эмиссии `SIMILAR_TO` по порогу в коде нет: этот вид приходит только из ответа модели.
 
 ### 2.7. Projection state и offline backfill
 

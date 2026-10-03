@@ -243,7 +243,7 @@ Dz4/
       hot-reload-preserve в `test_worker_hotreload.py`.
 
 ### Веха 4 — Eval и гейт готовности
-- [x] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (50 вопросов/it, 10/library, 10/cinema)
+- [x] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (74 вопроса/it, 10/library, 10/cinema)
       — валидация через `tests/test_eval_dataset.py`, формат ADR-015 (id, query, golden_sources, golden_facts, category).
 - [x] Метрики Retrieval@K=5 (Recall, Precision, MRR, nDCG), generation (groundedness, coverage,
       hallucination_rate) — `src/graphrag_proto/eval/metrics.py`, 10 unit-тестов (`test_eval_metrics.py`).

@@ -18,7 +18,10 @@ from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedde
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryVectorStore
 from graphrag_proto.retrieval.adapters.llm import FakeLLM
 from graphrag_proto.retrieval.adapters.reranker import NoOpRerankerAdapter
-from graphrag_proto.retrieval.pipeline import QueryPipeline, graph_search_enabled
+from graphrag_proto.retrieval.pipeline import (
+    QueryPipeline,
+    graph_search_enabled,
+)
 from graphrag_proto.retrieval.profile import DomainProfileLoader, ProfileError
 from graphrag_proto.retrieval.semantic_cache import InMemorySemanticCache
 

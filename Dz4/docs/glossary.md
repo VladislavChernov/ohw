@@ -31,7 +31,7 @@ origin: user | ai | system
 
 | Generic kind | Назначение |
 |---|---|
-| `CONTAINS` | Техническая связь Source → Chunk |
+| `Chunk` | платформенный якорь: фрагмент текста, владелец задан полем `source_url` (ADR-046 п. 9) |
 | `MENTIONS` | Техническая связь Chunk → ContextNode |
 | вид из экстракции | Связь ContextNode → ContextNode; набор задаёт промпт профиля, при отсутствии вида подставляется `RELATED` |
 | `PARENT` | Вид, который больше не ищет `expand()`; в production-пути не пишется (встречается только в тестах) |

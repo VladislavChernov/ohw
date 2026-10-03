@@ -32,7 +32,6 @@ from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     ValidateStage,
     _context_node_id,
     _identity_key,
-    _source_node_id,
 )
 from graphrag_proto.ingestion_service.readers.registry import TxtReader
 from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
@@ -927,10 +926,8 @@ def test_primitive_ingest_without_profile_ai_or_optional_enrichment(
         vector_store=vector,
     ).run(ctx)
 
-    source_id = _source_node_id("it", "src://primitive.txt")
-    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    chunk_ids = graph.list_chunk_ids_of_source("src://primitive.txt", "it")
     assert ctx.commit_applied is True
-    assert graph.get_node(source_id) is not None
     assert chunk_ids
     assert all(graph.get_node(chunk_id)["_labels"] == ["Chunk"] for chunk_id in chunk_ids)
     assert all(node["labels"] != ["ContextNode"] for node in graph._nodes.values())
@@ -1135,8 +1132,7 @@ def test_optional_ai_failure_does_not_block_document_persistence(
     assert ctx.commit_applied is True
     assert ctx.enrichment_degraded is True
     assert ctx.enrichment_error
-    assert graph.get_node(_source_node_id("it", "src://d.txt")) is not None
-    assert graph.list_chunk_ids_of_source(_source_node_id("it", "src://d.txt"))
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert vector._vectors
     assert all(node.get("origin") != "ai" for node in graph._nodes.values())
 

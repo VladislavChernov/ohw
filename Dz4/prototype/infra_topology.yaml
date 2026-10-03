@@ -38,8 +38,6 @@ endpoints:
     http: "http://neo4j:7474"
   ollama:
     base: "http://ollama:11434"
-  embeddings:
-    base: "http://embeddings-service:8004"
   valkey:
     base: "redis://valkey:6379"
 

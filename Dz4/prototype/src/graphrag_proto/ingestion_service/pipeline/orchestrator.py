@@ -44,6 +44,7 @@ from graphrag_proto.ingestion_service.projection import (
     ProjectionStateStore,
     projection_revision_for,
     projection_transition_allowed,
+    source_projection_revision,
 )
 from graphrag_proto.retrieval.adapters.base import (
     OWNED_ENTITY_FIELDS as _OWNED_ENTITY_FIELDS,
@@ -71,7 +72,6 @@ SCOPE_USER = "user"
 
 EXTRACTOR_VERSION = "deterministic:v1"
 
-SOURCE_LABEL = "Source"
 CHUNK_LABEL = "Chunk"
 ENTITY_LABEL = "Entity"
 CONTEXT_NODE_LABEL = "ContextNode"
@@ -403,10 +403,6 @@ def _chunk_id(domain: str, source_url: str, index: int) -> str:
     """Стабильный идентификатор чанка (L2-04: оси связаны по chunk_id)."""
     digest = hashlib.sha256(f"{domain}:{source_url}:{index}".encode()).hexdigest()[:12]
     return f"chk:{digest}"
-
-
-def _source_node_id(domain: str, source_url: str) -> str:
-    return f"src:{domain}:{source_url}"
 
 
 def _entity_node_id(domain: str, canonical_name: str) -> str:
@@ -1567,12 +1563,16 @@ class CommitStage(Stage):
                 ctx.registry_result = (current["doc_id"], current["version"], False)
                 ctx.commit_applied = True
                 return
+            # ADR-046, пункт 8: `revision` (отпечаток множества документов) остаётся, но
+            # больше не Currency-меткой проекции — на вопрос «изменились ли данные этого
+            # источника» отпечаток набора ответить не может. Он остаётся атрибуцией
+            # («проекция построена из корпуса X») и по-прежнему отдаётся реестром.
             ctx.metadata["revision"] = self._registry.data_revision_after(doc)
             config_fingerprint = os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
             if self._graph_store is not None:
-                ctx.metadata["projection_revision"] = projection_revision_for(
-                    str(ctx.metadata["revision"]),
-                    config_fingerprint,
+                # Метка актуальности принадлежит источнику, а не домену.
+                ctx.metadata["projection_revision"] = source_projection_revision(
+                    doc.content_hash, config_fingerprint
                 )
             try:
                 self._write(doc, ctx)
@@ -1600,11 +1600,21 @@ class CommitStage(Stage):
         if not data_revision:
             return
         config_fingerprint = os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
+        # ADR-046, пункт 8: у состояния остаётся отпечаток множества — но как атрибуция
+        # («проекция построена из корпуса X»), а не как условие готовности.
         projection_revision = projection_revision_for(data_revision, config_fingerprint)
         status = ctx.graph_projection_status
         active_source_count = self._registry.active_source_count(ctx.domain)
         if status == "committed":
-            state_status = "ready" if active_source_count <= 1 else "pending"
+            # ADR-046, пункт 4: эвристика `active_source_count <= 1` снята. Она вычисляла не
+            # «последняя джоба в пачке», а «в домене ровно один документ», и потому на любом
+            # корпусе из нескольких документов `ready` был недостижим никогда — измерено:
+            # `pending`, `input_source_count=3`, `processed_source_count=1`. Угадывать конец
+            # пачки нечем: пачки в системе нет, а «последней джобы» не отличить от любой.
+            # Теперь коммит публикует `ready`, а решает **проверка**: она пораздельная и видит
+            # расхождения, поэтому несоответствие станет `degraded` с числом, а не вечным
+            # `pending`, который читается как «ещё не догрузили».
+            state_status = "ready"
             processed = 1
             failed = 0
         elif status in {"degraded", "disabled"}:
@@ -1616,7 +1626,17 @@ class CommitStage(Stage):
             processed = 0
             failed = 0
         current = self._projection_state_store.get(ctx.domain)
-        if current is not None and current.is_ready(data_revision, config_fingerprint):
+        # ADR-046 п. 8 снял `data_revision` из `is_ready`, поэтому условие «ничего не
+        # изменилось» нельзя делегировать на `is_ready`: после первой джобы состояние `ready`,
+        # и каждая следующая вышла бы из функции, не записав ни состояние, ни ревизию
+        # своего источника. Проверяем отпечаток явно — он и есть признак «ничего не
+        # изменилось», а условием готовности он больше не является.
+        if (
+            current is not None
+            and current.status == "ready"
+            and current.data_revision == data_revision
+            and current.config_fingerprint == config_fingerprint
+        ):
             return
         if (
             current is not None
@@ -1629,6 +1649,19 @@ class CommitStage(Stage):
         if current is not None and not projection_transition_allowed(current, state_status):
             return
         try:
+            # ADR-046: пораздельная ревизия источника пишется **всегда**, независимо от
+            # того, сменится ли статус состояния. Иначе источник, чья публикация не прошла,
+            # остался бы без ревизии — и проверка не смогла бы отличить «нет ревизии» от
+            # «ревизия есть».
+            source_revision_value = source_projection_revision(
+                ctx.document.content_hash, config_fingerprint
+            )
+            self._projection_state_store.put_source_revision(
+                ctx.domain,
+                ctx.document.source_url,
+                source_revision_value,
+                ctx.document.content_hash,
+            )
             next_state = ProjectionState(
                 domain=ctx.domain,
                 data_revision=data_revision,
@@ -1642,10 +1675,7 @@ class CommitStage(Stage):
                 failed_source_count=failed,
                 started_at="",
                 finished_at=None,
-                last_error=(
-                    ctx.graph_projection_error
-                    or ("inline_projection_pending" if state_status == "pending" else None)
-                ),
+                last_error=(ctx.graph_projection_error or None),
             )
             expected_revision = current.projection_revision if current is not None else None
             self._projection_state_store.compare_and_set(
@@ -1668,7 +1698,6 @@ class CommitStage(Stage):
             raise RuntimeError("COMMIT: vector store is required for baseline")
         domain = doc.domain
         source_url = doc.source_url
-        source_id = _source_node_id(domain, source_url)
         entities = list(ctx.entities)
         entity_edges = list(ctx.entity_edges)
         alias_ids: dict[str, set[str]] = {}
@@ -1745,17 +1774,14 @@ class CommitStage(Stage):
             if not relation.get("chunk_ids"):
                 relation["chunk_ids"] = list(all_chunk_ids)
 
-        nodes: list[dict[str, Any]] = [
-            {
-                "node_id": source_id,
-                "labels": [SOURCE_LABEL],
-                "properties": {
-                    "source_url": source_url,
-                    "domain": domain,
-                    "doc_type": doc.doc_type,
-                },
-            }
-        ]
+        # ADR-046 п. 9: ноды-якоря источника в схеме нет. Отпечаток содержимого и ревизия
+        # выражены на самих чанках: `content_hash` документа и вычисленная из него вместе с
+        # конфигом ревизия. Обе величины вычисляемые, поэтому разойтиться им не с чем и
+        # дублировать ожидаемое значение во втором хранилище не нужно.
+        source_projection_revision_value = source_projection_revision(
+            doc.content_hash, os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
+        )
+        nodes: list[dict[str, Any]] = []
         entity_ids: dict[str, dict[str, Any]] = {}
         # ADR-044: версия, которую присвоит эта загрузка (`registry.upsert` = current + 1).
         # Считается под `source_lock`, поэтому две загрузки одного источника не сойдутся.
@@ -1927,6 +1953,9 @@ class CommitStage(Stage):
         for meta in ctx.chunks_meta:
             chunk_id = str(meta["chunk_id"])
             text = ctx.chunks[meta["index"]]
+            # ADR-046 п. 9: носитель ревизии — сам Chunk. Отдельной ноды источника в схеме
+            # нет, поэтому ревизия источника выражена его `content_hash`, а ревизия чанка
+            # выводится из него же; разойтись им не с чем, обе величины вычисляемые.
             nodes.append(
                 {
                     "node_id": chunk_id,
@@ -1937,18 +1966,8 @@ class CommitStage(Stage):
                         "source_url": source_url,
                         "domain": domain,
                         "index": meta["index"],
-                    },
-                }
-            )
-            edges.append(
-                {
-                    "from_id": source_id,
-                    "to_id": chunk_id,
-                    "type": "CONTAINS",
-                    "properties": {
-                        "domain": domain,
-                        "origin": "system",
-                        "source_ids": [source_url],
+                        "content_hash": doc.content_hash,
+                        "projection_revision": source_projection_revision_value,
                     },
                 }
             )
@@ -1994,13 +2013,14 @@ class CommitStage(Stage):
         ):
             raise ValueError("COMMIT: entity ссылается на неизвестный chunk_id")
 
-        stale_chunks = list(
-            dict.fromkeys(
-                [
-                    *graph.list_chunk_ids_of_source(source_id),
-                    *vector.list_chunk_ids_of_source(source_url, domain),
-                ]
-            )
+        # ADR-046 п. 9: якоря источника нет, поэтому обе оси перечисляют чанки документа
+        # по `source_url`. Союз нужен для устойчивости к частичному сбою: если векторная
+        # запись уже исчезла, перечисление только по ней не снимет ноду чанка с графа.
+        stale_chunks = sorted(
+            {
+                *graph.list_chunk_ids_of_source(source_url, domain),
+                *vector.list_chunk_ids_of_source(source_url, domain),
+            }
         )
 
         # ADR-028: детерминированный порядок — защита от deadlock-циклов (S2, 2.3)
@@ -2307,8 +2327,11 @@ def _soft_delete_source_locked(
         return False
 
     def _do_delete() -> bool:
-        source_id = _source_node_id(domain, source_url)
-        chunk_ids = set(graph_store.list_chunk_ids_of_source(source_id))
+        # ADR-046 п. 9: якоря источника удалён из схемы, поэтому обе оси перечисляют
+        # чанки документа по полю `source_url`. Союз оставлен намеренно: после частичного
+        # сбоя оси расходятся, и перечисление только по одной из них оставило бы ноду
+        # чанка в графе навсегда (проверено тестом частичного удаления).
+        chunk_ids = set(graph_store.list_chunk_ids_of_source(source_url, domain))
         chunk_ids.update(vector_store.list_chunk_ids_of_source(source_url, domain))
         ordered_chunk_ids = sorted(chunk_ids)
         with graph_store.transaction() as graph_tx, vector_store.transaction() as vector_tx:

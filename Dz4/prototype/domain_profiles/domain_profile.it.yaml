@@ -100,32 +100,11 @@ extraction:
 validation:
   # Правила декларативны: код их не исполняет (исполнение — Стадия 8, BLG-02).
   # Ключ идентичности доменных сущностей — canonical_name (Вариант А, Стадия 7).
-  rules:
-    - id: "entity_must_have_canonical_name"
-      severity: "error"
-      cypher: |
-        MATCH (n)
-        WHERE (n:Requirement OR n:Concept OR n:Contract) AND n.canonical_name IS NULL
-        RETURN n
-    - id: "requires_constraint_no_target"
-      severity: "warning"
-      cypher: |
-        MATCH (r:Requirement)-[:REQUIRES_CONSTRAINT]->(c:Concept)
-        WHERE c IS NULL RETURN r
-
 canonicalization:
   # Слои трансформации ключа идентичности (ADR-007). Реализованы в коде единой
   # функцией `orchestrator._identity_key`: unicode (NFKC) + yo_fold (ё→е) +
   # trim_lower (casefold + сжатие пробелов). Слой glossary остаётся в NORMALIZE
   # (разрешение синонимов через Glossary Service).
-  nodes:
-    Concept:
-      layers: ["unicode", "yo_fold", "glossary", "trim_lower"]
-    Requirement:
-      layers: ["unicode", "yo_fold", "trim_lower"]
-    Contract:
-      layers: ["unicode", "yo_fold", "trim_lower"]
-
 chunking:
   # Стадия 7: параметры стратегий читаются декларативно из этой секции
   # (`ctx.profile.chunking` → build_chunker_from_profile). Полный динамический
@@ -136,16 +115,7 @@ chunking:
   overlap: 64
   langchain_splitter: "recursive"
   llamaindex_parser: "sentence"
-  chunk_size_by_type:
-    default: 512
-    # book/schema/poem — стратегии по типам источников (заполняется по факту)
-
 context_assembly:
-  template:
-    id: "context_it_v1"
-    priorities:
-      - "graph"
-      - "vector"
   eviction: "drop_lowest_reranker_score"
 
 retrieval:
@@ -163,8 +133,3 @@ retrieval:
   # Кодовый фолбэк (2) ниже намеренно меньше: профиль не загрузился - лучше меньше
   # контекста, чем больше.
   max_depth: 3
-  cypher_template: |
-    MATCH (n) WHERE any(t IN $terms WHERE toLower(n.canonical_name) CONTAINS toLower(t) OR toLower(n.name) CONTAINS toLower(t) OR toLower(n.id) CONTAINS toLower(t))
-    OPTIONAL MATCH (n)-[r]-(m) WHERE m:{node_labels}
-    RETURN n, m, type(r) AS rel_type
-    LIMIT $max_nodes

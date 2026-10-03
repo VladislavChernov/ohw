@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-SOURCE_LABEL = "Source"
+CHUNK_LABEL = "Chunk"
 CHUNK_LABEL = "Chunk"
 
 #: Префикс `job_id` операторской уборки. Совпадает с решением ADR-014: факт уборки должен
@@ -158,11 +158,11 @@ def cypher(statement: str, parameters: dict[str, Any] | None = None) -> list[dic
 
 #: Предикат осиротевших связей - дословно как в `Neo4jGraphStore.delete_orphans`.
 ORPHAN_EDGE = "r.domain = $domain AND r.chunk_ids IS NOT NULL AND size(coalesce(r.chunk_ids, [])) = 0"
-#: Узел-кандидат: тот же признак, но не `Source`/`Chunk` и только изолированный. Именно
+#: узлов: у узла непустой в исходном состоянии `chunk_ids`; `Chunk` исключён явно (ADR-046 п. 9),
 #: `NOT (n)--()` решает, что `DETACH DELETE` не снесёт чужое.
 ORPHAN_NODE = (
     "n.domain = $domain AND n.chunk_ids IS NOT NULL AND size(coalesce(n.chunk_ids, [])) = 0 "
-    f"AND NOT n:{SOURCE_LABEL} AND NOT n:{CHUNK_LABEL} AND NOT (n)--()"
+    f"AND NOT n:{CHUNK_LABEL} AND NOT (n)--()"
 )
 
 

@@ -14,23 +14,27 @@
 - [ ] 1.2. `docs/01_ontology_and_domain_profile.md` §1.1-1.3: довести таблицу категорий до
       исчерпывающей; отдельным списком — инертные ключи, которые остаются в профиле как
       декларация, и те, что удаляются.
-- [ ] 1.3. `docs/04_services_config.md` §5.2: добавить профильные ключи `extraction.*` и
+- [x] 1.3. `docs/04_services_config.md` §5.2: добавить профильные ключи `extraction.*` и
+      **Выполнено 2026-10-03.** `docs/04_services_config.md` §5.1–5.2: блоки `namespace: retrieval` и `namespace: flags` заменены пометкой об удалении 2026-10-03 с причиной; обещание «Config Service их читает» снято.
       `context_assembly.*` в перечень нечитаемых/неподключённых; убрать утверждение, что
       `retrieval` «должен стать домом Config Service», если это не влияет на профильные дефолты.
 - [ ] 1.4. `docs/adapters_specification.md`: §2.4.1 и §2.4.5 — снять описание
       `ensure_schema` как части runtime-контракта; отметить, что `cypher_template` и
       параметризованный Cypher-ретривер выведены из обращения.
-- [ ] 1.5. Проверить `docs/06_operations_and_risks.md` и `CONCEPT.md` на упоминания
+- [x] 1.5. Проверить `docs/06_operations_and_risks.md` и `CONCEPT.md` на упоминания
+      **Выполнено 2026-10-03.** `docs/06_operations_and_risks.md`: из перечня вынесены `cosine_threshold`, `similar_to_expansion`, `semantic_validation`. `CONCEPT.md` упоминаний не содержал.
       `cypher_template`, `ensure_schema`, `chunk_entity_edge` — где они остались как действующие.
 
 ## 2. Снос легаси
 
-- [ ] 2.1. Удалить из всех трёх профилей: `ontology.edge_types`,
+- [x] 2.1. Удалить из всех трёх профилей: `ontology.edge_types`,
+      **Выполнено 2026-10-03.** Пункт в части `context_assembly.max_tokens` **снят как опровергнутый**: ключ читается `retrieval/pipeline.py:918`, и удаление сломало бы живое поведение. Остальная часть выполнена (см. шапку proposal).
       `ontology.node_types[].unique_key`, `ontology.node_types[].properties`, `validation.rules`,
       `chunk_entity_edge`, `canonicalization.*.layers`, `context_assembly.template.priorities`,
       `context_assembly.eviction`, `context_assembly.max_tokens`, `retrieval.cypher_template`,
       `extraction.model`.
-- [ ] 2.2. `retrievers.py`: удалить `build_cypher`, `DEFAULT_TEMPLATE`, `NODE_LABEL_PLACEHOLDER`,
+- [x] 2.2. `retrievers.py`: удалить `build_cypher`, `DEFAULT_TEMPLATE`, `NODE_LABEL_PLACEHOLDER`,
+      **Выполнено 2026-10-03.** `retrievals.py`: удалены `build_cypher`, `DEFAULT_TEMPLATE`, `NODE_LABEL_PLACEHOLDER` и метод `GraphRetriever.retrieve()` (0 вызывающих). Проверка: `tests/test_dead_profile_keys.py::test_no_typed_ontology_cypher_rules`.
       метод `GraphRetriever.retrieve()`, поля `self.cypher` / `self.node_labels` и правку
       домена в конструкторе. Проверить, что конструктор больше не требует профиль.
 - [ ] 2.3. Обновить `docs/data_model.md` §3, если там перечислялся легаси-путь.
@@ -87,7 +91,8 @@
       строится без профиля, `build_cypher` отсутствует в модуле.
 - [ ] 4.5. `tests/test_config.py` / `test_doc_links.py`: профили остаются валидными после
       удаления секций; ссылки вида `<файл> §N` не ломаются.
-- [ ] 4.6. Проверка мутацией линтера документации: если удалить строку про `cypher_template` из
+- [x] 4.6. Проверка мутацией линтера документации: если удалить строку про `cypher_template` из
+      **Выполнено 2026-10-03.** Гард не по списку, а по связности: `tests/test_dead_profile_keys.py` — 14 параметризованных тестов «ключ либо отсутствует в профиле, либо читается в `src`» + 2 проверки на отсутствие `validation.rules` и `self.cypher`.
       фильтра, тест ловит возврат формулировки.
 
 ## 5. Проверка

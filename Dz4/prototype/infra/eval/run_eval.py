@@ -256,6 +256,30 @@ def preflight(
 # Corpus ingestion (through Ingestion API :8002)
 # ---------------------------------------------------------------------------
 
+INGEST_IGNORE_MARKER = ".ingest-ignore"
+
+
+def _is_ingest_excluded(path: Path, corpus_dir: Path) -> bool:
+    """Помечен ли каталог документа маркером `.ingest-ignore` в любой точке пути.
+
+    Объявление едет вместе с содержимым, поэтому код не знает имён каталогов заранее: архив
+    и планы исключаются сами, и новый каталог потребует маркера, а не правки кода.
+
+    Проверяются все сегменты относительного пути, а не только первый: вложенный исключённый
+    каталог внутри живого тоже не должен попадать в корпус.
+    """
+    try:
+        relative = path.relative_to(corpus_dir)
+    except ValueError:  # документ вне корпуса — договорённость проверяет вызывающий код
+        return False
+    current = corpus_dir
+    for segment in relative.parts[:-1]:
+        current = current / segment
+        if (current / INGEST_IGNORE_MARKER).is_file():
+            return True
+    return False
+
+
 def select_corpus_files(
     corpus_dir: Path,
     *,
@@ -283,7 +307,11 @@ def select_corpus_files(
                 raise FileNotFoundError(f"документ не найден в корпусе: {rel!r}")
             selected.append(candidate)
     else:
-        selected = sorted(corpus_dir.rglob("*.md"))
+        selected = [
+            path
+            for path in sorted(corpus_dir.rglob("*.md"))
+            if not _is_ingest_excluded(path, corpus_dir)
+        ]
     if limit is not None:
         if limit <= 0:
             raise ValueError(f"--limit-docs должен быть положительным, получено {limit}")

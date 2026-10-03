@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -25,9 +26,12 @@ from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     PipelineContext,
     ValidateStage,
     _chunk_id,
-    _source_node_id,
     _with_commit_retry,
     soft_delete_source,
+)
+from graphrag_proto.ingestion_service.projection import (
+    InMemoryProjectionStateStore,
+    source_projection_revision,
 )
 from graphrag_proto.ingestion_service.readers.registry import TxtReader
 from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
@@ -46,6 +50,7 @@ def build_analyzer(
     vector: InMemoryVectorStore,
     embedder: Embedder | None = None,
     chunker: Chunker | None = None,
+    projection_state: InMemoryProjectionStateStore | None = None,
 ) -> tuple[Analyzer, DocumentRegistry]:
     registry = DocumentRegistry(tmp_path / "commit.db")
     stages = [
@@ -62,6 +67,7 @@ def build_analyzer(
             graph_store=graph,
             vector_store=vector,
             graph_optional=True,
+            projection_state_store=projection_state,
         ),
     ]
     return Analyzer(stages), registry
@@ -123,19 +129,21 @@ def test_commit_writes_context_nodes_edges_vectors(tmp_path: Path) -> None:
     src.write_text(CONTENT_1, encoding="utf-8")
     ctx = run_source(analyzer, src)
 
-    source_id = _source_node_id("it", "src://d.txt")
     assert ctx.commit_applied is True
-    source = graph.get_node(source_id)
-    assert source is not None
-    assert source["_labels"] == ["Source"]
-    assert source["source_url"] == "src://d.txt"
-    assert source["domain"] == "it"
 
-    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    # ADR-046 п. 9: ноды-якоря источника в схеме нет. Носитель ревизии — сам Chunk,
+    # а владелец выражен полем `source_url` (L2-03).
+    chunk_ids = graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert chunk_ids
     chunks = {chunk_id: graph.get_node(chunk_id) for chunk_id in chunk_ids}
     assert all(chunks[chunk_id]["_labels"] == ["Chunk"] for chunk_id in chunks)
     assert all(chunks[chunk_id]["source_url"] == "src://d.txt" for chunk_id in chunks)
+    assert all(chunks[chunk_id]["domain"] == "it" for chunk_id in chunks)
+    revisions = {chunks[chunk_id].get("projection_revision") for chunk_id in chunks}
+    assert len(revisions) == 1 and None not in revisions, "все чанки документа делят одну ревизию"
+    hashes = {chunks[chunk_id].get("content_hash") for chunk_id in chunks}
+    assert len(hashes) == 1 and None not in hashes
+
 
     context_node = graph.get_node(DEDUP_TAG_ID)
     assert context_node is not None
@@ -159,6 +167,56 @@ def test_commit_writes_context_nodes_edges_vectors(tmp_path: Path) -> None:
     assert all(hit["revision"] == registry.data_revision("it") for hit in hits)
 
 
+def test_chunk_revision_equals_revision_derived_from_its_owner(tmp_path: Path) -> None:
+    """Гард ADR-046 п. 7: у каждого `Chunk` задан владелец, а его `projection_revision`
+    равна ревизии, **вычисленной** из `content_hash` этого владельца и конфига.
+
+    Формулировка положительная намеренно: «ревизия чанка равна вычисленной из его
+    владельца» переживёт и удаление якоря, и появление новых полей, тогда как
+    «ноды `Source` не существует» ломалась бы от первого законного изменения схемы.
+    """
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    analyzer, _ = build_analyzer(tmp_path, graph, vector)
+    src = tmp_path / "d.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    run_source(analyzer, src)
+
+    config = os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
+    chunk_ids = graph.list_chunk_ids_of_source("src://d.txt", "it")
+    assert chunk_ids, "документ обязан оставить чанки в графе"
+    for chunk_id in chunk_ids:
+        chunk = graph.get_node(chunk_id)
+        assert chunk is not None, chunk_id
+        owner = str(chunk["source_url"])
+        assert owner, "L2-03: чанк без владельца недопустим"
+        content_hash = str(chunk["content_hash"])
+        assert content_hash, "носитель ревизии обязан хранить отпечаток содержимого"
+        assert chunk["projection_revision"] == source_projection_revision(content_hash, config)
+
+
+def test_chunk_revision_changes_with_config_not_with_version(tmp_path: Path) -> None:
+    """Ревизия выводится из содержимого и конфига, а не из номера версии документа:
+    перезагрузка того же содержимого обязана оставить ревизию прежней."""
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    analyzer, _ = build_analyzer(tmp_path, graph, vector)
+    src = tmp_path / "d.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    run_source(analyzer, src)
+    first = graph.list_chunk_ids_of_source("src://d.txt", "it")
+    before = graph.get_node(first[0])["projection_revision"]
+
+    src.write_text(CONTENT_2, encoding="utf-8")
+    run_source(analyzer, src)
+    second = graph.list_chunk_ids_of_source("src://d.txt", "it")
+    after = graph.get_node(second[0])["projection_revision"]
+    assert before != after, "новое содержимое обязано менять ревизию"
+
+    monkey_config = os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
+    assert source_projection_revision(
+        str(graph.get_node(second[0])["content_hash"]), monkey_config + "-changed"
+    ) != after, "смена конфига обязана менять ревизию"
+
+
 def test_commit_idempotent_noop(tmp_path: Path) -> None:
     graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
     analyzer, registry = build_analyzer(tmp_path, graph, vector)
@@ -166,13 +224,13 @@ def test_commit_idempotent_noop(tmp_path: Path) -> None:
     src.write_text(CONTENT_1, encoding="utf-8")
 
     run_source(analyzer, src)
-    before_ids = graph.list_chunk_ids_of_source(_source_node_id("it", "src://d.txt"))
+    before_ids = graph.list_chunk_ids_of_source("src://d.txt", "it")
     vectors_before = list(vector._vectors.keys())
 
     run_source(analyzer, src)
     latest = registry.latest_active("it", "src://d.txt")
     assert latest is not None and latest["version"] == 1
-    assert graph.list_chunk_ids_of_source(_source_node_id("it", "src://d.txt")) == before_ids
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == before_ids
     assert set(vector._vectors.keys()) == set(vectors_before)
 
 
@@ -183,7 +241,7 @@ def test_commit_reindex_replaces_stale_chunks(tmp_path: Path) -> None:
 
     src.write_text(CONTENT_1, encoding="utf-8")
     run_source(analyzer, src)
-    chunk_ids = graph.list_chunk_ids_of_source(_source_node_id("it", "src://d.txt"))
+    chunk_ids = graph.list_chunk_ids_of_source("src://d.txt", "it")
 
     src.write_text(CONTENT_2, encoding="utf-8")
     run_source(analyzer, src)
@@ -191,7 +249,7 @@ def test_commit_reindex_replaces_stale_chunks(tmp_path: Path) -> None:
     latest = registry.latest_active("it", "src://d.txt")
     assert latest is not None and latest["version"] == 2
     # идентификаторы чанков стабильны (source_url+index), контент перезаписан
-    assert graph.list_chunk_ids_of_source(_source_node_id("it", "src://d.txt")) == chunk_ids
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == chunk_ids
     assert len(vector._vectors) == len(chunk_ids)
     for chunk_id in chunk_ids:
         assert "граф знаний" in graph.get_node(chunk_id)["text"]
@@ -253,7 +311,7 @@ def test_commit_transaction_rollback_on_error(tmp_path: Path) -> None:
     except RuntimeError:
         pass
     # атомарность: узлы графа не записались, несмотря на то что вектор-ось упала
-    assert graph2.get_node(_source_node_id("it", "src://d.txt")) is None
+    assert graph2.list_chunk_ids_of_source("src://d.txt", "it") == []
 
 
 def test_soft_delete_source_removes_chunks_keeps_context_nodes(tmp_path: Path) -> None:
@@ -263,20 +321,17 @@ def test_soft_delete_source_removes_chunks_keeps_context_nodes(tmp_path: Path) -
     src.write_text(CONTENT_1, encoding="utf-8")
     run_source(analyzer, src)
 
-    source_id = _source_node_id("it", "src://d.txt")
-    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    chunk_ids = graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert chunk_ids
 
     assert soft_delete_source(registry, graph, vector, "it", "src://d.txt") is True
     assert registry.latest_active("it", "src://d.txt") is None
-    assert graph.list_chunk_ids_of_source(source_id) == []
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == []
     for chunk_id in chunk_ids:
         assert graph.get_node(chunk_id) is None
         assert chunk_id not in vector._vectors
-    # context nodes и источник сохраняются (историчность, ADR-014)
-    source = graph.get_node(source_id)
-    assert source is not None
-    assert source["_labels"] == ["Source"]
+    # Context nodes сохраняются (историчность, ADR-014); ноды-якоря источника в схеме
+    # нет, поэтому сохраняться тут нечему (ADR-046 п. 9).
     context_node = graph.get_node(DEDUP_TAG_ID)
     assert context_node is not None
     assert context_node["_labels"] == ["ContextNode"]
@@ -315,8 +370,7 @@ def test_soft_delete_source_rolls_back_registry_when_stores_deny(tmp_path: Path)
     src = tmp_path / "d.txt"
     src.write_text(CONTENT_1, encoding="utf-8")
     run_source(analyzer, src)
-    source_id = _source_node_id("it", "src://d.txt")
-    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    chunk_ids = graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert chunk_ids
 
     class DenyingGraph(InMemoryGraphStore):
@@ -326,8 +380,8 @@ def test_soft_delete_source_rolls_back_registry_when_stores_deny(tmp_path: Path)
             super().__init__()
             self._real = real
 
-        def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
-            return self._real.list_chunk_ids_of_source(source_id)
+        def list_chunk_ids_of_source(self, source_url: str, domain: str) -> list[str]:
+            return self._real.list_chunk_ids_of_source(source_url, domain)
 
         def delete_node(self, node_id: str) -> bool:
             raise RuntimeError("хранилище отказывает в удалении")
@@ -339,13 +393,13 @@ def test_soft_delete_source_rolls_back_registry_when_stores_deny(tmp_path: Path)
     latest = registry.latest_active("it", "src://d.txt")
     assert latest is not None and latest["status"] == "active"
     # данные на месте — удаление не применилось ни к одной оси
-    assert graph.list_chunk_ids_of_source(source_id) == chunk_ids
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == chunk_ids
     assert len(vector._vectors) == len(chunk_ids)
 
     # повторная джоба проходит полный путь: реестр -> хранилища -> True
     assert soft_delete_source(registry, graph, vector, "it", "src://d.txt") is True
     assert registry.latest_active("it", "src://d.txt") is None
-    assert graph.list_chunk_ids_of_source(source_id) == []
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == []
     assert not vector._vectors
 
 
@@ -357,8 +411,7 @@ def test_soft_delete_source_repeat_after_partial_delete_full_path(tmp_path: Path
     src = tmp_path / "d.txt"
     src.write_text(CONTENT_1, encoding="utf-8")
     run_source(analyzer, src)
-    source_id = _source_node_id("it", "src://d.txt")
-    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    chunk_ids = graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert chunk_ids
 
     class FailAfterPartialDeleteVector(InMemoryVectorStore):
@@ -376,6 +429,11 @@ def test_soft_delete_source_repeat_after_partial_delete_full_path(tmp_path: Path
                 self._real._vectors.pop(items[0], None)
             raise RuntimeError("сбой на середине удаления")
 
+        # ADR-046 п. 9: перечисление чанков документа идёт только по оси вектора,
+        # поэтому двойник обязан читать реальное состояние, а не своё пустое.
+        def list_chunk_ids_of_source(self, source_url: str, domain: str) -> list[str]:
+            return self._real.list_chunk_ids_of_source(source_url, domain)
+
     fail_vector = FailAfterPartialDeleteVector(vector)
     with pytest.raises(RuntimeError, match="середине"):
         soft_delete_source(registry, graph, fail_vector, "it", "src://d.txt")
@@ -388,8 +446,50 @@ def test_soft_delete_source_repeat_after_partial_delete_full_path(tmp_path: Path
     # повторный вызов проходит полный путь: остаток удаляется идемпотентно (L2-06)
     assert soft_delete_source(registry, graph, vector, "it", "src://d.txt") is True
     assert registry.latest_active("it", "src://d.txt") is None
-    assert graph.list_chunk_ids_of_source(source_id) == []
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == []
     assert not vector._vectors
+
+
+def test_every_committed_source_gets_its_revision_row(tmp_path: Path) -> None:
+    """Гард, найденный на стенде 2026-10-02: журнал ревизий оставался с одной строкой.
+
+    ADR-046 п. 8 снял `data_revision` из `ProjectionState.is_ready`, после чего ранний выход
+    «ничего не изменилось» (делегированный `is_ready`) перестал срабатывать: первая джоба
+    писала состояние `ready`, и каждая следующая выходила из `_record_projection_state`,
+    не записав ни состояние, ни ревизию своего источника. На живом графе это выглядело как
+    «3 документа в графе, 1 в журнале» — то есть ось графа закрылась бы по ложной причине.
+    """
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    state = InMemoryProjectionStateStore()
+    analyzer, _ = build_analyzer(tmp_path, graph, vector, projection_state=state)
+
+    for index, content in enumerate((CONTENT_1, CONTENT_2), start=1):
+        src = tmp_path / f"d{index}.txt"
+        src.write_text(content, encoding="utf-8")
+        ctx = PipelineContext(
+            job_id=f"j{index}",
+            domain="it",
+            doc_type="txt",
+            source_url=f"src://d{index}.txt",
+            source_path=str(src),
+        )
+        analyzer.run(ctx)
+
+    revisions = state.source_revisions("it")
+    assert set(revisions) == {"src://d1.txt", "src://d2.txt"}, (
+        "каждый закоммиченный источник обязан получить строку журнала, иначе пораздельная "
+        f"проверка не сможет отличить «нет ревизии» от «ревизия есть»: {revisions}"
+    )
+    config = os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
+    for source_url, revision in revisions.items():
+        expected = source_projection_revision(
+            str(state.source_content_hashes("it")[source_url]), config
+        )
+        assert revision == expected
+        chunk_ids = graph.list_chunk_ids_of_source(source_url, "it")
+        assert chunk_ids, f"источник {source_url} обязан иметь чанки в графе"
+        for chunk_id in chunk_ids:
+            assert graph.get_node(chunk_id)["projection_revision"] == revision
 
 
 def test_chunk_id_deterministic() -> None:
@@ -416,8 +516,7 @@ def test_embed_stage_writes_injected_embedder_vector(tmp_path: Path) -> None:
     src.write_text(CONTENT_1, encoding="utf-8")
     run_source(analyzer, src)
 
-    source_id = _source_node_id("it", "src://d.txt")
-    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    chunk_ids = graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert chunk_ids
     # L2-04: в хранилище лежит именно вектор инжектированного эмбеддера
     # (тест падает, если EmbedStage вернётся к детерминированному эмбеддеру).
@@ -468,7 +567,7 @@ def test_commit_reindex_replaces_stale_context_provenance(tmp_path: Path) -> Non
     source.write_text("дедупликация", encoding="utf-8")
     run_source(analyzer, source)
     context_node = graph.get_node(DEDUP_TAG_ID)
-    current_chunks = set(graph.list_chunk_ids_of_source(_source_node_id("it", "src://d.txt")))
+    current_chunks = set(graph.list_chunk_ids_of_source("src://d.txt", "it"))
     assert context_node is not None
     assert context_node["_labels"] == ["ContextNode"]
     assert context_node["tag_id"] == DEDUP_TAG_ID
@@ -505,22 +604,21 @@ class FailOnSecondUpsertVector(InMemoryVectorStore):
 
 def test_best_effort_compensates_graph_on_vector_failure(tmp_path: Path) -> None:
     """A-2 (4.1): сбой второй оси в best_effort-паре → граф компенсирован,
-    джоба failed с пометкой «компенсировано», Source/ContextNode сохраняются."""
+    джоба failed с пометкой «компенсировано», ContextNode сохраняются."""
     graph, vector = InMemoryGraphStore(), FailingVectorAxis()
     assert not _is_atomic_pair_for_test(graph, vector)
     analyzer, _ = build_analyzer(tmp_path, graph, vector)
     src = tmp_path / "d.txt"
     src.write_text(CONTENT_1, encoding="utf-8")
-    source_id = _source_node_id("it", "src://d.txt")
 
     with pytest.raises(CommitStageError) as excinfo:
         run_source(analyzer, src)
     assert excinfo.value.compensated is True
     assert "компенсирован" in str(excinfo.value)
 
-    # чанки компенсированы, источник/context nodes сохранились (историчность, ADR-014)
-    assert graph.list_chunk_ids_of_source(source_id) == []
-    assert graph.get_node(source_id) is not None
+    # чанки компенсированы, context nodes сохранились (историчность, ADR-014);
+    # якоря источника в схеме нет (ADR-046 п. 9)
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == []
     context_node = graph.get_node(DEDUP_TAG_ID)
     assert context_node is not None
     assert context_node["_labels"] == ["ContextNode"]
@@ -545,7 +643,6 @@ def test_best_effort_rerun_after_failure_replays_commit(tmp_path: Path) -> None:
     analyzer, registry = build_analyzer(tmp_path, graph, vector)
     src = tmp_path / "d.txt"
     src.write_text(CONTENT_1, encoding="utf-8")
-    source_id = _source_node_id("it", "src://d.txt")
 
     with pytest.raises(CommitStageError):
         run_source(analyzer, src)
@@ -554,7 +651,7 @@ def test_best_effort_rerun_after_failure_replays_commit(tmp_path: Path) -> None:
     vector.fail = False
     ctx = run_source(analyzer, src)
     assert ctx.commit_applied is True
-    assert graph.list_chunk_ids_of_source(source_id)
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert registry.latest_active("it", "src://d.txt") is not None
 
 
@@ -568,14 +665,13 @@ def test_best_effort_reindex_compensates_stale_vectors(tmp_path: Path) -> None:
     graph = InMemoryGraphStore()
     analyzer, registry = build_analyzer(tmp_path, graph, vector)
     src = tmp_path / "d.txt"
-    source_id = _source_node_id("it", "src://d.txt")
 
     # --- первый прогон: CONTENT_1, обе оси записаны ---
     src.write_text(CONTENT_1, encoding="utf-8")
     run_source(analyzer, src)
     v1 = registry.latest_active("it", "src://d.txt")
     assert v1 is not None and v1["version"] == 1
-    chunk_ids_v1 = graph.list_chunk_ids_of_source(source_id)
+    chunk_ids_v1 = graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert len(chunk_ids_v1) > 0, "чанки записаны в граф"
     assert len(vector._vectors) > 0, "эмбеддинги записаны в вектор"
 
@@ -586,11 +682,10 @@ def test_best_effort_reindex_compensates_stale_vectors(tmp_path: Path) -> None:
     assert excinfo.value.compensated is True
 
     # граф пуст (чанки удалены)
-    assert graph.list_chunk_ids_of_source(source_id) == []
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == []
     # ВЕКТОР тОЖЕ пуст: орфанов нет (L2-03)
     assert not vector._vectors, "старые эмбеддинги удалены при компенсации"
-    # источник и context node сохранились (историчность, ADR-014)
-    assert graph.get_node(source_id) is not None
+    # context node сохранился (историчность, ADR-014); якоря источника нет (ADR-046 п. 9)
     context_node = graph.get_node(DEDUP_TAG_ID)
     assert context_node is not None
     assert context_node["_labels"] == ["ContextNode"]
@@ -604,7 +699,7 @@ def test_best_effort_reindex_compensates_stale_vectors(tmp_path: Path) -> None:
     # --- третий прогон: CONTENT_2 после rollback — повторяет успешную запись ---
     run_source(analyzer, src)
     assert registry.latest_active("it", "src://d.txt")["version"] == 2
-    assert graph.list_chunk_ids_of_source(source_id)
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert vector._vectors
 
 
@@ -621,8 +716,7 @@ def test_atomic_pair_writes_both_axes_in_one_batch(tmp_path: Path) -> None:
     src.write_text(CONTENT_1, encoding="utf-8")
     run_source(analyzer, src)
 
-    source_id = _source_node_id("it", "src://d.txt")
-    chunk_ids = graph.list_chunk_ids_of_source(source_id)
+    chunk_ids = graph.list_chunk_ids_of_source("src://d.txt", "it")
     assert chunk_ids, "обе оси записаны через единый batch"
     # в единой транзакции лежат операции ОБЕИХ осей (граф: узлы+рёбра; вектор: delete+upsert)
     kinds = {kind for kind, _ in graph.batch_calls}

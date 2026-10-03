@@ -2,13 +2,15 @@
 
 > **Статус:** primitive document + dynamic context graph
 
-## 1. Технические anchors
+## 1. Технический anchor
 
-- `Source` — источник документа (`source_url`, `domain`, `doc_type`).
-- `Chunk` — фрагмент текста (`chunk_id`, `text`, `source_url`, `domain`, `index`).
-- `CONTAINS` — техническая связь Source → Chunk.
+- `Chunk` — фрагмент текста (`chunk_id`, `text`, `source_url`, `domain`, `index`,
+  `projection_revision`).
 
-Эти anchors не являются бизнес-онтологией и не требуют DDL constraints.
+Этот anchor не является бизнес-онтологией и не требует DDL constraints. Владелец чанка задаётся
+полем `source_url` на самом чанке; отдельной ноды источника и технической связи `CONTAINS` в схеме
+нет — решение владельца 2026-10-02, ADR-046 пункт 9, обоснование и инвентаризация использования —
+`Ingest/analitic/manual_tags_and_ingest_open_questions.md` §3.17.
 
 ## 2. Context nodes
 
@@ -61,7 +63,6 @@ multilingual aliases, но не обязательны для записи.
 
 | Ребро | Тип | Кто пишет |
 |---|---|---|
-`Source -[:CONTAINS]-> Chunk` | generic relationship type | оркестратор, `_write` |
 `Chunk -[:MENTIONS]-> ContextNode` | generic relationship type | оркестратор, `_write` |
 `ContextNode -[kind]-> ContextNode` | kind в property | экстракция, приводится к верхнему регистру |
 

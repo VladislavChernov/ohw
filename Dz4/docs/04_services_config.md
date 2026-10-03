@@ -171,7 +171,7 @@ factorial: ["!", "fact"]
 
 | Дом | Что попадает | Последствие изменения |
 |---|---|---|
-**Config Service** (`namespaces.yaml`) | поведение во время чтения: `context_size`, `cosine_threshold` векторного поиска, `max_vector_chunks`, `reranker_enabled`, выбор адаптеров, `auth`, `domain.active_profile` | меняет ответ, но не то, что лежит в хранилище; переключается на hot |
+| **Config Service** (`namespaces.yaml`) | выбор адаптеров (`adapters`), параметры LLM (`llm`), чанкинг-дефолты (`chunking`), `auth`, `domain.active_profile` | меняет ответ, но не то, что лежит в хранилище; переключается на hot |
 **Domain Profile** | поведение во время записи: чанкинг, промпт экстракции, `retrieval.graph_boost`, `expansion_direction`, `expansion_kinds`, `graph_source_relevance`, пороги дедупликации | версионируется вместе с корпусом и требует re-ingest |
 
 Отсюда важное следствие: пороги дедупликации, даже если будут реализованы, должны жить в
@@ -185,15 +185,7 @@ factorial: ["!", "fact"]
 - `profiles_available`
 - `auto_reload`
 
-**namespace: retrieval**
-- `cosine_threshold` (0.7)
-- `max_graph_nodes` (5)
-- `max_vector_chunks` (5)
-- `context_size` (4096)
-- `reranker_enabled`
-- `graph_search_enabled`
-- `similar_to_expansion`
-
+**namespace: retrieval — удалён 2026-10-03.** Блок объявлял `cosine_threshold`, `max_graph_nodes`, `max_vector_chunks`, `context_size`, `reranker_enabled`, `graph_search_enabled`, `similar_to_expansion` и не читался ничем: query-контур берёт `retrieval` из Domain Profile (`retrieval/pipeline.py`), а `namespaces.py` отдаёт наружу только `domain`, `chunking`, `adapters`, `llm`. Плюс блок `flags:` дублировал три из этих флагов — одно и то же было объявлено дважды.
 **namespace: extraction**
 - `model` ("qwen2.5-coder-7b-instruct-abliterated-q4_k_m")
 - `temperature` (0.1)
@@ -256,12 +248,7 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
 **namespace: auth**
 - `api_key` ("changeme")
 
-**namespace: flags**
-- `graph_search_enabled`
-- `reranker_enabled`
-- `similar_to_expansion`
-- `semantic_validation`
-
+**namespace: flags — удалён 2026-10-03.** Дублировал `graph_search_enabled`, `reranker_enabled`, `similar_to_expansion` из `retrieval` того же файла и не читался ничем.
 **namespace: adapters (новое в v5)**
 - `graph_store` ("neo4j")
 - `vector_store` ("neo4j")
@@ -283,8 +270,8 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
 `domain.active_profile` | **читается**, определяет профиль по умолчанию |
 `chunking.*` | читается через env и профиль; в `namespaces.yaml` используется как последний fallback |
 `normalizer.*` | **не читается**; косинусная дедупликация не реализована (`L3-02a`) |
-`retrieval.cosine_threshold` | **не читается** |
-`retrieval.similar_to_expansion` | **не читается** |
+`retrieval.cosine_threshold` | **удалён 2026-10-03** |
+`retrieval.similar_to_expansion` | **удалён 2026-10-03** |
 `retrieval.max_graph_nodes` | **дублируется**: конвейер берёт одноимённый ключ из профиля, значение из YAML не подключено, в конструкторе стоит литерал `5` |
 `retrieval.context_size`, `max_vector_chunks`, `reranker_enabled` | передаются в сервисы через параметры подключения, а не через YAML |
 `storage.*`, `auth.*`, `adapters.*`, `projection.lease_seconds` | читаются env и compose; YAML используется как документация и дефолт |

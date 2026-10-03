@@ -1,4 +1,54 @@
 # Proposal: разделить ключи Domain Profile, снести легаси и подключить LLM-параметры
+## Аудит 2026-10-03: бандл разделён, часть A выполнена
+
+Проверка по коду, а не по отметкам, дала три вывода, которые меняют содержание бандла.
+
+**1. Пункт 2.1 опирался на опровергнутое основание и в нынешнем виде был бы регрессией.**
+`context_assembly.max_tokens` объявлен мёртвым («лимит задан константой `CONTEXT_TOKEN_LIMIT`»),
+но `retrieval/pipeline.py:918` читает его из профиля, и значение уходит в `ContextAssembly`.
+Выполнение пункта удалило бы работающую настройку. Основание исправлено.
+
+**2. Корневая причина мёртвых ключей — не «забыли», а снятая типизация.** ADR-031 удалил
+`_validate_ontology`, `ensure_schema`, typed labels и runtime DDL, а ключи остались. У
+`retrieval.cypher_template` был читатель — `GraphRetriever.retrieve()`, — но у метода **0
+вызывающих** во всём проекте, потому что ось давно идёт через `expand()` адаптера. Это тот
+же класс остатка, что и нода-якорь `Source`.
+
+**3. Отметки в бандле не являются мерой реализации.** `data-revision-query-context` реализован
+17 из 18 при **0 из 18** галочках. Основание для приёмки — код, а не чекбоксы.
+
+### Что сделано (часть A — только удаление)
+
+| предмет | подтверждение удаления |
+|---|---|
+| `retrieval.cypher_template` из трёх профилей | `tests/test_dead_profile_keys.py`, 14 тестов |
+| `build_cypher`, `DEFAULT_TEMPLATE`, `NODE_LABEL_PLACEHOLDER`, `GraphRetriever.retrieve()` | `retrievers.py`; гард `test_no_typed_ontology_cypher_rules` |
+| `validation.rules[].cypher` (искали `:Requirement/:Concept/:Contract`) | профили `it/library/cinema` |
+| `canonicalization.nodes` (слои под типизированные метки) | там же |
+| `namespaces.yaml`: блоки `retrieval:` и `flags:` | читаются только `domain`, `chunking`, `adapters`, `llm` |
+| `infra_topology.yaml`: `endpoints.embeddings` | `TopologyClient` берёт `/api/v1/config/adapters` |
+| `context_assembly.eviction`, `context_assembly.template`, `chunking.chunk_size_by_type` | профили; ноль чтений в `src` |
+
+Гард `tests/test_dead_profile_keys.py` проверяет контракт **связностью**, а не запрещённым
+списком: «ключа нет в профилях **или** его читает код». Вернуть остатки молча нельзя.
+
+**`ontology.node_types[].unique_key` и `ensure_schema` оставлены намеренно.** Их читатель
+(`neo4j.py:269`) не вызывается в ingest, но `tests/test_typed_graph.py:215` содержит гард,
+который бросает `AssertionError` при попытке вызова, — то есть это оформленный эталон, а не
+мусор. Удаление погасило бы гард.
+
+### Что осталось за бандлом (часть B — добавление поверхности)
+
+Пункты 3.1–3.3: протянуть `extraction.temperature` и `extraction.max_tokens` из профиля в
+`LLMInference` и `orchestrator._extract_llm`. Сейчас решает env, поэтому влиять на
+детерминизм экстракции из профиля нельзя — а без этого повторяемый замер невозможен.
+
+Это **добавление**, а не уборка, и риски противоположны: уборка может только задеть живое,
+добавление может изменить поведение экстракции. Поэтому части A и B разведены и не должны
+идти одним шагом.
+
+---
+
 
 ## Почему
 

@@ -21,7 +21,8 @@ from graphrag_proto.retrieval.adapters.base import (
     OWNED_ENTITY_FIELDS as _OWNED_ENTITY_FIELDS,
 )
 from graphrag_proto.retrieval.adapters.base import (
-    VECTOR_METADATA_BACKFILL_KEYS,
+        OWNERLESS_SOURCE,
+        VECTOR_METADATA_BACKFILL_KEYS,
     Consistency,
     GraphStoreProvider,
     VectorStoreProvider,
@@ -39,7 +40,6 @@ from graphrag_proto.retrieval.adapters.schemas import (
 _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 CHUNK_LABEL = "Chunk"
-SOURCE_LABEL = "Source"
 ENTITY_LABEL = "Entity"
 _PROVENANCE_KEYS = ("source_ids", "chunk_ids", "variants", "aliases")
 
@@ -81,6 +81,34 @@ def _is_transient_exc(exc: BaseException) -> bool:
 
 class Neo4jGraphStore(GraphStoreProvider):
     """Графовая ось поверх Neo4j (ADR-013)."""
+
+    def chunk_revisions_by_source(self, domain: str) -> dict[str, dict[str, int]] | None:
+        """Ревизии чанков по владельцу одним запросом на домен (ADR-046 п. 3).
+
+        Живёт именно на графовом хранилище: гейт спрашивает его у графа, и если метод
+        остался бы на векторном, тот унаследовал бы заглушку `None` и объявил проекцию
+        непроверяемой. На стенде это и произошло — `projection_not_measurable` вместо
+        `ready`, то есть защита сработала, но код был не туда.
+
+        Группировка делается на стороне Neo4j, чтобы по сети шёл один ответ, а не N строк
+        на каждый чанк. Ветка без `source_url` схлопывается в `OWNERLESS_SOURCE`: такие
+        чанки нарушают L2-03 и обязаны попасть в счётчик, а не потеряться при группировке.
+        """
+        with self._session() as session:
+            rows = session.run(
+                f"MATCH (c:{CHUNK_LABEL}) WHERE c.domain = $domain "
+                "RETURN coalesce(c.source_url, $ownerless) AS source_url, "
+                "coalesce(c.projection_revision, '') AS revision, count(*) AS chunks",
+                parameters={"domain": domain, "ownerless": OWNERLESS_SOURCE},
+            ).data()
+        grouped: dict[str, dict[str, int]] = {}
+        for row in rows:
+            owner = str(row["source_url"])
+            revision = str(row["revision"])
+            grouped.setdefault(owner, {})[revision] = grouped.setdefault(owner, {}).get(
+                revision, 0
+            ) + int(row["chunks"] or 0)
+        return grouped
 
     def __init__(self, uri: str, user: str, password: str, database: str | None = None) -> None:
         self._uri = uri
@@ -155,11 +183,14 @@ class Neo4jGraphStore(GraphStoreProvider):
                 {"domain": domain, "source_url": source_url, "chunk_ids": chunk_ids},
             )
 
-    def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
+    def list_chunk_ids_of_source(self, source_url: str, domain: str) -> list[str]:
+        """Чанки документа по его `source_url` (ADR-046 п. 9: якорь `Source` удалён,
+        перечисление идёт по полю владельца на самом чанке)."""
         with self._session() as session:
             rows = session.run(
-                "MATCH (s {node_id: $source_id})-[:CONTAINS]->(c) RETURN c.node_id AS chunk_id",
-                parameters={"source_id": source_id},
+                "MATCH (c {source_url: $source_url, domain: $domain}) "
+                "WHERE c:Chunk RETURN c.node_id AS chunk_id",
+                parameters={"source_url": source_url, "domain": domain},
             ).data()
         return [str(row["chunk_id"]) for row in rows]
 
@@ -169,15 +200,15 @@ class Neo4jGraphStore(GraphStoreProvider):
         Реализация обязана соблюдать три правила из контракта в `base.py`, иначе ошибка
         проявится не как «не туда удалил», а как «сломался поиск»:
 
-        - **`r.chunk_ids IS NOT NULL` обязателен.** У `CONTAINS` и `MENTIONS` этого свойства
-          нет вовсе, поэтому `size(coalesce(r.chunk_ids, [])) = 0` для них истинно.
+        - **`r.chunk_ids IS NOT NULL` обязателен.** У `MENTIONS` этого свойства нет вовсе,
+          поэтому `size(coalesce(r.chunk_ids, [])) = 0` для него истинно.
         - **Порядок: связи, затем узлы.** Обратный ломает счёт: `DETACH DELETE` узла унёс бы
           связь, которую мы посчитали удалённой, не удаляя её.
         - **`dry_run` ничего не удаляет.** Подсчёт обязателен: цена ошибки предиката —
           молчаливая потеря данных, которую не откатит ни одна транзакция.
 
         Узлы отбираются по отсутствию инцидентных связей, что в Neo4j требует
-        `DETACH DELETE`; узлы `Source` и `Chunk` исключены явно, они принадлежат другим
+        `DETACH DELETE`; узел `Chunk` исключён явно, иначе уборка снесла бы
         путям записи.
         """
         values = {"domain": domain}
@@ -191,7 +222,7 @@ class Neo4jGraphStore(GraphStoreProvider):
             "MATCH (n) "
             "WHERE n.domain = $domain AND n.chunk_ids IS NOT NULL "
             "AND size(coalesce(n.chunk_ids, [])) = 0 "
-            f"AND NOT n:{SOURCE_LABEL} AND NOT n:{CHUNK_LABEL} "
+            "AND NOT n:" + CHUNK_LABEL + " "
             "AND NOT (n)--() "
             "RETURN count(n) AS c"
         )
@@ -215,7 +246,7 @@ class Neo4jGraphStore(GraphStoreProvider):
                 "MATCH (n) "
                 "WHERE n.domain = $domain AND n.chunk_ids IS NOT NULL "
                 "AND size(coalesce(n.chunk_ids, [])) = 0 "
-                f"AND NOT n:{SOURCE_LABEL} AND NOT n:{CHUNK_LABEL} "
+                "AND NOT n:" + CHUNK_LABEL + " "
                 "AND NOT (n)--() "
                 "DETACH DELETE n",
                 parameters=values,
@@ -228,8 +259,8 @@ class Neo4jGraphStore(GraphStoreProvider):
     def ensure_schema(self, node_types: list[dict[str, Any]]) -> None:
         """Schema-провижининг (стадия 1, design.md §0): `CREATE CONSTRAINT ... IS
         UNIQUE` по паре `(domain, unique_key)` каждого типа онтологии. Идемпотентно
-        по имени constraint; fallback-типы `Source`/`Entity`/`Chunk` пропускаются. """
-        skipped = {SOURCE_LABEL, CHUNK_LABEL, ENTITY_LABEL}
+        по имени constraint; fallback-типы `Entity`/`Chunk` пропускаются. """
+        skipped = {CHUNK_LABEL, ENTITY_LABEL}
         with self._session() as session:
             for node_type in node_types:
                 if not isinstance(node_type, dict):
@@ -474,7 +505,7 @@ class _TxGraph(GraphStoreProvider):
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         raise NotImplementedError("чтение в транзакции записи не поддерживается")
 
-    def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
+    def list_chunk_ids_of_source(self, source_url: str, domain: str) -> list[str]:
         raise NotImplementedError("чтение в транзакции записи не поддерживается")
 
     def commit(self) -> None:

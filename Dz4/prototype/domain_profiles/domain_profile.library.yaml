@@ -48,23 +48,12 @@ validation:
   rules: []
 
 canonicalization:
-  nodes:
-    Author:
-      layers: ["unicode", "glossary", "trim_lower"]
-    Book:
-      layers: ["trim_lower"]
-    Genre:
-      layers: ["unicode", "glossary", "trim_lower"]
-
 chunking:
   strategy: "sliding_window"
   chunk_size: 512
   overlap: 64
 
 context_assembly:
-  template:
-    id: "context_library_v1"
-    priorities: ["graph", "vector"]
   eviction: "drop_lowest_reranker_score"
 
 retrieval:
@@ -77,8 +66,3 @@ retrieval:
   # 2026-09-29). Потолок живёт в MAX_EXPANSION_DEPTH, а не здесь; зажим объявляется в
   # трассировке (`depth_clamped`). Кодовый фолбэк (2) ниже намеренно меньше.
   max_depth: 3
-  cypher_template: |
-    MATCH (n) WHERE any(t IN $terms WHERE toLower(n.canonical_name) CONTAINS toLower(t) OR toLower(n.name) CONTAINS toLower(t) OR toLower(n.id) CONTAINS toLower(t))
-    OPTIONAL MATCH (n)-[r]-(m) WHERE m:{node_labels}
-    RETURN n, m, type(r) AS rel_type
-    LIMIT $max_nodes

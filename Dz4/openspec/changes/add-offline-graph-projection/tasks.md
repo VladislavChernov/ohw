@@ -1,5 +1,11 @@
 # Задачи: Offline graph projection lifecycle
 
+> **Часть пунктов снята 2026-10-03 — ADR-046 п. 9.** Оформление ноды-якоря `Source` и ребра
+> `CONTAINS` отменено: сущности удалены из схемы и кода, владелец чанка задан полем
+> `Chunk.source_url`, L2-03 и L2-05 переписаны. Пункты этого бандла, перечислявшие
+> `Source`/`Chunk` anchors или ребро `CONTAINS`, помечены ниже как исторические. Причина
+> и расследование: `Ingest/analitic/manual_tags_and_ingest_open_questions.md` §3.17.
+
 > Сначала фиксируется контракт state/revision, затем реализуется job и интеграция readiness. Live Neo4j и paired eval остаются отдельной приёмкой.
 
 - [x] LP-01. Зафиксировать `ProjectionState`, projection revision, config fingerprint и допустимые status transitions.

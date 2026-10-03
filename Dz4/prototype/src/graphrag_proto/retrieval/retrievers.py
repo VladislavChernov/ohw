@@ -16,19 +16,6 @@ from graphrag_proto.retrieval.adapters.base import GraphStoreProvider, VectorSto
 
 _TERM_RE = re.compile(r"[\wА-Яа-яЁё-]{3,}")
 
-NODE_LABEL_PLACEHOLDER = "{node_labels}"
-
-DEFAULT_TEMPLATE = (
-    "MATCH (n)\n"
-    "WHERE any(t IN $terms WHERE toLower(n.canonical_name) CONTAINS toLower(t) "
-    "OR toLower(n.name) CONTAINS toLower(t) OR toLower(n.id) CONTAINS toLower(t))\n"
-    "OPTIONAL MATCH (n)-[r]-(m)\n"
-    "WHERE m:{node_labels}\n"
-    "RETURN n, m, type(r) AS rel_type\n"
-    "LIMIT $max_nodes"
-)
-
-
 def extract_query_terms(query: str) -> list[str]:
     """Термины для графового матчинга: само сообщение + слова >= 3 символов."""
     words = [w.casefold() for w in _TERM_RE.findall(query)]
@@ -71,13 +58,6 @@ class GraphRetriever:
         self._graph_store = graph_store
         self._max_nodes = max_nodes
         self._domain = domain
-        self.cypher, self.node_labels = build_cypher(profile)
-        if domain and "n.domain" not in self.cypher:
-            self.cypher = self.cypher.replace(
-                "WHERE any(",
-                "WHERE n.domain = $domain AND any(",
-                1,
-            )
 
     def expand(
         self,
@@ -107,41 +87,6 @@ class GraphRetriever:
                 or str(row.get("node_id") or "").startswith(f"tag:{self._domain}:")
             ]
         return [row for row in rows if _has_active_provenance(row)]
-
-    def retrieve(self, query: str) -> list[dict[str, Any]]:
-        if not self.node_labels:
-            return []
-        terms = extract_query_terms(query)
-        if not terms:
-            return []
-        # Ось отключается целиком до вызова здесь — тумблер читает QueryPipeline
-        # (`graph_search_enabled` из profile.retrieval / env RETRIEVAL_GRAPH_ENABLED).
-        try:
-            rows = self._graph_store.query(
-                self.cypher,
-                {
-                    "terms": terms,
-                    "max_nodes": self._max_nodes * 4 if self._domain else self._max_nodes,
-                    "domain": self._domain,
-                },
-            )
-        except NotImplementedError:
-            return []
-        except Exception:  # noqa: BLE001 - обход графа не должен валить Pipeline
-            return []
-        if self._domain:
-            rows = [
-                row
-                for row in rows
-                if isinstance(row.get("n"), dict) and row["n"].get("domain") == self._domain
-            ]
-        rows = [
-            row
-            for row in rows
-            if _has_active_provenance(row.get("n")) and _has_active_provenance(row.get("m"))
-        ]
-        return [row for row in rows if row.get("n")][: self._max_nodes]
-
 
 class VectorRetriever:
     """Векторная ось: top_k ближайших чанков по эмбеддингу запроса."""
@@ -188,21 +133,3 @@ class VectorRetriever:
         return normalized[: self._top_k]
 
 
-def build_cypher(profile: dict[str, Any]) -> tuple[str, list[str]]:
-    """Legacy query template; target retrieval uses expand() and has no ontology gate."""
-    retrieval = profile.get("retrieval") or {}
-    ontology = profile.get("ontology") or {}
-    node_types = ontology.get("node_types") or []
-    labels = [
-        str(t["type"]) if isinstance(t, dict) and isinstance(t.get("type"), str) else ""
-        for t in node_types
-    ]
-    labels = [label for label in labels if label]
-    template = retrieval.get("cypher_template") or DEFAULT_TEMPLATE
-    if not isinstance(template, str) or not template.strip():
-        template = DEFAULT_TEMPLATE
-    if labels:
-        cypher = template.replace(NODE_LABEL_PLACEHOLDER, " OR m:".join(labels))
-    else:
-        cypher = template.replace(NODE_LABEL_PLACEHOLDER, "true")
-    return cypher, labels

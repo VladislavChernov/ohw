@@ -23,6 +23,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from graphrag_proto.retrieval.adapters.base import (
+    OWNERLESS_SOURCE,
     VECTOR_METADATA_BACKFILL_KEYS,
     Consistency,
     GraphStoreProvider,
@@ -409,8 +410,31 @@ class InMemoryGraphStore(GraphStoreProvider):
             self._do("delete_node", node_id)
         return planned
 
-    def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
-        return sorted(to_id for (from_id, to_id, etype) in self._edges if from_id == source_id and etype == "CONTAINS")
+    def chunk_revisions_by_source(self, domain: str) -> dict[str, dict[str, int]] | None:
+        """Ревизии чанков по владельцу, один проход по нодам (ADR-046 п. 3)."""
+        grouped: dict[str, dict[str, int]] = {}
+        for node in self._nodes.values():
+            if "Chunk" not in list(node.get("labels") or []):
+                continue
+            properties = node.get("properties") or {}
+            if str(properties.get("domain") or "") != domain:
+                continue
+            owner = str(properties.get("source_url") or "") or OWNERLESS_SOURCE
+            revisions = grouped.setdefault(owner, {})
+            revision = str(properties.get("projection_revision") or "")
+            revisions[revision] = revisions.get(revision, 0) + 1
+        return grouped
+
+    def list_chunk_ids_of_source(self, source_url: str, domain: str) -> list[str]:
+        """Чанки документа по полю владельца (ADR-046 п. 9: якорь `Source` удалён, раньше
+        здесь был обход `CONTAINS`)."""
+        return sorted(
+            node_id
+            for node_id, node in self._nodes.items()
+            if "Chunk" in list(node.get("labels") or [])
+            and str((node.get("properties") or {}).get("source_url") or "") == source_url
+            and str((node.get("properties") or {}).get("domain") or "") == domain
+        )
 
     # ----------------------------------------------------------------- A-2 capability
 

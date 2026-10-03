@@ -158,7 +158,16 @@ def _render_documents(client: DemoClient, domains: list[str]) -> None:
             )
         st.dataframe(rows, hide_index=True)
         source_url = st.selectbox("Источник для soft-delete", options=[r["source_url"] for r in rows])
-        if st.button("Удалить (soft-delete)"):
+        # Soft-delete необратим: чанки снимаются с поиска сразу, а `source_ids` у
+        # сущностей вычищаются. Поэтому кнопка без шага подтверждения опаснее её
+        # отсутствия — тот же довод, что у вкладки обслуживания. Подтверждение вводится
+        # тем же именем: несовпадение не удаляет ничего, а не удаляет не то.
+        typed = st.text_input(
+            f"Введите имя документа для подтверждения: `{source_url}`",
+            key="soft_delete_confirm",
+        )
+        confirmed = typed.strip() == source_url.strip() and bool(source_url.strip())
+        if st.button("Удалить (soft-delete)", disabled=not confirmed):
             item_domain = next((r["domain"] for r in rows if r["source_url"] == source_url), domain)
             try:
                 client.delete_document(item_domain, source_url)
@@ -328,6 +337,43 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                     st.success(f"Задача {task_id} отменена.")
 
 
+def maintenance_preview(domain: str) -> str:
+    """Текст предупреждения вкладки обслуживания — **чистая функция без Streamlit**.
+
+    Вынесена отдельно от `_render_maintenance` намеренно: разметка Streamlit не импортируется
+    ни одним тестом, и проверять её нечем. Смысловая часть — что именно оператор увидит до
+    запуска — обязана быть проверяемой, поэтому она здесь, а `st.*` остаётся тонкой обёрткой.
+    Это же требование снимает вопрос «до нажатия видно, что удаляется».
+    """
+    return (
+        "Будет удалено: сиротские связи и пустые сущности домена "
+        f"`{domain or '—'}`. Планировщика нет намеренно — запуск ваш выбор. "
+        "Чанки уборка не трогает: их снимает удаление документа."
+    )
+
+
+def maintenance_result_lines(response: dict[str, Any]) -> list[str]:
+    """Строки отчёта по ответу уборки — тоже чистая функция.
+
+    Ключевое различие, которое обязано остаться видимым: `skipped` — это «не разрешено»,
+    а не «удалять нечего». Смешивать их нельзя, и проверяется это здесь, а не глазами.
+    """
+    lines = [f"Проход завершён: `{response.get('job_id', '')}`."]
+    if response.get("skipped"):
+        lines.append(
+            f"Проход **пропущен** политикой уборки (режим `{response.get('mode')}`), "
+            "ничего не удалено. Это не «удалять нечего» — это «не разрешено»."
+        )
+        return lines
+    lines.append(
+        f"Связи: запланировано **{response.get('planned_relations')}**, "
+        f"удалено **{response.get('removed_relations')}**. "
+        f"Узлы: запланировано **{response.get('planned_nodes')}**, "
+        f"удалено **{response.get('removed_nodes')}**."
+    )
+    return lines
+
+
 def _render_maintenance(client: DemoClient, domains: list[str]) -> None:
     """Обслуживание графа: уборка сиротских связей и узлов по домену.
 
@@ -342,11 +388,7 @@ def _render_maintenance(client: DemoClient, domains: list[str]) -> None:
         "Возврата нет: факт уборки пишется в реестр, и по `job_id` его можно найти."
     )
     domain = st.selectbox("Домен", options=domains, key="maintenance_domain")
-    st.warning(
-        "Будет удалено: сиротские связи и пустые сущности домена "
-        f"`{domain or '—'}`. Планировщика нет намеренно — запуск ваш выбор. "
-        "Не удаляются `Source`-ноды (ADR-046)."
-    )
+    st.warning(maintenance_preview(domain))
     run_id = st.text_input(
         "Идентификатор прохода (для поиска по журналу)",
         value="maintenance-demo",
@@ -360,20 +402,11 @@ def _render_maintenance(client: DemoClient, domains: list[str]) -> None:
         else:
             job_id = str(response.get("job_id", ""))
             st.success(f"Проход завершён: `{job_id}` (ваш идентификатор — `{run_id}`).")
-            if response.get("skipped"):
-                st.warning(
-                    f"Проход **пропущен** политикой уборки (режим `{response.get('mode')}`), "
-                    "ничего не удалено. Это не «удалять нечего» — это «не разрешено»."
-                )
-            else:
-                planned_r = response.get("planned_relations")
-                removed_r = response.get("removed_relations")
-                planned_n = response.get("planned_nodes")
-                removed_n = response.get("removed_nodes")
-                st.write(
-                    f"Связи: запланировано **{planned_r}**, удалено **{removed_r}**. "
-                    f"Узлы: запланировано **{planned_n}**, удалено **{removed_n}**."
-                )
+            for line in maintenance_result_lines(response)[1:]:
+                if line.startswith("Проход"):
+                    st.warning(line)
+                else:
+                    st.write(line)
             st.caption(
                 "До ADR-047 узлы попадали в счётчик связей, а счётчик узлов всегда был нулём. "
                 "Теперь счётчики раздельные (ADR-047)."

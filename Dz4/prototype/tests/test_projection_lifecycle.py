@@ -28,6 +28,7 @@ from graphrag_proto.ingestion_service.projection import (
     _safe_error,
     projection_revision_for,
     projection_transition_allowed,
+    source_projection_revision,
 )
 from graphrag_proto.ingestion_service.projection import main as projection_main
 from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
@@ -238,14 +239,6 @@ def test_offline_projection_job_backfills_metadata_idempotently() -> None:
                 source_url="src://doc",
                 nodes=[
                     {
-                        "node_id": "src:it:src://doc",
-                        "labels": ["Source"],
-                        "properties": {
-                            "source_url": "src://doc",
-                            "domain": "it",
-                        },
-                    },
-                    {
                         "node_id": "chk:seed",
                         "labels": ["Chunk"],
                         "properties": {
@@ -329,14 +322,6 @@ def test_offline_projection_job_records_failure_without_breaking_vector_baseline
                 source_url="src://doc",
                 nodes=[
                     {
-                        "node_id": "src:it:src://doc",
-                        "labels": ["Source"],
-                        "properties": {
-                            "source_url": "src://doc",
-                            "domain": "it",
-                        },
-                    },
-                    {
                         "node_id": "chk:seed",
                         "labels": ["Chunk"],
                         "properties": {
@@ -372,11 +357,6 @@ def test_projection_job_cleans_stale_source_before_backfill(tmp_path: Path) -> N
     source_id = "src:it:src://old"
     graph.upsert_nodes(
         [
-            {
-                "node_id": source_id,
-                "labels": ["Source"],
-                "properties": {"source_url": "src://old", "domain": "it"},
-            },
             {
                 "node_id": "chk:old",
                 "labels": ["Chunk"],
@@ -491,6 +471,36 @@ def test_projection_job_does_not_overwrite_lost_lease() -> None:
     assert state_store.get("it") is not None
 
 
+def test_projection_job_rejects_chunk_without_owner() -> None:
+    """Гард L2-03 в новой формулировке (ADR-046 п. 9): чанк обязан объявлять владельца
+    полем `source_url`. Носителя-ноды больше нет, поэтому «чанк без `source_url`» —
+    единственное выражение «сирота», которое юнит способен отвергнуть."""
+    state_store = InMemoryProjectionStateStore()
+    job = OfflineProjectionJob(
+        state_store=state_store,
+        graph_store=InMemoryGraphStore(),
+        vector_store=InMemoryVectorStore(),
+        source_provider=lambda _domain, _revision: [
+            ProjectionUnit(
+                source_url="src://doc",
+                nodes=[
+                    {
+                        "node_id": "chk:ownerless",
+                        "labels": ["Chunk"],
+                        "properties": {"chunk_id": "chk:ownerless", "domain": "it"},
+                    },
+                ],
+                vector_metadata=[],
+            )
+        ],
+    )
+
+    result = job.run("it", "data-1")
+
+    assert result.status == "failed"
+    assert "не объявляет владельца" in (result.last_error or "")
+
+
 def test_projection_job_rejects_missing_vector_record() -> None:
     state_store = InMemoryProjectionStateStore()
     vector = InMemoryVectorStore()
@@ -503,14 +513,9 @@ def test_projection_job_rejects_missing_vector_record() -> None:
                 source_url="src://doc",
                 nodes=[
                     {
-                        "node_id": "src:it:src://doc",
-                        "labels": ["Source"],
-                        "properties": {"source_url": "src://doc", "domain": "it"},
-                    },
-                    {
                         "node_id": "chk:missing",
                         "labels": ["Chunk"],
-                        "properties": {"chunk_id": "chk:missing", "domain": "it"},
+                        "properties": {"chunk_id": "chk:missing", "source_url": "src://doc", "domain": "it"},
                     },
                 ],
                 vector_metadata=[{"chunk_id": "chk:missing", "metadata": {}}],
@@ -535,14 +540,9 @@ def test_projection_job_rejects_vector_body_metadata() -> None:
                 source_url="src://doc",
                 nodes=[
                     {
-                        "node_id": "src:it:src://doc",
-                        "labels": ["Source"],
-                        "properties": {"source_url": "src://doc", "domain": "it"},
-                    },
-                    {
                         "node_id": "chk:x",
                         "labels": ["Chunk"],
-                        "properties": {"chunk_id": "chk:x", "domain": "it"},
+                        "properties": {"chunk_id": "chk:x", "source_url": "src://doc", "domain": "it"},
                     },
                 ],
                 vector_metadata=[{"chunk_id": "chk:x", "metadata": {"text": "forbidden"}}],
@@ -562,7 +562,25 @@ def test_ready_projection_revision_isolates_graph_cache() -> None:
     state_store.put(
         _state(status="ready", data_revision="data-1", projection_revision=ready_projection)
     )
+    # ADR-046 п. 3: готовность держится на пораздельной проверке, поэтому состояние
+    # `ready` само по себе не открывает ось — нужен журнал ревизий и чанки с ними.
+    source_revision = source_projection_revision("hash-doc", "config-1")
+    state_store.put_source_revision("it", "src://doc", source_revision, "hash-doc")
     graph = _CountingGraphStore()
+    graph.upsert_nodes(
+        [
+            {
+                "node_id": "chk:seed",
+                "labels": ["Chunk"],
+                "properties": {
+                    "chunk_id": "chk:seed",
+                    "source_url": "src://doc",
+                    "domain": "it",
+                    "projection_revision": source_revision,
+                },
+            }
+        ]
+    )
     vector = InMemoryVectorStore()
     vector.upsert_vectors(
         [
@@ -628,11 +646,6 @@ def test_offline_projection_failure_marks_backfill_for_retry() -> None:
             ProjectionUnit(
                 source_url="src://doc",
                 nodes=[
-                    {
-                        "node_id": "src:it:src://doc",
-                        "labels": ["Source"],
-                        "properties": {"source_url": "src://doc", "domain": "it"},
-                    },
                     {
                         "node_id": "chk:retry",
                         "labels": ["Chunk"],
@@ -711,21 +724,61 @@ def test_query_pipeline_blocks_graph_until_projection_is_ready() -> None:
     state_store.put(
         _state(status="ready", data_revision="data-1", projection_revision=ready_projection)
     )
+    # Появление состояния `ready` само по себе не открывает ось: проверка пораздельная,
+    # поэтому нужен журнал опубликованных ревизий и соответствующие чанки в графе.
+    source_revision = source_projection_revision("hash-doc", "config-1")
+    state_store.put_source_revision("it", "src://doc", source_revision, "hash-doc")
+    graph.upsert_nodes(
+        [
+            {
+                "node_id": "chk:seed",
+                "labels": ["Chunk"],
+                "properties": {
+                    "chunk_id": "chk:seed",
+                    "source_url": "src://doc",
+                    "domain": "it",
+                    "projection_revision": source_revision,
+                },
+            }
+        ]
+    )
     ready = pipeline.run("seed", domain="it", revision="data-1", generate=False, trace=True)
     assert ready["graph_degraded"] is False
     assert ready["projection_revision"] == ready_projection
     assert graph.expansion_calls == [["tag:it:seed"]]
 
+    # ADR-046 п. 8: отставание доменной ревизии **само по себе** ось больше не закрывает —
+    # отпечаток множества не может ответить на вопрос «изменились ли данные этого
+    # источника». Старость теперь выражается пораздельная: граф и журнал разошлись.
     state_store.put(_state(status="ready", data_revision="data-0", projection_revision="projection-0"))
+    behind = pipeline.run("seed", domain="it", revision="data-1", generate=False, trace=True)
+    assert behind["graph_degraded"] is False
+    assert behind["projection_status"] == "ready"
+
+    graph.upsert_nodes(
+        [
+            {
+                "node_id": "chk:seed",
+                "labels": ["Chunk"],
+                "properties": {
+                    "chunk_id": "chk:seed",
+                    "source_url": "src://doc",
+                    "domain": "it",
+                    "projection_revision": "revision-from-another-content",
+                },
+            }
+        ]
+    )
     stale = pipeline.run("seed", domain="it", revision="data-1", generate=False, trace=True)
     assert stale["graph_degraded"] is True
-    assert stale["projection_status"] == "stale"
-    assert graph.expansion_calls == [["tag:it:seed"]]
+    assert stale["projection_status"] == "revision_mismatch"
+    # Обход не вырос: заблокированный запрос к графу не ходил.
+    assert graph.expansion_calls == [["tag:it:seed"], ["tag:it:seed"]]
 
     unknown = pipeline.run("seed", domain="it", generate=False, trace=True)
     assert unknown["graph_degraded"] is True
     assert unknown["projection_status"] == "revision_unknown"
-    assert graph.expansion_calls == [["tag:it:seed"]]
+    assert graph.expansion_calls == [["tag:it:seed"], ["tag:it:seed"]]
 
 
 def test_query_pipeline_uses_vector_cache_when_projection_is_missing() -> None:
@@ -832,14 +885,6 @@ def test_offline_projection_preserves_manual_provenance_on_ai_rebuild() -> None:
                 source_url="src://doc",
                 nodes=[
                     {
-                        "node_id": "src:it:src://doc",
-                        "labels": ["Source"],
-                        "properties": {
-                            "source_url": "src://doc",
-                            "domain": "it",
-                        },
-                    },
-                    {
                         "node_id": "chk:seed",
                         "labels": ["Chunk"],
                         "properties": {
@@ -937,11 +982,6 @@ def test_offline_projection_rejects_context_without_anchor() -> None:
                 source_url="src://doc",
                 nodes=[
                     {
-                        "node_id": "src:it:src://doc",
-                        "labels": ["Source"],
-                        "properties": {"source_url": "src://doc", "domain": "it"},
-                    },
-                    {
                         "node_id": "chk:seed",
                         "labels": ["Chunk"],
                         "properties": {
@@ -975,11 +1015,6 @@ def test_offline_projection_stale_cleanup_removes_source_anchor(tmp_path: Path) 
     source_id = "src:it:src://old"
     graph.upsert_nodes(
         [
-            {
-                "node_id": source_id,
-                "labels": ["Source"],
-                "properties": {"source_url": "src://old", "domain": "it"},
-            },
             {
                 "node_id": "chk:old",
                 "labels": ["Chunk"],
@@ -1031,11 +1066,16 @@ def test_offline_projection_stale_cleanup_removes_source_anchor(tmp_path: Path) 
     result = job.run("it", "data-1", stale_source_urls=["src://old"])
 
     assert result.status == "ready"
-    assert graph.get_node(source_id) is None
-    assert graph._edges == {}
+    # ADR-046 п. 9: якоря `Source` в схеме нет, поэтому проверять нечего; предмет уборки —
+    # чанки stale-источника на обеих осях.
+    assert graph.get_node("chk:old") is None
+    assert graph.list_chunk_ids_of_source("src://old", "it") == []
+    assert not vector._vectors
 
 
-def test_query_pipeline_blocks_ready_state_with_stale_vector_projection_marker() -> None:
+def test_query_pipeline_blocks_ready_state_with_stale_chunk_revision() -> None:
+    """Готовность проверяется пораздельная (ADR-046 п. 3): состояние `ready` при чанке,
+    несущем ревизию своего источника, ось графа не открывает."""
     state_store = InMemoryProjectionStateStore()
     state_store.put(
         _state(
@@ -1044,7 +1084,24 @@ def test_query_pipeline_blocks_ready_state_with_stale_vector_projection_marker()
             projection_revision=projection_revision_for("data-1", "config-1"),
         )
     )
+    state_store.put_source_revision(
+        "it", "src://doc", source_projection_revision("hash-doc", "config-1"), "hash-doc"
+    )
     graph = _CountingGraphStore()
+    graph.upsert_nodes(
+        [
+            {
+                "node_id": "chk:seed",
+                "labels": ["Chunk"],
+                "properties": {
+                    "chunk_id": "chk:seed",
+                    "source_url": "src://doc",
+                    "domain": "it",
+                    "projection_revision": "stale-projection",
+                },
+            }
+        ]
+    )
     vector = InMemoryVectorStore()
     vector.upsert_vectors(
         [
@@ -1055,7 +1112,7 @@ def test_query_pipeline_blocks_ready_state_with_stale_vector_projection_marker()
                     "source_url": "src://doc",
                     "domain": "it",
                     "context_ids": ["tag:it:seed"],
-                    "projection_revision": "old-projection",
+                    "projection_revision": "stale-projection",
                 },
             }
         ]
@@ -1074,7 +1131,7 @@ def test_query_pipeline_blocks_ready_state_with_stale_vector_projection_marker()
     result = pipeline.run("seed", domain="it", revision="data-1", generate=False, trace=True)
 
     assert result["graph_degraded"] is True
-    assert result["projection_status"] == "projection_metadata_mismatch"
+    assert result["projection_status"] == "revision_mismatch"
     assert graph.expansion_calls == []
 
 
@@ -1136,14 +1193,8 @@ def test_soft_delete_marks_projection_stale_and_removes_chunks(
         )
     )
     graph = InMemoryGraphStore()
-    source_id = "src:it:src://doc"
     graph.upsert_nodes(
         [
-            {
-                "node_id": source_id,
-                "labels": ["Source"],
-                "properties": {"source_url": "src://doc", "domain": "it"},
-            },
             {
                 "node_id": "chk:doc",
                 "labels": ["Chunk"],
@@ -1153,20 +1204,6 @@ def test_soft_delete_marks_projection_stale_and_removes_chunks(
                     "domain": "it",
                 },
             },
-        ]
-    )
-    graph.upsert_edges(
-        [
-            {
-                "from_id": source_id,
-                "to_id": "chk:doc",
-                "type": "CONTAINS",
-                "properties": {
-                    "domain": "it",
-                    "source_ids": ["src://doc"],
-                    "chunk_ids": ["chk:doc"],
-                },
-            }
         ]
     )
     vector = InMemoryVectorStore()
@@ -1192,7 +1229,6 @@ def test_soft_delete_marks_projection_stale_and_removes_chunks(
     state = state_store.get("it")
     assert state is not None
     assert state.status == "stale"
-    assert graph.get_node(source_id) is not None
     assert graph.get_node("chk:doc") is None
     assert vector.get_vector_metadata("chk:doc") is None
 
@@ -1214,11 +1250,6 @@ def test_offline_projection_renews_lease_between_source_units() -> None:
                 ProjectionUnit(
                     source_url=source_url,
                     nodes=[
-                        {
-                            "node_id": f"src:it:{source_url}",
-                            "labels": ["Source"],
-                            "properties": {"source_url": source_url, "domain": "it"},
-                        }
                     ],
                 )
             )
@@ -1256,11 +1287,6 @@ def test_offline_projection_refuses_to_delete_active_source(tmp_path: Path) -> N
     registry.upsert(document)
     graph.upsert_nodes(
         [
-            {
-                "node_id": "src:it:src://active",
-                "labels": ["Source"],
-                "properties": {"source_url": "src://active", "domain": "it"},
-            },
             {
                 "node_id": "chk:active",
                 "labels": ["Chunk"],
@@ -1314,11 +1340,6 @@ def test_offline_projection_job_does_not_touch_other_domain(tmp_path: Path) -> N
     graph.upsert_nodes(
         [
             {
-                "node_id": it_source_id,
-                "labels": ["Source"],
-                "properties": {"source_url": "src://shared", "domain": "it"},
-            },
-            {
                 "node_id": "chk:it",
                 "labels": ["Chunk"],
                 "properties": {
@@ -1326,11 +1347,6 @@ def test_offline_projection_job_does_not_touch_other_domain(tmp_path: Path) -> N
                     "source_url": "src://shared",
                     "domain": "it",
                 },
-            },
-            {
-                "node_id": library_source_id,
-                "labels": ["Source"],
-                "properties": {"source_url": "src://shared", "domain": "library"},
             },
             {
                 "node_id": "chk:library",

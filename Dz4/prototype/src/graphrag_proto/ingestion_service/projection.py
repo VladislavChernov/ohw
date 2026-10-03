@@ -104,9 +104,17 @@ class ProjectionState:
         data_revision: str | None = None,
         config_fingerprint: str | None = None,
     ) -> bool:
+        """Статус `ready` плюс, если переданы, проверка конфигурации.
+
+        **`data_revision` намеренно не участвует в готовности** (ADR-046 п. 8): отпечаток
+        состава домена не может ответить на вопрос «изменились ли данные этого источника»,
+        поэтому он остаётся атрибуцией («проекция построена из корпуса такой-то ревизии»),
+        а решение о готовности принимает пораздельная проверка ревизий источников.
+        Параметр оставлен, чтобы смена подписи ломала старых вызывающих явно, а не молча.
+        """
+        del data_revision
         return (
             self.status == "ready"
-            and (data_revision is None or self.data_revision == data_revision)
             and (config_fingerprint is None or self.config_fingerprint == config_fingerprint)
         )
 
@@ -152,10 +160,38 @@ class ProjectionStateStore(ABC):
     ) -> bool:
         raise NotImplementedError
 
+    @abstractmethod
+    def put_source_revision(
+        self,
+        domain: str,
+        source_url: str,
+        projection_revision: str,
+        content_hash: str,
+    ) -> None:
+        """Пораздельная ревизия источника (ADR-046).
+
+        Отдельная таблица, а не колонка состояния: домен может содержать сколько угодно
+        источников, и колонка для них одна. Ревизия **вычисляется** из `content_hash`, а не
+        хранится как источник истины, — эта строка журнал «что было заявлено», а основание
+        для проверки.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def source_revisions(self, domain: str) -> dict[str, str]:
+        """Ревизии источников домена: `source_url → projection_revision`."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def source_content_hashes(self, domain: str) -> dict[str, str]:
+        """Отпечатки содержимого, заявленные источниками домена."""
+        raise NotImplementedError
+
 
 class InMemoryProjectionStateStore(ProjectionStateStore):
     def __init__(self) -> None:
         self._states: dict[str, ProjectionState] = {}
+        self._source_revisions: dict[tuple[str, str], tuple[str, str]] = {}
         self._lock = threading.RLock()
 
     def get(self, domain: str) -> ProjectionState | None:
@@ -165,6 +201,32 @@ class InMemoryProjectionStateStore(ProjectionStateStore):
     def put(self, state: ProjectionState) -> None:
         with self._lock:
             self._states[state.domain] = state
+
+    def put_source_revision(
+        self,
+        domain: str,
+        source_url: str,
+        projection_revision: str,
+        content_hash: str,
+    ) -> None:
+        with self._lock:
+            self._source_revisions[(domain, source_url)] = (projection_revision, content_hash)
+
+    def source_revisions(self, domain: str) -> dict[str, str]:
+        with self._lock:
+            return {
+                key[1]: value[0]
+                for key, value in self._source_revisions.items()
+                if key[0] == domain
+            }
+
+    def source_content_hashes(self, domain: str) -> dict[str, str]:
+        with self._lock:
+            return {
+                key[1]: value[1]
+                for key, value in self._source_revisions.items()
+                if key[0] == domain
+            }
 
     def compare_and_set(
         self,
@@ -257,6 +319,19 @@ class SQLiteProjectionStateStore(ProjectionStateStore):
             "finished_at TEXT, "
             "last_error TEXT, "
             "lease_until REAL"
+            ")"
+        )
+        # ADR-046: пораздельная готовность. Отдельная таблица, а не колонка: добавление
+        # колонки потребовало бы ALTER на каждой развёрнутой базе, а `CREATE TABLE IF NOT
+        # EXISTS` создаёт её на существующих без миграции (тот же довод, что у соседних таблиц).
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS projection_state_sources ("
+            "domain TEXT NOT NULL, "
+            "source_url TEXT NOT NULL, "
+            "projection_revision TEXT NOT NULL, "
+            "content_hash TEXT NOT NULL, "
+            "recorded_at TEXT NOT NULL, "
+            "PRIMARY KEY (domain, source_url)"
             ")"
         )
         columns = {
@@ -479,6 +554,44 @@ class SQLiteProjectionStateStore(ProjectionStateStore):
             ),
         )
 
+    def put_source_revision(
+        self,
+        domain: str,
+        source_url: str,
+        projection_revision: str,
+        content_hash: str,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO projection_state_sources ("
+                "domain, source_url, projection_revision, content_hash, recorded_at"
+                ") VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(domain, source_url) DO UPDATE SET "
+                "projection_revision=excluded.projection_revision, "
+                "content_hash=excluded.content_hash, "
+                "recorded_at=excluded.recorded_at",
+                (domain, source_url, projection_revision, content_hash, _now_iso()),
+            )
+            self._conn.commit()
+
+    def source_revisions(self, domain: str) -> dict[str, str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source_url, projection_revision FROM projection_state_sources "
+                "WHERE domain = ?",
+                (domain,),
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
+
+    def source_content_hashes(self, domain: str) -> dict[str, str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT source_url, content_hash FROM projection_state_sources "
+                "WHERE domain = ?",
+                (domain,),
+            ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
+
 
 @dataclass
 class ProjectionUnit:
@@ -620,15 +733,39 @@ class JsonlProjectionSource:
 ProjectionSourceProvider = Callable[[str, str], list[ProjectionUnit]]
 
 
-def _source_node_id(domain: str, source_url: str) -> str:
-    return f"src:{domain}:{source_url}"
-
-
 def projection_revision_for(data_revision: str, config_fingerprint: str) -> str:
     payload = json.dumps(
         {
             "algorithm": PROJECTION_ALGORITHM_VERSION,
             "data_revision": data_revision,
+            "config_fingerprint": config_fingerprint,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def source_projection_revision(content_hash: str, config_fingerprint: str) -> str:
+    """Ревизия проекции **одного источника** (ADR-046).
+
+    Ключ отличается от `projection_revision_for` принципиально: там вход — отпечаток
+    **множества** `(source_url, content_hash)`, и он меняется от любого изменения состава
+    домена. Отпечаток множества структурно не может ответить на вопрос «изменились ли данные
+    этого источника», а метка актуальности должна отвечать именно на него. Проверено
+    измерением: на домене из трёх документов чанки несли три разных значения доменной ревизии,
+    и гейт, требующий одну ревизию на домен, был закрыт всегда.
+
+    Здесь вход — `content_hash` одного документа. Смена соседнего файла значение не меняет,
+    поэтому протухание становится локальным, а ревизия **выводится**, а не хранится: разойтись
+    ей не с чем. По этой же причине номер версии документа не участвует: он относится к одному
+    источнику и между источниками несравним.
+    """
+    payload = json.dumps(
+        {
+            "algorithm": PROJECTION_ALGORITHM_VERSION,
+            "content_hash": content_hash,
             "config_fingerprint": config_fingerprint,
         },
         ensure_ascii=False,
@@ -714,18 +851,9 @@ class OfflineProjectionJob:
             if properties.get("domain") is not None and str(properties["domain"]) != domain:
                 raise ProjectionContractError(f"node {node_id} принадлежит другому domain")
             nodes_by_id[node_id] = node
-        source_nodes = [
-            node
-            for node in unit.nodes
-            if "Source" in list(node.get("labels") or [])
-            and str((node.get("properties") or {}).get("source_url") or "") == unit.source_url
-            and str((node.get("properties") or {}).get("domain") or "") == domain
-        ]
-        if not source_nodes:
-            raise ProjectionContractError("ProjectionUnit должен содержать Source anchor")
-        expected_source_id = _source_node_id(domain, unit.source_url)
-        if any(str(node.get("node_id") or "") != expected_source_id for node in source_nodes):
-            raise ProjectionContractError("Source anchor должен использовать детерминированный node_id")
+        # ADR-046 п. 9: якоря источника в схеме нет, поэтому требование «юнит обязан
+        # содержать Source anchor» заменено прямым выражением L2-03 — каждый Chunk
+        # объявляет своего владельца полем `source_url`.
         chunk_nodes: dict[str, dict[str, Any]] = {}
         for node in unit.nodes:
             if "Chunk" not in list(node.get("labels") or []):
@@ -734,7 +862,9 @@ class OfflineProjectionJob:
             chunk_id = str(properties.get("chunk_id") or "")
             if not chunk_id or chunk_id in chunk_nodes:
                 raise ProjectionContractError("Chunk anchor должен иметь уникальный chunk_id")
-            if properties.get("source_url") is not None and str(properties["source_url"]) != unit.source_url:
+            if not str(properties.get("source_url") or ""):
+                raise ProjectionContractError(f"Chunk anchor {chunk_id} не объявляет владельца")
+            if str(properties["source_url"]) != unit.source_url:
                 raise ProjectionContractError(f"Chunk anchor {chunk_id} принадлежит другому source")
             if properties.get("domain") is not None and str(properties["domain"]) != domain:
                 raise ProjectionContractError(f"Chunk anchor {chunk_id} принадлежит другому domain")
@@ -1053,16 +1183,22 @@ class OfflineProjectionJob:
                             f"domain={domain!r} "
                             f"source_url={_audit_safe_source_url(source_url)!r}"
                         )
-                    source_id = _source_node_id(domain, source_url)
-                    chunk_ids = set(self._graph_store.list_chunk_ids_of_source(source_id))
-                    chunk_ids.update(self._vector_store.list_chunk_ids_of_source(source_url, domain))
+                    # ADR-046 п. 9: якоря источника в схеме нет, удалять нечего; обе
+                    # оси перечисляют чанки по `source_url`. Союз обязателен: после
+                    # частичного сбоя оси расходятся, и перечисление только по вектору
+                    # оставило бы ноду чанка в графе.
+                    chunk_ids = set(
+                        self._graph_store.list_chunk_ids_of_source(source_url, domain)
+                    )
+                    chunk_ids.update(
+                        self._vector_store.list_chunk_ids_of_source(source_url, domain)
+                    )
                     ordered_chunk_ids = sorted(chunk_ids)
                     self._graph_store.remove_source_from_entities(
                         domain, source_url, ordered_chunk_ids
                     )
                     for chunk_id in ordered_chunk_ids:
                         self._graph_store.delete_node(chunk_id)
-                    self._graph_store.delete_node(source_id)
                     self._vector_store.delete_vectors(ordered_chunk_ids)
                 self._audit_retention(
                     domain,
