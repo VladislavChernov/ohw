@@ -34,9 +34,15 @@ fanout, total-node и time budget, возвращает path/depth/confidence и
 Контракт обхода и история дефекта — `data_model.md` §3.1.
 
 Graph experiment не является prerequisite для baseline. Перед expansion QueryPipeline проверяет
-`ProjectionState`: `ready` и актуальная `data_revision` разрешают graph; `pending`, `degraded`,
-`stale`, `failed` или отсутствие state дают vector-only fallback. При `graph_enabled=false`,
-отсутствии adapter, неполной или stale projection retrieval возвращает vector-only fallback.
+готовность **пораздельно** (ADR-046 п. 3 и п. 8): состояние должно быть `ready`,
+`config_fingerprint` — совпадать, а журнал `projection_state_sources` должен сойтись с ревизиями
+чанков в графе (`sources_tracked > 0`, `sources_without_graph = 0`, `revision_mismatches = 0`,
+`chunks_without_owner = 0`). Доменная `data_revision` в готовности **не участвует**: отпечаток
+состава домена не может ответить на вопрос «изменились ли данные этого источника», поэтому он
+остаётся атрибуцией, а не условием (ADR-046 п. 8). `pending`, `degraded`, `stale`, `failed`,
+отсутствие state, несовпадение конфигурации, расхождение счётчиков и непроверяемая проекция
+(`projection_not_measurable`) дают vector-only fallback. При `graph_enabled=false` и отсутствии
+adapter — тоже.
 
 **Что графовая ось добавляет к источникам.** Атрибуция строится по `source_ids` найденных
 узлов, а не по их тексту. Поскольку `tag_id` выводится из canonical name, один узел накапливает

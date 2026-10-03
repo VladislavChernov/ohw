@@ -13,8 +13,9 @@
   эталона. Если сделать это блокирующим, гейт станет красным всегда и через неделю его
   начнут игнорировать — это хуже, чем гейта нет.
 
-Символы схемы, снятые решениями, хранятся здесь, а не размазаны по тестам: иначе проверка
-и список разойдутся, и проверка станет фиктивной.
+Символы схемы, снятые решениями, хранятся в `suspended_symbols.py`, а не размазаны по тестам:
+иначе проверка и список разойдутся, и проверка станет фиктивной. Там же живёт правило для
+живых документов — список один, а контекст у двух потребителей разный (см. модуль).
 """
 
 from __future__ import annotations
@@ -22,28 +23,25 @@ from __future__ import annotations
 import json
 import pathlib
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+
+if __package__ in (None, ""):
+    # Прибор запускают и как `python infra/eval/review_gate.py` — так его описан в
+    # REVIEW-GATE.md, — и как пакетом из тестов. В первом случае корень репозитория в
+    # `sys.path` не попадает, и импорт падал с ModuleNotFoundError: pytest был зелёным,
+    # а документированный запуск для человека не работал. Оба способа обязаны работать,
+    # иначе прибор есть только у гейта.
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
+from infra.eval.suspended_symbols import SUSPENDED_SYMBOLS
 
 EVAL_ROOT = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = EVAL_ROOT.parents[2]
 DOCS = REPO_ROOT / "docs"
 DOMAINS = ("it", "library", "cinema")
 INGEST_IGNORE_MARKER = ".ingest-ignore"
-
-#: Снятые сущности схемы и правила их упоминания. Ключ — для отчёта, `patterns` — что ищем.
-#: Регистрозависимо: иначе `Source` ловит обычное слово «sources» в тексте факта, и правило
-#: даёт ложные срабатывания на каждом втором вопросе.
-#:
-#: Узел `Source` ищется **не по одному слову**, а по связке с соседним термином: в домене
-#: `cinema` есть документ, буквально названный «Source», и вопрос `cin_010` спрашивает «что
-#: такое Source и чем отличается от источника документа?» — это заголовок документа, а не
-#: снятая нода. Снятая нода всегда упоминается рядом с `Chunk` или со словом «anchor».
-SUSPENDED_SYMBOLS: dict[str, tuple[str, ...]] = {
-    "edge CONTAINS": (r"CONTAINS",),
-    "node Source": (r"\bSource\b(?=[^|]{0,60}(?:Chunk|anchor))", r"(?:Chunk|anchor)(?=[^|]{0,60}\bSource\b)"),
-    "profile key cypher_template": (r"cypher_template",),
-}
 
 
 @dataclass(frozen=True)
@@ -65,6 +63,7 @@ class GateReport:
     missing_sources: list[str] = field(default_factory=list)
     excluded_sources: list[str] = field(default_factory=list)
     questions_per_domain: dict[str, int] = field(default_factory=dict)
+    graph_slice: list[str] = field(default_factory=list)
 
     @property
     def blocking(self) -> list[str]:
@@ -146,6 +145,8 @@ def check() -> GateReport:
                 rel = absolute.relative_to(DOCS) if str(absolute).startswith(str(DOCS)) else None
                 if rel is not None and _excluded(rel):
                     report.excluded_sources.append(f"{qid}: {source}")
+            if question.get("golden_graph_evidence") is True:
+                report.graph_slice.append(qid)
             as_of = _iso_date(str(question.get("as_of") or ""))
             if as_of:
                 newest = max((_mtime(s) for s in sources), default=0.0)
@@ -161,6 +162,7 @@ def _epoch(day: str) -> float:
 def main() -> int:
     report = check()
     print(f"вопросов по доменам: {report.questions_per_domain}")
+    print(f"срез на ревью перед замером ({len(report.graph_slice)}): {', '.join(report.graph_slice)}")
     print(f"блокирующих замечаний: {len(report.blocking)}")
     for line in report.blocking:
         print(f"  БЛОК: {line}")

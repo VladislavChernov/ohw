@@ -202,10 +202,14 @@ projection, backfill-ит metadata и фиксирует projection revision/rea
 двум writer обрабатывать один projection одновременно. Graph batch и metadata backfill могут
 повторяться без дублей и без изменения content, embedding или document registry.
 
-State store допускает статусы `pending`, `ready`, `degraded`, `stale` и `failed`. Только
-`ready` с актуальной `data_revision` разрешает graph experiment. Пока job не завершён, индекс
-отстал или state отсутствует, query получает vector-only fallback с degraded marker; job и
-baseline не блокируют друг друга.
+State store допускает статусы `pending`, `ready`, `degraded`, `stale` и `failed`. `ready` сам по
+себе не разрешает graph experiment: QueryPipeline сверяет журнал `projection_state_sources` с
+ревизиями чанков в графе (`sources_tracked > 0`, `sources_without_graph = 0`,
+`revision_mismatches = 0`, `chunks_without_owner = 0`) и требует совпадения `config_fingerprint`.
+Доменная `data_revision` не сравнивается — она атрибуция («проекция построена из корпуса такой-то
+ревизии»), а не условие готовности (ADR-046 п. 8 и п. 10). Пока job не завершён, индекс отстал,
+счётчик расходится или state отсутствует, query получает vector-only fallback с degraded marker;
+job и baseline не блокируют друг друга.
 
 ## 3. Identity и multilingual aliases
 
@@ -395,8 +399,8 @@ no-op, сущности извлекаются заново, и те же `node_
 
 Фактическое поведение при перезагрузке изменённого документа:
 
-- **структура старой версии удаляется полностью** — узел чанка, его вектор, связи `CONTAINS`
-  и `MENTIONS` (последние снимаются каскадно при `DETACH DELETE` узла чанка);
+- **структура старой версии удаляется полностью** — узел чанка, его вектор и связи `MENTIONS`
+  (они снимаются каскадно при `DETACH DELETE` узла чанка);
 - **происхождение у оставшихся узлов-сущностей и рёбер вычищается**: `source_ids` теряет
   URL источника, `chunk_ids` — идентификаторы удалённых чанков;
 - **доменные связи между сущностями при этом не удаляются** — ни в онлайне, ни в
@@ -459,7 +463,8 @@ metadata, chunking, extraction, glossary, шаблон контекста. По�
 (`docs/06` §2.4), он **объявлен, но не реализован**.
 
 **Ловушка реализации, которую надо назвать заранее.** Наивный запрос «удали связи с пустым
-`chunk_ids`» снесёт `CONTAINS` и `MENTIONS`, у которых `chunk_ids` нет вовсе. Обязательный
+`chunk_ids`» снесёт `MENTIONS` и пользовательские утверждения (`scope: user`), у которых
+`chunk_ids` нет вовсе. Обязательный
 дискриминатор — наличие самого свойства `chunk_ids` у связи, плюс домен. Ошибка здесь
 проявится не как «не туда удалил», а как «сломался поиск».
 

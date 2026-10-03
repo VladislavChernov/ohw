@@ -66,4 +66,16 @@ def test_shape_of_the_set_is_intact() -> None:
     questions = load_questions("it")
     assert len(questions) == 74
     assert sum(1 for q in questions if q["id"].startswith("it_graph_")) == 24
-    assert sum(1 for q in questions if q.get("golden_graph_evidence")) == 8
+
+
+def test_graph_slice_is_the_expected_ids_not_just_a_count() -> None:
+    """Срез задаётся идентичностью, а не «ровно 8».
+
+    Причина теста: автор уже публиковал перечень среза, ошибочный в 7 пунктах из 8, — он
+    вывел его из количества, а количества были верны. Проверка на количество прошла бы снова.
+    """
+    report = check()
+    assert report.graph_slice == [
+        "it_graph_17", "it_graph_18", "it_graph_19", "it_graph_20",
+        "it_graph_21", "it_graph_22", "it_graph_23", "it_graph_24",
+    ]

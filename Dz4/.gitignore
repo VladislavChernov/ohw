@@ -15,6 +15,10 @@ QA_review/
 # Секреты локального контура (не публикуются): ключи API и пароль Neo4j
 prototype/infra/.env
 
+# Coordination and handoff files: working state, not history. Owned by git, not by them.
+current_work.md
+NEXT_SESSION_INSTRUCTIONS.md
+
 # Runtime data (SQLite прототипа, локальные прогоны)
 prototype/runtime/
 prototype/reports/
