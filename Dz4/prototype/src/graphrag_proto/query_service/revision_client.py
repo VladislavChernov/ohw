@@ -9,7 +9,9 @@ Fail-open: недоступный ingestion — не ошибка; отдаёт�
 S6/`topology_poll_errors_total` ревью №7) — деградация не молчит.
 
 `REVISION_POLL_INTERVAL_S = 0` → поллер выключен, все ревизии `None`
-(M3-поведение, обратная совместимость с TTL-кэшем).
+(M3-поведение, обратная совместимость с TTL-кэшем). Пустое значение и `false` означают то же
+самое: бандл `data-revision-query-context` требует именно этого, а прежний разбор env молчал на
+них и возвращал дефолт — то есть поллер оставался включённым при объявленном «выключено».
 """
 
 from __future__ import annotations
@@ -23,6 +25,11 @@ import requests
 
 _INGESTION_DEFAULT_URL = "http://ingestion-api:8002"
 _REVISION_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_DEFAULT_POLL_INTERVAL_S = 5.0
+_DEFAULT_TIMEOUT_S = 3.0
+#: Значения, которыми поллер выключают явно. Непустой мусор сюда не входит: неп��разимая
+#: строка — это не «выключено», это ошибка конфигурации, и она даёт дефолт.
+_POLL_DISABLED = {"", "0", "false", "off", "no", "none"}
 
 
 class RevisionClient:
@@ -53,8 +60,8 @@ class RevisionClient:
         return cls(
             url,
             api_key=key,
-            poll_interval_s=_env_float("REVISION_POLL_INTERVAL_S", 5.0),
-            timeout_s=_env_float("REVISION_TIMEOUT_S", 3.0),
+            poll_interval_s=_poll_interval_from_env(),
+            timeout_s=_env_float("REVISION_TIMEOUT_S", _DEFAULT_TIMEOUT_S),
         )
 
     def _fetch(self, domain: str) -> tuple[str | None, str | None] | None:
@@ -108,6 +115,25 @@ class RevisionClient:
         """Известные ревизии доменов {domain: revision} — видимость для оператора."""
         with self._lock:
             return {domain: cached[0] for domain, cached in self._cache.items()}
+
+
+def _poll_interval_from_env() -> float:
+    """`REVISION_POLL_INTERVAL_S` в трёх состояниях, а не в двух.
+
+    Переменная не задана → дефолт 5 с. Задана пустым или `false`/`off`/`no`/`none`/`0` →
+    поллер выключен (`0.0`), как требует бандл `data-revision-query-context` и как описано в
+    докстринге модуля. Нечитаемая строка → дефолт 5 с: молча гасить поллер из-за опечатки в
+    конфигурации нельзя, это тот же класс, что уверенный ноль вместо «не измерено».
+    """
+    raw = os.environ.get("REVISION_POLL_INTERVAL_S")
+    if raw is None:
+        return _DEFAULT_POLL_INTERVAL_S
+    if raw.strip().lower() in _POLL_DISABLED:
+        return 0.0
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return _DEFAULT_POLL_INTERVAL_S
 
 
 def _env_float(name: str, default: float) -> float:
