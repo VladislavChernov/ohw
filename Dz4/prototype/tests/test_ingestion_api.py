@@ -15,6 +15,8 @@ from graphrag_proto.ingestion_service.storage.registry import (
     JobStore,
 )
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
+from tests.job_wait import JOB_WAIT_CEILING_S
+from tests.job_wait import wait_until as _wait_until
 
 API_KEY = "changeme"
 
@@ -28,13 +30,10 @@ class _AuthedClient(TestClient):
         return super().request(method, url, headers=headers, **kwargs)
 
 
-def wait_until(condition, timeout: float = 10.0, interval: float = 0.1) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if condition():
-            return True
-        time.sleep(interval)
-    return False
+def wait_until(condition, timeout: float = JOB_WAIT_CEILING_S, interval: float = 0.1) -> bool:
+    """Совместимая обёртка над общим ожидателем: потолок и интервал приходят из `job_wait`,
+    иначе в этом файле снова появился бы свой, короткий."""
+    return _wait_until(condition, timeout_s=timeout, interval_s=interval)
 
 
 def make_app(tmp_path: Path, glossary_url: str = ""):

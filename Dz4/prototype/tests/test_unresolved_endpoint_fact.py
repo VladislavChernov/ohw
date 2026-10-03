@@ -13,7 +13,6 @@ LLM-слой документа: `_validate_edges` поднимал `ExtractionM
 from __future__ import annotations
 
 import json
-import time
 from copy import deepcopy
 from typing import Any
 
@@ -25,6 +24,7 @@ from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     ExtractStage,
     PipelineContext,
 )
+from tests.job_wait import wait_for_terminal
 
 _ENTITIES = {
     "tags": [
@@ -350,14 +350,13 @@ def test_unresolved_endpoints_reach_the_job_report(monkeypatch: Any, tmp_path: A
     jobs.create("job", "src://d.txt", "it", "txt")
     assert executor.start("job", source, "src://d.txt", "it", "txt") is True
 
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        row = jobs.get("job")
-        if row["status"] in {"succeeded", "failed"}:
-            break
-        time.sleep(0.05)
+    state, elapsed = wait_for_terminal(lambda: jobs.get("job"))
     failed = [s for s in jobs.stages("job") if s["status"] == "failed"]
-    assert row["status"] == "succeeded", {"job": row, "failed_stages": failed}
+    assert state["status"] == "succeeded", {
+        "waited_s": round(elapsed, 1),
+        "job": state,
+        "failed_stages": failed,
+    }
 
     facts = jobs.missing_endpoints("job")
     assert [fact["endpoint_name"] for fact in facts] == ["REQ_MADE_UP"]

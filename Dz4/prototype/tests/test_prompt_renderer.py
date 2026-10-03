@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import copy
-import time
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +32,7 @@ from graphrag_proto.ingestion_service.pipeline.prompt_renderer import (
     extraction_identity,
     render_instruction,
 )
+from tests.job_wait import wait_for_terminal
 
 PROFILES_DIR = Path(__file__).resolve().parents[1] / "domain_profiles"
 
@@ -148,13 +148,10 @@ def test_passport_is_written_for_every_extracting_job(
     # Джоба выполняется асинхронно: 202 - это «поставлено в очередь», а не «готово».
     # Без ожидания тест читал бы базу до того, как EXTRACT вообще случился, и падал бы
     # с сообщением, похожим на «паспорт не пишется», то есть вводил бы в заблуждение.
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        job = client.get(f"/api/v1/ingestion/jobs/{job_id}", headers={"X-API-Key": "k"}).json()
-        if str(job.get("status")) in {"succeeded", "failed", "cancelled"}:
-            break
-        time.sleep(0.2)
-    assert str(job.get("status")) == "succeeded", job
+    job, elapsed = wait_for_terminal(
+        lambda: client.get(f"/api/v1/ingestion/jobs/{job_id}", headers={"X-API-Key": "k"}).json()
+    )
+    assert str(job.get("status")) == "succeeded", {"waited_s": round(elapsed, 1), "job": job}
 
     from graphrag_proto.ingestion_service.storage.registry import JobStore
 

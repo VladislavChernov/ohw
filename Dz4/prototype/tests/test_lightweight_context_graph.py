@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -19,6 +18,7 @@ from graphrag_proto.retrieval.adapters.llm import FakeLLM
 from graphrag_proto.retrieval.adapters.reranker import NoOpRerankerAdapter
 from graphrag_proto.retrieval.adapters.schemas import normalize_vector_row
 from graphrag_proto.retrieval.pipeline import QueryPipeline
+from tests.job_wait import wait_for_terminal
 
 
 class _NoSchemaGraph(InMemoryGraphStore):
@@ -256,16 +256,13 @@ def test_ingest_accepts_optional_tags_and_links(tmp_path: Path, monkeypatch: Any
         )
         assert response.status_code == 202
         job_id = response.json()["job_id"]
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            state = client.get(
+        state, elapsed = wait_for_terminal(
+            lambda: client.get(
                 f"/api/v1/ingestion/jobs/{job_id}",
                 headers={"X-API-Key": "changeme"},
             ).json()
-            if state["status"] in {"succeeded", "failed", "cancelled"}:
-                break
-            time.sleep(0.05)
-        assert state["status"] == "succeeded"
+        )
+        assert state["status"] == "succeeded", {"waited_s": round(elapsed, 1), "job": state}
     assert graph.get_node("tag:it:quicksort") is not None
     assert graph.get_node("tag:it:sorting") is not None
 
