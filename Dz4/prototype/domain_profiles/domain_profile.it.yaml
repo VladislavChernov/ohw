@@ -97,14 +97,16 @@ extraction:
       - Если связей в тексте нет — верни "relationships": [].
       - Отвечай только JSON, без пояснений и без markdown-fence.
 
-validation:
-  # Правила декларативны: код их не исполняет (исполнение — Стадия 8, BLG-02).
-  # Ключ идентичности доменных сущностей — canonical_name (Вариант А, Стадия 7).
-canonicalization:
-  # Слои трансформации ключа идентичности (ADR-007). Реализованы в коде единой
-  # функцией `orchestrator._identity_key`: unicode (NFKC) + yo_fold (ё→е) +
-  # trim_lower (casefold + сжатие пробелов). Слой glossary остаётся в NORMALIZE
-  # (разрешение синонимов через Glossary Service).
+# Секции `validation` и `canonicalization` удалены вместе с мёртвым содержимым
+# (`validation.rules`, `canonicalization.nodes`; бандл tidy-domain-profile-keys, 61050ae).
+# Оставленные ключи без тела дают в YAML `None`, а не маппинг, и профиль целиком переставал
+# грузиться: Config Service отвечал 422, и query-контур не мог получить профиль домена.
+# Что осталось в силе: слои трансформации ключа идентичности (ADR-007) реализованы в коде
+# единой функцией `orchestrator._identity_key` — unicode (NFKC) + yo_fold (ё→е) +
+# trim_lower (casefold + сжатие пробелов); слой glossary остаётся в NORMALIZE (разрешение
+# синонимов через Glossary Service). Правила validation декларативны и кодом не
+# исполняются (исполнение — Стадия 8, BLG-02), а ключ идентичности доменных сущностей —
+# canonical_name (Вариант А, Стадия 7).
 chunking:
   # Стадия 7: параметры стратегий читаются декларативно из этой секции
   # (`ctx.profile.chunking` → build_chunker_from_profile). Полный динамический

@@ -135,10 +135,13 @@ function Invoke-Compose {
 if (-not (Test-Path -LiteralPath $composeFile)) {
     throw "Не найден compose-файл: $composeFile"
 }
-if (-not $env:RUN_CODE_COMMIT) {
-    $env:RUN_CODE_COMMIT = (& git -C $repoRoot rev-parse --short HEAD).Trim()
-    Write-Host "RUN_CODE_COMMIT не задан — беру из HEAD: $($env:RUN_CODE_COMMIT)"
-}
+# Ревизия кода, попадающая в артефакты, вычисляется здесь всегда, а не только когда
+# переменная пуста. Иначе переменная, оставшаяся в сессии от прошлого прогона, молча
+# уехала бы в манифест: `run_eval.py` проверяет только наличие, поэтому прогон записался бы
+# с чужим старым хэшем и остался бы правдоподобным. Выровнено с `run_e2e_cleanup.ps1`
+# и `run_e2e_depth.ps1`, которые выставляют её принудительно.
+$env:RUN_CODE_COMMIT = (& git -C $repoRoot rev-parse --short HEAD).Trim()
+Write-Host "RUN_CODE_COMMIT взят из HEAD: $($env:RUN_CODE_COMMIT)"
 $env:RUN_CODE_TREE = Get-GitTreeState
 if (-not $env:GRAPH_AUTH_API_KEY) { $env:GRAPH_AUTH_API_KEY = 'changeme' }
 if (-not $env:NEO4J_PASSWORD) { $env:NEO4J_PASSWORD = 'graphrag' }

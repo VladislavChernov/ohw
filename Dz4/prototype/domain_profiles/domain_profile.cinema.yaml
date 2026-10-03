@@ -46,7 +46,11 @@ extraction:
 validation:
   rules: []
 
-canonicalization:
+# Секция `canonicalization` удалена вместе с мёртвым содержимым `canonicalization.nodes`
+# (бандл tidy-domain-profile-keys, 61050ae). Оставленный ключ без тела даёт в YAML `None`,
+# а не маппинг, и профиль целиком переставал грузиться: Config Service отвечал 422, и
+# query-контур не мог получить профиль домена. Слои трансформации ключа идентичности
+# (ADR-007) реализованы в коде — `orchestrator._identity_key`.
 chunking:
   strategy: "sliding_window"
   chunk_size: 512
