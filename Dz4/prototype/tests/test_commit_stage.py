@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ import pytest
 
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
+    MANUAL_NODE_VERSION,
     Analyzer,
     ChunkStage,
     CommitStage,
@@ -38,10 +41,61 @@ from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
 from graphrag_proto.retrieval.adapters.base import Embedder
 from graphrag_proto.retrieval.adapters.deterministic import deterministic_embedding
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
+from graphrag_proto.retrieval.adapters.llm import FakeLLM
 
 CONTENT_1 = "кэширование данные дедупликация алгоритм базы данных\n"
 CONTENT_2 = "индекс поиск дедупликация граф знаний через рёбра и вершины\n"
 DEDUP_TAG_ID = "tag:it:дедупликация"
+
+# ADR-049: детерминированной заглушки больше нет, поэтому ноды в графе этого файла
+# появляются только потому, что тест сам объявляет их ответом модели. Раньше они
+# появлялись потому, что LLM не было, — то есть четыре теста ниже держались на молчании
+# и на подстановке слов текста вместо сущностей.
+#
+# Форма ответа — та, которую отдаёт модель (ADR-039, ADR-037): `canonical_name` обязателен,
+# `tag_id` запрещён и платформой не принимается, идентичность считается из имени. Нода
+# получает `tag_id = tag:it:дедупликация` сама, из `_identity_key(canonical_name)`.
+_ENTITY_PROFILE: dict[str, Any] = {
+    "profile": {"name": "it"},
+    "extraction": {
+        "llm_enabled": True,
+        "prompt_template": {
+            "id": "extract_commit_it_v1",
+            "system": "Extract context nodes and links.",
+            "user": "Return JSON with tags and links.",
+        },
+    },
+    # Те же параметры, что давал `build_chunker()` по умолчанию, — чтобы появление профиля
+    # в этой сборке не сдвинуло разбиение на чанки и не изменило ожидания тестов про
+    # векторную ось. Профиль без `chunking` тоже откатился бы на дефолты, но объявлять их
+    # здесь лучше явно: иначе смена дефолта тихо меняет смысл этих тестов.
+    "chunking": {"strategy": "sliding_window", "chunk_size": 512, "overlap": 64},
+}
+
+_LLM_ANSWER: dict[str, Any] = {
+    "tags": [
+        {
+            "canonical_name": "дедупликация",
+            "name": "дедупликация",
+            "aliases": ["дедупликационный проход"],
+            "origin": "ai",
+            "confidence": 0.8,
+        }
+    ],
+    "relationships": [],
+}
+
+
+@pytest.fixture(autouse=True)
+def _llm_extraction_declared(monkeypatch: Any) -> None:
+    """Экстракция LLM в этом файле объявлена намеренно.
+
+    Отдельная фикстура, а не `monkeypatch` в каждом тесте: `build_analyzer` ниже собирает
+    конвейер, и «объявлен ли LLM» — свойство файла, а не отдельного теста. Раньше здесь
+    ничего не объявлялось, и ветка `not _llm_extraction_enabled()` была дорогой по
+    умолчанию.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
 
 
 def build_analyzer(
@@ -57,7 +111,11 @@ def build_analyzer(
         IngestStage({"txt": TxtReader()}),
         ChunkStage(chunker),
         EmbedStage(embedder),
-        ExtractStage(),
+        ExtractStage(
+            llm=FakeLLM(text=json.dumps(_LLM_ANSWER, ensure_ascii=False), is_fake=False),
+            profile_fetcher=lambda _domain: deepcopy(_ENTITY_PROFILE),
+            optional_failure=True,
+        ),
         NormalizeStage(""),
         DedupStage(),
         ContractStage(),
@@ -70,7 +128,7 @@ def build_analyzer(
             projection_state_store=projection_state,
         ),
     ]
-    return Analyzer(stages), registry
+    return Analyzer(stages, profile_fetcher=lambda _domain: deepcopy(_ENTITY_PROFILE)), registry
 
 
 def run_source(
@@ -149,7 +207,11 @@ def test_commit_writes_context_nodes_edges_vectors(tmp_path: Path) -> None:
     assert context_node is not None
     assert context_node["_labels"] == ["ContextNode"]
     assert context_node["tag_id"] == DEDUP_TAG_ID
-    assert context_node["extractor_version"] == "deterministic:v1"
+    # ADR-049: метка ноды называет того, кто её создал. Раньше здесь стояло
+    # `== "deterministic:v1"`, то есть тест закреплял метку заглушки, а тесты этого
+    # файла держались на её молчаливом срабатывании.
+    assert context_node["extractor_version"].startswith("llm:")
+    assert context_node["extractor_version"] != MANUAL_NODE_VERSION
     assert context_node["source_ids"] == ["src://d.txt"]
     mentioned_chunks = {
         from_id
@@ -627,6 +689,48 @@ def test_best_effort_compensates_graph_on_vector_failure(tmp_path: Path) -> None
     assert context_node["chunk_ids"] == []
     assert not any(edge_type == "MENTIONS" for _, _, edge_type in graph._edges)
     assert not vector._vectors
+
+
+def test_node_counter_stays_empty_when_a_best_effort_pair_is_compensated(tmp_path: Path) -> None:
+    """Счётчик нод пуст, когда проекция была скомпенсирована (ADR-024 + ADR-049 п. 4).
+
+    Важная поправка к формулировке: ноды `ContextNode` при компенсации **выживают** в графе
+    (см. `test_best_effort_compensates_graph_on_vector_failure` выше). Значит счётчик
+    описывает не «что лежит в графе», а «что эта джоба записала как свою проекцию» и не
+    откатила. Здесь проекция откачена, поэтому считать нечего, а `graph_projection_status`
+    это уже сообщает.
+
+    Тест не пустой по построению: ноды в графе есть (проверяется), сущности от модели
+    получены, и всё же счётчик пуст - потому что запись не состоялась.
+    """
+    graph, vector = InMemoryGraphStore(), FailingVectorAxis()
+    analyzer, _ = build_analyzer(tmp_path, graph, vector)
+    src = tmp_path / "compensated.txt"
+    src.write_text(CONTENT_1, encoding="utf-8")
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://compensated.txt",
+        source_path=str(src),
+        tags=[],
+        links=[],
+        metadata={},
+    )
+
+    with pytest.raises(CommitStageError) as excinfo:
+        analyzer.run(ctx)
+    assert excinfo.value.compensated is True
+
+    # Ненулевая величина, ради которой тест не пуст: нода в графе пережила компенсацию.
+    survivors = {
+        node_id: node
+        for node_id in graph._nodes
+        if (node := graph.get_node(node_id)) and node.get("extractor_version")
+    }
+    assert survivors, "ожидалась хотя бы одна помеченная нода: тест обязан быть непустым"
+    assert ctx.graph_projection_status != "committed", ctx.graph_projection_status
+    assert ctx.nodes_by_extractor_version == {}, ctx.nodes_by_extractor_version
 
 
 def _is_atomic_pair_for_test(graph: InMemoryGraphStore, vector: InMemoryVectorStore) -> bool:

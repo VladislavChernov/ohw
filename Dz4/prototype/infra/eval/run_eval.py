@@ -82,6 +82,11 @@ ENRICHMENT_DEGRADED_PREFIX = "enrichment_degraded"
 # поломки, он не выглядит как поломка.
 ENRICHMENT_DEGRADED_SIGNAL = "enrichment_degraded"
 LLM_LAYER_DROPPED_SIGNAL = "llm_layer_dropped"
+# ADR-049: ещё два сигнала, и оба закрывают один класс поломки — «признак выведен из
+# журнала стадий, а журнал не различает отработавшую и пропущенную стадию». Владелец —
+# ingestion-сервис (`app.INGEST_NOOP_SIGNAL`, `app.EXTRACTION_SIGNAL_PREFIX`).
+INGEST_NOOP_SIGNAL = "ingest_noop"
+EXTRACTION_SIGNAL_PREFIX = "extraction:"
 DEFAULT_CONTOUR_TIMEOUT_S = 5.0
 
 EVAL_K = 5
@@ -561,18 +566,55 @@ def _int_field(source: dict[str, Any], name: str) -> int:
         return 0
 
 
-def _extraction_stage_ran(job: dict[str, Any]) -> bool:
-    """Выполнялась ли стадия EXTRACT у этой джобы.
+def _extraction_stage_reached(job: dict[str, Any]) -> bool:
+    """Лежит ли в журнале джобы строка стадии EXTRACT.
 
-    Независимый свидетель, а не счётчик: `job_stages` — журнал фактического
-    прохождения стадий, тогда как объём записей живёт в `enrichment`. Два источника
-    нужны именно потому, что независимы: сломавшийся счётчик не исчезнет из знаменателя,
-    и дыра в одном станет видна по расхождению с другим.
+    Это факт ЖУРНАЛА, а не факт работы: `update_stage` вызывается перед каждой стадией, и у
+    no-op-джобы, где пайплайн остановился на INGEST, в журнале лежат все девять строк.
+    Поэтому как знаменатель объёма извлечения этот признак не годится — для этого есть
+    `_llm_extraction_ran`. Имя изменено, чтобы «этап достигнут» и «извлечение шло» не
+    читались как одно и то же поле.
     """
     for entry in job.get("stages") or []:
         if isinstance(entry, dict) and entry.get("stage") == "EXTRACT":
             return True
     return False
+
+
+def _llm_extraction_ran(job: dict[str, Any]) -> bool:
+    """Отвечала ли модель на этой джобе.
+
+    Положительный свидетель работы, а не вывод из журнала: сигнал `extraction:<identity>`
+    ставится только тогда, когда `_extract_llm` была вызвана, то есть когда записан паспорт
+    извлечения. Стадия EXTRACT может быть пройдена, не вызвав модель ни разу, — при
+    деградации по конфигурации, — и тогда этот признак `false`, что и требуется: объём
+    извлечения у такой джобы ноль не потому, что модель ничего не нашла.
+
+    Причина, по которой в отчёт не смотрели, названа в ADR-049: на прогоне 2026-10-04
+    `llm_records_extracted: 0` стоял рядом с `enrichment_degraded: false` тремя документами
+    подряд, и по журналу стадий это выглядело как «модель отработала и ничего не нашла».
+    """
+    signals = job.get("signals")
+    if not isinstance(signals, dict):
+        return False
+    return any(
+        isinstance(name, str) and name.startswith(EXTRACTION_SIGNAL_PREFIX) for name in signals
+    )
+
+
+def _ingest_noop(job: dict[str, Any]) -> bool:
+    """Признал ли INGEST содержимое неизменным и не пошёл дальше.
+
+    Читается из сигнала `ingest_noop`, а не выводится из журнала: журнал содержит все
+    стадии и у no-op-джобы в том числе, поэтому вывод «стадия INGEST — последняя» работал
+    только до появления `Executor`, который пишет стадию перед запуском. На прогоне
+    2026-10-04 три no-op-джобы были отчитаны как холодная перезагрузка: `noop: false`,
+    `last_stage: COMMIT`, `extraction_stage_ran: true`.
+    """
+    signals = job.get("signals")
+    if not isinstance(signals, dict):
+        return False
+    return INGEST_NOOP_SIGNAL in signals
 
 
 def _parse_enrichment_degradation(
@@ -626,6 +668,43 @@ def _parse_enrichment_degradation(
     )
 
 
+def _parse_nodes_by_extractor(job: dict[str, Any]) -> tuple[dict[str, int], str | None, bool]:
+    """Разобрать `nodes_by_extractor` — кто создал ноды, записанные джобой (ADR-049 п. 4).
+
+    Возвращает `(распределение, статус проекции, запись была)`.
+
+    **Третья часть — не формальность.** Пустое распределение означает три разные вещи:
+    джоба не дошла до записи в граф (no-op, отказ, джоба без COMMIT) — тогда это
+    `не измерено`; запись состоялась, но сущностей не было; запись в граф не состоялась
+    (`degraded`). Отчёт обязан различать их, иначе «нод ноль» и «мы не смотрели»
+    снова сольются — а это ровно тот молчащий ноль, из-за которого дефект и прожил
+    два отчёта.
+
+    **Распределение не суммируется как «ноды в графе».** Оно отвечает на вопрос «кто
+    создал ноды этой сборки», а не «сколько нод в графе»: `extractor_version`
+    перезаписывается на том же MERGE, что и содержимое ноды, поэтому история извлечений
+    в графе не сохраняется (ADR-049, раздел про требование M0).
+    """
+    raw = job.get("nodes_by_extractor")
+    if not isinstance(raw, dict):
+        return {}, None, False
+    counts = raw.get("by_extractor_version")
+    status = raw.get("graph_projection_status")
+    if not isinstance(counts, dict):
+        # Поле есть, а распределения в нём нет - это не «нод ноль», а «записи не было».
+        # Сервис отдаёт `nodes_by_extractor` для каждой джобы, а строку в реестре заводит
+        # только COMMIT; упавшая и no-op-джоба приходят сюда с `None`. Форма `{}` тоже
+        # означает «не измерено»: она неотличима от отсутствия строки, и читать её как
+        # состоявшуюся запись нельзя (ADR-049 п. 4).
+        return {}, str(status) if status else None, False
+    parsed = {
+        str(key): _int_field(counts, str(key))
+        for key in counts
+        if isinstance(key, str) and key
+    }
+    return parsed, str(status) if status else None, True
+
+
 def build_ingest_report(
     submitted: list[dict[str, Any]],
     statuses: dict[str, dict[str, Any]],
@@ -641,9 +720,11 @@ def build_ingest_report(
         job = statuses.get(record["job_id"], {})
         status = str(job.get("status", "unknown"))
         stage = job.get("stage")
-        is_noop = status == "succeeded" and stage == "INGEST"
+        is_noop = status == "succeeded" and _ingest_noop(job)
         degraded, degradation_error, layer_dropped, facts = _parse_enrichment_degradation(job)
-        extraction_ran = _extraction_stage_ran(job)
+        stage_reached = _extraction_stage_reached(job)
+        llm_ran = _llm_extraction_ran(job)
+        nodes_by_version, projection_status, nodes_recorded = _parse_nodes_by_extractor(job)
         documents.append(
             {
                 "source_url": record["source_url"],
@@ -658,15 +739,30 @@ def build_ingest_report(
                 "enrichment_error": degradation_error,
                 "enrichment_cause": facts["cause"],
                 "llm_layer_dropped": layer_dropped,
-                # Свидетель: EXTRACT фактически выполнялся. Отдельно от `llm_layer_dropped`
-                # и `records`, потому что «стадия не запускалась» (no-op тёплого корпуса) —
-                # законное объяснение нуля, а «стадия была, а записей ноль» — повод
-                # смотреть, а не вывод.
-                "extraction_stage_ran": extraction_ran,
+                # Свидетель ЖУРНАЛА: строка стадии EXTRACT существует. Это не значит, что
+                # модель отвечала, — у no-op-джобы лежат все девять строк. Как знаменатель
+                # объёма не годится, поэтому ниже есть отдельный `llm_extraction_ran`.
+                "extraction_stage_reached": stage_reached,
+                # Свидетель РАБОТЫ: модель отвечала, паспорт извлечения записан. Знаменатель
+                # «записей на документ» считается по этому признаку, иначе в него попадают
+                # документы, где извлечения не было (ADR-049).
+                "llm_extraction_ran": llm_ran,
                 "llm_records_extracted": facts["llm_records"],
                 "llm_edges_extracted": facts["llm_edges"],
                 "llm_layer_lost_entities": facts["lost_entities"],
                 "llm_layer_lost_edges": facts["lost_edges"],
+                # ADR-049 п. 4: кто создал ноды этой джобы, и состоялась ли запись. Чтение
+                # отчёта не должно требовать обхода графа, чтобы понять, откуда взялись
+                # ноды: до этого изменения вопрос «это сущности модели или слова текста»
+                # решался только осмотром базы.
+                "nodes_by_extractor_version": nodes_by_version,
+                "llm_nodes": sum(
+                    count
+                    for key, count in nodes_by_version.items()
+                    if key.startswith("llm:")
+                ),
+                "nodes_recorded": nodes_recorded,
+                "graph_projection_status": projection_status,
                 "wall_time_s": round(float(record.get("waited_s") or 0.0), 2),
                 "seconds_per_kb": (
                     round(float(record["waited_s"]) / max(record["bytes"] / 1024.0, 0.001), 2)
@@ -677,13 +773,29 @@ def build_ingest_report(
         )
     cold = [d["wall_time_s"] for d in documents if not d["noop"]]
     noop = [d["wall_time_s"] for d in documents if d["noop"]]
-    extraction_docs = [d for d in documents if d["extraction_stage_ran"]]
-    llm_records_total = sum(d["llm_records_extracted"] for d in extraction_docs)
+    # Знаменатель объёма извлечения — документы, где модель ОТВЕЧАЛА, а не те, где
+    # стадия EXTRACT стоит в журнале. Разница не косметическая: у no-op-джобы журнал
+    # содержит все девять стадий, и на прогоне 2026-10-04 три таких документа попали в
+    # знаменатель с нулём записей — то есть «записей на документ» считалось по документам,
+    # где извлечения не было (ADR-049).
+    llm_docs = [d for d in documents if d["llm_extraction_ran"]]
+    extraction_docs = [d for d in documents if d["extraction_stage_reached"]]
+    llm_records_total = sum(d["llm_records_extracted"] for d in llm_docs)
     causes: dict[str, int] = {}
     for doc in documents:
         cause = doc["enrichment_cause"]
         if cause:
             causes[cause] = causes.get(cause, 0) + 1
+    # ADR-049 п. 4: сколько нод прогон записал и кто их создал. Считается по джобам, где
+    # запись состоялась, — джобы без записи в знаменатель не входят, иначе «нод ноль»
+    # слилось бы с «мы не смотрели». Производители, встретившиеся хоть раз, попадают в
+    # отчёт целиком, включая нулевые значения: отсутствие ключа и нулевое значение —
+    # разные утверждения, и по отчёту их надо различать.
+    nodes_by_version: dict[str, int] = {}
+    for doc in documents:
+        for key, value in doc["nodes_by_extractor_version"].items():
+            nodes_by_version[key] = nodes_by_version.get(key, 0) + value
+    documents_with_nodes_recorded = sum(1 for d in documents if d["nodes_recorded"])
     return {
         "documents_total": len(documents),
         "noop_documents": len(noop),
@@ -702,22 +814,32 @@ def build_ingest_report(
         "llm_layer_lost_edges": sum(d["llm_layer_lost_edges"] for d in documents),
         # Причины разведены поимённо: чинить профиль, промпт и модель — разные работы.
         "enrichment_causes": causes,
-        # Знаменатель — документы, где экстракция ФАКТИЧЕСКИ выполнялась. Считать по
-        # всем документам нельзя: у части EXTRACT не запускался (no-op тёплого корпуса,
-        # детерминированный путь), и их нулевой вклад выглядел бы как «модель вернула
-        # ноль», то есть как поломка.
+        # Два знаменателя, и они разные вопросы. `documents_with_llm_extraction` —
+        # где модель отвечала; это знаменатель объёма. `documents_with_extraction_stage` —
+        # где стадия EXTRACT стоит в журнале; у no-op-джобы она тоже стоит, поэтому как
+        # знаменатель объёма этот счётчик вводил бы в заблуждение (ADR-049).
+        "documents_with_llm_extraction": len(llm_docs),
         "documents_with_extraction_stage": len(extraction_docs),
         "llm_records_extracted": llm_records_total,
-        # Место, где счётчик может сломаться: стадия была, а записей ноль. Само по себе
-        # не приговор — модель действительно могла ничего не найти, — но такой документ
-        # обязателен для ручной проверки, и поэтому назван числом, а не спрятан.
-        "documents_with_extraction_stage_without_records": sum(
-            1 for d in extraction_docs if not d["llm_records_extracted"]
+        # ADR-049 п. 4. Знаменатель рядом с числом, иначе «нод ноль» не отличить от
+        # «запись нигде не считалась». `llm_nodes` — доля нод, записанных моделью; она
+        # имеет смысл, только когда в прогоне вообще была нода.
+        "nodes_by_extractor_version": dict(sorted(nodes_by_version.items())),
+        "llm_nodes": sum(
+            count for key, count in nodes_by_version.items() if key.startswith("llm:")
+        ),
+        "nodes_written": sum(nodes_by_version.values()),
+        "documents_with_nodes_recorded": documents_with_nodes_recorded,
+        # Место, где счётчик может сломаться: модель отвечала, а записей ноль. Само по
+        # себе не приговор — модель действительно могла ничего не найти, — но такой
+        # документ обязателен для ручной проверки и потому назван числом.
+        "documents_with_llm_extraction_without_records": sum(
+            1 for d in llm_docs if not d["llm_records_extracted"]
         ),
         # Доля НЕ выводится при нулевом знаменателе: `0%` на пустой базе читается как
         # «модель не работает», хотя правильный смысл — «нечего было измерять».
         "llm_records_per_extraction_document": (
-            round(llm_records_total / len(extraction_docs), 2) if extraction_docs else None
+            round(llm_records_total / len(llm_docs), 2) if llm_docs else None
         ),
         "total_wall_time_s": round(sum(d["wall_time_s"] for d in documents), 2),
         "cold_wall_time_sum_s": round(sum(cold), 2),
@@ -768,6 +890,9 @@ def build_ingest_quality(ingest: dict[str, Any] | None) -> dict[str, Any]:
         "llm_layer_lost_edges": lost_edges,
         "enrichment_degraded_documents": int(ingest.get("enrichment_degraded_documents") or 0),
         "enrichment_causes": ingest.get("enrichment_causes") or {},
+        "documents_with_llm_extraction": int(
+            ingest.get("documents_with_llm_extraction") or 0
+        ),
         "documents_with_extraction_stage": int(
             ingest.get("documents_with_extraction_stage") or 0
         ),

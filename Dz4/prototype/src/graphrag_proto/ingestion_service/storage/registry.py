@@ -448,6 +448,22 @@ class JobStore:
             "ts TEXT NOT NULL"
             ")"
         )
+        # НОДЫ ДЖОБЫ ПО ПРОИЗВОДИТЕЛЮ (ADR-049 п. 4). Таблица, а не столбец в
+        # `job_enrichment`, по тому же доводу, что и у соседних: `CREATE TABLE IF NOT EXISTS`
+        # создаёт её на уже развёрнутой базе без миграции, а столбец потребовал бы `ALTER`
+        # везде, где пайплайн уже отработал.
+        #
+        # Набор значений задаёт не схема, а то, кто создаёт ноды, поэтому распределение
+        # хранится JSON, а не столбцом на каждый возможный производителя. Одна строка на
+        # джобу: считается по факту состоявшейся записи в графе, и джоба пишет её один раз.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_nodes_by_extractor ("
+            "job_id TEXT PRIMARY KEY, "
+            "by_version_json TEXT NOT NULL, "
+            "graph_projection_status TEXT NOT NULL, "
+            "ts TEXT NOT NULL"
+            ")"
+        )
         self._conn.commit()
 
     def close(self) -> None:
@@ -879,6 +895,74 @@ class JobStore:
                 ),
             )
             self._conn.commit()
+
+    def record_nodes_by_extractor(
+        self,
+        job_id: str,
+        by_version: dict[str, int],
+        *,
+        graph_projection_status: str,
+    ) -> None:
+        """Записать, сколько нод джоба записала в граф, по производителю (ADR-049 п. 4).
+
+        Пишется в том числе пустым dict, и рядом кладётся `graph_projection_status`.
+        Без статуса пустое распределение нечитаемо: «сущностей не было» и «запись в граф
+        не состоялась» — разные результаты, и оба выглядели бы как `{}`. Со статусом
+        отличить их можно, не заглядывая в лог.
+
+        Ключи приводятся к строке и сортируются при записи: значение, которое читается
+        человеком и сравнивается в отчёте, не должно зависеть от порядка обхода.
+        """
+        from datetime import datetime
+
+        payload = json.dumps(
+            {str(key): int(value) for key, value in sorted(by_version.items())},
+            ensure_ascii=False,
+        )
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_nodes_by_extractor (job_id, by_version_json, "
+                "graph_projection_status, ts) VALUES (?, ?, ?, ?)",
+                (
+                    job_id,
+                    payload,
+                    str(graph_projection_status),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def nodes_by_extractor(self, job_id: str) -> dict[str, Any] | None:
+        """Распределение нод джобы по производителю; ``None`` — записи не было.
+
+        Отсутствие строки и пустая строка — разные вещи, и потребителю это важно:
+        отсутствие строки означает, что джоба не дошла до записи в граф (no-op, отказ,
+        джоба без COMMIT), и тогда счётчик пуст **не потому, что нод не было**.
+
+        Поэтому отсутствие возвращается как ``None``, а не как ``{}``. Раньше оба случая
+        выглядели одинаково, и прибор читал упавшую джобу как «запись состоялась, нод
+        ноль» - ровно то слияние, которое ADR-049 п. 4 и запрещает.
+
+        ``json.JSONDecodeError`` тоже означает «не измерено», а не «ноль»: значение
+        записано, но нечитаемо, и подменять его нулём нельзя.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT by_version_json, graph_projection_status FROM job_nodes_by_extractor "
+                "WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(str(row[0]))
+        except json.JSONDecodeError:
+            return None
+        counts = data if isinstance(data, dict) else {}
+        return {
+            "by_extractor_version": {str(key): int(value) for key, value in counts.items()},
+            "graph_projection_status": str(row[1]),
+        }
 
     def record_resolvability(self, job_id: str, stats: dict[str, Any], stage: str = "") -> None:
         """Записать счётчики разрешимости джобы (ADR-039).

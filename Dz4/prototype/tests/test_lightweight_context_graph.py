@@ -9,7 +9,11 @@ from fastapi.testclient import TestClient
 from graphrag_proto.config_service.domain import validate_profile
 from graphrag_proto.ingestion_service.app import create_app
 from graphrag_proto.ingestion_service.document import Document
-from graphrag_proto.ingestion_service.pipeline.orchestrator import CommitStage, PipelineContext
+from graphrag_proto.ingestion_service.pipeline.orchestrator import (
+    MANUAL_NODE_VERSION,
+    CommitStage,
+    PipelineContext,
+)
 from graphrag_proto.ingestion_service.readers.registry import TxtReader
 from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
@@ -19,6 +23,13 @@ from graphrag_proto.retrieval.adapters.reranker import NoOpRerankerAdapter
 from graphrag_proto.retrieval.adapters.schemas import normalize_vector_row
 from graphrag_proto.retrieval.pipeline import QueryPipeline
 from tests.job_wait import wait_for_terminal
+
+# Якорь для фикстур: идентичность прогона LLM. В системе она вычисляется на каждый
+# разбор (`llm:<домен>@<счётчик>:<дайджест>`), поэтому в тесте задана руками. Существует
+# рядом с `MANUAL_NODE_VERSION` именно потому, что тесты собирают записи вручную и обязаны
+# называть производителя - обе метки импортированы из кода, чтобы фикстура не разошлась
+# с реальными значениями.
+LLM_NODE_VERSION_FIXTURE = "llm:it@1:0000000000ff"
 
 
 class _NoSchemaGraph(InMemoryGraphStore):
@@ -175,6 +186,12 @@ def test_commit_preserves_dynamic_tag_ids_and_links(tmp_path: Path) -> None:
             "aliases": ["Быстрая сортировка"],
             "type": "ContextNode",
             "origin": "user",
+            # ADR-049 п. 3: имя производителя обязательно. Тест собирает записи руками и
+            # идёт сразу в COMMIT, минуя VALIDATE, — поэтому поле объявляет он сам, ровно
+            # как это делают оба настоящих производителя: `_entity_record` для ответа
+            # модели и сборка ручного тега в `_write`. Раньше здесь стояло значение по
+            # умолчанию, и запись без производителя проходила как норма.
+            "extractor_version": MANUAL_NODE_VERSION,
             "properties": {"language": "en"},
             "sources": ["src://doc"],
             "chunk_ids": ["chk:doc:0"],
@@ -185,10 +202,16 @@ def test_commit_preserves_dynamic_tag_ids_and_links(tmp_path: Path) -> None:
             "canonical_name": "Sorting",
             "type": "ContextNode",
             "origin": "ai",
+            # `origin: ai` означает производителя-модель, поэтому и метка здесь llm-овая.
+            # Раньше стоял `user:manual`, то есть запись объявляла себя ручной при
+            # модельном происхождении: фикстура называла двух разных производителей
+            # одним именем и тем самым разрешала бы тот дефект, который ADR-049 запрещает.
+            "extractor_version": LLM_NODE_VERSION_FIXTURE,
             "sources": ["src://doc"],
             "chunk_ids": ["chk:doc:0"],
         },
     ]
+
     ctx.entity_edges = [
         {
             "from_id": "tag:it:quicksort",

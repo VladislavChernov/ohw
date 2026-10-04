@@ -70,7 +70,10 @@ from graphrag_proto.retrieval.adapters.llm import (
 SCOPE_DOCUMENT = "document"
 SCOPE_USER = "user"
 
-EXTRACTOR_VERSION = "deterministic:v1"
+#: Метка ноды, которую объявил человек, а не модель. Отдельное значение, а не
+#: отсутствие поля: раньше нода без `extractor_version` получала метку
+#: `deterministic:v1` и тем самым утверждала, что её придумала заглушка (ADR-049 п. 3).
+MANUAL_NODE_VERSION = "user:manual"
 
 CHUNK_LABEL = "Chunk"
 ENTITY_LABEL = "Entity"
@@ -132,8 +135,8 @@ def _load_profile(ctx: PipelineContext, profile_fetcher: ProfileFetcher | None) 
     if verdict.errors and PROFILE_PROBLEM_LOG.due(ctx.domain, "error", verdict.errors):
         _log.error(
             "профиль домена %r нарушает контракт экстракции: %s — LLM-слой построен не "
-            "будет, документ уйдёт в детерминированный fallback (лог один раз на "
-            "набор проблем, счётчик — в enrichment_causes отчёта)",
+            "будет, ноды не извлекаются, а причина уйдёт в enrichment_causes отчёта "
+            "(лог один раз на набор проблем)",
             ctx.domain,
             "; ".join(verdict.errors),
         )
@@ -502,6 +505,18 @@ class PipelineContext:
     endpoint_keys: set[str] = field(default_factory=set)
     model_tag_ids_ignored: int = 0
     ambiguous_aliases: int = 0
+    # Ноды, записанные этой джобой в ГРАФ, сгруппированные по производителю
+    # (`extractor_version`) — ADR-049 п. 4. Заполняется в COMMIT после успешной записи.
+    #
+    # Смысл узкий и потому проверяемый: кто создал ноды **этой** сборки. Это не история
+    # извлечений: `extractor_version` перезаписывается на том же MERGE, что и остальное
+    # содержимое, поэтому прежнего значения в графе не остаётся (см. ADR-049, раздел про
+    # требование M0). Хранить историю извлечений — отдельная задача, и она не решена.
+    #
+    # Нужно, чтобы прогон читался: появление здесь чужого производителя означает, что
+    # ноды в графе появились не из ответа модели, и это видно по числам, а не по догадке
+    # о том, какая ветка EXTRACT отработала.
+    nodes_by_extractor_version: dict[str, int] = field(default_factory=dict)
     graph_projection_status: str = "not_requested"
     graph_projection_error: str | None = None
     registry_result: tuple[str, int, bool] | None = None
@@ -630,6 +645,16 @@ CAUSE_MODEL_UNAVAILABLE = "model_unavailable"
 CAUSE_MODEL_TIMEOUT = "model_timeout"
 CAUSE_MODEL_HTTP_ERROR = "model_http_error"
 
+# Причины, по которым экстракция LLM не состоялась, хотя её ждали (ADR-049).
+# Отдельные имена, потому что ремонт у них разный, — тот же довод, что у четырёх
+# транспортных причин выше. До ADR-049 все три ветки были молчаливыми: не ставили
+# флаг, не называли причину и не писали лог, а документ уходил в COMMIT без
+# слоя сущностей и читался как «извлечение отработало».
+CAUSE_LLM_DISABLED_BY_CONFIG = "llm_disabled_by_config"
+CAUSE_FAKE_LLM_ADAPTER = "fake_llm_adapter"
+CAUSE_PROFILE_NOT_ENABLING_LLM = "profile_not_enabling_llm"
+CAUSE_LLM_ADAPTER_MISSING = "llm_adapter_missing"
+
 #: Транспортная ошибка адаптера → причина деградации. Словарь, а не цепочка `isinstance`,
 #: потому что цепочка выросла бы вместе с числом классов и перестала бы читаться.
 ADAPTER_CAUSES: dict[type, str] = {
@@ -708,7 +733,11 @@ def _extraction_passport(
 
 
 class ExtractStage(Stage):
-    """EXTRACT: LLM или детерминированный fallback."""
+    """EXTRACT: LLM-слой, а при невозможности — объявление деградации (ADR-049).
+
+    Раньше здесь была заглушка, которая создавала ноды из токенов текста. Теперь её нет:
+    ни одна из веток, ведущих в неё, не пишет в граф ничего.
+    """
 
     name = "EXTRACT"
 
@@ -725,24 +754,61 @@ class ExtractStage(Stage):
     def run(self, ctx: PipelineContext) -> None:
         if not _llm_extraction_enabled():
             _load_profile(ctx, self._profile_fetcher)
-            self._extract_deterministic(ctx)
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_LLM_DISABLED_BY_CONFIG,
+                "EXTRACT_LLM не объявлен: экстракция LLM выключена конфигурацией",
+            )
             return
         if getattr(self._llm, "is_fake", False):
             if not ctx.profile_loaded:
                 ctx.profile = {}
                 ctx.profile_loaded = True
-            self._extract_deterministic(ctx)
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_FAKE_LLM_ADAPTER,
+                "адаптер LLM помечен is_fake: его ответы не несут извлечения",
+            )
             return
         _load_profile(ctx, self._profile_fetcher)
-        if ctx.profile_error:
-            ctx.enrichment_degraded = True
-            ctx.enrichment_error = ctx.profile_error
-            # Профиль не пришёл — экстракция не запускалась, ничего не потеряно.
-            # Отдельная причина, потому что «деградация» без потери и «деградация с
-            # потерей» лечатся противоположно.
-            ctx.enrichment_cause = CAUSE_PROFILE_UNAVAILABLE
-        if not ctx.profile or not _profile_llm_enabled(ctx.profile) or self._llm is None:
-            self._extract_deterministic(ctx)
+        # Причину `profile_unavailable` объявляет ветка `not ctx.profile` ниже, а не этот
+        # участок. `_load_profile` ставит `profile_error` только вместе с пустым профилем
+        # (исключение загрузчика и «профиль не mapping»), поэтому объявлять деградацию
+        # здесь было дублированием. Дублирование опасно: если бы `_load_profile` стал
+        # оставлять непустой профиль вместе с ошибкой, экстракция ушла бы в `_extract_llm`,
+        # а джоба осталась бы помеченной `enrichment_degraded` с причиной, которой не
+        # было,- то есть «деградация объявлена, извлечение выполнено».
+        # Две причины, а не одна: у профиля и у адаптера ремонт разный, и обЪединённая
+        # строка читалась бы «виновато что-то одно» — ровно та неразличимость, ради
+        # устранения которой по ТИПУ классифицируются и транспортные ошибки.
+        if not ctx.profile:
+            # Профиль не пришёл — причина здесь `profile_unavailable`, а НЕ «профиль не
+            # разрешает LLM». Первая означает «экстракция не запускалась и не могла
+            # запуститься», вторая — «запустилась бы, если бы профиль разрешал». Сливать
+            # их нельзя: это ровно то различие, ради которого имена разведены (ADR-032
+            # п. 3), и слилось бы оно здесь впервые — именно на этой ветке.
+            if ctx.profile_error:
+                self._declare_extraction_fallback(ctx, CAUSE_PROFILE_UNAVAILABLE, ctx.profile_error)
+                return
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_PROFILE_NOT_ENABLING_LLM,
+                "профиль домена пуст: объявлять LLM-экстракцию нечем",
+            )
+            return
+        if not _profile_llm_enabled(ctx.profile):
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_PROFILE_NOT_ENABLING_LLM,
+                "профиль домена не объявляет extraction.llm_enabled",
+            )
+            return
+        if self._llm is None:
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_LLM_ADAPTER_MISSING,
+                "адаптер LLM не собран: извлечение выполнять нечем",
+            )
             return
         if not self._optional_failure:
             self._extract_llm(ctx)
@@ -781,6 +847,11 @@ class ExtractStage(Stage):
 
         Причина выбирается по типу, а не по тексту: недоступный стенд, таймаут, код
         ошибки и негодный ответ — четыре разных ремонта, и раньше они были одной строкой.
+
+        Сброс больше **не подставляет токены** на место утраченного (ADR-049). Раньше последней
+        строкой здесь стоял вызов детерминированной заглушки, и на место утраченных сущностей
+        попадали слова текста: база получала 1391 выдуманную сущность, а отчёт — ни одного
+        признака, что это подмена. Теперь документ уходит в COMMIT без слоя.
         """
         # Сколько записей и рёбер ПЕРЕЖИВАЛИ бы сброс: это и есть потеря. Пока
         # считаем ДО очистки — иначе потеря всегда выглядит нулевой.
@@ -788,9 +859,6 @@ class ExtractStage(Stage):
         lost_edges = len(ctx.entity_edges)
         ctx.entities = []
         ctx.entity_edges = []
-        ctx.enrichment_degraded = True
-        ctx.enrichment_cause = _degradation_cause(exc)
-        ctx.enrichment_error = str(exc)
         # Объём LLM-слоя известен даже при сбое: то, что модель успела вернуть, и есть
         # то, что мы сейчас уничтожаем.
         ctx.llm_records = lost_entities
@@ -802,7 +870,41 @@ class ExtractStage(Stage):
         # счётчик завышает потерю на документах, где терять было нечего, и его
         # перестают читать.
         ctx.llm_layer_dropped = bool(lost_entities or lost_edges)
-        self._extract_deterministic(ctx)
+        self._declare_extraction_fallback(ctx, _degradation_cause(exc), str(exc))
+
+    def _declare_extraction_fallback(
+        self, ctx: PipelineContext, cause: str, detail: str
+    ) -> None:
+        """Объявить, что LLM-слоя не будет, и назвать почему (ADR-049).
+
+        Единственная точка, где ставится `enrichment_degraded` для всех веток EXTRACT без
+        извлечения. Одна, а не по месту каждой ветки: раньше три ветки были молчаливыми
+        (не ставили флаг, не называли причину, не писали лог), а четвёртая, сброс после
+        сбоя модели, объявлялась в своём месте — и по отчёту их было не различить вовсе.
+
+        Ничего не создаёт. Это не заглушка, которой выключили запись, а объявление:
+        код, строящий ноды, удалён, и вернуть его нельзя, не написав его заново.
+
+        `ctx.entities` и `ctx.entity_edges` здесь **не** чистятся. Здесь их и нечего чистить:
+        в ветках конфигурации извлечение не начиналось, а в ветке сбоя их уже сбросил
+        `_degrade_after_extraction_failure` — причём ДО подсчёта потери. Молчаливый сброс
+        внутри функции, названной «объявить», был бы новой ловушкой на месте старой.
+        """
+        ctx.enrichment_degraded = True
+        ctx.enrichment_cause = cause
+        ctx.enrichment_error = detail
+        # По одной строке на документ, без rate-limit: событие по природе документное, а
+        # молчание здесь стоило 1391 ноды в графе. Читаемость важнее частоты строк.
+        _log.error(
+            "экстракция LLM не дала слоя, документ уйдёт в COMMIT без сущностей: "
+            "причина=%s, детали=%s, домен=%s, источник=%s, потеряно_записей=%d, потеряно_рёбер=%d",
+            cause,
+            detail,
+            ctx.domain,
+            ctx.source_url,
+            ctx.llm_layer_lost_entities,
+            ctx.llm_layer_lost_edges,
+        )
 
     def _extract_llm(self, ctx: PipelineContext) -> None:
         template = _extraction_template(ctx.profile or {})
@@ -1120,36 +1222,6 @@ class ExtractStage(Stage):
                     )
         return unresolved
 
-    def _extract_deterministic(self, ctx: PipelineContext) -> None:
-        seen: dict[str, dict[str, Any]] = {}
-        for index, chunk in enumerate(ctx.chunks):
-            chunk_id = self._chunk_id(ctx, index)
-            for token in chunk.split():
-                word = "".join(c for c in token.lower() if c.isalpha())
-                if len(word) < 5 or not word.isalpha():
-                    continue
-                current = seen.get(word)
-                if current is None:
-                    current = {
-                        "type": CONTEXT_NODE_LABEL,
-                        "name": word,
-                        "canonical_name": word,
-                        "tag_id": f"tag:{ctx.domain}:{word}",
-                        "source": ctx.source_url,
-                        "sources": [ctx.source_url],
-                        "canonical": word,
-                        "chunk_ids": [chunk_id],
-                        "extractor_version": EXTRACTOR_VERSION,
-                        "origin": "system",
-                        "variants": [word],
-                    }
-                    seen[word] = current
-                    ctx.entities.append(current)
-                    continue
-                current["chunk_ids"] = list(dict.fromkeys([*_entity_chunk_ids(current), chunk_id]))
-                current["sources"] = list(dict.fromkeys([*_entity_sources(current), ctx.source_url]))
-                current["variants"] = list(dict.fromkeys([*_entity_variants(current), word]))
-
 
 class NormalizeStage(Stage):
     """NORMALIZE: канонизация через Glossary HTTP (resolve)."""
@@ -1346,6 +1418,18 @@ class ValidateStage(Stage):
                 raise ValueError("context node без tag_id/name на VALIDATE")
             if not entity.get("sources") and not entity.get("source_ids"):
                 raise ValueError("context node без provenance на VALIDATE")
+            # ADR-049 п. 3: у ноды обязано быть имя её создателя. Проверка живёт здесь,
+            # а не на записи ноды, потому что VALIDATE уже отвечает за форму записи и
+            # сообщает о ней читаемым текстом; «упасть позже и с другим сообщением»
+            # хуже, чем «не дойти до COMMIT вовсе». До ADR-049 здесь стояло значение по
+            # умолчанию `deterministic:v1`, и нода без производителя получала метку
+            # заглушки — то есть дефект проходил как норма.
+            if not entity.get("extractor_version"):
+                raise ValueError(
+                    "context node без extractor_version на VALIDATE: "
+                    f"производитель ноды '{entity.get('canonical') or entity.get('name') or '?'}' "
+                    "не назван, а значение по умолчанию у поля нет (ADR-049)"
+                )
         for edge in ctx.entity_edges:
             has_endpoints = all(
                 isinstance(edge.get(key), str) and edge[key]
@@ -1377,6 +1461,41 @@ def _is_atomic_pair(graph: GraphStoreProvider, vector: VectorStoreProvider) -> b
         and graph.engine_key() is not None
         and graph.engine_key() == vector.engine_key()
     )
+
+
+def _record_written_node_versions(ctx: PipelineContext, nodes: list[dict[str, Any]]) -> None:
+    """Посчитать ноды, записанные этой джобой в граф, по производителю (ADR-049 п. 4).
+
+    Считается по факту состоявшейся записи, а не при сборке `nodes`. Причина не в том, что
+    при компенсации best_effort-пары (ADR-024) ноды исчезают из графа, - они там
+    **остаются** (см. `test_commit_stage.py::test_best_effort_compensates_graph_on_vector_failure`).
+    Причина в том, что компенсация бросает `CommitStageError` раньше, чем счётчик заполняется:
+    джоба не записала проекцию как свою, и `graph_projection_status` это уже сообщает.
+
+    Записи схлопываются по `node_id`, и побеждает последняя - ровно так же, как их мержит
+    граф: `nodes` сортируется по `node_id` стабильным sort, при равных ключах порядок
+    сохраняется, а запись применяется построчно и входящее значение перебивает прежнее.
+    Обычный случай коллизии - человек помечает то, что модель уже нашла: тег без `tag_id`
+    разрешается в `node_id` найденной сущности. Без схлопывания счётчик насчитывал бы две
+    ноды там, где граф держит одну, и `nodes_written` разошлось бы с графом.
+
+    Ноды `Chunk` пропускаются: поля `extractor_version` у них нет, и приписать им
+    производителя, которого у них не было, - ровно та ошибка, ради устранения которой
+    значение по умолчанию и было снято. Молча пропустить ноду без поля нельзя, поэтому
+    отсутствие поля здесь просто не попадает в счётчик, а счётчик остаётся перечислением
+    того, что производитель известен.
+    """
+    by_node_id: dict[str, str] = {}
+    for node in nodes:
+        node_id = str(node.get("node_id") or "")
+        version = (node.get("properties") or {}).get("extractor_version")
+        if not node_id or not version:
+            continue
+        by_node_id[node_id] = str(version)
+    counts: dict[str, int] = {}
+    for version in by_node_id.values():
+        counts[version] = counts.get(version, 0) + 1
+    ctx.nodes_by_extractor_version = counts
 
 
 # ------------------------------------------------------------------ ADR-028 retry
@@ -1730,6 +1849,18 @@ class CommitStage(Stage):
             record.setdefault("name", canonical)
             record.setdefault("type", CONTEXT_NODE_LABEL)
             record.setdefault("origin", "user")
+            # ADR-049 п. 3: метка ставится здесь, где производитель известен, а не
+            # подставляется на записи ноды. Раньше здесь поля не было, и запись ноды
+            # подставляла метку заглушки - то есть ручной тег, который человек поставил
+            # сам, получал `extractor_version` чужого происхождения.
+            #
+            # Именно присваивание, а не `setdefault`: на этом пути производитель известен
+            # по построению - запись вносит загрузка, то есть человек. Значение, присланное
+            # клиентом, не подсказка, а попытка выдать ручную ноду за модельную, а явный
+            # `null` превратился бы в строку `"None"` - производителя, которого нет.
+            # Теги приходят свободной формой и дописываются уже после VALIDATE, поэтому
+            # проверка обязательного поля их не увидит.
+            record["extractor_version"] = MANUAL_NODE_VERSION
             record.setdefault("sources", [source_url])
             record.setdefault("source_ids", [source_url])
             entities.append(record)
@@ -1798,7 +1929,13 @@ class CommitStage(Stage):
                 "canonical_name": canonical,
                 "source_ids": _entity_sources(entity) or [source_url],
                 "chunk_ids": _entity_chunk_ids(entity),
-                "extractor_version": str(entity.get("extractor_version") or EXTRACTOR_VERSION),
+                # ADR-049 п. 3: поле обязательное и значения по умолчанию не имеет.
+                # Раньше здесь стояло `or EXTRACTOR_VERSION`, и метку заглушки получала
+                # любая нода без поля — включая ручной тег, который собрали без него.
+                # Теперь производителей ровно два, оба ставят поле сами, а отсутствие
+                # поля — дефект нашего кода, который обязан падать громко, а не получать
+                # чужую метку и выглядеть при этом извлечённым.
+                "extractor_version": str(entity["extractor_version"]),
                 "variants": _entity_variants(entity),
                 "properties": dict(entity.get("properties") or {}),
             }
@@ -2042,21 +2179,25 @@ class CommitStage(Stage):
                     source_url,
                 ),
             )
-            ctx.graph_projection_status = "committed"
-            return
-        # best_effort: ретраи и компенсация выполняются по осям внутри _write_best_effort
-        self._write_best_effort(
-            graph,
-            vector,
-            nodes,
-            edges,
-            vectors,
-            stale_chunks,
-            written_chunk_ids,
-            domain,
-            source_url,
-        )
+        else:
+            # best_effort: ретраи и компенсация выполняются по осям внутри _write_best_effort
+            self._write_best_effort(
+                graph,
+                vector,
+                nodes,
+                edges,
+                vectors,
+                stale_chunks,
+                written_chunk_ids,
+                domain,
+                source_url,
+            )
+        # Обе ветки сходятся здесь, и только здесь запись считалась состоявшейся. Раньше
+        # `graph_projection_status = "committed"` стоял в двух местах, и добавить туда же
+        # счётчик нод означало бы два места, которые надо не забыть при следующей правке
+        # пути записи. Одно место — единственное, где факт уже установлен.
         ctx.graph_projection_status = "committed"
+        _record_written_node_versions(ctx, nodes)
 
     def _write_vector_only(self, doc: Any, ctx: PipelineContext) -> None:
         vector = self._vector_store

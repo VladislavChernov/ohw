@@ -12,12 +12,17 @@ import pytest
 from graphrag_proto.ingestion_service.pipeline import orchestrator as _orchestrator
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
+    CAUSE_FAKE_LLM_ADAPTER,
+    CAUSE_LLM_ADAPTER_MISSING,
+    CAUSE_LLM_DISABLED_BY_CONFIG,
     CAUSE_MODEL_ERROR,
     CAUSE_MODEL_HTTP_ERROR,
     CAUSE_MODEL_TIMEOUT,
     CAUSE_MODEL_UNAVAILABLE,
     CAUSE_PROFILE_INVALID,
+    CAUSE_PROFILE_NOT_ENABLING_LLM,
     CAUSE_PROFILE_UNAVAILABLE,
+    MANUAL_NODE_VERSION,
     Analyzer,
     ChunkStage,
     CommitStage,
@@ -506,10 +511,12 @@ def test_optional_failure_wipes_whole_ai_layer_on_malformed_answer(
     assert ctx.llm_layer_lost_entities == len(_AI_CONTEXT["tags"])
     assert ctx.llm_layer_lost_edges == len(_AI_CONTEXT["links"])
     assert "relationships должно быть списком" in (ctx.enrichment_error or "")
-    # AI-слой ушёл целиком: остались только детерминированные сущности
+    # ADR-049: после сброса в графе не остаётся **ничего**. Раньше последней строкой
+    # сброса был вызов заглушки, и тест закреплял именно его: «AI-слой ушёл целиком:
+    # остались только детерминированные сущности». То есть контракт «сброс убирает слой»
+    # проверялся как «сброс заменяет слой на слова текста», и подмена проходила как успех.
     assert ctx.entity_edges == []
-    assert ctx.entities
-    assert all(entity["origin"] != "ai" for entity in ctx.entities)
+    assert ctx.entities == []
 
 
 def test_profile_failure_degrades_without_dropping_layer(
@@ -879,9 +886,21 @@ def test_same_tag_id_merges_context_provenance() -> None:
     assert node["aliases"] == ["первый вариант", "второй вариант"]
 
 
-def test_extract_fallback_does_not_require_profile_or_llm(
+def test_extract_without_llm_creates_no_entities_and_names_the_cause(
     monkeypatch: Any,
 ) -> None:
+    """ADR-049: без объявленного LLM экстракция не создаёт сущностей и называет причину.
+
+    Раньше этот тест утверждал обратное: заглушка превращала в ноды слова текста
+    (`fallback`, `entity`) и вешала на них `extractor_version = "deterministic:v1"`. На
+    живом графе это дало 1391 выдуманную сущность, и отчёт прогона не показывал ни
+    одного признака подмены.
+
+    Формулировка положительная: «ветка без LLM не создаёт сущностей и объявляет
+    деградацию с поимённой причиной». Отрицание «токенов в графе нет» в тест не входит —
+    оно верно только пока заглушка единственный кандидат, и перестало бы быть верным от
+    первого же законного нового источника нод.
+    """
     monkeypatch.delenv("EXTRACT_LLM", raising=False)
     stage = ExtractStage(
         profile_fetcher=lambda _domain: (_ for _ in ()).throw(RuntimeError("offline"))
@@ -891,15 +910,214 @@ def test_extract_fallback_does_not_require_profile_or_llm(
         domain="it",
         doc_type="txt",
         source_url="src://d.txt",
-        chunks=["fallback entity"],
+        chunks=["fallback entity дедупликация"],
     )
 
     stage.run(ctx)
 
-    assert ctx.entities
-    assert {entity["type"] for entity in ctx.entities} == {"ContextNode"}
-    assert {entity["tag_id"] for entity in ctx.entities} == {"tag:it:fallback", "tag:it:entity"}
-    assert all(entity["extractor_version"] == "deterministic:v1" for entity in ctx.entities)
+    assert ctx.entities == [], "ветка без LLM не имеет права создавать сущности"
+    assert ctx.entity_edges == []
+    assert ctx.enrichment_degraded is True
+    assert ctx.enrichment_cause == CAUSE_LLM_DISABLED_BY_CONFIG
+
+
+def test_profile_without_llm_enabled_declares_cause_and_creates_nothing(
+    monkeypatch: Any,
+) -> None:
+    """ADR-049 п. 2: профиль, не разрешающий LLM, больше не уходит в заглушку молча.
+
+    Именно эта ветка на стенде 2026-10-04 дала 1391 ноду из слов текста при
+    `enrichment_degraded: false`, `enrichment_cause: null` и `llm_layer_dropped: false`:
+    три признака деградации были чисты, потому что ни один из них не ставился.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    profile = _ai_profile()
+    profile["extraction"]["llm_enabled"] = False
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование индексировать документы дедупликация"],
+    )
+
+    ExtractStage(
+        llm=FakeLLM(text=json.dumps(_AI_CONTEXT, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: profile,
+    ).run(ctx)
+
+    assert ctx.entities == []
+    assert ctx.enrichment_degraded is True
+    assert ctx.enrichment_cause == CAUSE_PROFILE_NOT_ENABLING_LLM
+    assert "llm_enabled" in str(ctx.enrichment_error)
+
+
+def test_missing_llm_adapter_is_named_separately_from_profile(monkeypatch: Any) -> None:
+    """Отсутствие адаптера и профиль без `llm_enabled` — разные ремонты, значит разные имена.
+
+    Раньше это была одна строка `if not ctx.profile or ... or self._llm is None`, то есть
+    три разных поломки выглядели как одна, и разбор уводил не туда — ровно та
+    неразличимость, ради устранения которой по ТИПУ разведены и транспортные ошибки.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        chunks=["требование индексировать"],
+    )
+
+    ExtractStage(llm=None, profile_fetcher=lambda _domain: _ai_profile()).run(ctx)
+
+    assert ctx.entities == []
+    assert ctx.enrichment_cause == CAUSE_LLM_ADAPTER_MISSING
+
+
+def test_every_written_node_names_its_producer(tmp_path: Path, monkeypatch: Any) -> None:
+    """ADR-049 п. 5: у каждой записанной ноды `extractor_version` называет её создателя.
+
+    Положительный контракт: нода появляется только от двух производителей — модель
+    назвала (метка равна идентичности извлечения **этого** прогона) или человек объявил
+    тег (метка `user:manual`). Всё прочее — дефект, и падение теста называет, чья это
+    была нода.
+
+    Отрицание «метки заглушки в графе нет» сюда сознательно не входит: оно верно только
+    пока производителей ровно два, и сломалось бы от первого же законного третьего,
+    тогда как этот контракт такой правки переживёт.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    analyzer, _ = _build_analyzer(
+        tmp_path,
+        graph,
+        vector,
+        llm=FakeLLM(text=json.dumps(_AI_CONTEXT, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: _ai_profile(),
+    )
+    source = tmp_path / "producers.txt"
+    source.write_text(CONTAINER_IT, encoding="utf-8")
+
+    ctx = _run(
+        analyzer,
+        source,
+        tags=[{"tag_id": "tag:it:manual", "canonical_name": "ручной тег"}],
+    )
+
+    identity = str((ctx.extraction_passport or {}).get("identity") or "")
+    assert identity, "паспорт обязателен: без него метку модели не с чем сравнить"
+
+    # Читается через `get_node`, а не по `graph._nodes`: `_nodes` держит внутреннюю форму
+    # записи (свойства лежат в `properties`), и проверка по ней молча нашла бы пустое
+    # множество — то есть прошла бы, ни разу не взглянув на ноду.
+    labelled = {
+        node_id: str(node["extractor_version"])
+        for node_id in graph._nodes
+        if (node := graph.get_node(node_id)) and node.get("extractor_version")
+    }
+    assert labelled, "в графе обязаны быть ноды с меткой производителя"
+    assert set(labelled.values()) <= {identity, MANUAL_NODE_VERSION}, labelled
+    assert labelled["tag:it:manual"] == MANUAL_NODE_VERSION
+
+    # Счётчик и граф обязаны сходиться: расхождение означало бы, что прибор измеряет не
+    # то, что записано. Сравнение сходится по ПРОИЗВОДИТЕЛЯМ, а не по числу нод, чтобы
+    # правка текста фикстуры не роняла тест.
+    assert ctx.nodes_by_extractor_version.get(MANUAL_NODE_VERSION) == 1
+    assert ctx.nodes_by_extractor_version.get(identity), ctx.nodes_by_extractor_version
+    assert sum(ctx.nodes_by_extractor_version.values()) == len(labelled)
+
+
+def test_manual_tag_onto_an_existing_entity_is_counted_once(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Ручной тег поверх найденной моделью сущности не удваивает счётчик нод.
+
+    Обычный случай, а не экзотика: человек помечает то, что модель уже нашла. Тег без
+    `tag_id`, чьё имя совпадает ровно с одним известным именем, разрешается в `node_id`
+    этой сущности (orchestrator, разрешение ручных тегов). Две записи получают один
+    `node_id`, граф мержит их в одну ноду - значит и счётчик должен видеть одну.
+
+    Имя берётся из ответа модели, а не записано строкой: тест проверяет правило
+    «совпало с известным именем - пишем один раз», а не сегодняшнее слово.
+
+    Проверяется равенство счётчика и графа, а не константа. Прежний тест брал `tag_id`,
+    которого в графе нет, и до коллизии не доходил вовсе.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    analyzer, _ = _build_analyzer(
+        tmp_path,
+        graph,
+        vector,
+        llm=FakeLLM(text=json.dumps(_AI_CONTEXT, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: _ai_profile(),
+    )
+    source = tmp_path / "collide.txt"
+    source.write_text(CONTAINER_IT, encoding="utf-8")
+
+    alias = str(_AI_CONTEXT["tags"][0]["aliases"][0])
+    ctx = _run(analyzer, source, tags=[{"canonical_name": alias}])
+
+    identity = str((ctx.extraction_passport or {}).get("identity") or "")
+    assert identity, "ожидался LLM: тест обязан быть разбором от модели"
+    written = {
+        node_id: str(node["extractor_version"])
+        for node_id in graph._nodes
+        if (node := graph.get_node(node_id)) and node.get("extractor_version")
+    }
+    # Ненулевая величина, ради которой тест не пуст: метки есть и у модели, и у человека.
+    assert MANUAL_NODE_VERSION in written.values(), written
+    assert identity in written.values(), written
+    # Главное: две записи с одним `node_id` - одна нода. Счётчик обязан сойтись с графом.
+    assert sum(ctx.nodes_by_extractor_version.values()) == len(written), (
+        ctx.nodes_by_extractor_version,
+        written,
+    )
+    assert ctx.nodes_by_extractor_version.get(MANUAL_NODE_VERSION) == 1
+
+
+def test_manual_tag_cannot_claim_a_foreign_producer(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Ручной тег не может назвать себя чужим производителем, даже если он это прислал.
+
+    Поле на ручном пути известно по построению: запись вносит загрузка, то есть человек.
+    Поэтому значение, присланное клиентом, здесь **перезаписывается**, а не принимается
+    как подсказка. Иначе тег с `extractor_version: "llm:..."` попадал в счётчик моделей и
+    раздувал `llm_nodes`, а тег с явным `null` превращался в строку `"None"` -
+    производителя, который не существует ни в одном смысле.
+
+    `ValidateStage` эти случаи не ловит: ручные теги дописываются после валидации.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
+    analyzer, _ = _build_analyzer(
+        tmp_path,
+        graph,
+        vector,
+        llm=FakeLLM(text=json.dumps(_AI_CONTEXT, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: _ai_profile(),
+    )
+    source = tmp_path / "spoof.txt"
+    source.write_text(CONTAINER_IT, encoding="utf-8")
+
+    ctx = _run(
+        analyzer,
+        source,
+        tags=[
+            {"tag_id": "tag:it:spoof", "extractor_version": "llm:it@1:подделка"},
+            {"tag_id": "tag:it:nulled", "extractor_version": None},
+        ],
+    )
+
+    counters = ctx.nodes_by_extractor_version
+    assert not [key for key in counters if key == "None"], counters
+    assert not [key for key in counters if "подделка" in key], counters
+    assert counters.get(MANUAL_NODE_VERSION) == 2, counters
+    for tag_id in ("tag:it:spoof", "tag:it:nulled"):
+        node = graph.get_node(tag_id)
+        assert node is not None, tag_id
+        assert str(node["extractor_version"]) == MANUAL_NODE_VERSION, (tag_id, node)
 
 
 def test_primitive_ingest_without_profile_ai_or_optional_enrichment(
@@ -1137,7 +1355,13 @@ def test_optional_ai_failure_does_not_block_document_persistence(
     assert all(node.get("origin") != "ai" for node in graph._nodes.values())
 
 
-def test_fake_llm_uses_deterministic_context_fallback(monkeypatch: Any) -> None:
+def test_fake_llm_declares_fallback_instead_of_extracting(monkeypatch: Any) -> None:
+    """ADR-049: адаптер `is_fake` — это объявление «слоя не будет», а не источник нод.
+
+    Раньше тест утверждал, что `FakeLLM` даёт сущности с `extractor_version =
+    "deterministic:v1"`. То есть ровно тот путь, который на живом графе написал 1391
+    ноду из слов текста, был закреплён тестом как рабочее поведение.
+    """
     monkeypatch.setenv("EXTRACT_LLM", "true")
     ctx = PipelineContext(
         job_id="j",
@@ -1152,8 +1376,9 @@ def test_fake_llm_uses_deterministic_context_fallback(monkeypatch: Any) -> None:
         profile_fetcher=lambda _domain: (_ for _ in ()).throw(RuntimeError("offline")),
     ).run(ctx)
 
-    assert {entity["type"] for entity in ctx.entities} == {"ContextNode"}
-    assert all(entity["extractor_version"] == "deterministic:v1" for entity in ctx.entities)
+    assert ctx.entities == [], "is_fake-адаптер не имеет права создавать сущности"
+    assert ctx.enrichment_degraded is True
+    assert ctx.enrichment_cause == CAUSE_FAKE_LLM_ADAPTER
 
 
 def test_real_llm_failure_is_not_converted_to_fallback(monkeypatch: Any) -> None:
@@ -1192,9 +1417,16 @@ def test_real_llm_invalid_json_is_not_converted_to_fallback(
         ).run(ctx)
 
 
-def test_profile_without_llm_capability_uses_deterministic_fallback(
+def test_profile_without_llm_capability_declares_cause_and_creates_nothing(
     monkeypatch: Any,
 ) -> None:
+    """ADR-049 п. 2: профиль без `extraction.llm_enabled` объявляется, а не заменяется токенами.
+
+    Раньше тест закреплял подмену: сущности появлялись, все с `tag_id` домена, и модель не
+    звали. То есть «профиль не разрешает LLM» выглядело как «профиль не разрешает LLM, но
+    сущности у вас будут» — и на стенде это давало 1391 ноду из слов текста при
+    `enrichment_degraded: false`.
+    """
     monkeypatch.setenv("EXTRACT_LLM", "true")
     llm = _RecordingLLM(text=json.dumps(_AI_CONTEXT, ensure_ascii=False))
     ctx = PipelineContext(
@@ -1210,8 +1442,10 @@ def test_profile_without_llm_capability_uses_deterministic_fallback(
         profile_fetcher=lambda _domain: {"profile": {"name": "library"}},
     ).run(ctx)
 
-    assert {entity["type"] for entity in ctx.entities} == {"ContextNode"}
-    assert all(entity["tag_id"].startswith("tag:library:") for entity in ctx.entities)
+    assert ctx.entities == []
+    assert ctx.entity_edges == []
+    assert ctx.enrichment_degraded is True
+    assert ctx.enrichment_cause == CAUSE_PROFILE_NOT_ENABLING_LLM
     assert llm.calls == []
 
 
@@ -1469,25 +1703,50 @@ def test_ambiguous_aliases_counter_is_zero_for_clean_document() -> None:
     assert ctx.ambiguous_aliases == 0
 
 
-def test_deterministic_fallback_keeps_repeated_context_chunk_links(
-    monkeypatch: Any,
-) -> None:
-    monkeypatch.delenv("EXTRACT_LLM", raising=False)
+def test_entity_named_in_two_chunks_keeps_both_chunk_links(monkeypatch: Any) -> None:
+    """Одна и та же сущность, названная моделью в двух чанках, несёт оба `chunk_id`.
+
+    Предмет теста — накопление происхождения по чанкам, и он не изменился: раньше его
+    проверяла заглушка, повторно встречавшая слово «alpha» в обоих чанках. Теперь
+    накопление проверяется на том, как оно и происходит в бою, — модель называет одну
+    сущность дважды, и обе ссылки должны дойти до ноды. Замена носителя проверки, а не
+    её предмета.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    payload = {
+        "tags": [
+            {
+                "canonical_name": "дедупликация",
+                "name": "дедупликация",
+                "origin": "ai",
+            }
+        ],
+        "relationships": [],
+    }
     ctx = PipelineContext(
         job_id="j",
         domain="it",
         doc_type="txt",
         source_url="src://d.txt",
-        chunks=["alpha alpha", "alpha"],
+        chunks=["дедупликация по требованиям", "дедупликация по эксплуатации"],
     )
 
     ExtractStage(
-        profile_fetcher=lambda _domain: (_ for _ in ()).throw(RuntimeError("offline"))
+        llm=_PerChunkLLM([json.dumps(payload, ensure_ascii=False)] * 2),
+        profile_fetcher=lambda _domain: _ai_profile(),
+        optional_failure=True,
     ).run(ctx)
+    # Слияние по чанкам делает DEDUP, а не EXTRACT: EXTRACT честно отдаёт по записи на
+    # ответ, и накопление `chunk_ids` происходит при склейке. Заглушка сливала сама, и
+    # поэтому проверка молча проходила мимо DEDUP — то есть мимо места, где накопление
+    # происходит на самом деле.
+    DedupStage().run(ctx)
 
     assert len(ctx.entities) == 1
-    assert ctx.entities[0]["tag_id"] == "tag:it:alpha"
-    assert len(ctx.entities[0]["chunk_ids"]) == 2
+    entity = ctx.entities[0]
+    assert entity["canonical"] == "дедупликация"
+    assert entity["origin"] == "ai"
+    assert len(entity["chunk_ids"]) == 2, entity["chunk_ids"]
 
 
 def test_graph_store_merges_context_provenance() -> None:

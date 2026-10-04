@@ -388,39 +388,57 @@ def test_executor_reports_enrichment_cause_and_loss_size(
     assert "llm_layer_dropped" not in jobs.signals("job")
 
 
-def test_executor_reports_enrichment_for_healthy_job_as_denominator(tmp_path: Path) -> None:
+def test_executor_reports_enrichment_for_healthy_job_as_denominator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Здоровый документ тоже пишет факты — иначе знаменателя не существует.
 
     Доля «записей на документ» считается по джобам, где EXTRACT дошёл. Если писать
     объём только при сбое, знаменатель состоял бы ровно из отказавших документов, и
     улучшение выглядело бы как ухудшение.
-    """
-    from graphrag_proto.ingestion_service.app import Executor
 
+    ADR-049: «здоровый» здесь означает настоящее извлечение. Раньше здоровье означало
+    «профиль загрузился, EXTRACT отработал, потерь нет», а записей при этом было ноль —
+    потому что LLM не был объявлен, и заглушка отвечала молча. Знаменатель наполнялся
+    документами, где экстракция не состоялась, и по отчёту это не отличалось от «модель
+    не нашла ничего». На стенде 2026-10-04 так выглядели три документа с
+    `llm_records_extracted: 0` при `enrichment_degraded: false`.
+    """
+    import json
+
+    from graphrag_proto.ingestion_service.app import Executor
+    from graphrag_proto.retrieval.adapters.llm import FakeLLM
+
+    payload = {
+        "tags": [{"canonical_name": "Quicksort", "name": "Quicksort", "origin": "ai"}],
+        "relationships": [],
+    }
+    monkeypatch.setenv("EXTRACT_LLM", "true")
     jobs = JobStore(tmp_path / "ok.db")
     registry = DocumentRegistry(tmp_path / "ok-registry.db")
     source = tmp_path / "d.txt"
-    source.write_text("алгоритм quicksort дедупликация алгоритм", encoding="utf-8")
+    source.write_text("сортировка quicksort разделяй и властвуй данными", encoding="utf-8")
     executor = Executor(
         jobs,
         registry,
         glossary_url="",
         graph_store=InMemoryGraphStore(),
         vector_store=InMemoryVectorStore(),
+        llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: _ai_extraction_profile(),
     )
     jobs.create("job", "src://d.txt", "it", "txt")
     assert executor.start("job", source, "src://d.txt", "it", "txt") is True
     assert wait_until(lambda: jobs.get("job")["status"] == "succeeded")
 
     facts = jobs.enrichment("job")
-    # детерминированный путь: LLM не запускался, слой не потерян, объём LLM — ноль
-    assert facts == {
-        "cause": None,
-        "lost_entities": 0,
-        "lost_edges": 0,
-        "llm_records": 0,
-        "llm_edges": 0,
-    }
+    assert facts["cause"] is None, facts
+    assert facts["lost_entities"] == 0
+    assert facts["lost_edges"] == 0
+    assert facts["llm_records"] > 0, (
+        "здоровая джоба обязана давать ненулевой знаменатель, иначе «записей на документ» "
+        f"считается по документам, где экстракции не было: {facts}"
+    )
 
 
 def _ai_extraction_profile() -> dict[str, object]:
@@ -470,8 +488,24 @@ def test_post_when_executor_saturated_returns_429(tmp_path: Path, monkeypatch) -
     assert jobs["items"][0]["status"] == "failed"
 
 
-def test_runner_normalize_without_glossary_keeps_entities(tmp_path: Path) -> None:
-    """Без Glossary URL этап NORMALIZE оставляет entity name как canonical."""
+def test_runner_normalize_without_glossary_keeps_entities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Без Glossary URL стадия NORMALIZE сохраняет сущность, а не теряет её.
+
+    ADR-049: раньше сущности здесь появлялись из детерминированной заглушки EXTRACT, и
+    проверялось вовсе не NORMALIZE, а то, что заглушка породила слово «алгоритм». Имя и
+    канон у такой ноды совпадали по построению, поэтому утверждение проходило и при
+    полностью сломанной NORMALIZE — тест был зелёным не по той причине.
+
+    Теперь сущность приходит от модели, и имя в ней отличается от канонического: без
+    глоссари канон сворачивается ключом идентичности, а отображаемое имя сохраняется.
+    Проверка стала настоящей — она падает, если NORMALIZE перепишет имя или выбросит
+    сущность.
+    """
+    import json
+    from copy import deepcopy
+
     from graphrag_proto.ingestion_service.pipeline.orchestrator import (
         Analyzer,
         ChunkStage,
@@ -487,7 +521,29 @@ def test_runner_normalize_without_glossary_keeps_entities(tmp_path: Path) -> Non
     )
     from graphrag_proto.ingestion_service.readers.registry import TxtReader
     from graphrag_proto.ingestion_service.storage.registry import DocumentRegistry
+    from graphrag_proto.retrieval.adapters.llm import FakeLLM
 
+    profile = {
+        "profile": {"name": "it"},
+        "extraction": {
+            "llm_enabled": True,
+            "prompt_template": {
+                "id": "extract_ingestion_api_v1",
+                "system": "Extract context nodes and links.",
+                "user": "Return JSON with tags and links.",
+            },
+        },
+    }
+    answer = {
+        "tags": [
+            {
+                "canonical_name": "Quicksort",
+                "name": "быстрая сортировка",
+                "origin": "ai",
+            }
+        ]
+    }
+    monkeypatch.setenv("EXTRACT_LLM", "true")
     reg = DocumentRegistry(tmp_path / "r.db")
     graph = InMemoryGraphStore()
     vector = InMemoryVectorStore()
@@ -497,7 +553,11 @@ def test_runner_normalize_without_glossary_keeps_entities(tmp_path: Path) -> Non
             IngestStage(reader),
             ChunkStage(),
             EmbedStage(),
-            ExtractStage(),
+            ExtractStage(
+                llm=FakeLLM(text=json.dumps(answer, ensure_ascii=False), is_fake=False),
+                profile_fetcher=lambda _domain: deepcopy(profile),
+                optional_failure=True,
+            ),
             NormalizeStage(""),
             DedupStage(),
             ContractStage(),
@@ -508,18 +568,23 @@ def test_runner_normalize_without_glossary_keeps_entities(tmp_path: Path) -> Non
                 vector_store=vector,
                 graph_optional=True,
             ),
-        ]
+        ],
+        profile_fetcher=lambda _domain: deepcopy(profile),
     )
     src = tmp_path / "d.txt"
-    src.write_text("алгоритм quicksort дедупликация алгоритм", encoding="utf-8")
+    src.write_text("алгоритм сортировки quicksort разделяй и властвуй", encoding="utf-8")
     ctx = PipelineContext(
         job_id="j", domain="it", doc_type="txt", source_url="src://d.txt", source_path=str(src)
     )
     analyzer.run(ctx)
     assert ctx.commit_applied is True
-    names = {e["name"] for e in ctx.entities}
-    # заглушка EXTRACT: deteministic entities из слов >= 5 символов
-    assert "алгоритм" in names
+    assert ctx.enrichment_degraded is False, ctx.enrichment_error
+    assert {e["name"] for e in ctx.entities} == {"быстрая сортировка"}, (
+        "NORMALIZE без глоссари не имеет права переписывать отображаемое имя"
+    )
+    assert {e["canonical"] for e in ctx.entities} == {"quicksort"}, (
+        "канон сворачивается ключом идентичности даже без глоссари"
+    )
 
 def test_note_stage_records_message_without_touching_status(tmp_path: Path) -> None:
     """note_stage не имеет права переводить стадию обратно в running.

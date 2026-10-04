@@ -247,15 +247,47 @@ def test_aggregate_flags_graph_axis_inactive_when_only_vector() -> None:
 # --- ingest_report ---------------------------------------------------------
 
 
-def test_build_ingest_report_detects_noop_by_stage() -> None:
+def test_build_ingest_report_reads_noop_from_signal_not_from_stage() -> None:
+    """Признак no-op приходит сигналом `ingest_noop`, а не выводится из последней стадии.
+
+    Тест прежнего поведения назывался `..._detects_noop_by_stage` и утверждал ровно то, что
+    ADR-049 п. 6 снял: `stage == "INGEST"` означает no-op. На стенде это давало ложь —
+    `Executor` пишет стадию **перед** запуском, поэтому джоба, остановленная на INGEST как
+    no-op, доходит в журнале до `COMMIT` и отчитывалась как холодная перезагрузка с нулевым
+    извлечением. Прогон 2026-10-04T02:21Z был отчитан именно так, тремя документами.
+
+    Сценарий здесь стендовский: у no-op-джобы в журнале **все девять стадий** и последняя
+    `COMMIT`, а отличает её только сигнал. Обратная проверка — что джоба без сигнала, но с
+    последней стадией `INGEST`, no-op **не** признаётся — живёт в
+    `test_run_eval_artifacts.py::test_noop_without_the_signal_is_not_guessed_from_the_stage_log`.
+    """
     submitted = [
         {"source_url": "docs/a.md", "relpath": "a.md", "bytes": 2048, "job_id": "j1", "waited_s": 1.5},
         {"source_url": "docs/b.md", "relpath": "b.md", "bytes": 4096, "job_id": "j2", "waited_s": 120.0},
     ]
+    all_stages = [
+        {"stage": name, "status": "succeeded", "message": ""}
+        for name in (
+            "CHUNK", "COMMIT", "CONTRACT", "DEDUP", "EMBED", "EXTRACT", "INGEST",
+            "NORMALIZE", "VALIDATE",
+        )
+    ]
     statuses = {
-        # stage=INGEST при succeeded ⇒ пайплайн встал после INGEST (документ не менялся)
-        "j1": {"status": "succeeded", "stage": "INGEST", "error": None},
-        "j2": {"status": "succeeded", "stage": "COMMIT", "error": None},
+        # no-op:journal полон, последняя стадия COMMIT, отличает только сигнал
+        "j1": {
+            "status": "succeeded",
+            "stage": "COMMIT",
+            "error": None,
+            "signals": {"ingest_noop": "INGEST"},
+            "stages": all_stages,
+        },
+        "j2": {
+            "status": "succeeded",
+            "stage": "COMMIT",
+            "error": None,
+            "signals": {},
+            "stages": all_stages,
+        },
     }
 
     report = _run_eval.build_ingest_report(submitted, statuses)

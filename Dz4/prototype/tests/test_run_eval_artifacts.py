@@ -1108,7 +1108,7 @@ def _job_with_extraction(
     degraded: bool = False,
     layer_dropped: bool = False,
 ) -> dict[str, Any]:
-    signals: dict[str, str] = {}
+    signals: dict[str, str] = {"extraction:llm:it@1:abc": "EXTRACT"}
     if degraded:
         signals["enrichment_degraded"] = "EXTRACT"
     if layer_dropped:
@@ -1130,7 +1130,43 @@ def _job_with_extraction(
 
 
 def _noop_job() -> dict[str, Any]:
-    """Тёплый корпус: EXTRACT не запускался, джоба встала на INGEST."""
+    """Джоба no-op: INGEST признал содержимое неизменным, пайплайн не пошёл дальше.
+
+    `stages` содержит ВСЕ девять стадий — ровно как на стенде. Это и есть дефект прибора,
+    который закрыт ADR-049: `Executor` пишет стадию перед запуском, поэтому журнал не
+    отличает отработавшую стадию от пропущенной, и джоба, где модель не звали ни разу,
+    выглядит как прошедшая все девять. Признак no-op приходит сигналом `ingest_noop`.
+    """
+    return {
+        "status": "succeeded",
+        "stage": "COMMIT",
+        "error": None,
+        "signals": {"ingest_noop": "INGEST"},
+        "stages": [
+            {"stage": name, "status": "succeeded", "message": ""}
+            for name in (
+                "CHUNK",
+                "COMMIT",
+                "CONTRACT",
+                "DEDUP",
+                "EMBED",
+                "EXTRACT",
+                "INGEST",
+                "NORMALIZE",
+                "VALIDATE",
+            )
+        ],
+    }
+
+
+def _noop_job_legacy_shape() -> dict[str, Any]:
+    """Форма джобы no-op ДО ADR-049: последняя стадия INGEST, сигналов нет.
+
+    Оставлена отдельной функцией, а не удалена: показывать, что именно было исправлено.
+    Прибор выводил no-op из `stage == "INGEST"` и по этой форме был прав — а на стенде
+    получал не эту форму, потому что `Executor` пишет стадию перед запуском и доходит до
+    COMMIT. То есть исправление касается не формы ответа, а основания вывода.
+    """
     return {
         "status": "succeeded",
         "stage": "INGEST",
@@ -1138,6 +1174,138 @@ def _noop_job() -> dict[str, Any]:
         "signals": {},
         "stages": [{"stage": "INGEST", "status": "succeeded", "message": "noop"}],
     }
+
+
+def _job_with_nodes(by_version: dict[str, int], status: str = "committed") -> dict[str, Any]:
+    """Джоба, у которой запись в граф состоялась, с нодами по производителям."""
+    job = _job_with_extraction(llm_records=sum(by_version.values()))
+    job["nodes_by_extractor"] = {
+        "by_extractor_version": dict(by_version),
+        "graph_projection_status": status,
+    }
+    return job
+
+
+def test_ingest_report_names_producer_of_every_written_node() -> None:
+    """ADR-049 п. 4: отчёт называет, кто создал записанные ноды.
+
+    До этого изменения вопрос «это сущности модели или слова текста» решался только
+    осмотром базы: в прогоне 2026-10-04 в отчёте стояло `llm_records_extracted: 0`,
+    `enrichment_degraded: false`, а в графе лежало 1391 нода с меткой заглушки. Читать
+    отчёт было нечем.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+        {"job_id": "j2", "source_url": "src://b.txt", "relpath": "b.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+    statuses = {
+        "j1": _job_with_nodes({"llm:it@1:97efaf964b1b": 39, "user:manual": 1}),
+        "j2": _job_with_nodes({"llm:it@1:97efaf964b1b": 12}),
+    }
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    assert report["nodes_by_extractor_version"] == {
+        "llm:it@1:97efaf964b1b": 51,
+        "user:manual": 1,
+    }
+    assert report["llm_nodes"] == 51
+    assert report["nodes_written"] == 52
+    assert report["documents_with_nodes_recorded"] == 2
+
+
+def test_ingest_report_tells_no_nodes_apart_from_nothing_measured() -> None:
+    """Пустое распределение и отсутствие записи — разные результаты, и оба обязаны быть видны.
+
+    «Нод ноль» и «мы не смотрели» сливаются в один и тот же `{}`, если не сказать, была ли
+    запись вообще. Это тот же молчащий ноль, из-за которого дефект прожил два отчёта:
+    джоба без записи в граф выглядит как джоба, где сущностей не нашлось.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+        {"job_id": "j2", "source_url": "src://b.txt", "relpath": "b.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+    statuses = {
+        "j1": _job_with_nodes({}, status="committed"),
+        "j2": _noop_job(),
+    }
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    measured = next(d for d in report["documents"] if d["job_id"] == "j1")
+    unmeasured = next(d for d in report["documents"] if d["job_id"] == "j2")
+    assert measured["nodes_recorded"] is True
+    assert measured["graph_projection_status"] == "committed"
+    assert measured["nodes_by_extractor_version"] == {}
+    assert unmeasured["nodes_recorded"] is False
+    assert unmeasured["graph_projection_status"] is None
+    assert report["documents_with_nodes_recorded"] == 1
+
+
+def test_ingest_report_counts_llm_nodes_only_by_its_own_prefix() -> None:
+    """`llm_nodes` - ноды модели, а не все ноды.
+
+    Ручной тег - законная нода (пользователь задал её осознанно), она попадает и в
+    `nodes_written`, и в `nodes_by_extractor_version`, но в `llm_nodes` не попадает: модель
+    её не производила.
+
+    Проверяются оба уровня, документ и отчёт. Одноимённый ключ в двух местах одного JSON
+    расходился: документ суммировал всех производителей, отчёт только префикс `llm:`.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+    statuses = {"j1": _job_with_nodes({"llm:it@1:97efaf964b1b": 4, "user:manual": 3})}
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    assert report["llm_nodes"] == 4
+    assert report["nodes_written"] == 7
+    assert report["documents"][0]["llm_nodes"] == 4
+    assert report["documents"][0]["nodes_by_extractor_version"] == {
+        "llm:it@1:97efaf964b1b": 4,
+        "user:manual": 3,
+    }
+
+
+def test_job_that_never_reached_commit_is_not_counted_as_recorded() -> None:
+    """Джоба без записи состоявшихся нод - это `не измерено`, а не «нод ноль» (ADR-049 п. 4).
+
+    Сервис отдаёт поле `nodes_by_extractor` всегда, а строка в реестре появляется только
+    когда дошла до COMMIT. Упавшая джоба и no-op-джоба не доходят - значит строки нет.
+    Разбор обязан отличать «строки нет» от «запись состоялась и нод ноль», иначе
+    `documents_with_nodes_recorded` считает документы, про которые никто ничего не знает,
+    и молчание снова выглядит как результат.
+
+    Формулировка контракта, а не реализации: тест накрывает все три наблюдаемые формы
+    (ключ отсутствует, `{}`, `None`) - форма ответа может меняться, запрет не должен.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://failed.txt", "relpath": "failed.txt", "bytes": 100, "waited_s": 1.0},
+        {"job_id": "j2", "source_url": "src://noop.txt", "relpath": "noop.txt", "bytes": 100, "waited_s": 1.0},
+        {"job_id": "j3", "source_url": "src://written.txt", "relpath": "written.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+    failed = _job_with_extraction(llm_records=9)
+    failed["status"] = "failed"
+    failed["stage"] = "EXTRACT"
+    failed["nodes_by_extractor"] = {}
+    noop = _noop_job()
+    noop["nodes_by_extractor"] = None
+    statuses = {
+        "j1": failed,
+        "j2": noop,
+        "j3": _job_with_nodes({"llm:it@1:97efaf964b1b": 0}),
+    }
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    assert [doc["nodes_recorded"] for doc in report["documents"]] == [False, False, True]
+    assert report["documents_with_nodes_recorded"] == 1
+    # Запись состоялась, но нод ноль - единственный честный ноль в отчёте.
+    assert report["documents"][2]["nodes_recorded"] is True
+    assert report["documents"][2]["llm_nodes"] == 0
+    assert report["llm_nodes"] == 0
+    assert report["nodes_written"] == 0
 
 
 def test_ingest_report_counts_loss_size_not_only_documents() -> None:
@@ -1166,13 +1334,14 @@ def test_ingest_report_counts_loss_size_not_only_documents() -> None:
     assert report["enrichment_causes"] == {"model_error": 1}
 
 
-def test_ingest_report_denominator_is_documents_where_extraction_ran() -> None:
-    """Знаменатель — документы, где EXTRACT реально выполнялся.
+def test_ingest_report_denominator_is_documents_where_the_model_answered() -> None:
+    """Знаменатель — документы, где модель ОТВЕЧАЛА, а не те, где стадия стоит в журнале.
 
-    Документ, вставшийся в пайплайн no-op (тёплый корпус), не должен попадать в
-    знаменатель: у него ноль не потому, что модель ничего не нашла, а потому, что её
-    не звали. Иначе улучшение на прогоне с тёплым корпусом читалось бы как деградация
-    модели.
+    Два разных вопроса, и раньше они были смешаны в один (`extraction_stage_ran`). У
+    no-op-джобы в журнале лежат все девять старий, поэтому как знаменатель объёма этот
+    признак вводил в заблуждение: на прогоне 2026-10-04 три no-op-джобы попали в него с
+    нулём записей, и «записей на документ» считалось по документам, где извлечения не
+    было (ADR-049).
     """
     submitted = [
         {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
@@ -1182,11 +1351,73 @@ def test_ingest_report_denominator_is_documents_where_extraction_ran() -> None:
 
     report = _run_eval.build_ingest_report(submitted, statuses)
 
-    assert report["documents_with_extraction_stage"] == 1
+    assert report["documents_with_llm_extraction"] == 1
     assert report["llm_records_extracted"] == 40
     assert report["llm_records_per_extraction_document"] == 40.0
+    # Журнал у no-op-джобы полон — это факт журнала, и он остаётся в отчёте отдельным полем,
+    # чтобы расхождение двух признаков было видно, а не спрятано.
     noop_doc = next(d for d in report["documents"] if d["job_id"] == "j2")
-    assert noop_doc["extraction_stage_ran"] is False
+    assert noop_doc["llm_extraction_ran"] is False
+    assert noop_doc["extraction_stage_reached"] is True
+    assert noop_doc["noop"] is True
+
+
+def test_noop_is_read_from_a_signal_not_from_the_last_stage() -> None:
+    """Регрессия на класс дефекта, а не на его единичный случай (ADR-049).
+
+    Сценарий ровно стендовский: `Executor` пишет стадию ПЕРЕД запуском, поэтому у джобы,
+    остановленной на INGEST как no-op, последняя стадия — `COMMIT`, а в журнале лежат все
+    девять строк. Прибор, выводящий no-op из последней стадии, объявляет такую джобу
+    холодной перезагрузкой — и прогон 2026-10-04 был отчитан именно так: `noop: false`,
+    `last_stage: COMMIT`, `extraction_stage_ran: true`, `llm_records_extracted: 0`.
+
+    Контракт положительный: признак no-op приходит из сигнала, который ставит сервис.
+    Отрицание «последняя стадия не бывает COMMIT у no-op» в тест не входит — оно стало бы
+    правдой только по счастливой форме ответа.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 0.0},
+    ]
+
+    report = _run_eval.build_ingest_report(submitted, {"j1": _noop_job()})
+
+    doc = report["documents"][0]
+    assert doc["noop"] is True, "no-op обязан читаться из сигнала, а не из последней стадии"
+    assert doc["last_stage"] == "COMMIT", "сценарий повторяет стенд: стадия доходит до COMMIT"
+    assert doc["llm_extraction_ran"] is False
+    assert report["noop_documents"] == 1
+    assert report["cold_documents"] == 0
+    # Знаменатель объёма не должен считать джобу, где модель не отвечала.
+    assert report["documents_with_llm_extraction"] == 0
+    assert report["llm_records_per_extraction_document"] is None
+
+
+def test_noop_without_the_signal_is_not_guessed_from_the_stage_log() -> None:
+    """Признак no-op читается ТОЛЬКО из сигнала; догадки по журналу не осталось (ADR-049).
+
+    Здесь фиксируется решение, а не совместимость. Прежний прибор выводил no-op из
+    `stage == "INGEST"`, и на стенде это давало ложь: `Executor` пишет стадию перед
+    запуском, поэтому джоба, остановленная на INGEST, доходит в журнале до `COMMIT` и
+    отчитывалась как холодная перезагрузка с нулевым извлечением.
+
+    Совместимость со старой формой ответа могла бы выглядеть аккуратно — «узнаём и по
+    старой, и по новой форме». Но старая форма и есть источник дефекта: возвращая её как
+    fallback, мы восстанавливаем ровно то поведение, которое чинили, и оно снова начнёт
+    срабатывать на любой джобе, чей последней статией случайно окажется INGEST.
+    Сервис и прибор выкатываются из одного образа, рассинхронизации здесь нет.
+
+    Контракт положительный: джоба, у которой нет сигнала `ingest_noop`, не объявляется
+    no-op. Отрицание «стадия INGEST не бывает последней» в тест не входит — оно было бы
+    правдой лишь по счастливой форме.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 0.0},
+    ]
+    legacy = _noop_job_legacy_shape()
+
+    assert _run_eval._ingest_noop(legacy) is False
+    report = _run_eval.build_ingest_report(submitted, {"j1": legacy})
+    assert report["documents"][0]["noop"] is False
 
 
 def test_ingest_report_does_not_publish_zero_percent_on_empty_base() -> None:
@@ -1201,7 +1432,7 @@ def test_ingest_report_does_not_publish_zero_percent_on_empty_base() -> None:
 
     report = _run_eval.build_ingest_report(submitted, {"j1": _noop_job()})
 
-    assert report["documents_with_extraction_stage"] == 0
+    assert report["documents_with_llm_extraction"] == 0
     assert report["llm_records_per_extraction_document"] is None
     assert report["llm_records_extracted"] == 0
 
@@ -1221,8 +1452,8 @@ def test_ingest_report_names_documents_where_counter_could_be_wrong() -> None:
 
     report = _run_eval.build_ingest_report(submitted, statuses)
 
-    assert report["documents_with_extraction_stage"] == 2
-    assert report["documents_with_extraction_stage_without_records"] == 1
+    assert report["documents_with_llm_extraction"] == 2
+    assert report["documents_with_llm_extraction_without_records"] == 1
     assert report["llm_records_per_extraction_document"] == 3.5
 
 

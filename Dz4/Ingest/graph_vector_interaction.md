@@ -177,9 +177,18 @@ for entity in ctx.entities:
         "properties": {
             "canonical_name": canonical,
             "source_ids": [...],
-            "extractor_version": EXTRACTOR_VERSION,
+            # Поле обязательное, значения по умолчанию нет (ADR-049 п. 3). Раньше здесь
+            # стояло `entity.get("extractor_version") or EXTRACTOR_VERSION`, и метку
+            # заглушки `deterministic:v1` получала любая нода без поля, включая ручной
+            # тег. Модель ставит `llm:<профиль>@<версия>:<отпечаток>`, человек — `user:manual`.
+            "extractor_version": str(entity["extractor_version"]),
             "variants": [...]
         }
+
+# ВНИМАНИЕ: этот фрагмент отставал от кода ещё до ADR-049 — метка узла `ContextNode`
+# (`CONTEXT_NODE_LABEL`), а не `Entity`, и идентичность считает `_context_node_id` от
+# `canonical_name`, а не `_entity_node_id`. Приведён в соответствие только фрагмент про
+# `extractor_version`; остальное не трогали, чтобы не переписывать чужой разбор целиком.
 
 **Результат в графе:**
 
