@@ -1844,6 +1844,7 @@ def write_passport(
         "| `qa_review.md` | тот же разбор для чтения глазами |",
         "| `lift_report.json` / `.md` | агрегат и вердикт |",
         "| `failures.jsonl` | вопросы с ошибками |",
+        "| `run_state.json` | **терминальный признак завершённости**: есть — прогон дошёл до конца, нет — обрыв |",
         "| `trace.jsonl` | события pipeline (только с `--trace`) |",
         "| `preflight.log` | доступность контуров |",
         "| `logs/*.log` | логи сервисов (снимает хостовый wrapper) |",
@@ -2153,6 +2154,15 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 3. qa_log переживает прерывание (append по вопросу); trace — только с флагом.
+    # `run_state.json` — терминальный признак завершённости. Без него папка прогона после
+    # обрыва неотличима от успешной: `failures.jsonl` пуст по определению (он про вопросы,
+    # а не про прогон), а `lift_report.json` и `qa_log.jsonl` остаются от предыдущих вопросов.
+    # Именно это случилось 2026-10-04: прогон умер на первом вопросе, и узнали об этом только
+    # по выводу — попало в stdout, а не в артефакт. При обрыве на десятом вопросе папка
+    # выглядела бы завершённой. Поэтому честность артефакта обеспечивается здесь: файл
+    # появляется только при нормальном выходе из main().
+    run_state_path = out_dir / "run_state.json"
+    run_state_path.unlink(missing_ok=True)
     qa_log_path = out_dir / "qa_log.jsonl"
     qa_log_path.write_text("", encoding="utf-8")
     failures_path = out_dir / "failures.jsonl"
@@ -2310,7 +2320,28 @@ def main() -> None:
         failures=len(failures),
         argv=argv,
     )
+    # Терминальный признак: пишется последним, уже после всех артефактов. Его отсутствие и
+    # означает «прогон не завершён» — обрыв, исключение, KeyboardInterrupt, убитый контейнер.
+    run_state_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "run_id": run_id,
+                "questions": len(questions),
+                "failed_questions": len(failures),
+                "verdict": report.get("verdict"),
+                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"run_state: {run_state_path} (completed)")
     print(json.dumps(report, ensure_ascii=False, indent=2))
+    # Ловушка для следующего вызова: `raise SystemExit(main())` поймал бы любой return без
+    # кода и ушёл бы с 0, то есть обрыв стал бы зелёвым на уровне процесса. Исключение
+    # специально остаётся необработанным, чтобы код возврата был ненулевым.
 
 
 if __name__ == "__main__":
