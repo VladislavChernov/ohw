@@ -101,10 +101,18 @@ def test_job_not_found_404(tmp_path: Path) -> None:
 
 
 def test_list_jobs_paginated_reflects_total(tmp_path: Path) -> None:
+    """`total` — общее число джоб, а не длина страницы (L2).
+
+    ADR-050: тест считал посты, а не джобы. Третий POST при `INGEST_MAX_CONCURRENT=2`
+    отклонялся с 429, но до правки оставлял запись в реестре — и `total` становился 3
+    только благодаря фантомной джобе. Теперь отказ не создаёт запись, поэтому дождаться
+    каждой джобы terminal-статуса: иначе тест снова зависит от того, сколько слотов настроено,
+    то есть проверяет не пагинацию.
+    """
     app = make_app(tmp_path)
     with _AuthedClient(app) as client:
         for i in range(3):
-            client.post(
+            resp = client.post(
                 "/api/v1/ingestion/documents",
                 json={
                     "source_url": f"src://d{i}.txt",
@@ -113,9 +121,14 @@ def test_list_jobs_paginated_reflects_total(tmp_path: Path) -> None:
                     "content": f"текст документа {i}",
                 },
             )
+            assert resp.status_code == 202, resp.text
+            job_id = resp.json()["job_id"]
+            assert wait_until(
+                lambda jid=job_id: client.get(f"/api/v1/ingestion/jobs/{jid}").json().get("status")
+                in {"succeeded", "failed"}
+            ), f"джоба {job_id} не дошла до терминального статуса"
         resp = client.get("/api/v1/ingestion/jobs?page=1&page_size=2")
         assert resp.status_code == 200
-        # total — общее число джоб, а не длина текущей страницы (L2)
         assert resp.json()["total"] == 3
         assert len(resp.json()["items"]) == 2
 
@@ -473,20 +486,197 @@ def test_executor_rejects_invalid_max_concurrent(tmp_path: Path) -> None:
         Executor(jobs, reg, glossary_url="", max_concurrent=0)
 
 
+class _FailingUploadDir:
+    """Загрузочный каталог, который умеет падать на записи и потом перестаёт падать.
+
+    Нужен, чтобы отличить утечку слота от «ещё падает». При одном слоте после сбоя записи
+    следующий запрос обязан стать 202. Если он получает 429 — слот утек; если 500 — падает
+    всё ещё то же самое. На одном приложении без переключателя эти причины не различимы,
+    а это ровно тот случай, который проще всего объявить «работает».
+    """
+
+    def __init__(self) -> None:
+        self.failing = True
+
+    def mkdir(self, parents: bool = False, exist_ok: bool = False) -> None:
+        return None
+
+    def __truediv__(self, other: object) -> object:
+        return self
+
+    def write_bytes(self, raw: bytes) -> int:
+        if self.failing:
+            raise OSError("диск кончился")
+        return len(raw)
+
+
 def test_post_when_executor_saturated_returns_429(tmp_path: Path, monkeypatch) -> None:
+    """ADR-050: отказ в слоте не оставляет следов — ни записи в реестре, ни файла.
+
+    Инвариант в положительной форме: джоба существует в реестре тогда и только тогда, когда
+    сервис её принял. 429 — это «не принято», поэтому новых записей должен быть ноль.
+
+    Проверяется настоящим HTTP-вызовом при одном слоте, а не подменой `Executor.start`:
+    подмена выбила бы ровно тот порядок вызовов, который создавал фантом.
+
+    Тест-предшественник утверждал `status == "failed"` на 429, то есть закреплял дефект как
+    контракт. Это третий случай одного anti-паттерна в этом бандле: первый —
+    `..._detects_noop_by_stage` (ADR-049), второй — пагинационный тест выше.
+    """
+    monkeypatch.setenv("INGEST_MAX_CONCURRENT", "1")
+    uploads = tmp_path / "uploads"
+    app = create_app(upload_dir=uploads, db_path=tmp_path / "j.db", glossary_url="")
+    with _AuthedClient(app) as client:
+        busy = client.post(
+            "/api/v1/ingestion/documents",
+            json={"source_url": "src://busy.txt", "domain": "it", "doc_type": "txt", "content": "занятый"},
+        )
+        assert busy.status_code == 202, busy.text
+        denied = client.post(
+            "/api/v1/ingestion/documents",
+            json={"source_url": "src://denied.txt", "domain": "it", "doc_type": "txt", "content": "отказ"},
+        )
+        assert denied.status_code == 429, denied.text
+        jobs = client.get("/api/v1/ingestion/jobs").json()
+
+    assert jobs["total"] == 1, jobs
+    assert [item["source_url"] for item in jobs["items"]] == ["src://busy.txt"], jobs
+    assert [path.name for path in uploads.glob("*")] == [f"{busy.json()['job_id']}.txt"]
+
+
+def test_rejected_request_does_not_wedge_the_executor(tmp_path: Path, monkeypatch) -> None:
+    """После 429 исполнитель продолжает принимать работу.
+
+    Отдельная проверка от предыдущей. Сам отказ слот не занимает, поэтому утечь ему нечем,
+    и этот тест ловит другое: правку, которая освобождает слот, не занятый ею. Для
+    `BoundedSemaphore` это либо исключение, либо порча счётчика, и снаружи обе ошибки
+    выглядят одинаково — как «иногда не работает».
+    """
+    monkeypatch.setenv("INGEST_MAX_CONCURRENT", "1")
+    uploads = tmp_path / "uploads"
+    app = create_app(upload_dir=uploads, db_path=tmp_path / "j.db", glossary_url="")
+    with _AuthedClient(app) as client:
+        busy = client.post(
+            "/api/v1/ingestion/documents",
+            json={"source_url": "src://busy.txt", "domain": "it", "doc_type": "txt", "content": "занятый"},
+        )
+        assert busy.status_code == 202, busy.text
+        for attempt in range(3):
+            denied = client.post(
+                "/api/v1/ingestion/documents",
+                json={
+                    "source_url": f"src://denied{attempt}.txt",
+                    "domain": "it",
+                    "doc_type": "txt",
+                    "content": "отказ",
+                },
+            )
+            assert denied.status_code == 429, denied.text
+        busy_id = busy.json()["job_id"]
+        assert wait_until(
+            lambda: client.get(f"/api/v1/ingestion/jobs/{busy_id}").json().get("status")
+            in {"succeeded", "failed"}
+        ), "занятая джоба не дошла до терминального статуса"
+        after = client.post(
+            "/api/v1/ingestion/documents",
+            json={"source_url": "src://after.txt", "domain": "it", "doc_type": "txt", "content": "после"},
+        )
+        assert after.status_code == 202, after.text
+
+
+class _FailOnceJobStore(JobStore):
+    """Реестр, который падает на первой попытке создать джобу и только на первой.
+
+    «Только на первой» нужно затем, чтобы вторую попытку можно было проверить тем же
+    приложением и тем же семафором. Проверка через новое приложение не годится: у него свой
+    исполнитель и свой слот, и «второй запрос принят» ничего не сказал бы о первом.
+    """
+
+    def __init__(self, db_path: Path) -> None:
+        super().__init__(db_path)
+        self.failed = False
+
+    def create(self, job_id: str, source_url: str, domain: str, doc_type: str) -> None:
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("БД недоступна")
+        super().create(job_id, source_url, domain, doc_type)
+
+
+def test_failure_in_job_store_creation_frees_slot_and_names_the_cause(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Отказ создания записи джобы: слот возвращён, причина названа, записи нет.
+
+    Ветка обработчика, которую предыдущий тест не покрывал: он подменял только запись файла.
+    Критерий ADR-050 («сбой после резерва») заявлен обобщённо, а покрыт был один его частный
+    случай, и по покрытому нельзя заключать о неприкрытом.
+    """
     from graphrag_proto.ingestion_service import app as ing_app
 
-    monkeypatch.setattr(ing_app.Executor, "start", lambda self, *a, **kw: False)
-    app = make_app(tmp_path)
+    monkeypatch.setenv("INGEST_MAX_CONCURRENT", "1")
+    monkeypatch.setattr(ing_app, "JobStore", _FailOnceJobStore)
+    app = create_app(upload_dir=tmp_path / "uploads", db_path=tmp_path / "j.db", glossary_url="")
     with _AuthedClient(app) as client:
         resp = client.post(
             "/api/v1/ingestion/documents",
-            json={"source_url": "src://full.txt", "domain": "it", "doc_type": "txt", "content": "текст"},
+            json={"source_url": "src://boom.txt", "domain": "it", "doc_type": "txt", "content": "упадёт"},
         )
-        assert resp.status_code == 429
+        assert resp.status_code == 500, resp.text
+        assert "БД недоступна" in resp.text, resp.text
         jobs = client.get("/api/v1/ingestion/jobs").json()
-    assert jobs["items"][0]["status"] == "failed"
+        # Записи нет: `create` не прошёл, а `finish` по несуществующей строке - это UPDATE
+        # на ноль строк, он не создаёт запись из ничего.
+        assert jobs["total"] == 0, jobs
+        # Тот же исполнитель, слот один. Реестр больше не падает, поэтому 202 здесь
+        # означает ровно одно: слот был возвращён.
+        after = client.post(
+            "/api/v1/ingestion/documents",
+            json={"source_url": "src://after.txt", "domain": "it", "doc_type": "txt", "content": "после"},
+        )
+    assert after.status_code == 202, after.text
 
+
+def test_failure_after_reservation_frees_slot_and_leaves_terminal_job(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Сбой между резервом и запуском: слот возвращён, джоба терминальна, причина настоящая.
+
+    Закрывает второй дефект того же класса, что и фантом на 429 (ADR-050). `jobs.create`
+    ставит `queued`, сборщика зависших `queued` в коде нет (проверено поиском). Если запись
+    файла падала, джоба оставалась в `queued` навсегда: прибор, ждущий терминального
+    статуса, упирался бы в свой таймаут, а запись была бы «принята и не завершилась
+    никогда».
+
+    Запись не удаляется и здесь: попытку приняли в работу, и она упала, а это достоверно
+    (решение владельца от 2026-10-05). Проверяется, что она терминальна и что ошибка не
+    выдумана, а несёт причину сбоя.
+    """
+    monkeypatch.setenv("INGEST_MAX_CONCURRENT", "1")
+    uploads = _FailingUploadDir()
+    app = create_app(upload_dir=uploads, db_path=tmp_path / "j.db", glossary_url="")
+    with _AuthedClient(app) as client:
+        first = client.post(
+            "/api/v1/ingestion/documents",
+            json={"source_url": "src://boom.txt", "domain": "it", "doc_type": "txt", "content": "упадёт"},
+        )
+        assert first.status_code == 500, first.text
+        jobs = client.get("/api/v1/ingestion/jobs").json()
+        assert jobs["total"] == 1, jobs
+        item = jobs["items"][0]
+        assert item["status"] == "failed", item
+        # Причина сбоя читается из карточки джобы, а не из списка: `JobStore.list` не
+        # выбирает колонку `error`, и проверять её там - проверять отсутствующее поле.
+        detail = client.get(f"/api/v1/ingestion/jobs/{item['job_id']}").json()
+        assert "диск кончился" in (detail.get("error") or ""), detail
+
+        # Тот же исполнитель, слот один: слот обязан быть вернут.
+        uploads.failing = False
+        second = client.post(
+            "/api/v1/ingestion/documents",
+            json={"source_url": "src://after.txt", "domain": "it", "doc_type": "txt", "content": "после"},
+        )
+        assert second.status_code == 202, second.text
 
 def test_runner_normalize_without_glossary_keeps_entities(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

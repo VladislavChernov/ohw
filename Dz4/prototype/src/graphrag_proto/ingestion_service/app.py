@@ -7,6 +7,7 @@ Lifecycle (ADR-018): queued -> running (INGEST..COMMIT) -> succeeded | failed | 
 
 from __future__ import annotations
 
+import logging as _logging
 import os
 import threading
 import uuid
@@ -57,6 +58,12 @@ from graphrag_proto.retrieval.profile import DomainProfileLoader
 HOST = "0.0.0.0"
 PORT = 8002
 ALLOWED_DOC_TYPES = {"txt", "md", "pdf"}
+
+# Логгер модуля. Появился вместе с ADR-050: сбой, при котором не удаётся терминализировать
+# запись джобы, обязан быть виден в логе. Иначе он выглядит как обычный 500, а джоба при
+# этом остаётся в `queued` навсегда — то есть «мы потеряли джобу» молча, а «мы потеряли
+# джобу» это ровно тот результат, который нельзя потерять молча.
+_log = _logging.getLogger(__name__)
 
 # Префикс пометки деградации optional-ингеста в message стадии EXTRACT. Владелец
 # контракта — здесь; читает его eval-раннер (`infra/eval/run_eval.py`), который
@@ -232,6 +239,47 @@ class Executor:
             projection_state_store=projection_state_store,
         )
 
+    def try_reserve(self) -> bool:
+        """Занять слот исполнения без запуска работы. False — все слоты заняты (429).
+
+        Отдельный вызов от `start_reserved` не для удобства, а по существу: слот должен
+        занять раньше, чем вызывающий создаст запись в реестре (ADR-050). Пока запись
+        создаётся до резерва, отказ в слоте оставлял в реестре джобу, идентификатор которой
+        вызывающему не отдали, — по реестру она неотличима от принятой и упавшей.
+        """
+        return bool(self._slots.acquire(blocking=False))
+
+    def release(self) -> None:
+        """Вернуть слот, занятый `try_reserve`, не запустив работу.
+
+        Обязателен на любом сбое между резервом и запуском потока: иначе слот занят вечно,
+        и следующий запрос получит 429 при свободных слотах.
+        """
+        self._slots.release()
+
+    def start_reserved(
+        self,
+        job_id: str,
+        target: Path,
+        source_url: str,
+        domain: str,
+        doc_type: str,
+        tags: list[dict[str, Any]] | None = None,
+        links: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Запустить фоновый поток на слоте, уже занятом `try_reserve`.
+
+        Слот освобождает сам поток в `_run`. Если запуск не состоялся, вызывающий обязан
+        вызвать `release()` — иначе слот утечёт.
+        """
+        thread = threading.Thread(
+            target=self._run,
+            args=(job_id, target, source_url, domain, doc_type, tags or [], links or [], metadata or {}),
+            daemon=True,
+        )
+        thread.start()
+
     def start(
         self,
         job_id: str,
@@ -243,15 +291,30 @@ class Executor:
         links: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
-        """Запускает фоновый поток; False, если все слоты заняты (429)."""
-        if not self._slots.acquire(blocking=False):
+        """Занять слот и запустить поток; False, если все слоты заняты (429).
+
+        Композиция двух вызовов для тех, кому не нужно разделять резерв и запуск. В
+        HTTP-пути разделять обязательно: запись в реестре создаётся между ними (ADR-050).
+        """
+        if not self.try_reserve():
             return False
-        thread = threading.Thread(
-            target=self._run,
-            args=(job_id, target, source_url, domain, doc_type, tags or [], links or [], metadata or {}),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            self.start_reserved(
+                job_id,
+                target,
+                source_url,
+                domain,
+                doc_type,
+                tags=tags,
+                links=links,
+                metadata=metadata,
+            )
+        except BaseException:
+            # Слот занят, а поток не пошёл: возвращаем слот, иначе он утечёт навсегда.
+            # Дыра была и до этого изменения, но метод переписан здесь, и оставить в нём
+            # поведение, которое его же докстринг запрещает, было бы неправдой.
+            self.release()
+            raise
         return True
 
     def _run(
@@ -423,27 +486,67 @@ def create_app(
                     )
                 ),
             )
-        job_id = str(uuid.uuid4())
-        jobs.create(job_id, source_url, domain, doc_type)
-        target = upload_dir / f"{job_id}.{doc_type}"
-        if content is not None:
-            raw = content.encode("utf-8") if isinstance(content, str) else content
-            target.write_bytes(raw)
-        if not executor.start(
-            job_id,
-            target,
-            source_url,
-            domain,
-            doc_type,
-            tags=tags,
-            links=links,
-            metadata=metadata,
-        ):
-            jobs.finish(job_id, "failed", error="перегрузка: все слоты исполнения заняты")
+        # ADR-050: слот резервируется ДО создания записи в реестре и до записи файла. Отказ в
+        # резерве не оставляет ни записи, ни файла: 429 означает «не принято», и по реестру
+        # это видно буквально — записи нет. Раньше порядок был обратным, и отозванный запрос
+        # оставался в реестре как `failed` без идентификатора, который можно было бы
+        # предъявить.
+        if not executor.try_reserve():
             raise HTTPException(
                 status_code=429,
                 detail=f"все {max_concurrent} слотов исполнения заняты; повторите позже",
             )
+        job_id = str(uuid.uuid4())
+        target = upload_dir / f"{job_id}.{doc_type}"
+        started = False
+        try:
+            jobs.create(job_id, source_url, domain, doc_type)
+            if content is not None:
+                raw = content.encode("utf-8") if isinstance(content, str) else content
+                target.write_bytes(raw)
+            executor.start_reserved(
+                job_id,
+                target,
+                source_url,
+                domain,
+                doc_type,
+                tags=tags,
+                links=links,
+                metadata=metadata,
+            )
+            started = True
+        except BaseException as exc:
+            # `BaseException`, а не `Exception`: `MemoryError` и прочие наследники не
+            # являются `Exception`, и на них слот утекал бы навсегда. Перенос резерва выше
+            # `jobs.create` превратил в этом месте «джоба зависла в queued» в «джоба
+            # зависла в queued И исполнитель заклинил», то есть правка внесла утечку,
+            # которой до неё не было.
+            if not started:
+                executor.release()
+            if isinstance(exc, HTTPException):
+                # Единственный источник 429 в этом блоке — `try_reserve` выше, до записи,
+                # и добраться сюда он не может. Ветка оставлена как страховка: слот в этом
+                # случае действительно занят, так что `release()` здесь правильный.
+                raise
+            # Запись в реестр терминализируется «по возможности». Если БД упала на
+            # `jobs.create`, она упадёт и на `finish`, и тогда запись останется в `queued`
+            # навсегда. Это обязано быть видно в логе: иначе сбой базы данных выглядит как
+            # обычный 500, а джоба тем временем ждёт терминального статуса вечно.
+            logged = False
+            try:
+                jobs.finish(job_id, "failed", error=f"сбой при запуске джобы: {exc}")
+                logged = True
+            except Exception:  # noqa: BLE001 - терять причину нельзя, терять запись - можно
+                _log.exception(
+                    "джоба %s осталась без терминального статуса: сбой записи в реестр "
+                    "поверх сбоя %r",
+                    job_id,
+                    exc,
+                )
+            detail = f"не удалось принять джобу: {exc}"
+            if not logged:
+                detail += "; запись в реестре не терминализирована"
+            raise HTTPException(status_code=500, detail=detail) from exc
         return JSONResponse(
             {
                 "job_id": job_id,
