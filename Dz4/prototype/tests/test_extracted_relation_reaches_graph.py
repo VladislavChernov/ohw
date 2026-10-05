@@ -28,6 +28,11 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import candidate_env
+
+# Извлечение без списка кандидатов не выполняется вовсе (ADR-053).
+pytestmark = pytest.mark.usefixtures("candidate_env_setup")
+
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     Analyzer,
     ChunkStage,
@@ -130,6 +135,9 @@ def _run(
         source_url="src://d.txt",
         source_path=str(src),
     )
+    # Список кандидатов обязателен (ADR-053): без него документ ушёл бы в вектор, и
+    # связи проверять было бы не на чем.
+    ctx = candidate_env(ctx)
     Analyzer(stages, profile_fetcher=fetcher).run(ctx)
     return ctx
 

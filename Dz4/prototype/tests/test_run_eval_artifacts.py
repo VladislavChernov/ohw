@@ -503,6 +503,78 @@ def test_ingest_corpus_rejects_response_without_job_id(monkeypatch: Any, tmp_pat
         _run_eval.ingest_corpus(source, "it")
 
 
+def test_429_backoff_grows_and_reports_its_own_result() -> None:
+    """Нарастание паузы и производные величины, а не одна константа.
+
+    Раньше на повтор была одна константа 5 с на все попытки: при `slot_timeout_s=300` это
+    около 60 попыток на документ, то есть прибор давил на тот самый лимит, в который
+    упёрся. Настраиваться должны три числа, а «сколько шагов вышло» и «сколько это всего
+    ожидания» — читаться из результата, иначе тот, кто настраивает, пересчитывает вручную.
+    """
+    delays = _run_eval.retry_backoff_delays(1.0, 2.0, 7.0)
+
+    assert delays == [1.0, 3.0, 5.0, 7.0], delays
+    assert delays[-1] == 7.0, "потолок обязан входить в последовательность"
+    summary = _run_eval.backoff_summary(1.0, 2.0, 7.0)
+    assert summary["derived"]["attempts_before_cap"] == 4, summary
+    assert summary["derived"]["integral_s"] == 16.0, summary
+
+    # Нулевой шаг - это осознанный «постоянный интервал», а не ошибка: он обязан работать
+    # и давать ровно два значения (начальная пауза и потолок).
+    assert _run_eval.retry_backoff_delays(1.0, 0.0, 7.0) == [1.0, 7.0]
+
+    # Потолок ниже начальной - опечатка в настройке, а не «ждать меньше сразу».
+    with pytest.raises(ValueError, match="меньше начальной"):
+        _run_eval.retry_backoff_delays(5.0, 1.0, 1.0)
+    with pytest.raises(ValueError, match="не может быть отрицательным"):
+        _run_eval.retry_backoff_delays(1.0, -1.0, 7.0)
+
+
+def test_ingest_corpus_waits_with_growing_backoff_and_stops_at_the_deadline(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Пауза нарастает по попыткам и не выходит за объявленный дедлайн.
+
+    Проверяются обе половины. Без обрезки последняя пауза выносила прибор за
+    `slot_timeout_s` на величину самой паузы, то есть объявленный в манифесте таймаут не был
+    пределом; без нарастания прибор повторяет запрос с той же частотой всю жизнь.
+    """
+    source = tmp_path / "corpus"
+    source.mkdir()
+    (source / "doc.md").write_text("text", encoding="utf-8")
+    slept: list[float] = []
+    attempts = {"n": 0}
+
+    def _always_429(url: str, body: dict[str, Any]) -> dict[str, Any]:
+        attempts["n"] += 1
+        raise RuntimeError(f"HTTP 429: {url}")
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(_run_eval, "_post_json", _always_429)
+    monkeypatch.setattr(_run_eval.time, "sleep", lambda s: (slept.append(float(s)), clock.update(now=clock["now"] + s))[0])
+    monkeypatch.setattr(_run_eval.time, "monotonic", lambda: clock["now"])
+
+    with pytest.raises(RuntimeError, match="попыток при 429"):
+        _run_eval.ingest_corpus(
+            source,
+            "it",
+            slot_timeout_s=10.0,
+            submit_budget_s=1000.0,
+            backoff_initial_s=1.0,
+            backoff_step_s=3.0,
+            backoff_max_s=100.0,
+        )
+
+    assert slept[:2] == [1.0, 4.0], slept
+    # Третья пауза была бы 7.0, но обрезана остатком до дедлайна: прошло 5 с из 10.
+    assert slept[2] == 5.0, slept
+    # Последняя пауза обрезана остатком до дедлайна, а не отработана целиком: сумма
+    # приходится ровно в границу, а не перескакивает её.
+    assert sum(slept) == pytest.approx(10.0), slept
+    assert clock["now"] <= 10.0 + 1e-6, clock
+    assert attempts["n"] >= 3, attempts
+
+
 def test_wait_jobs_rejects_cancelled_terminal_status(monkeypatch: Any) -> None:
     monkeypatch.setattr(
         _run_eval,
@@ -1266,6 +1338,62 @@ def test_ingest_report_counts_llm_nodes_only_by_its_own_prefix() -> None:
         "llm:it@1:97efaf964b1b": 4,
         "user:manual": 3,
     }
+
+
+def test_groundedness_fields_survive_the_enrichment_parse(tmp_path: Path) -> None:
+    """ADR-052: числа groundedness доходят до прибора, а не отбрасываются разбором.
+
+    Регрессия поймана на живом прогоне: `build_ingest_report` показал `0/0` при
+    `llm_records_extracted: 19`. Причина в том, что `_parse_enrichment_degradation`
+    возвращает **белый список** полей, и двух новых в нём не было. Метрика молчала ровно
+    на тех прогонах, ради которых её добавляли, и выглядела при этом как честный ноль.
+
+    Тест на форму ответа, а не на вычисление: он требует, чтобы разбор не терял числа.
+    """
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+    statuses = {"j1": _job_with_extraction(llm_records=19)}
+    statuses["j1"]["enrichment"] = {
+        "cause": "model_error",
+        "lost_entities": 19,
+        "lost_edges": 15,
+        "llm_records": 19,
+        "llm_edges": 15,
+        "llm_names_total": 137,
+        "llm_names_grounded": 68,
+    }
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    doc = report["documents"][0]
+    assert doc["llm_names_total"] == 137, doc
+    assert doc["llm_names_grounded"] == 68, doc
+    assert report["llm_names_total"] == 137, report
+    assert report["llm_names_grounded"] == 68, report
+    assert report["llm_names_grounded_ratio"] == round(68 / 137, 4), report
+
+
+def test_groundedness_ratio_is_none_when_no_names(tmp_path: Path) -> None:
+    """Ноль имён - это `None`, а не 0: иначе «нечего проверять» читается как «всё настоящее»."""
+    submitted = [
+        {"job_id": "j1", "source_url": "src://a.txt", "relpath": "a.txt", "bytes": 100, "waited_s": 1.0},
+    ]
+    statuses = {"j1": _job_with_extraction(llm_records=0)}
+    statuses["j1"]["enrichment"] = {
+        "cause": "llm_disabled_by_config",
+        "lost_entities": 0,
+        "lost_edges": 0,
+        "llm_records": 0,
+        "llm_edges": 0,
+        "llm_names_total": 0,
+        "llm_names_grounded": 0,
+    }
+
+    report = _run_eval.build_ingest_report(submitted, statuses)
+
+    assert report["llm_names_total"] == 0
+    assert report["llm_names_grounded_ratio"] is None, report
 
 
 def test_job_that_never_reached_commit_is_not_counted_as_recorded() -> None:

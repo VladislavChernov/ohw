@@ -24,6 +24,7 @@ from pathlib import Path
 SCRIPTS = Path(__file__).resolve().parent.parent / "infra" / "scripts"
 CAPTURE = SCRIPTS / "Invoke-Captured.ps1"
 WRAPPER = SCRIPTS / "run_eval_run.ps1"
+COMPOSE = SCRIPTS.parent / "compose.eval-minimal.yaml"
 
 
 def _read(path: Path) -> str:
@@ -72,14 +73,38 @@ def test_wrapper_captures_runner_output_to_runner_log() -> None:
     assert len(captured) == 2, "вызов раннера должен быть внутри -Command {}"
     assert run_call in captured[1].split("}", 1)[0]
 
+def test_wrapper_passes_the_script_path_to_python() -> None:
+    """Путь к `run_eval.py` обязан доходить до python.
 
-def test_wrapper_splats_eval_tail() -> None:
-    """`@evalTail`, а не `@($evalTail)`: array subexpression схлопывает срез в ОДИН аргумент.
+    Регрессия, найдена 2026-10-05: обёртка резала `$evalArgs[1..N]`, отбрасывая первый
+    элемент — путь к скрипту, — и прогон падал с `unknown option --domain`, потому что
+    первым аргументом к python приходили флаги.
 
-    Минус-проверку «паттерна нет в тексте» сознательно не делаем: wrapper
-    упоминает `@($evalArgs[1..N])` в комментарии-предупреждении, и поиск по сырому
-    тексту ловит прозу, а не код.
+    Предыдущая проверка утверждала, что в тексте обёртки есть ровно строка
+    `$evalTail = $evalArgs[1..($evalArgs.Count - 1)]`. Это проверка формы, а не поведения:
+    она проходила на сломанной обёртке именно потому, что не запускала её. Здесь проверяется
+    инвариант — «скрипт доходит до python» — вместе с его причиной.
+
+    Причина в том, что `docker compose run <svc> <команда...>` **перекрывает** `command` сервиса.
+У `eval-runner` в compose есть безопасный дефолт
+`command: ["python", "/app/infra/eval/run_eval.py", "--help"]`, но обёртка идёт через
+`docker compose run ... eval-runner python <args>`, и этот дефолт отбрасывается целиком: до
+python доходит только `<args>`. Проверено на прогоне: без пути к скрипту первым аргументом
+приходил `--domain`, и python отвечал `unknown option --domain`.
     """
-    text = _read(WRAPPER)
-    assert "$evalTail = $evalArgs[1..($evalArgs.Count - 1)]" in text
-    assert "eval-runner' 'python' @evalTail" in text
+    wrapper = _read(WRAPPER)
+    assignments = [
+        line.strip()
+        for line in wrapper.splitlines()
+        if line.strip().startswith("$evalTail")
+    ]
+    assert assignments == ["$evalTail = $evalArgs"], (
+        f"ожидалась одна строка присваивания без среза, найдено: {assignments}"
+    )
+    assert "$evalArgs = @('/app/infra/eval/run_eval.py'" in wrapper, "скрипт первый аргументом"
+    assert "eval-runner' 'python' @evalTail" in wrapper, "splatting по переменной обязателен"
+
+    compose = _read(COMPOSE)
+    assert (
+        'command: ["python", "/app/infra/eval/run_eval.py", "--help"]' in compose
+    ), "безопасный дефолт сервиса перекрывается docker compose run, и это обязано быть видимо"

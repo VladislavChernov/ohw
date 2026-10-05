@@ -6,8 +6,11 @@ x-logging: &logging
   logging:
     driver: json-file
     options:
-      max-size: "10m"
-      max-file: "3"
+      # Ротация поднята с 10m×3: на диагностическом прогоне с журналом обмена `full` и
+      # усечённым корпусом журналы переполняли первый файл раньше, чем прогон доходил до
+      # интересного места. Обрезка логов на середине прогона выглядит как «сервис замолчал».
+      max-size: "100m"
+      max-file: "10"
 
 x-client-env: &client-env
   AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
@@ -125,10 +128,31 @@ services:
       INGEST_CHUNKER: sliding_window
       INGEST_CHUNK_SIZE: "512"
       INGEST_CHUNK_OVERLAP: "64"
+      # ADR-053: папка со списками кандидатов (`<документ>_candidates.json`).
+      #
+      # Путь ВНУТРИ контейнера фиксирован, настраивается только путь на хосте
+      # (`CANDIDATES_HOST_DIR`). Две переменные с одинаковым смыслом «куда смотреть» -
+      # это ловушка: их можно задать не согласованно, и список будет искаться не там.
+      #
+      # Списки производятся отдельной стадией:
+      #   run_pre_ingest.ps1 -Src ../docs -Dst ../../pre-ingest
+      # Без них каждый документ уходит ТОЛЬКО в вектор: стенд отработает, отчёт
+      # покажет успех, а графа не будет ни одного.
+      CANDIDATES_DIR: /candidates
       # Graph EXTRACT по онтологии профиля (Requirement|Concept|Contract + рёбра):
       # без флага извлечение детерминированное (Entity-слова), и настройки осей из
       # domain_profile.yaml к графу не применяются (типизированные узлы не создаются).
       EXTRACT_LLM: "true"
+      # Журнал обмена с LLM. `full` пишет промпт, системную инструкцию и ответ целиком —
+      # это единственный уровень, на котором видно, где модель «сходит с ума», потому что
+      # `meta` не содержит текста, а `response` содержит только ответ. Дефолт `off`:
+      # объём такого журнала на полном корпусе не кладут в Loki, и включать его надо
+      # явно, на конкретный прогон.
+      # `LLM_EXCHANGE_LOG_MAX_CHARS` по умолчанию 8000 обрезает промпт, а обрезанный
+      # промпт нельзя отличить от полного — поэтому для диагностики его поднимают.
+      LLM_EXCHANGE_LOG: "${LLM_EXCHANGE_LOG:-off}"
+      LLM_EXCHANGE_LOG_FILE: "${LLM_EXCHANGE_LOG_FILE:-}"
+      LLM_EXCHANGE_LOG_MAX_CHARS: "${LLM_EXCHANGE_LOG_MAX_CHARS:-8000}"
       # Имя модели обязательно объявляет сервис: в коде больше нет зашитого имени,
       # отсутствие LLM_MODEL - ошибка конфигурации, а не повод угадать.
       LLM_MODEL: "${LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}"
@@ -140,6 +164,9 @@ services:
       - projection_data:/var/lib/graphrag/projection
       - ../domain_profiles:/profiles:ro
       - ./config:/config:ro
+      # Списки кандидатов лежат ВНЕ контейнера и монтируются только на чтение:
+      # стадия pre-ingest пишет их на хосте, а ингест лишь сверяет `sha256` и читает.
+      - ${CANDIDATES_HOST_DIR:-../../pre-ingest}:/candidates:ro
     depends_on:
       config-service:
         condition: service_healthy
@@ -228,4 +255,19 @@ volumes:
   ingestion_data:
   projection_data:
   neo4j_data:
+  # Модель весит ~16 ГБ и была залита в этот том вручную, до того как он стал
+  # управляться compose. Поэтому том объявлен внешним: compose не пытается его пересоздать
+  # и не ругается предупреждением на каждом запуске.
+  #
+  # Побочный эффект, который стоит знать: предупреждение
+  # `volume ... already exists but was not created by Docker Compose` уходило в stderr, а
+  # `run_eval_run.ps1` понижает `$ErrorActionPreference` до `Stop` на время вызова compose
+  # (см. `Invoke-Compose`), то есть любое безобидное предупреждение роняло обёртку ДО
+  # подъёма стенда. Объявление `external` убирает предупреждение, а не замалчивает
+  # проблему.
+  #
+  # Том должен существовать: при `external: true` compose не создаёт его сам, и отсутствие
+  # даст явную ошибку вместо молчаливого старта без модели.
   models_data:
+    external: true
+    name: ohw-eval-minimal_models_data

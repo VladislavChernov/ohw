@@ -127,7 +127,21 @@ function Get-GitTreeState {
 
 function Invoke-Compose {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$ComposeArgs)
-    & docker compose -p $Project -f $composeFile @ComposeArgs
+    # Та же ловушка, что описана в `Invoke-Captured.ps1` п.2, только для compose: docker
+    # compose пишет в stderr обычный прогресс (`Container ... Running`), и при
+    # `$ErrorActionPreference = 'Stop'` это становится terminating-ошибкой. Обёртка падала
+    # ДО подъёма стенда и ДО запуска прогона, то есть на сообщении о состоянии, а не об
+    # ошибке. Приём тот же: понизить политику на время вызова и восстановить в `finally`.
+    #
+    # `$LASTEXITCODE` после вызова сохраняется: вызывающий проверяет его сам, и именно он
+    # говорит, поднялся стенд или нет.
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & docker compose -p $Project -f $composeFile @ComposeArgs
+    } finally {
+        $ErrorActionPreference = $previous
+    }
 }
 
 # --- предусловия ----------------------------------------------------------
@@ -145,6 +159,26 @@ Write-Host "RUN_CODE_COMMIT взят из HEAD: $($env:RUN_CODE_COMMIT)"
 $env:RUN_CODE_TREE = Get-GitTreeState
 if (-not $env:GRAPH_AUTH_API_KEY) { $env:GRAPH_AUTH_API_KEY = 'changeme' }
 if (-not $env:NEO4J_PASSWORD) { $env:NEO4J_PASSWORD = 'graphrag' }
+
+# ADR-053: папка со списками кандидатов. Значение по умолчанию указывает на каталог,
+# который производит стадия `run_pre_ingest.ps1`, и монтируется в стенд на чтение.
+# Если папки нет, compose пересоздаст ingestion-service с пустым каталогом, и КАЖДЫЙ
+# документ уйдёт только в вектор - стенд отработает и покажет успех при полном
+# отсутствии графа. Поэтому проверка здесь, до поднятия, а не по итогам прогона.
+if (-not $env:CANDIDATES_HOST_DIR) {
+    $env:CANDIDATES_HOST_DIR = Join-Path $repoRoot 'pre-ingest'
+}
+$candidatesPath = (Resolve-Path -LiteralPath $env:CANDIDATES_HOST_DIR -ErrorAction SilentlyContinue)
+if (-not $candidatesPath) {
+    throw "папка со списками кандидатов не найдена: $($env:CANDIDATES_HOST_DIR). " +
+    "Запустите стадию заранее: run_pre_ingest.ps1 -Src <документы> -Dst $($env:CANDIDATES_HOST_DIR). " +
+    "Без списков каждый документ будет загружен только в вектор."
+}
+$candidateFiles = @(Get-ChildItem -LiteralPath $candidatesPath -Filter '*_candidates.json' -File)
+if ($candidateFiles.Count -eq 0) {
+    throw "в папке $($candidatesPath) нет файлов *_candidates.json: разбор пойдёт без ограничения имён."
+}
+Write-Host "CANDIDATES_HOST_DIR: $($candidatesPath) (файлов: $($candidateFiles.Count))"
 
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
@@ -203,7 +237,13 @@ Write-Host "==> прогон $RunName"
 # Splatting по переменной, а не `@($evalArgs[1..N])`: array subexpression схлопывает срез
 # в ОДИН аргумент, и python получает «--domain it --mode both ...» одной строкой,
 # отвечая `unknown option`. Проверено: 6 элементов вместо 11.
-$evalTail = $evalArgs[1..($evalArgs.Count - 1)]
+#
+# Первый элемент (`/app/infra/eval/run_eval.py`) резать НЕЛЬЗЯ, и это отдельная ошибка от
+# предыдущей: у сервиса `eval-runner` в compose нет ни `command`, ни `entrypoint`, поэтому
+# `docker compose run ... python <args>` отдаёт `<args>` самому python. Образ даёт только
+# `ENTRYPOINT ["uv","run","--no-sync"]`, скрипт в него не зашит. Со срезом python получал
+# первым аргументом `--domain` и падал с `unknown option --domain` — прогон не начинался.
+$evalTail = $evalArgs
 # Вывод раннера перехватывается в logs/runner.log по ходу прогона. Без этого прогон
 # на полном корпусе нечем разбирать: логи сервисов выгружаются позже и переживают
 # prune, а stdout раннера жил только в консоли и терялся вместе с окном.

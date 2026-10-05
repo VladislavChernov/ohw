@@ -9,6 +9,12 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import candidate_env
+
+# Извлечение без списка кандидатов не выполняется вовсе (ADR-053): фикстура готовит папку
+# списков, а candidate_env кладёт документ и его список перед разбором.
+pytestmark = pytest.mark.usefixtures("candidate_env_setup")
+
 from graphrag_proto.ingestion_service.pipeline import orchestrator as _orchestrator
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
@@ -126,7 +132,7 @@ def _build_analyzer(
         [
             IngestStage({"txt": TxtReader()}),
             ChunkStage(),
-            EmbedStage(),
+EmbedStage(),
             ExtractStage(
                 llm=llm,
                 optional_failure=True,
@@ -167,8 +173,11 @@ def _run(
         source_path=str(src),
         tags=[] if tags is None else tags,
         links=[] if links is None else links,
-        metadata={} if metadata is None else metadata,
+metadata={} if metadata is None else metadata,
     )
+    # Список кандидатов обязателен (ADR-053): без него документ ушёл бы в вектор, и
+    # проверки графа не имели бы предмета. Кладём его здесь, в общей точке файла.
+    ctx = candidate_env(ctx)
     analyzer.run(ctx)
     return ctx
 
@@ -256,6 +265,8 @@ def test_extract_llm_produces_generic_context_nodes_and_edge(
         chunks=["требование индексировать документы"],
     )
 
+    ctx = candidate_env(ctx)
+
     ExtractStage(
         llm=FakeLLM(text=json.dumps(_AI_CONTEXT, ensure_ascii=False), is_fake=False),
         profile_fetcher=lambda _domain: _ai_profile(),
@@ -294,6 +305,45 @@ def test_extract_llm_produces_generic_context_nodes_and_edge(
     assert all(edge.get("chunk_ids") for edge in edges), edges
 
 
+def test_groundedness_counts_only_names_present_in_the_chunk(monkeypatch: Any) -> None:
+    """ADR-052: сколько имён модели есть в тексте чанка — измеряется на живом разборе.
+
+    Имена, которых в тексте нет, попадают в граф и неотличимы от настоящих: `CONCEPT_1` или
+    `CONCEPT_JOB_ALERTS` разрешатся так же, как реальная сущность. Поэтому это единственное
+    место, где их можно увидеть, и метрика обязана считать оба числа — иначе ноль будет
+    читаться как «все имена настоящие».
+
+    Проверяются обе половины: имя из текста засчитано, выдуманное — нет.
+    """
+    monkeypatch.setenv("EXTRACT_LLM", "true")
+    payload = deepcopy(_AI_CONTEXT)
+    payload["tags"][0]["canonical_name"] = "Реестр документов"
+    payload["tags"][0]["name"] = "Реестр документов"
+    payload["tags"][1]["canonical_name"] = "ВЫДУМАННАЯ_КОНЦЕПЦИЯ"
+    payload["tags"][1]["name"] = "ВЫДУМАННАЯ_КОНЦЕПЦИЯ"
+    ctx = PipelineContext(
+        job_id="j",
+        domain="it",
+        doc_type="txt",
+        source_url="src://d.txt",
+        # В тексте только первое имя. Второе — типичная выдумка модели.
+        chunks=["В системе ведётся Реестр документов и он же является источником правды."],
+    )
+
+    ctx = candidate_env(ctx)
+
+    ExtractStage(
+        llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
+        profile_fetcher=lambda _domain: _ai_profile(),
+    ).run(ctx)
+
+    assert ctx.llm_names_total == 2, ctx.llm_names_total
+    assert ctx.llm_names_grounded == 1, (
+        f"grounded={ctx.llm_names_grounded} of {ctx.llm_names_total}: "
+        "имя из текста должно засчитываться, выдуманное — нет"
+    )
+
+
 def test_llm_origin_is_forced_to_ai(monkeypatch: Any) -> None:
     monkeypatch.setenv("EXTRACT_LLM", "true")
     payload = deepcopy(_AI_CONTEXT)
@@ -306,6 +356,8 @@ def test_llm_origin_is_forced_to_ai(monkeypatch: Any) -> None:
         source_url="src://d.txt",
         chunks=["требование индексировать документы"],
     )
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
@@ -369,6 +421,8 @@ def test_context_edges_accept_canonical_addressing_and_preserve_ai_provenance(
         chunks=["требование индексировать документы"],
     )
 
+    ctx = candidate_env(ctx)
+
     ExtractStage(
         llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
         profile_fetcher=lambda _domain: _ai_profile(),
@@ -424,6 +478,8 @@ def test_context_edges_record_model_invented_tag_id_addressing_as_fact(
         chunks=["требование индексировать документы"],
     )
 
+    ctx = candidate_env(ctx)
+
     ExtractStage(
         llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
         profile_fetcher=lambda _domain: _ai_profile(),
@@ -457,6 +513,7 @@ def test_malformed_extraction_answer_raises_in_strict_mode(monkeypatch: Any) -> 
     )
 
     with pytest.raises(ExtractionModelError, match="relationships должно быть списком"):
+        ctx = candidate_env(ctx)
         ExtractStage(
             llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
             profile_fetcher=lambda _domain: _ai_profile(),
@@ -492,6 +549,8 @@ def test_optional_failure_wipes_whole_ai_layer_on_malformed_answer(
         source_url="src://d.txt",
         chunks=["требование индексировать документы", "индексирование документов"],
     )
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=_PerChunkLLM(
@@ -538,6 +597,8 @@ def test_profile_failure_degrades_without_dropping_layer(
         chunks=["требование"],
     )
 
+    ctx = candidate_env(ctx)
+
     ExtractStage(
         llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
         profile_fetcher=lambda _domain: (_ for _ in ()).throw(RuntimeError("profile 503")),
@@ -564,6 +625,7 @@ def test_layer_loss_implies_degradation(monkeypatch: Any) -> None:
     ctx_profile = PipelineContext(
         job_id="j1", domain="it", doc_type="txt", source_url="src://a.txt", chunks=["требование"]
     )
+    ctx_profile = candidate_env(ctx_profile)
     ExtractStage(
         llm=FakeLLM(text=json.dumps(deepcopy(_AI_CONTEXT), ensure_ascii=False), is_fake=False),
         profile_fetcher=_profile_fails,
@@ -582,6 +644,7 @@ def test_layer_loss_implies_degradation(monkeypatch: Any) -> None:
         source_url="src://b.txt",
         chunks=["требование", "индексирование"],
     )
+    ctx_drop = candidate_env(ctx_drop)
     ExtractStage(
         llm=_PerChunkLLM(
             [
@@ -616,6 +679,8 @@ def test_extraction_failure_before_any_record_is_degradation_without_loss(
         source_url="src://d.txt",
         chunks=["требование"],
     )
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=FakeLLM(text=json.dumps(bad, ensure_ascii=False), is_fake=False),
@@ -652,6 +717,8 @@ def test_invalid_profile_is_reported_as_config_not_as_model(monkeypatch: Any) ->
         source_url="src://d.txt",
         chunks=["требование"],
     )
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=FakeLLM(text=json.dumps(deepcopy(_AI_CONTEXT), ensure_ascii=False), is_fake=False),
@@ -716,6 +783,8 @@ def test_transport_failures_get_distinct_causes(monkeypatch: Any) -> None:
     ) -> Any:
                 return _raise()
 
+        ctx = candidate_env(ctx)
+
         ExtractStage(
             llm=_Failing(),
             profile_fetcher=lambda _domain: _ai_profile(),
@@ -774,6 +843,7 @@ def test_our_own_defect_in_extraction_is_not_reported_as_degradation(
     )
 
     with pytest.raises(AttributeError):
+        ctx = candidate_env(ctx)
         ExtractStage(
             llm=FakeLLM(text=json.dumps(deepcopy(_AI_CONTEXT), ensure_ascii=False), is_fake=False),
             profile_fetcher=lambda _domain: _ai_profile(),
@@ -797,6 +867,7 @@ def test_extract_llm_prompt_contains_each_document_chunk(monkeypatch: Any) -> No
     )
     llm = _RecordingLLM(text=json.dumps(payload, ensure_ascii=False))
 
+    ctx = candidate_env(ctx)
     ExtractStage(llm=llm, profile_fetcher=lambda _domain: _ai_profile()).run(ctx)
 
     assert len(llm.calls) == len(chunks)
@@ -941,6 +1012,8 @@ def test_profile_without_llm_enabled_declares_cause_and_creates_nothing(
         chunks=["требование индексировать документы дедупликация"],
     )
 
+    ctx = candidate_env(ctx)
+
     ExtractStage(
         llm=FakeLLM(text=json.dumps(_AI_CONTEXT, ensure_ascii=False), is_fake=False),
         profile_fetcher=lambda _domain: profile,
@@ -968,6 +1041,7 @@ def test_missing_llm_adapter_is_named_separately_from_profile(monkeypatch: Any) 
         chunks=["требование индексировать"],
     )
 
+    ctx = candidate_env(ctx)
     ExtractStage(llm=None, profile_fetcher=lambda _domain: _ai_profile()).run(ctx)
 
     assert ctx.entities == []
@@ -1371,6 +1445,8 @@ def test_fake_llm_declares_fallback_instead_of_extracting(monkeypatch: Any) -> N
         chunks=["fake extraction fallback entity"],
     )
 
+    ctx = candidate_env(ctx)
+
     ExtractStage(
         llm=FakeLLM(text=json.dumps(_AI_CONTEXT, ensure_ascii=False)),
         profile_fetcher=lambda _domain: (_ for _ in ()).throw(RuntimeError("offline")),
@@ -1392,6 +1468,7 @@ def test_real_llm_failure_is_not_converted_to_fallback(monkeypatch: Any) -> None
     )
 
     with pytest.raises(RuntimeError, match="LLM failed"):
+        ctx = candidate_env(ctx)
         ExtractStage(
             llm=_RaisingLLM(),
             profile_fetcher=lambda _domain: _ai_profile(),
@@ -1411,6 +1488,7 @@ def test_real_llm_invalid_json_is_not_converted_to_fallback(
     )
 
     with pytest.raises(ExtractionModelError, match="валидный JSON"):
+        ctx = candidate_env(ctx)
         ExtractStage(
             llm=FakeLLM(text="not-json", is_fake=False),
             profile_fetcher=lambda _domain: _ai_profile(),
@@ -1436,6 +1514,8 @@ def test_profile_without_llm_capability_declares_cause_and_creates_nothing(
         source_url="src://book.txt",
         chunks=["library fallback entity"],
     )
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=llm,
@@ -1471,6 +1551,8 @@ def test_llm_context_description_does_not_echo_chunk_text(
         chunks=["сырой текст"],
     )
 
+    ctx = candidate_env(ctx)
+
     ExtractStage(
         llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
         profile_fetcher=lambda _domain: _ai_profile(),
@@ -1505,6 +1587,8 @@ def test_llm_accepts_dynamic_context_payload_with_optional_legacy_hints(
         source_url="src://d.txt",
         chunks=["custom"],
     )
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
@@ -1543,6 +1627,8 @@ def test_llm_tag_id_does_not_define_node_identity(monkeypatch: Any) -> None:
         source_url="src://d.txt",
         chunks=["требование"],
     )
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=FakeLLM(text=json.dumps(payload, ensure_ascii=False), is_fake=False),
@@ -1597,6 +1683,8 @@ def test_llm_tag_ids_do_not_split_one_canonical_into_two_nodes(monkeypatch: Any)
         source_url="src://d.txt",
         chunks=["требование", "требование"],
     )
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=_TwoChunks(),
@@ -1731,6 +1819,8 @@ def test_entity_named_in_two_chunks_keeps_both_chunk_links(monkeypatch: Any) -> 
         chunks=["дедупликация по требованиям", "дедупликация по эксплуатации"],
     )
 
+    ctx = candidate_env(ctx)
+
     ExtractStage(
         llm=_PerChunkLLM([json.dumps(payload, ensure_ascii=False)] * 2),
         profile_fetcher=lambda _domain: _ai_profile(),
@@ -1799,6 +1889,8 @@ def test_llm_repeated_tag_merges_chunk_ids(monkeypatch: Any) -> None:
         source_url="src://d.txt",
         chunks=["требование", "требование"],
     )
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=FakeLLM(text=json.dumps(_AI_CONTEXT, ensure_ascii=False), is_fake=False),

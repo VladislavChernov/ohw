@@ -65,6 +65,14 @@ DEFAULT_WAIT_CEILING_S = 7200.0        # жёсткий кап ожидания 
 # ограничиваем отдельно — иначе N документов умножают лимит на себя.
 DEFAULT_SLOT_TIMEOUT_S = 300.0         # свободный слот исполнителя для одного документа
 DEFAULT_SUBMIT_BUDGET_S = 7200.0       # вся фаза подачи корпуса
+# Нарастающая пауза при 429 (ADR-050). Раньше стояла константа 5 с на все повторы: при
+# `slot_timeout_s=300` это около 60 попыток на документ, то есть прибор давил на тот самый
+# лимит, в который упёрся. Три числа — минимальная пауза, шаг наращивания и потолок; сколько
+# шагов получится и сколько всего ожидания, выводится в `run_manifest` (см.
+# `backoff_summary`), то есть настраивается любая из трёх величин, а результат виден сразу.
+DEFAULT_429_RETRY_INITIAL_S = 1.0
+DEFAULT_429_RETRY_STEP_S = 2.0
+DEFAULT_429_RETRY_MAX_S = 30.0
 # Таймаут одного HTTP-вызова LLM (не окно ожидания джоб): та же величина, что была
 # до B3, но с собственным именем — иначе «300 с» означал бы сразу три разных вещи.
 DEFAULT_LLM_TIMEOUT_S = 300.0
@@ -326,6 +334,58 @@ def select_corpus_files(
     ]
 
 
+def retry_backoff_delays(initial_s: float, step_s: float, max_s: float) -> list[float]:
+    """Последовательность пауз между попытками при перегрузке: `initial, +step, ...` до `max`.
+
+    Три параметра, а не один, потому что у вопроса три разных ответа: сколько ждать перед
+    первой повторной попыткой (это задаёт тон всей фазе подачи), насколько быстро
+    наращивать (слишком полого - прибор продолжает давить на занятый лимит) и чем
+    ограничить (иначе при длинном ожидании пауза съест бюджет фазы целиком).
+
+    Ограничение шагом числом попыток - то же самое, что ограничение максимумом: шагов
+    ровно столько, сколько нужно, чтобы дойти до потолка. Обе величины печатаются в
+    `run_manifest.timeouts.ingest_429_backoff.derived`, чтобы тот, кто настраивает,
+    видел результат, а не пересчитывал его.
+    """
+    if step_s < 0:
+        raise ValueError(f"шаг увеличения паузы не может быть отрицательным: {step_s}")
+    if max_s < initial_s:
+        raise ValueError(
+            f"максимальная пауза {max_s} меньше начальной {initial_s}: последовательность "
+            "не будет нарастать"
+        )
+    delays: list[float] = []
+    current = float(initial_s)
+    while current < max_s:
+        delays.append(round(current, 3))
+        if step_s == 0.0:
+            break
+        current += step_s
+    delays.append(float(max_s))
+    return delays
+
+
+def backoff_summary(initial_s: float, step_s: float, max_s: float) -> dict[str, Any]:
+    """Настроенные значения плюс производные: сколько шагов и сколько всего ожидания.
+
+    «Сколько шагов» и «максимальный таймаут» - одно и то же, выраженное с разных сторон,
+    поэтому обе величины здесь же: настроить можно любую, а проверить результат нужно по
+    обеим. ``integral_s`` - сумма пауз до достижения потолка, то есть сколько прибор
+    готов ждать, прежде чем повторные попытки станут бесполезными.
+    """
+    delays = retry_backoff_delays(initial_s, step_s, max_s)
+    return {
+        "initial_s": float(initial_s),
+        "step_s": float(step_s),
+        "max_s": float(max_s),
+        "derived": {
+            "attempts_before_cap": len(delays),
+            "integral_s": round(sum(delays), 3),
+            "delays_s": delays,
+        },
+    }
+
+
 def ingest_corpus(
     corpus_dir: Path,
     domain: str,
@@ -335,6 +395,9 @@ def ingest_corpus(
     submit_budget_s: float = DEFAULT_SUBMIT_BUDGET_S,
     documents: list[str] | None = None,
     limit: int | None = None,
+    backoff_initial_s: float = DEFAULT_429_RETRY_INITIAL_S,
+    backoff_step_s: float = DEFAULT_429_RETRY_STEP_S,
+    backoff_max_s: float = DEFAULT_429_RETRY_MAX_S,
 ) -> list[dict[str, Any]]:
     """Загрузить выбранные .md в Ingestion API (async). Возвращает записи джобов.
 
@@ -353,6 +416,7 @@ def ingest_corpus(
     job_ids: list[dict[str, Any]] = []
     selected = select_corpus_files(corpus_dir, documents=documents, limit=limit)
     submit_deadline = time.monotonic() + submit_budget_s
+    backoff = retry_backoff_delays(backoff_initial_s, backoff_step_s, backoff_max_s)
     for md_file, rel in selected:
         source_url = f"{source_prefix}/{rel}" if source_prefix else rel
         content = md_file.read_text(encoding="utf-8")
@@ -363,6 +427,7 @@ def ingest_corpus(
             "content": content,
         }
         deadline = min(time.monotonic() + slot_timeout_s, submit_deadline)
+        attempt = 0
         while True:
             try:
                 resp = _post_json(
@@ -374,18 +439,26 @@ def ingest_corpus(
                 # 429: все слоты исполнения заняты — ждём и повторяем (async-пайплайн).
                 if "429" not in str(exc):
                     raise
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if now >= deadline:
                     # Различаем, что кончилось: слот для этого документа или бюджет всей
                     # фазы подачи. Сообщение обязано называть, потому что лечится это
                     # по-разному: слот — подождать или снизить параллелизм, бюджет — снять
                     # лимит с корпуса либо поднять `submit_budget_s`.
                     budget = (
                         f"бюджет фазы подачи {submit_budget_s:.0f}с исчерпан"
-                        if time.monotonic() >= submit_deadline
+                        if now >= submit_deadline
                         else f"слот исполнителя не освободился за {slot_timeout_s:.0f}с"
                     )
-                    raise RuntimeError(f"{budget} для {source_url}") from exc
-                time.sleep(5.0)
+                    raise RuntimeError(
+                        f"{budget} для {source_url} (попыток при 429: {attempt})"
+                    ) from exc
+                # Пауза нарастает и обрезается остатком до дедлайна. Без обрезки прибор
+                # выходил за `slot_timeout_s` на величину последней паузы, то есть
+                # объявленный в манифесте таймаут не был пределом.
+                delay = backoff[min(attempt, len(backoff) - 1)]
+                time.sleep(max(0.0, min(delay, deadline - now)))
+                attempt += 1
         job_id = resp.get("job_id")
         if not job_id:
             raise RuntimeError(f"ingestion не вернул job_id для {source_url}")
@@ -664,6 +737,20 @@ def _parse_enrichment_degradation(
             "lost_edges": _int_field(facts, "lost_edges"),
             "llm_records": _int_field(facts, "llm_records"),
             "llm_edges": _int_field(facts, "llm_edges"),
+            # ADR-052. Пока эти два поля не попали в этот список, прибор их молча
+            # отбрасывал: `facts` — белый список, а не прочитанный dict. На прогоне это
+            # выглядело как «модель не выдала ни одного имени», хотя `llm_records` был 19.
+            # То есть метрика молчала ровно на тех прогонах, ради которых добавлена.
+"llm_names_total": _int_field(facts, "llm_names_total"),
+            "llm_names_grounded": _int_field(facts, "llm_names_grounded"),
+            # ADR-053: «документ ушёл только в вектор» и «список был, но имена вне
+            # него» - разные события с разными последствиями. Без этих полей в отчёте
+            # ограничение выглядит работающим, пока тихо перестаёт работать.
+            "candidates_absent": bool(facts.get("candidates_absent")),
+            "candidates_total": _int_field(facts, "candidates_total"),
+            "llm_names_off_list": _int_field(facts, "llm_names_off_list"),
+            "chunks_without_candidates": _int_field(facts, "chunks_without_candidates"),
+            "chunks_total": _int_field(facts, "chunks_total"),
         },
     )
 
@@ -748,6 +835,20 @@ def build_ingest_report(
                 # документы, где извлечения не было (ADR-049).
                 "llm_extraction_ran": llm_ran,
                 "llm_records_extracted": facts["llm_records"],
+                # ADR-052: доля имён, которые реально есть в тексте чанка. Знаменатель
+                # рядом с числителем и всегда: 0 при 0 имён - это «нечего проверять», а
+                # не «все имена настоящие».
+                "llm_names_total": _int_field(facts, "llm_names_total"),
+                "llm_names_grounded": _int_field(facts, "llm_names_grounded"),
+                # ADR-053. `candidates_absent` - документ разбирался ТОЛЬКО вектором,
+                # потому что списка кандидатов не было. Это режим по решению владельца,
+                # а не дефект, но без него в сводке не отличить «графа нет» от
+                # «граф есть и пуст».
+                "candidates_absent": bool(facts.get("candidates_absent")),
+                "candidates_total": _int_field(facts, "candidates_total"),
+                "llm_names_off_list": _int_field(facts, "llm_names_off_list"),
+                "chunks_without_candidates": _int_field(facts, "chunks_without_candidates"),
+                "chunks_total": _int_field(facts, "chunks_total"),
                 "llm_edges_extracted": facts["llm_edges"],
                 "llm_layer_lost_entities": facts["lost_entities"],
                 "llm_layer_lost_edges": facts["lost_edges"],
@@ -781,6 +882,17 @@ def build_ingest_report(
     llm_docs = [d for d in documents if d["llm_extraction_ran"]]
     extraction_docs = [d for d in documents if d["extraction_stage_reached"]]
     llm_records_total = sum(d["llm_records_extracted"] for d in llm_docs)
+    names_total = sum(d["llm_names_total"] for d in llm_docs)
+    names_grounded = sum(d["llm_names_grounded"] for d in llm_docs)
+    # ADR-053: кандидаты. Знаменатель здесь - ВСЕ документы, а не только те, где
+    # дошла LLM: `candidates_absent` и есть ответ на вопрос «сколько документов
+    # разбиралось вообще без списка». Считать по `llm_docs` нельзя - там их нет по
+    # определению, и доля вышла бы нулём, то есть выглядела бы как «нарушений нет».
+    candidates_absent_docs = sum(1 for d in documents if d["candidates_absent"])
+    off_list_names = sum(d["llm_names_off_list"] for d in llm_docs)
+    chunks_without_candidates = sum(d["chunks_without_candidates"] for d in llm_docs)
+    chunks_total = sum(d["chunks_total"] for d in llm_docs)
+    candidates_total_all = sum(d["candidates_total"] for d in documents)
     causes: dict[str, int] = {}
     for doc in documents:
         cause = doc["enrichment_cause"]
@@ -821,6 +933,33 @@ def build_ingest_report(
         "documents_with_llm_extraction": len(llm_docs),
         "documents_with_extraction_stage": len(extraction_docs),
         "llm_records_extracted": llm_records_total,
+        # ADR-052. `None`, а не 0, когда имён не было ни одного: ноль здесь читался бы как
+        # «все имена настоящие», а это противоположный смысл (ADR-049, запрет тихого нуля).
+        "llm_names_total": names_total,
+        "llm_names_grounded": names_grounded,
+        "llm_names_grounded_ratio": (
+            round(names_grounded / names_total, 4) if names_total else None
+        ),
+        # ADR-053. Знаменатель каждой доли стоит рядом с числом.
+        # `documents_with_candidates_absent` — документы, ушедшие ТОЛЬКО в вектор:
+        # режим по решению владельца, а не дефект, но если таких все 30, то стенд
+        # «работает», не построив ни одного графа.
+        "documents_with_candidates_absent": candidates_absent_docs,
+        "candidates_total": candidates_total_all,
+# Знаменатели рядом с числами: доля «нарушений» без числа имён рядом читается как
+    # «нарушений нет, потому что имён не было».
+        "llm_names_off_list": off_list_names,
+        "llm_names_off_list_ratio": (
+            round(off_list_names / names_total, 4) if names_total else None
+        ),
+        # Знаменатель рядом: из числа не видно, много это или мало. Сколько чанков
+        # ушло в модель, считается на стороне ингеста и приезжает полем -
+        # иначе доля «пропущено / все чанки документа» была бы недоступна вовсе.
+        "chunks_without_candidates": chunks_without_candidates,
+        "chunks_total": chunks_total,
+        "chunks_without_candidates_ratio": (
+            round(chunks_without_candidates / chunks_total, 4) if chunks_total else None
+        ),
         # ADR-049 п. 4. Знаменатель рядом с числом, иначе «нод ноль» не отличить от
         # «запись нигде не считалась». `llm_nodes` — доля нод, записанных моделью; она
         # имеет смысл, только когда в прогоне вообще была нода.
@@ -2147,8 +2286,33 @@ def main() -> None:
         "--submit-budget",
         type=float,
         default=DEFAULT_SUBMIT_BUDGET_S,
-        help="Бюджет всей фазы подачи корпуса, сек (по умолч. 7200). Существует отдельно от "
-        "--slot-timeout, иначе лимит умножается на число документов и перестаёт быть капом",
+        help="бюджет фазы подачи целиком, с (по умолчанию. 7200). Не умножается на "
+        "--slot-timeout, а ограничивает всю пачку, иначе N документов съели бы бюджет",
+    )
+    parser.add_argument(
+        "--retry429-initial",
+        type=float,
+        default=DEFAULT_429_RETRY_INITIAL_S,
+        help="пауза перед первой повторной попыткой при 429, с (по умолчанию. 1). Задаёт "
+        "тон всей фазе подачи: меньше - прибор не даёт занятому лиоту занятся",
+    )
+    parser.add_argument(
+        "--retry429-step",
+        type=float,
+        default=DEFAULT_429_RETRY_STEP_S,
+help="насколько наращивать паузу после каждого 429, с (по умолчанию 2). Ноль "
+        "фиксирует постоянную паузу, единица даёт линейный рост. При значении больше "
+        "единицы после первого повтора пауза перескакивает к потолку `max`; это "
+        "закреплено тестом как осознанное поведение, а не как рост по шагу",
+    )
+    parser.add_argument(
+        "--retry429-max",
+        type=float,
+        default=DEFAULT_429_RETRY_MAX_S,
+        help="потолок паузы при 429, с (по умолчанию. 30). Равен максимальному числу шагов "
+        "по величине: настраивается любая из двух, а сколько шагов вышло и сколько это "
+        "всего ожидания, печатается в манифест (run_manifest.timeouts."
+        "ingest_429_backoff.derived)",
     )
     parser.add_argument(
         "--no-preflight",
@@ -2218,6 +2382,14 @@ def main() -> None:
         "wait_ceiling_s": args.wait_ceiling,
         "slot_timeout_s": args.slot_timeout,
         "submit_budget_s": args.submit_budget,
+        # Три настроенных числа и производные от них. Производные положены рядом с
+        # настройками намеренно: «сколько шагов получится» и «сколько это всего ожидания»
+        # должны читаться из манифеста, а не вычисляться тем, кто читает его потом.
+        "ingest_429_backoff": backoff_summary(
+            args.retry429_initial,
+            args.retry429_step,
+            args.retry429_max,
+        ),
     }
     if args.corpus:
         corpus_dir = Path(args.corpus)
@@ -2230,6 +2402,9 @@ def main() -> None:
             submit_budget_s=args.submit_budget,
             documents=documents or None,
             limit=args.limit_docs,
+            backoff_initial_s=args.retry429_initial,
+            backoff_step_s=args.retry429_step,
+            backoff_max_s=args.retry429_max,
         )
         print(f"ingest: {len(submitted)} документов поставлено, ждём завершения ...")
         statuses = wait_jobs(

@@ -271,7 +271,7 @@ N3 | онтология профиля (`unique_key`, `edge_types`, `validation`
 `ensure_schema` (`neo4j.py`, `base.py`) | вызовов нет; `data_model.md:71-75` описывает constraints и миграции как отдельную операционную задачу | **не удалять**, а закрепить как инструмент оператора вне ingest-пути |
 `ENTITY_LABEL` | используется как фолбэк при записи узла; в `ensure_schema` — как skip | убрать из `ensure_schema`, фолбэк оставить |
 `GraphRetriever.retrieve()` + `build_cypher()` + `NODE_LABEL_PLACEHOLDER` | работают, но конвейер зовёт `expand()`; доктринг называет путь legacy | удалить после починки обхода |
-`_extract_deterministic` (`orchestrator.py:554`) | каждое слово ≥5 букв становится `ContextNode` с `origin: system`, **связей не создаётся вовсе** | путь не выключен на стенде (`EXTRACT_LLM=true` в `compose.eval-minimal.yaml:131`), но остаётся дефектом M5 |
+`_extract_deterministic` (`orchestrator.py:554`) | каждое слово ≥5 букв становилось `ContextNode` с `origin: system`, **связей не создавалось вовсе** | **закрыто ADR-049 (2026-10-04)**: заглушка удалена целиком вместе с меткой `deterministic:v1`; деградация объявляется поимённой причиной и ничего не создаёт |
 
 ---
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import builtins
 import hashlib
 import json
+import sqlite3
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -311,9 +312,51 @@ class JobStore:
             "lost_edges INTEGER NOT NULL DEFAULT 0, "
             "llm_records INTEGER NOT NULL DEFAULT 0, "
             "llm_edges INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_total INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_grounded INTEGER NOT NULL DEFAULT 0, "
+            # ADR-053: ограничение списком кандидатов. `candidates_absent` хранится как
+            # 0/1, а не выводится из `candidates_total`: «список был пуст» и «список не
+            # нашли» - разные события, и оба означают разбор, которого не было.
+"candidates_absent INTEGER NOT NULL DEFAULT 0, "
+            "candidates_total INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_off_list INTEGER NOT NULL DEFAULT 0, "
+            "chunks_without_candidates INTEGER NOT NULL DEFAULT 0, "
+            "chunks_total INTEGER NOT NULL DEFAULT 0, "
             "ts TEXT NOT NULL"
             ")"
         )
+        # ADR-052: колонки groundedness добавлены в уже развёрнутую базу, а
+        # `CREATE TABLE IF NOT EXISTS` на существующей таблице ничего не добавляет. Без
+        # этого `INSERT` падал бы с «no such column» на любой базе, созданной до правки, -
+        # то есть отказ на данных, а не на чистой установке. Миграция идемпотентная:
+        # повторный запуск на уже мигрированной базе молча ничего не делает.
+        for column in ("llm_names_total", "llm_names_grounded"):
+            try:
+                self._conn.execute(
+                    f"ALTER TABLE job_enrichment ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                # «duplicate column name» - колонка уже есть, и это не ошибка.
+                pass
+# ADR-053: те же колонки, что и выше, по той же причине.
+        for column in (
+            "candidates_absent",
+            "candidates_total",
+            "llm_names_off_list",
+            "chunks_without_candidates",
+            "chunks_total",
+        ):
+            try:
+                self._conn.execute(
+                    f"ALTER TABLE job_enrichment ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError as exc:
+                # «duplicate column name» - колонка уже есть, и это не ошибка. Любая
+                # другая перебрасывается: молча проглотить её означало бы оставить базу
+                # НЕмигрированной, и падение пришлось бы на `INSERT` с «no such column» -
+                # ровно та ошибка, ради которой миграция и написана.
+                if "duplicate column name" not in str(exc):
+                    raise
         # ДЛИТЕЛЬНОСТИ стадий: измеряются в момент перехода и хранятся явно.
         #
         # Почему не разность `job_stages.ts`: `update_stage` при переходе к следующей
@@ -870,6 +913,13 @@ class JobStore:
         lost_edges: int,
         llm_records: int,
         llm_edges: int,
+        llm_names_total: int = 0,
+        llm_names_grounded: int = 0,
+candidates_absent: bool = False,
+        candidates_total: int = 0,
+        llm_names_off_list: int = 0,
+        chunks_without_candidates: int = 0,
+        chunks_total: int = 0,
     ) -> None:
         """Записать числовые факты обогащения джобы (одна строка на джобу).
 
@@ -883,7 +933,10 @@ class JobStore:
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO job_enrichment (job_id, cause, lost_entities, "
-                "lost_edges, llm_records, llm_edges, ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "lost_edges, llm_records, llm_edges, llm_names_total, llm_names_grounded, "
+"candidates_absent, candidates_total, llm_names_off_list, "
+                "chunks_without_candidates, chunks_total, "
+                "ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     cause,
@@ -891,6 +944,13 @@ class JobStore:
                     int(lost_edges),
                     int(llm_records),
                     int(llm_edges),
+                    int(llm_names_total),
+                    int(llm_names_grounded),
+                    1 if candidates_absent else 0,
+                    int(candidates_total),
+                    int(llm_names_off_list),
+                    int(chunks_without_candidates),
+                    int(chunks_total),
                     datetime.now(UTC).isoformat(timespec="seconds"),
                 ),
             )
@@ -1122,7 +1182,10 @@ class JobStore:
         """Числовые факты обогащения; ``{}`` — их не было (EXTRACT не дошёл до записи)."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT cause, lost_entities, lost_edges, llm_records, llm_edges "
+                "SELECT cause, lost_entities, lost_edges, llm_records, llm_edges, "
+                "llm_names_total, llm_names_grounded, "
+                "candidates_absent, candidates_total, llm_names_off_list, "
+                "chunks_without_candidates, chunks_total "
                 "FROM job_enrichment WHERE job_id=?",
                 (job_id,),
             ).fetchone()
@@ -1134,6 +1197,21 @@ class JobStore:
             "lost_edges": int(row[2]),
             "llm_records": int(row[3]),
             "llm_edges": int(row[4]),
+            # ADR-052. Ноль при нуле имён означает «нечего было проверять», а не «все
+            # имена настоящие»: потребитель обязан смотреть на оба числа вместе.
+            "llm_names_total": int(row[5]),
+            "llm_names_grounded": int(row[6]),
+            # ADR-053. `candidates_absent` - документ ушёл только в вектор, потому что
+            # списка не было. Это НЕ выводится из `candidates_total`: список мог быть
+            # пустым, а мог отсутствовать, и разбира это разные события.
+            "candidates_absent": bool(row[7]),
+            "candidates_total": int(row[8]),
+            # Сколько имён модель выдала вне списка и сколько типов вне онтологии.
+            # Ненулевое значение означает, что ограничение нарушено, а не «список был
+            # плохой»: список из отчёта не читается, а имя видно в логе EXTRACT.
+            "llm_names_off_list": int(row[9]),
+            "chunks_without_candidates": int(row[10]),
+            "chunks_total": int(row[11]),
         }
 
     def stages(self, job_id: str) -> builtins.list[dict[str, Any]]:

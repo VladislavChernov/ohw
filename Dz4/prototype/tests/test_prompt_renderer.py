@@ -27,6 +27,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from tests.conftest import candidate_env
+
+# Извлечение без списка кандидатов не выполняется вовсе (ADR-053).
+pytestmark = pytest.mark.usefixtures("candidate_env_setup")
 import yaml
 
 from graphrag_proto.ingestion_service.pipeline.prompt_renderer import (
@@ -218,6 +223,7 @@ def test_prompt_sent_to_model_carries_profile_types(monkeypatch: pytest.MonkeyPa
         chunks=["текст про требования и контракты"],
         profile=profile,
     )
+    ctx = candidate_env(ctx)
     ExtractStage(llm=_CapturingLLM()).run(ctx)
 
     assert sent, "модель не была вызвана: тест проверил бы пустоту"

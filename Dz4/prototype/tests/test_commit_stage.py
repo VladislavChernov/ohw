@@ -13,6 +13,12 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import candidate_env_for
+
+# Извлечение без списка кандидатов не выполняется вовсе (ADR-053): фикстура готовит папку
+# списков, а candidate_env кладёт документ и его список перед разбором.
+pytestmark = pytest.mark.usefixtures("candidate_env_setup")
+
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     MANUAL_NODE_VERSION,
@@ -139,6 +145,9 @@ def run_source(
     links: list[dict[str, Any]] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> PipelineContext:
+    # Список кандидатов обязателен (ADR-053): без него документ ушёл бы в вектор, и
+    # проверки графа не имели бы предмета. Кладём его здесь, в общей точке файла.
+    candidate_env_for(src)
     ctx = PipelineContext(
         job_id="j",
         domain="it",
@@ -528,6 +537,7 @@ def test_every_committed_source_gets_its_revision_row(tmp_path: Path) -> None:
     for index, content in enumerate((CONTENT_1, CONTENT_2), start=1):
         src = tmp_path / f"d{index}.txt"
         src.write_text(content, encoding="utf-8")
+        candidate_env_for(src)
         ctx = PipelineContext(
             job_id=f"j{index}",
             domain="it",
@@ -707,6 +717,7 @@ def test_node_counter_stays_empty_when_a_best_effort_pair_is_compensated(tmp_pat
     analyzer, _ = build_analyzer(tmp_path, graph, vector)
     src = tmp_path / "compensated.txt"
     src.write_text(CONTENT_1, encoding="utf-8")
+    candidate_env_for(src)
     ctx = PipelineContext(
         job_id="j",
         domain="it",

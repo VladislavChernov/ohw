@@ -19,6 +19,12 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import candidate_env
+
+# Извлечение без списка кандидатов не выполняется вовсе (ADR-053): фикстура готовит папку
+# списков, а candidate_env кладёт документ и его список перед разбором.
+pytestmark = pytest.mark.usefixtures("candidate_env_setup")
+
 
 @pytest.fixture(autouse=True)
 def _llm_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,6 +78,7 @@ def _run(payload: dict[str, Any], chunks: list[str]) -> Any:
             return iter([json.dumps(payload, ensure_ascii=False)])
 
     ctx = _ctx(chunks)
+    ctx = candidate_env(ctx)
     ExtractStage(
         llm=_LLM(),
         profile_fetcher=lambda _domain: _profile(),

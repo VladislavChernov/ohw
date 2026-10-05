@@ -22,8 +22,13 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
+from itertools import pairwise
 from typing import Any, TypeVar
 
+from graphrag_proto.ingestion_service.pipeline.candidates import (
+    candidates_dir_from_env,
+    load_candidates,
+)
 from graphrag_proto.ingestion_service.pipeline.chunker import (
     Chunker,
     build_chunker,
@@ -37,6 +42,7 @@ from graphrag_proto.ingestion_service.pipeline.profile_contract import (
 from graphrag_proto.ingestion_service.pipeline.prompt_renderer import (
     extraction_identity,
     instruction_fingerprint,
+    render_candidates_block,
     render_instruction,
 )
 from graphrag_proto.ingestion_service.projection import (
@@ -158,6 +164,21 @@ def _identity_key(value: object) -> str:
     normalized = unicodedata.normalize("NFKC", str(value))
     normalized = normalized.replace("Ё", "Е").replace("ё", "е")
     return " ".join(normalized.casefold().split())
+
+
+def _iter_name_words(text: str) -> list[str]:
+    """Слова и соседние пары слов текста — кандидаты на имя сущности.
+
+    Пары нужны для составных имён вроде `Document Registry`: по одному слову такое имя
+    не найдётся, а искать только целые фразы нельзя — тогда `REQUIREMENT_3` или
+    `CONCEPT_JOB_ALERTS` не нашлись бы и сочли бы «из текста», хотя в тексте их нет.
+    Тройки не берутся: они почти всегда дают ложные совпадения на длинных русских
+    оборотах, а цена ошибки тут — либо пропущенная выдумка, либо невидимая.
+    """
+    words = text.split()
+    candidates = list(words)
+    candidates.extend(f"{first} {second}" for first, second in pairwise(words))
+    return candidates
 
 
 def _extraction_template(profile: dict[str, Any]) -> dict[str, Any]:
@@ -446,6 +467,7 @@ class PipelineContext:
     source_url: str
     source_path: str | None = None
     document: Any = None
+    raw_text: str = ""
     chunks: list[str] = field(default_factory=list)
     chunks_meta: list[dict[str, Any]] = field(default_factory=list)
     entities: list[dict[str, Any]] = field(default_factory=list)
@@ -476,6 +498,27 @@ class PipelineContext:
     llm_layer_lost_edges: int = 0
     llm_records: int = 0
     llm_edges: int = 0
+    # ADR-052: сколько имён модель выдала и сколько из них реально есть в тексте чанка.
+    # Оба числа — про извлечение, а не про запись: считаются на ответе модели, до COMMIT.
+    # Ноль означает «извлечение не вернуло ни одного имени», а не «все имена настоящие».
+    llm_names_total: int = 0
+    llm_names_grounded: int = 0
+    # ADR-053: ограничение имен списком кандидатов. `candidates_absent` — список не
+    # найден, и по решению владельца документ грузится только в вектор: это режим
+    # работы, а не потеря. `candidates_total` — размер списка документа.
+    # `llm_names_off_list` — сколько имён модель выдала ВНЕ списка: ограничение может
+    # нарушаться, и это обязано быть числом, а не ощущением по ответам.
+    # `chunks_without_candidates` — сколько чанков ушло в модель без списка кандидатов.
+    candidates_absent: bool = False
+    candidates_total: int = 0
+    llm_names_off_list: int = 0
+    chunks_without_candidates: int = 0
+    chunks_total: int = 0
+    # Счётчика «тип вне онтологии» здесь НЕТ, и это решение, а не недосмотр: тип
+    # сущности задаётся ключом payload, который определяет СХЕМА ответа, а не модель.
+    # Поэтому значение вне онтологии невозможно by construction, и счётчик был бы
+    # гарантированным нулём. Проект такое прямо запрещает: прибор, который не может
+    # измерить, обязан сказать «не измерено», а не 0.
     # Причина деградации (`CAUSE_*`), а не её текст: текст можно переформулировать
     # вместе с причиной, имя — нет.
     enrichment_cause: str | None = None
@@ -549,6 +592,17 @@ class IngestStage(Stage):
 
         document = reader.read(Path(ctx.source_path or ""), ctx.source_url, ctx.domain)
         ctx.document = document
+        # Сырой текст источника нужен для сверки `sha256` со списком кандидатов (ADR-053).
+        # Считать хеш по `blocks` нельзя: блоки не сохраняют исходную разметку, и хеш
+        # документа тогда не совпал бы с тем, что посчитал pre-ingest по файлу, - то есть
+        # проверка свежести всегда отвергала бы правильный список.
+        try:
+            ctx.raw_text = Path(ctx.source_path or "").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Источник, который не читается как текст (например, PDF), просто не имеет
+            # списка кандидатов: стадия pre-ingest работает с markdown. Это штатный путь,
+            # а не повод ронять загрузку.
+            ctx.raw_text = ""
 
 
 class ChunkStage(Stage):
@@ -906,6 +960,47 @@ class ExtractStage(Stage):
             ctx.llm_layer_lost_edges,
         )
 
+    def _check_candidate_membership(
+        self,
+        record: dict[str, Any],
+        chunk_candidates: tuple[str, ...],
+        chunk_id: str,
+        ctx: PipelineContext,
+    ) -> None:
+        """Сверяет извлечённое имя со списком кандидатов чанка (ADR-053).
+
+        Ключи берутся из `_entity_record`: запись называется `canonical`, а не
+        `canonical_name`. Читать несуществующий ключ было тихим дефектом - функция
+        выходила по `if not canonical` на КАЖДОЙ записи, и счётчик нарушений был
+        всегда нулём при полном отсутствии проверки. Зелёный гейт этого не видел,
+        потому что ненулевое значение никто не утверждал.
+
+        Проверяется только имя. Тип здесь проверять бессмысленно: он определяется
+        ключом payload, который задаёт СХЕМА ответа, а не модель, поэтому «тип вне
+        онтологии» невозможен by construction. Счётчик для него был бы гарантированным
+        нулём - тем самым запрещённым в этом проекте.
+
+        Нарушение не роняет разбор: запись остаётся в графе, потому что «модель ошиблась»
+        и «сущности нет» - разные утверждения. Но нарушение обязано быть посчитано и
+        залогировано, иначе ограничение выглядит работающим, пока тихо не перестаёт.
+        """
+        canonical = str(record.get("canonical") or "").strip()
+        if not canonical:
+            return
+        allowed = self._allowed_keys(chunk_candidates)
+        if _identity_key(canonical) not in allowed:
+            ctx.llm_names_off_list += 1
+            _log.warning(
+                "имя вне списка кандидатов: %r (чанк %s, %d кандидатов в списке)",
+                canonical,
+                chunk_id,
+                len(chunk_candidates),
+            )
+
+    @staticmethod
+    def _allowed_keys(candidates: tuple[str, ...]) -> set[str]:
+        return {_identity_key(name) for name in candidates}
+
     def _extract_llm(self, ctx: PipelineContext) -> None:
         template = _extraction_template(ctx.profile or {})
         # Схема в инструкции не пишется руками: она генерируется из профиля, иначе вид
@@ -914,6 +1009,10 @@ class ExtractStage(Stage):
         # `prompt_id` остаётся человекочитаемой подписью в отчёте, но идентичностью
         # извлечения не является: версия считается от содержимого инструкции.
         instruction = render_instruction(ctx.profile or {}, str(template.get("user") or ""))
+        declared_types = [
+            str(item.get("type") or "")
+            for item in _profile_node_types(ctx.profile or {})
+        ]
         extractor_version = extraction_identity(ctx.profile or {}, instruction)
         ctx.extraction_passport = _extraction_passport(ctx, self._llm, instruction, extractor_version)
         entity_payloads = {
@@ -930,10 +1029,53 @@ class ExtractStage(Stage):
         llm = self._llm
         if llm is None:
             raise ExtractionConfigError("EXTRACT: LLM adapter is required for profile extraction")
+        # Список кандидатов документа (ADR-053). Без него разбор не выполняется вовсе:
+        # решение владельца - документ без списка грузится только в вектор.
+        candidate_list = load_candidates(
+            candidates_dir_from_env(),
+            str(ctx.source_url).rsplit("/", 1)[-1],
+            ctx.raw_text or "",
+        )
+        if candidate_list is None:
+            ctx.candidates_absent = True
+            _log.warning(
+                "кандидаты для %s не найдены, документ грузится только в вектор",
+                ctx.source_url,
+            )
+            return
+        ctx.candidates_total = len(candidate_list)
+        # Знаменатель для «чанков без кандидатов»: без него доля не считается, а
+        # «пропущено 10 чанков» неизвестно из чего - из десяти или из трёхсот.
+        ctx.chunks_total = len(ctx.chunks)
         for index, chunk in enumerate(ctx.chunks):
             chunk_id = self._chunk_id(ctx, index)
+            chunk_candidates = candidate_list.for_chunk(chunk)
+            # ОТКРЫТОЕ РЕШЕНИЕ (нужно владельцу), поэтому по умолчанию чанк уходит в
+            # модель даже без кандидатов, а факт считается: 10 таких чанков из 343 на
+            # текущем корпусе. Вариантов два, и молча выбирать нельзя:
+            #   (а) пропускать вызов - тогда ограничение нигде не снимается, но теряется
+            #       2.9% чанков, и модель не получает шанса назвать то, что правила
+            #       кандидатов пропустили;
+            #   (б) звать без списка - тогда именно здесь и рождается выдумка, от которой
+            #       ADR-053 и защищает (замерено 50% выдуманных имён).
+            # Сейчас включён (б) с явным запретом придумывать имена в блоке, и потеря
+            # измеряется, а не замалчивается.
+            if not chunk_candidates:
+                ctx.chunks_without_candidates += 1
+                _log.warning(
+                    "чанк %s не содержит кандидатов (%d из %d чанков документа): %s",
+                    chunk_id,
+                    ctx.chunks_without_candidates,
+                    ctx.chunks_total,
+                    ctx.source_url,
+                )
+            chunk_candidates_block = render_candidates_block(
+                chunk_candidates,
+                declared_types=declared_types,
+            )
             prompt = (
                 f"{instruction}\n\n"
+                f"{chunk_candidates_block}\n\n"
                 f"Текст документа для извлечения (чанк {index + 1}):\n{chunk}"
             )
             # Граница с моделью: ровно здесь всё, что пришло извне, становится
@@ -985,15 +1127,24 @@ class ExtractStage(Stage):
                 for item in items:
                     if not isinstance(item, dict):
                         raise ExtractionModelError(f"EXTRACT поле {key!r} содержит не-объект")
-                    records.append(
-                        _entity_record(
-                            entity_type,
-                            item,
-                            ctx,
-                            chunk_id,
-                            extractor_version,
-                        )
+                    record = _entity_record(
+                        entity_type,
+                        item,
+                        ctx,
+                        chunk_id,
+                        extractor_version,
                     )
+                    # Имя сверяется со списком кандидатов того же чанка: модель получила
+                    # именно его и обязана была выбирать из него. Ответ вне списка - не
+                    # повод для отказа разбора, но повод быть посчитанным: иначе ограничение
+                    # выглядит работающим, пока тихо не перестаёт.
+                    self._check_candidate_membership(
+                        record,
+                        chunk_candidates,
+                        chunk_id,
+                        ctx,
+                    )
+                    records.append(record)
             relations = payload.get("relationships", payload.get("links", []))
             unresolved = self._validate_edges(relations, records)
             # Индекс по КЛЮЧИ неразрешённого имени — тем же `_identity_key`, каким
@@ -1003,6 +1154,24 @@ class ExtractStage(Stage):
             unresolved_by_key = {
                 _identity_key(item["endpoint_name"]) for item in unresolved
             }
+            # ADR-052: сколько имён модели есть в самом чанке. Считается здесь, а не в
+            # приборе, потому что здесь есть и текст чанка, и разобранный ответ: прибор,
+            # читающий другой набор данных, измерял бы другое (ровно тот класс дефекта,
+            # который ловил обмен полями). Ключ сравнения - `_identity_key`, тот же, каким
+            # склеиваются идентичности, иначе «ё» и регистр давали бы ложное «выдумано».
+            # Имена, пришедшие не из текста, попадают в граф и неотличимы от настоящих:
+            # измерить это иначе нечем.
+            chunk_keys = {_identity_key(word) for word in _iter_name_words(chunk)}
+            for record in records:
+                # Ключ после нормализации — `canonical`, а не `canonical_name`: его
+                # переносит `_entity_record`. Читать исходное поле здесь означало бы
+                # считать ноль у каждой записи, и метрика тихо врала бы.
+                name = str(record.get("canonical") or "")
+                if not name:
+                    continue
+                ctx.llm_names_total += 1
+                if _identity_key(name) in chunk_keys:
+                    ctx.llm_names_grounded += 1
             ctx.entities.extend(records)
             ctx.unresolved_endpoints.extend(
                 {
@@ -1811,6 +1980,12 @@ class CommitStage(Stage):
         if graph is None:
             if vector is None:
                 raise RuntimeError("COMMIT: vector store is required for baseline")
+            self._write_vector_only(doc, ctx)
+            return
+        # ADR-053: документ без списка кандидатов грузится только в вектор. Это решение
+        # владельца, а не следствие пустого извлечения: без списка модель выдумывает
+        # половину имён (ADR-052), и «граф из выдумок» хуже, чем «графа нет».
+        if ctx.candidates_absent:
             self._write_vector_only(doc, ctx)
             return
         if vector is None:

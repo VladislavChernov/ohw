@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
+
+from tests.conftest import candidate_env, candidate_env_for
+
+# Извлечение без списка кандидатов не выполняется вовсе (ADR-053): папка списков
+# готовится на весь файл, а список кладётся в тестах, где идёт разбор.
+pytestmark = pytest.mark.usefixtures("candidate_env_setup")
 from fastapi.testclient import TestClient
 
 from graphrag_proto.ingestion_service.app import create_app
@@ -315,11 +323,11 @@ def test_executor_limits_concurrent_jobs(tmp_path: Path) -> None:
     )
     assert ex._slots.acquire(blocking=False) is True
     try:
-        assert ex.start("blocked", src, "src://blocked", "it", "txt") is False
+        assert ex.start_reserved_guarded("blocked", src, "src://blocked", "it", "txt") is False
     finally:
         ex._slots.release()
     jobs.create("ok", "src://ok", "it", "txt")
-    assert ex.start("ok", src, "src://ok", "it", "txt") is True
+    assert ex.start_reserved_guarded("ok", src, "src://ok", "it", "txt") is True
     assert wait_until(lambda: jobs.get("ok")["status"] == "succeeded")
 
 
@@ -341,7 +349,9 @@ def test_executor_loads_profile_once_per_job(tmp_path: Path) -> None:
     jobs = JobStore(tmp_path / "jobs.db")
     registry = DocumentRegistry(tmp_path / "registry.db")
     source = tmp_path / "source.txt"
-    source.write_text("текст для профиля", encoding="utf-8")
+    source.write_text("тест документа", encoding="utf-8")
+    # Список обязателен (ADR-053): без него документ ушёл бы в вектор.
+    candidate_env_for(source)
     executor = Executor(
         jobs,
         registry,
@@ -351,10 +361,10 @@ def test_executor_loads_profile_once_per_job(tmp_path: Path) -> None:
         profile_fetcher=fetcher,
     )
     jobs.create("job", "src://profile.txt", "it", "txt")
-    assert executor.start("job", source, "src://profile.txt", "it", "txt") is True
+    assert executor.start_reserved_guarded("job", source, "src://profile.txt", "it", "txt") is True
     assert wait_until(lambda: jobs.get("job")["status"] == "succeeded")
     jobs.create("job-noop", "src://profile.txt", "it", "txt")
-    assert executor.start("job-noop", source, "src://profile.txt", "it", "txt") is True
+    assert executor.start_reserved_guarded("job-noop", source, "src://profile.txt", "it", "txt") is True
     assert wait_until(lambda: jobs.get("job-noop")["status"] == "succeeded")
     assert calls == ["it"]
 
@@ -377,8 +387,10 @@ def test_executor_reports_enrichment_cause_and_loss_size(
     registry = DocumentRegistry(tmp_path / "enr-registry.db")
     source = tmp_path / "d.txt"
     source.write_text(
-        "требование индексировать документы дедупликация документов", encoding="utf-8"
+        "требование индексировать документы векторизовать документы", encoding="utf-8"
     )
+    # Список обязателен (ADR-053): без него документ ушёл бы в вектор.
+    candidate_env_for(source)
     executor = Executor(
         jobs,
         registry,
@@ -389,7 +401,7 @@ def test_executor_reports_enrichment_cause_and_loss_size(
         profile_fetcher=lambda _domain: _ai_extraction_profile(),
     )
     jobs.create("job", "src://d.txt", "it", "txt")
-    assert executor.start("job", source, "src://d.txt", "it", "txt") is True
+    assert executor.start_reserved_guarded("job", source, "src://d.txt", "it", "txt") is True
     assert wait_until(lambda: jobs.get("job")["status"] == "succeeded")
 
     job = jobs.get("job")
@@ -430,7 +442,9 @@ def test_executor_reports_enrichment_for_healthy_job_as_denominator(
     jobs = JobStore(tmp_path / "ok.db")
     registry = DocumentRegistry(tmp_path / "ok-registry.db")
     source = tmp_path / "d.txt"
-    source.write_text("сортировка quicksort разделяй и властвуй данными", encoding="utf-8")
+    source.write_text("быстрая сортировка quicksort работает всегда")
+    # Список обязателен (ADR-053): без него документ ушёл бы в вектор.
+    candidate_env_for(source)
     executor = Executor(
         jobs,
         registry,
@@ -441,7 +455,7 @@ def test_executor_reports_enrichment_for_healthy_job_as_denominator(
         profile_fetcher=lambda _domain: _ai_extraction_profile(),
     )
     jobs.create("job", "src://d.txt", "it", "txt")
-    assert executor.start("job", source, "src://d.txt", "it", "txt") is True
+    assert executor.start_reserved_guarded("job", source, "src://d.txt", "it", "txt") is True
     assert wait_until(lambda: jobs.get("job")["status"] == "succeeded")
 
     facts = jobs.enrichment("job")
@@ -486,30 +500,6 @@ def test_executor_rejects_invalid_max_concurrent(tmp_path: Path) -> None:
         Executor(jobs, reg, glossary_url="", max_concurrent=0)
 
 
-class _FailingUploadDir:
-    """Загрузочный каталог, который умеет падать на записи и потом перестаёт падать.
-
-    Нужен, чтобы отличить утечку слота от «ещё падает». При одном слоте после сбоя записи
-    следующий запрос обязан стать 202. Если он получает 429 — слот утек; если 500 — падает
-    всё ещё то же самое. На одном приложении без переключателя эти причины не различимы,
-    а это ровно тот случай, который проще всего объявить «работает».
-    """
-
-    def __init__(self) -> None:
-        self.failing = True
-
-    def mkdir(self, parents: bool = False, exist_ok: bool = False) -> None:
-        return None
-
-    def __truediv__(self, other: object) -> object:
-        return self
-
-    def write_bytes(self, raw: bytes) -> int:
-        if self.failing:
-            raise OSError("диск кончился")
-        return len(raw)
-
-
 def test_post_when_executor_saturated_returns_429(tmp_path: Path, monkeypatch) -> None:
     """ADR-050: отказ в слоте не оставляет следов — ни записи в реестре, ни файла.
 
@@ -542,6 +532,45 @@ def test_post_when_executor_saturated_returns_429(tmp_path: Path, monkeypatch) -
     assert jobs["total"] == 1, jobs
     assert [item["source_url"] for item in jobs["items"]] == ["src://busy.txt"], jobs
     assert [path.name for path in uploads.glob("*")] == [f"{busy.json()['job_id']}.txt"]
+
+
+def test_failed_upload_leaves_no_file_and_logs_its_path(
+    tmp_path: Path, monkeypatch: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Оборванный файл удаляется, а сбой записи называет файл в логе (ADR-050).
+
+    Файл из `INGESTION_UPLOAD_DIR` никто не читает и не удаляет: проверено поиском по
+    `src`. Поэтому недописанный файл остался бы лежать навсегда, тогда как по реестру джоба
+    выглядит терминальной и обработанной, — то есть фантом, только на уровне файла.
+
+    Вторая половина проверки — про лог. Раньше сбой записи не попадал в лог вовсе: он был
+    только в `error` записи и в теле 500, а путь загрузки не назывался нигде. По одному
+    «джоба не принята» нельзя отличить одну неудачную загрузку от другой.
+    """
+    monkeypatch.setenv("INGEST_MAX_CONCURRENT", "1")
+    uploads = tmp_path / "uploads"
+    real_write = Path.write_bytes
+
+    def _partial_then_fail(self: Path, data: bytes) -> int:
+        real_write(self, b"part")
+        raise OSError("диск кончился")
+
+    monkeypatch.setattr(Path, "write_bytes", _partial_then_fail)
+    app = create_app(upload_dir=uploads, db_path=tmp_path / "j.db", glossary_url="")
+    with caplog.at_level(logging.ERROR), _AuthedClient(app) as client:
+            resp = client.post(
+                "/api/v1/ingestion/documents",
+                json={"source_url": "src://boom.txt", "domain": "it", "doc_type": "txt", "content": "упадёт"},
+            )
+    assert resp.status_code == 500, resp.text
+    # Оборванный файл не должен пережить джобу. Настоящий диск, а не подмена: фейк
+    # каталога не умеет `exists()`/`unlink()`, и проверка на нём ломалась бы о форму, а не
+    # о поведение.
+    assert list(uploads.glob("*")) == [], list(uploads.glob("*"))
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "не удалось записать файл загрузки" in logged, logged
+    # В логе назван конкретный файл, а не только факт сбоя.
+    assert any(".txt" in record.getMessage() for record in caplog.records), logged
 
 
 def test_rejected_request_does_not_wedge_the_executor(tmp_path: Path, monkeypatch) -> None:
@@ -653,7 +682,17 @@ def test_failure_after_reservation_frees_slot_and_leaves_terminal_job(
     выдумана, а несёт причину сбоя.
     """
     monkeypatch.setenv("INGEST_MAX_CONCURRENT", "1")
-    uploads = _FailingUploadDir()
+    uploads = tmp_path / "uploads"
+    real_write = Path.write_bytes
+    state = {"fail": True}
+
+    def _partial_then_fail(self: Path, data: bytes) -> int:
+        if not state["fail"]:
+            return real_write(self, data)
+        real_write(self, b"part")
+        raise OSError("диск кончился")
+
+    monkeypatch.setattr(Path, "write_bytes", _partial_then_fail)
     app = create_app(upload_dir=uploads, db_path=tmp_path / "j.db", glossary_url="")
     with _AuthedClient(app) as client:
         first = client.post(
@@ -669,9 +708,12 @@ def test_failure_after_reservation_frees_slot_and_leaves_terminal_job(
         # выбирает колонку `error`, и проверять её там - проверять отсутствующее поле.
         detail = client.get(f"/api/v1/ingestion/jobs/{item['job_id']}").json()
         assert "диск кончился" in (detail.get("error") or ""), detail
+        # Оборванный файл удалён: по реестру джоба терминальна, и лежащий рядом обрывок
+        # был бы вторым фантомом - тем, у которого нет даже записи в реестре.
+        assert list(uploads.glob("*")) == [], list(uploads.glob("*"))
 
         # Тот же исполнитель, слот один: слот обязан быть вернут.
-        uploads.failing = False
+        state["fail"] = False
         second = client.post(
             "/api/v1/ingestion/documents",
             json={"source_url": "src://after.txt", "domain": "it", "doc_type": "txt", "content": "после"},
@@ -766,6 +808,10 @@ def test_runner_normalize_without_glossary_keeps_entities(
     ctx = PipelineContext(
         job_id="j", domain="it", doc_type="txt", source_url="src://d.txt", source_path=str(src)
     )
+    # Список обязателен (ADR-053): без него документ ушёл бы в вектор, и сущностей
+    # из ответа модели просто не существовало бы.
+    candidate_env_for(src)
+    ctx = candidate_env(ctx)
     analyzer.run(ctx)
     assert ctx.commit_applied is True
     assert ctx.enrichment_degraded is False, ctx.enrichment_error
@@ -849,6 +895,18 @@ def test_job_enrichment_carries_counts_not_just_a_flag(tmp_path: Path) -> None:
         lost_edges=12,
         llm_records=77,
         llm_edges=12,
+        # ADR-052: значения НЕ нулевые, иначе проверка терпела бы нули и ничего бы не
+        # проверяла. Знаменатель и числитель рядом: 0/0 читается как «все имена
+        # настоящие», а это противоположный смысл.
+        llm_names_total=77,
+        llm_names_grounded=31,
+        # ADR-053: значения тоже НЕ нулевые, иначе проверка терпела бы нули и пропустила
+        # бы случай, где ограничение нарушается, а в отчёт это не попало.
+        candidates_absent=False,
+        candidates_total=41,
+        llm_names_off_list=9,
+        chunks_without_candidates=6,
+        chunks_total=77,
     )
 
     facts = jobs.enrichment("job-1")
@@ -858,6 +916,13 @@ def test_job_enrichment_carries_counts_not_just_a_flag(tmp_path: Path) -> None:
         "lost_edges": 12,
         "llm_records": 77,
         "llm_edges": 12,
+        "llm_names_total": 77,
+        "llm_names_grounded": 31,
+        "candidates_absent": False,
+        "candidates_total": 41,
+        "llm_names_off_list": 9,
+        "chunks_without_candidates": 6,
+        "chunks_total": 77,
     }
 
     # джоба без записанных фактов — пустой словарь, а не нули с выдуманной причиной

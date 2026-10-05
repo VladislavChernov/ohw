@@ -18,6 +18,12 @@ from typing import Any
 
 import pytest
 
+from tests.conftest import candidate_env, candidate_env_for
+
+# Извлечение без списка кандидатов не выполняется вовсе (ADR-053): фикстура готовит папку
+# списков, а candidate_env кладёт документ и его список перед разбором.
+pytestmark = pytest.mark.usefixtures("candidate_env_setup")
+
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     CAUSE_MODEL_ERROR,
     ExtractionModelError,
@@ -74,6 +80,7 @@ def _ctx(chunks: list[str] | None = None) -> PipelineContext:
 
 def _run(payload: dict[str, Any], *, optional_failure: bool = True) -> PipelineContext:
     ctx = _ctx()
+    ctx = candidate_env(ctx)
     ExtractStage(
         llm=_OneShotLLM(payload),
         profile_fetcher=lambda _domain: _profile(),
@@ -204,6 +211,7 @@ def test_malformed_answer_still_fails_loudly(monkeypatch: Any) -> None:
         payload = deepcopy(_ENTITIES)
         payload["links"] = relations
         with pytest.raises(ExtractionModelError, match=message):
+            ctx = candidate_env(ctx)
             ExtractStage(
                 llm=_OneShotLLM(payload),
                 profile_fetcher=lambda _domain: _profile(),
@@ -221,6 +229,7 @@ def test_strict_mode_no_longer_rejects_the_document(monkeypatch: Any) -> None:
     payload["links"] = [_UNRESOLVABLE]
 
     ctx = _ctx()
+    ctx = candidate_env(ctx)
     ExtractStage(
         llm=_OneShotLLM(payload),
         profile_fetcher=lambda _domain: _profile(),
@@ -249,6 +258,8 @@ def test_optional_failure_keeps_layer_when_only_an_endpoint_is_unresolved(
     good = {**_ENTITIES, "links": [_RESOLVABLE]}
     bad = {**_ENTITIES, "links": [_UNRESOLVABLE]}
     ctx = _ctx(["индексировать и хранить", "индексировать и хранить документы"])
+
+    ctx = candidate_env(ctx)
 
     ExtractStage(
         llm=_PerChunkLLM([json.dumps(good, ensure_ascii=False), json.dumps(bad, ensure_ascii=False)]),
@@ -336,6 +347,9 @@ def test_unresolved_endpoints_reach_the_job_report(monkeypatch: Any, tmp_path: A
     registry = DocumentRegistry(tmp_path / "missing-endpoints-registry.db")
     source = tmp_path / "d.txt"
     source.write_text("требование индексировать документы", encoding="utf-8")
+    # Список обязателен: без него документ ушёл бы в вектор, и факта о неразрешённом
+    # конце просто не существовало бы.
+    candidate_env_for(source)
 
     payload = json.dumps({**_ENTITIES, "links": [_UNRESOLVABLE]}, ensure_ascii=False)
     executor = Executor(
@@ -348,7 +362,7 @@ def test_unresolved_endpoints_reach_the_job_report(monkeypatch: Any, tmp_path: A
         profile_fetcher=lambda _domain: _profile(),
     )
     jobs.create("job", "src://d.txt", "it", "txt")
-    assert executor.start("job", source, "src://d.txt", "it", "txt") is True
+    assert executor.start_reserved_guarded("job", source, "src://d.txt", "it", "txt") is True
 
     state, elapsed = wait_for_terminal(lambda: jobs.get("job"))
     failed = [s for s in jobs.stages("job") if s["status"] == "failed"]
