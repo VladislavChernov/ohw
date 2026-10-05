@@ -1,0 +1,18 @@
+{
+  "source": "defense_notes_graph_scaling.md",
+  "source_sha256": "fee2e5de52222508a80f21524a47d0eeb6d8b92b94e463d4febe836d806e6086",
+  "source_bytes": 10134,
+  "generated_by": "natasha+CANDIDATE_PATTERNS",
+  "generated_at": "2026-10-05T10:32:37+00:00",
+  "count": 4,
+  "counts": {
+    "by_rule": 4,
+    "by_ner_only": 1
+  },
+  "candidates": [
+    "GraphRAG",
+    "Map-reduce",
+    "SIMD",
+    "РАГ"
+  ]
+}

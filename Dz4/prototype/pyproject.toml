@@ -17,6 +17,9 @@ dependencies = [
     "neo4j>=5.26",
     "requests>=2.32",
     "streamlit>=1.40",
+    # Кандидаты сущностей для стадии pre-ingest (ADR-053). Без torch: natasha тянет
+    # slovnet+navec на CPU, ~40 МБ, и стадия обязана подниматься дешевле пайплайна.
+    "natasha>=1.6",
 ]
 
 [project.scripts]
@@ -30,6 +33,7 @@ graphrag-demo-ui = "graphrag_proto.demo_ui.cli:main"
 graphrag-topology = "graphrag_proto.topology_service.app:main"
 graphrag-embeddings = "graphrag_proto.embeddings_service.app:main"
 graphrag-reranker = "graphrag_proto.reranker_service.app:main"
+graphrag-pre-ingest = "graphrag_proto.pre_ingest.generate:main"
 
 [dependency-groups]
 dev = [
@@ -77,4 +81,11 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["llama_index", "llama_index.*", "llama_index.core", "llama_index.core.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Стадия pre-ingest (ADR-053). natasha не публикует заглушек типов, ровно как
+# streamlit, torch и langchain выше; модуль используется в одной функции, где типы
+# проверяются по факту, а не аннотацией.
+module = ["natasha", "natasha.*"]
 ignore_missing_imports = true

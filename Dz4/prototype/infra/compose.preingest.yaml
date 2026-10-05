@@ -1,0 +1,37 @@
+# Стадия pre-ingest (ADR-053). Одноразовый runner: не входит в стенд, не имеет
+# фиксированного имени контейнера, поднимается командой запуска и уходит.
+# На вход папка с документами, на выход папка с результатами.
+name: ohw-pre-ingest
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      # Журнал стадии небольшой: она печатает одну строку на документ. Хранить дольше
+      # нечего, а молчание об ошибке здесь опаснее самого размера.
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  pre-ingest:
+    <<: *logging
+    build:
+      context: ..
+      dockerfile: Dockerfile.preingest
+    # `--src`/`--dst` приходят из run_pre_ingest.ps1, поэтому здесь не зашиты: путь
+    # источника выбирает владелец запуска, а не образ.
+    volumes:
+      - type: bind
+        source: ${PRE_INGEST_SRC:-../docs}
+        target: /data/src
+        read_only: true
+      - type: bind
+        source: ${PRE_INGEST_DST:-../pre-ingest}
+        target: /data/dst
+    command: ["--src", "/data/src", "--dst", "/data/dst"]
+    # Стадия одноразовая: без сети она всё равно работает, потому что модель NER лежит
+    # в образе. Сеть убрана намеренно — чтобы случайная попытка докачать модель
+    # превратилась в явную ошибку, а не в молчаливое отличие от прогона на стенде.
+    network_mode: "none"
+    # Читать весь документ нужно целиком, а NER на 248 КБ занимает заметное время.
+    stop_grace_period: 5m

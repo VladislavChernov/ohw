@@ -1,0 +1,39 @@
+{
+  "source": "glossary.md",
+  "source_sha256": "fa868e830c6e769c2a6ecdb1806ffc5eefc37da610da24c46ced8033458721f0",
+  "source_bytes": 5071,
+  "generated_by": "natasha+CANDIDATE_PATTERNS",
+  "generated_at": "2026-10-05T10:32:38+00:00",
+  "count": 25,
+  "counts": {
+    "by_rule": 24,
+    "by_ner_only": 1
+  },
+  "candidates": [
+    "ADR",
+    "ADR-036",
+    "ADR-046",
+    "canonical_name",
+    "Chunk",
+    "context_ids",
+    "ContextNode",
+    "Cypher",
+    "depth_clamped",
+    "GraphRAG",
+    "GraphStoreProvider",
+    "max_depth",
+    "MAX_EXPANSION_DEPTH",
+    "max_fanout",
+    "max_graph_nodes",
+    "MENTIONS",
+    "PARENT",
+    "Quicksort",
+    "RELATED",
+    "source_url",
+    "tag_id",
+    "unique_key",
+    "vector-only",
+    "VectorStoreProvider",
+    "страна → область → район → город → улица → дом"
+  ]
+}

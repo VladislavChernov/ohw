@@ -1,0 +1,27 @@
+# Стадия pre-ingest (ADR-053). Отдельный образ по двум причинам:
+# 1. natasha не нужен ingestion-пайплайну — только этой стадии;
+# 2. стадия одноразовая и короткая, ей не нужен ни Neo4j, ни Redis, ни эмбеддинги.
+# Сборка поэтому дешевле основного образа, но требует uv.lock с natasha в зависимостях.
+FROM python:3.13-slim-bookworm
+
+RUN pip install --no-cache-dir uv
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_OFFLINE=1
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN uv sync --no-dev --frozen
+
+# Модель slovnet NER и вектор navec лежат ВНУТРИ пакета natasha (`natasha/data/model`),
+# и `NewsEmbedding` берёт путь из константы пакета, а не из окружения. Ничего скачивать
+# не нужно: `HF_HUB_OFFLINE=1` выше не даёт стадии дотянуться до сети в рантайме и
+# превратить это в явную ошибку вместо молчаливого отличия от прогона с сетью.
+
+# Точка входа указывается путём, а не именем: `uv sync` кладёт её в .venv/bin, а .venv/bin
+# не в PATH. По имени её не найти, и контейнер падал бы с "executable file not found".
+ENTRYPOINT ["/app/.venv/bin/graphrag-pre-ingest"]
