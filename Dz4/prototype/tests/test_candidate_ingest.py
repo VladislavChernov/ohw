@@ -318,10 +318,10 @@ def test_off_list_name_is_counted_not_swallowed(monkeypatch: pytest.MonkeyPatch)
 def test_chunk_without_candidates_is_sent_with_a_hard_prohibition(monkeypatch: pytest.MonkeyPatch) -> None:
     """Пустой список - это ЗАПРЕТ называть, а не снятое ограничение (ADR-053).
 
-    Решение «пропускать такой вызов» остаётся открытым: таких чанков 10 из 343,
-    то есть 2.9% корпуса. Пока владелец не выбрал, проверяется другое: вызов уходит,
-    но блок запрещает придумывать что-либо. Пустой блок был бы ХУЖЕ пропуска -
-    он читался бы как «список не пришёл, значит можно всё».
+    Ветка жива, но на текущем корпусе после ADR-054 не срабатывает: разрез markdown по
+    блокам кода устранён, и разборов без списка стало 0 из 221 чанка. Проверяется всё
+    равно - разбиение может измениться, а молчание при смене разбиения опаснее.
+    Пустой блок был бы ХУЖЕ пропуска - он читался бы как «список не пришёл».
     """
     from graphrag_proto.ingestion_service.pipeline.orchestrator import ExtractStage
     from graphrag_proto.ingestion_service.pipeline.prompt_renderer import (

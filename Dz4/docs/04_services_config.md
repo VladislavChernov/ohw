@@ -235,6 +235,16 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
   LangChain/LlamaIndex — optional dependency (group `[chunking]`), lazy import;
   без установленного пакета выбранный адаптер даёт fail-fast при вызове.
 
+- `MD_KEEP_CODE_SPLIT` (не задана = не режем) - разделять ли markdown на блоки
+  `text`/`code` по ограждениям ``` . По умолчанию НЕ режем (ADR-054): разрез оставлял
+  подводку в одном чанке, а её содержимое - в соседнем, и это давало 10 чанков без
+  кандидатов. Внимание: переменная меняет `content_hash` каждого `.md`, а значит требует
+  полного перезалива корпуса и обнуляет базлайны прибора. Нераспознанное значение
+  логируется предупреждением.
+- `CANDIDATES_DIR` (обязательна) - папка со списками кандидатов `<документ>_candidates.json`,
+  которые производит стадия `pre_ingest` (ADR-053). Без неё извлечение работает без
+  ограничения имён, поэтому отсутствие переменной - ошибка конфигурации, а не режим.
+
 **namespace: storage**
 - `graph_store` ("neo4j") — optional backend для graph experiment: Neo4jGraphStore / MemgraphGraphStore; baseline может работать без него.
 - `vector_store` ("neo4j") — векторная ось: Neo4jVectorStore / QdrantVectorStore.
