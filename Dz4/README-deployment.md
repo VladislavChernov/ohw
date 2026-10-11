@@ -71,7 +71,40 @@ docker compose -p $project -f $compose down
 
 ---
 
-## 3. Monolith (single-container) — future-work
+## 3. Образы: что внутри и что собирается само
+
+Раздел отвечает на вопрос «что нужно собрать руками». Он возник из наблюдения: **`docker
+compose build` молча ничего не делает для большинства сервисов**, потому что у них нет
+секции `build` — compose берёт готовый образ с именем. Это уже стоило прогона, который
+отработал на устаревшем коде и выглядел как успех.
+
+| образ | Dockerfile | что внутри | собирается compose'ом |
+|---|---|---|---|
+| `ohw/config-service:prototype` | `Dockerfile` | ядро пакета без dev-зависимостей, точка входа `graphrag-config` | да |
+| `ohw/glossary-service:prototype` | `Dockerfile` | тот же код, вход `graphrag-glossary` | да |
+| `ohw/ingestion-service:prototype` | `Dockerfile` | тот же код, вход `graphrag-ingestion` | **нет** |
+| `ohw/query-api:prototype` | `Dockerfile` | тот же код, вход `graphrag-query-api` | да |
+| `ohw/query-worker:prototype` | `Dockerfile` | тот же код, вход `graphrag-query-worker` | да |
+| `ohw/demo-ui:prototype` | `Dockerfile` | тот же код, вход `graphrag-demo-ui` (Streamlit :8503) | да |
+| `ohw/topology-orchestrator:prototype` | `Dockerfile` | тот же код, вход оркестратора топологии | да |
+| `ohw/embeddings-service:prototype` | `Dockerfile.embeddings` | **отдельная база**: torch, bge-m3 | да |
+| `ohw/reranker:prototype` | `Dockerfile.reranker` | **отдельная база**: bge-reranker, работает на CPU | да |
+| `ohw/llm:prototype` | `Dockerfile.llm` | **отдельная база**: llama.cpp + gguf | да |
+| `ohw/configurator-ui:prototype` | — | UI конфигуратора | **нет** |
+
+Три вещи, которые из этой таблицы следуют и которые стоит знать до прогона:
+
+1. **Прав `src/` — пересобери образ**, иначе изменения не попадут внутрь. Код запечён в образ;
+   томами подключаются только профили, конфиг и отчёты.
+2. **`ohw/ingestion-service:prototype` собирается руками.** Это единственный сервис без
+   секции `build`, и он же самый нужный. Команда:
+   `docker build -f prototype/Dockerfile -t ohw/ingestion-service:prototype prototype/`
+3. **Три образа тяжёлые и собраны на разных базах** (`embeddings`, `reranker`, `llm`) —
+   их нельзя заменить одним общим, они различаются зависимостями, а не кодом.
+
+---
+
+## 4. Monolith (single-container) — future-work
 
 - **Состав**: один контейнер со всеми сервисами как процессами внутри (supervisord)
 - **Когда**: машина с 16GB RAM и слабым CPU, CI без GPU-резервации, быстрый smoke-test

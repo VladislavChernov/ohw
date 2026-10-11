@@ -158,7 +158,29 @@ $env:RUN_CODE_COMMIT = (& git -C $repoRoot rev-parse --short HEAD).Trim()
 Write-Host "RUN_CODE_COMMIT взят из HEAD: $($env:RUN_CODE_COMMIT)"
 $env:RUN_CODE_TREE = Get-GitTreeState
 if (-not $env:GRAPH_AUTH_API_KEY) { $env:GRAPH_AUTH_API_KEY = 'changeme' }
-if (-not $env:NEO4J_PASSWORD) { $env:NEO4J_PASSWORD = 'graphrag' }
+# `NEO4J_PASSWORD` НЕ подставляется по умолчанию, и это не осторожность, а требование
+# к таймингу: compose читает `infra/.env`, и значение ОТТУДА переопределяет всё, что
+# положено в переменную окружения. Если обвязка подставит свой дефолт, Neo4j получит
+# пароль, отличный от того, которым инициализирован том, и станет unhealthy - с
+# сообщением про контейнер, а не про пароль. Замер: пароль тома в `infra/.env`
+# отличается от дефолта обвязки.
+if (-not $env:NEO4J_PASSWORD) {
+    $envFile = Join-Path $PSScriptRoot '..\.env'
+    if (Test-Path -LiteralPath $envFile) {
+        $fromFile = (Get-Content -LiteralPath $envFile -Encoding UTF8 |
+            Where-Object { $_ -match '^NEO4J_PASSWORD=' } |
+            Select-Object -First 1) -replace '^NEO4J_PASSWORD=', ''
+        if ($fromFile) {
+            $env:NEO4J_PASSWORD = $fromFile.Trim()
+            Write-Host 'NEO4J_PASSWORD взят из infra/.env (как инициализирован том)'
+        }
+    }
+    if (-not $env:NEO4J_PASSWORD) {
+        throw 'NEO4J_PASSWORD не задан ни в окружении, ни в infra/.env: том Neo4j ' +
+        'инициализирован неизвестным паролем, и подставлять свой значит получить ' +
+        'unhealthy с сообщением не о том.'
+    }
+}
 
 # ADR-053: папка со списками кандидатов. Значение по умолчанию указывает на каталог,
 # который производит стадия `run_pre_ingest.ps1`, и монтируется в стенд на чтение.
@@ -182,6 +204,19 @@ Write-Host "CANDIDATES_HOST_DIR: $($candidatesPath) (файлов: $($candidateF
 
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
+
+# --- журнал обмена с LLM ---------------------------------------------------
+# `LLM_EXCHANGE_LOG=full` без пути означает «писать в stdout через structlog», а оттуда
+# записи не доезжают ни в отчёт, ни в `docker logs` - проверено: ноль записей. Поэтому
+# путь задаётся здесь явно и указывает ВНУТРИ контейнера, а не на хосте.
+if ($env:LLM_EXCHANGE_LOG -and $env:LLM_EXCHANGE_LOG -ne 'off') {
+    $exchangeDir = Join-Path $runDir 'exchange'
+    New-Item -ItemType Directory -Force -Path $exchangeDir | Out-Null
+    if (-not $env:LLM_EXCHANGE_LOG_FILE) {
+        $env:LLM_EXCHANGE_LOG_FILE = "/reports/$RunName/exchange/llm_exchange.jsonl"
+    }
+    Write-Host "журнал обмена: $($env:LLM_EXCHANGE_LOG) -> $env:LLM_EXCHANGE_LOG_FILE"
+}
 
 # --- аргументы раннера ----------------------------------------------------
 
