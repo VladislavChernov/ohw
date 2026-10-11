@@ -9,9 +9,12 @@
 # отличить «ответ по свежему корпусу» от «ответ по устаревшему». Это видимый счётчик
 # `revision_poll_errors_total`, а не молчание.
 #
-# ДВА НАБОРА ВНЕШНИХ ТОМОВ. Тома объявлены `external` с именем из переменной, поэтому
-# один и тот же файл поднимает и пустую базу, и заполненную — различается только
-# значение `DZ4_VOLUME_SUFFIX`. См. README.md §Как выбрать набор.
+# ДВА НАБОРА ВНЕШНИХ ТОМОВ. Имя тома собирается из `VOL`, поэтому один и тот же файл
+# поднимает и пустую базу, и заполненную — различается только значение `VOL`.
+# См. `../README-deployment.md` §Как выбрать набор.
+#
+# Том `ready` создаётся compose, но сам по себе остаётся ПУСТЫМ: наполняет его
+# `compose.ingest.yaml`, которого в этом контуре нет. См. `compose.ingest.yaml`.
 #
 # Источник определений: `compose.yaml` (config, glossary, neo4j, embeddings, valkey,
 # query-api, query-worker, demo-ui, llm). Расхождения с ним намеренные и перечислены
@@ -68,9 +71,13 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 5
-      start_period: 5s
+      # Было `5s`, и контейнер объявлялся unhealthy при холодном старте, а ПОТОМ сам
+      # становился healthy - то есть процесс просто импортировался дольше окна
+      # (наблюдалось 36 секунд до готовности). Здоровый контейнер в статусе unhealthy
+      # хуже отсутствия проверки: на такой статус начинают опираться как на отказ.
+      start_period: 60s
     <<: *logging
 
   glossary-service:
@@ -102,7 +109,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      start_period: 5s
+      start_period: 60s
     <<: *logging
 
   # ------------------------------------------------------------------ neo4j
@@ -203,7 +210,7 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-      start_period: 5s
+      start_period: 60s
     <<: *logging
 
   # -------------------------------------------------------------- query-api

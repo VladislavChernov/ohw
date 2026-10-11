@@ -1,0 +1,109 @@
+# Оверлей ингеста поверх runtime: `compose.runtime.yaml` + этот файл.
+#
+# Зачем отдельным файлом. Runtime поднимает девять сервисов без ingestion-api (ADR-058),
+# и это осознанно: запросы идут и без него, `revision_client.py` объявлен fail-open. Но
+# том `ready`, который создаёт compose, сам по себе ПУСТ - наполнить его нечем, и набор
+# «заполненная база» не содержал ни одной ноды. Этот оверлей добавляет ровно один
+# сервис, который пишет в тот же Neo4j, что читает runtime.
+#
+# Использование (наполнение `ready`):
+#   $env:VOL = "ready"
+#   $env:NEO4J_PASSWORD = "..."
+#   docker compose -f compose.runtime.yaml -f compose.ingest.yaml --profile ingest up -d --wait
+#   # загрузить корпус, дождаться succeeded у каждой джобы
+#   docker compose -f compose.runtime.yaml -f compose.ingest.yaml --profile ingest down
+#
+# ЗАПУСКАТЬ НА ПУСТОЙ БАЗЕ НЕЛЬЗЯ: повторная загрузка того же документа станет `noop` и
+# ничего не проверит. Для `empty` ингест не нужен - он и есть чистый старт.
+#
+# Наборы томов общие с runtime (`${VOL}`), поэтому загруженное видно и после того, как
+# оверлей опущен: `docker compose -f compose.runtime.yaml up -d` без него поднимет тот же
+# том с той же базой.
+
+name: ohw-runtime
+
+services:
+  ingestion-api:
+    image: ohw/ingestion-service:prototype
+    command: ["graphrag-ingestion"]
+    # Профиль `ingest`, а не общий: сервис нужен для НАПОЛНЕНИЯ базы, а не для
+    # работы с ней. Поднимать его вместе с каждым запросом - значит платить памятью
+    # за сервис, который в этот момент ничего не делает.
+    profiles: ["ingest"]
+    container_name: ohw-runtime-ingestion
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      config-service:
+        condition: service_started
+      glossary-service:
+        condition: service_started
+      embeddings-service:
+        condition: service_started
+    networks: [runtime_net]
+    ports: ["8002:8002"]
+    environment:
+      CONFIG_URL: http://config-service:8001
+      GLOSSARY_URL: http://glossary-service:8003
+      INGESTION_DB_PATH: /data/ingestion.sqlite
+      INGESTION_UPLOAD_DIR: /data/uploads
+      PROJECTION_STATE_DB_PATH: /var/lib/graphrag/projection/projection.db
+      PROJECTION_CONFIG_FINGERPRINT: ${PROJECTION_CONFIG_FINGERPRINT:-default}
+      GRAPH_STORE: ${GRAPH_STORE:-neo4j}
+      VECTOR_STORE: ${VECTOR_STORE:-neo4j}
+      # ОБЯЗАТЕЛЬНО. Без этого `ExtractStage` объявляет `EXTRACT_LLM не объявлен:
+      # экстракция LLM выключена конфигурацией` и уходит в vector-only: джобы
+      # завершаются `succeeded`, Chunk пишутся, а ContextNode и связей нет НОЛЬ.
+      # Выглядит как успех, хотя графа не существует - ровно тот случай, который
+      # нельзя пропускать. На eval-стенде переменная задана (compose.eval-minimal:148).
+      EXTRACT_LLM: "true"
+      # bge-m3 обязателен: детерминированный эмбеддер кладёт в вектора не текст, и
+      # retrieval по базе, наполненной им, не имеет смысла.
+      EMBEDDER: ${INGEST_EMBEDDER:-bge_m3_service}
+      EMBEDDINGS_URL: http://embeddings-service:8004
+      EMBEDDINGS_TIMEOUT_S: ${RUNTIME_EMBEDDINGS_TIMEOUT_S:-300}
+      RERANKER: ${RERANKER:-noop}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-graphrag}
+      # Кандидаты обязательны (ADR-053): документ без файла кандидатов грузит только
+      # вектора, и графа не будет - то есть база снова окажется «наполненной» и пустой.
+      CANDIDATES_DIR: /candidates
+      LLM_ADAPTER: openai
+      LLM_BASE_URL: http://llm:8080
+      LLM_MODEL: ${RUNTIME_LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}
+      LLM_MAX_TOKENS: ${RUNTIME_LLM_MAX_TOKENS:-6144}
+      LLM_TEMPERATURE: ${RUNTIME_LLM_TEMPERATURE:-0}
+      LLM_TIMEOUT_S: ${RUNTIME_LLM_TIMEOUT_S:-600}
+      # Журнал обмена: при отказе модели его видно, иначе причина остаётся в одном
+      # поле `enrichment_degraded` без ответа, который к нему привёл.
+      LLM_EXCHANGE_LOG: "${LLM_EXCHANGE_LOG:-meta}"
+      LLM_EXCHANGE_LOG_FILE: "${LLM_EXCHANGE_LOG_FILE:-}"
+      LLM_EXCHANGE_LOG_MAX_CHARS: "${LLM_EXCHANGE_LOG_MAX_CHARS:-8000}"
+      INGEST_CHUNKER: ${INGEST_CHUNKER:-structure_aware}
+      INGEST_CHUNK_SIZE: ${INGEST_CHUNK_SIZE:-512}
+      INGEST_CHUNK_OVERLAP: ${INGEST_CHUNK_OVERLAP:-64}
+      INGEST_MAX_CONCURRENT: ${INGEST_MAX_CONCURRENT:-2}
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+      GRAPH_LOG_LEVEL: ${GRAPH_LOG_LEVEL:-INFO}
+    volumes:
+      - ../src:/app/src:ro
+      - type: volume
+        source: ingestion
+        target: /data
+      - ../domain_profiles:/profiles:ro
+      # Кандидаты лежат в корне репозитория, а НЕ рядом с compose: `infra/` находится на
+      # уровень ниже, поэтому здесь нужен `../../pre-ingest`. С `../pre-ingest` docker
+      # СОЗДАЁТ пустую папку `prototype/pre-ingest` и молча монтирует её - контейнер видит
+      # ноль кандидатов, ингест уходит в vector-only по ADR-053, все джобы завершаются
+      # `succeeded`, а графа нет. Выглядит как успех.
+      - ../../pre-ingest:/candidates:ro
+      - type: volume
+        source: projection
+        target: /var/lib/graphrag/projection
+
+volumes:
+  # Ключ фиксирован, имя собирается из `VOL` - так же, как в `compose.runtime.yaml`.
+  # Переменная в КЛЮЧЕ раздела не раскрывается, поэтому `name:` здесь обязателен.
+  ingestion:
+    name: ohw-runtime_${VOL}_ingestion

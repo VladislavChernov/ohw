@@ -43,7 +43,10 @@ $combos = @(
     @{ files = @('compose.yaml', 'compose.eval-minimal.yaml') },
     @{ files = @('compose.runtime.yaml') },
     @{ files = @('compose.preingest.yaml') },
-    @{ files = @('compose.yaml', 'compose.eval-minimal.yaml', 'compose.eval-qwen3b.yaml') }
+    @{ files = @('compose.yaml', 'compose.eval-minimal.yaml', 'compose.eval-qwen3b.yaml') },
+    # runtime + ingest is the combination that actually fills the `ready` set, so it is
+    # checked too: an overlay nobody checks is an overlay nobody notices breaking.
+    @{ files = @('compose.runtime.yaml', 'compose.ingest.yaml') }
 )
 
 $problems = @()
