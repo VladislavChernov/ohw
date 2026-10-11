@@ -68,15 +68,16 @@ foreach ($combo in $combos) {
             continue
         }
 
-        # No `build:` means the image cannot be produced from this project, and a
-        # service with neither `build:` nor a locally present image is a phantom:
-        # there is nothing to mount into. Reporting it as "no mount" would hide the
-        # real defect behind a false one.
+        # No `build:` means the image cannot be produced from this project. Such a service is
+        # reported separately: it is NOT automatically a defect, because a service may be
+        # declared on purpose and deferred (configurator-ui is documented in docs/04 and
+        # kept in compose by owner decision). It must still be reported every run, so it
+        # cannot quietly rot into something nobody looked at.
         $imageName = "$($spec.image)"
         $imageExists = if ($imageName) { [bool](docker images -q $imageName) } else { $false }
 
         if (-not $spec.build -and -not $imageExists) {
-            $phantoms += "$label/$name : image '$imageName' not built and no build context"
+            $phantoms += "$label/$name : image '$imageName' not built, no build context (declared, not runnable)"
             continue
         }
 
@@ -86,7 +87,7 @@ foreach ($combo in $combos) {
 
 Write-Output "services checked: $checked"
 if ($phantoms.Count -gt 0) {
-    Write-Output "PHANTOM SERVICES (separate defect, not a mount problem):"
+    Write-Output "DECLARED BUT NOT RUNNABLE (not necessarily a defect - verify intent):"
     $phantoms | Sort-Object -Unique | ForEach-Object { Write-Output "  $_" }
 }
 if ($problems.Count -gt 0) {
