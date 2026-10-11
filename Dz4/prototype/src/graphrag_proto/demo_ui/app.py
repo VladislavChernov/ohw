@@ -211,12 +211,18 @@ def _render_effective_depth(done: dict[str, Any]) -> None:
         )
         return
     requested = effective.get("max_depth_requested")
-    applied = effective.get("max_depth_effective")
+    allowed = effective.get("max_depth_allowed", effective.get("max_depth_effective"))
+    traversed = effective.get("hops_traversed")
     clamped = effective.get("depth_clamped")
-    st.caption(f"Глубина: запрошено {requested}, применено {applied}")
+    # ADR-059: «применено» обещало исполнение, а значило только зажим числа в диапазон.
+    # На пустой базе подпись утверждала «применено 3» при нуле пройденных хопов.
+    parts = [f"Глубина: запрошено {requested}, разрешено {allowed}"]
+    if isinstance(traversed, int):
+        parts.append(f", пройдено {traversed}")
+    st.caption("".join(parts))
     if clamped:
         st.warning(
-            f"Запрошенная глубина {requested} выше предела {DEPTH_MAX}: применено {applied}. "
+            f"Запрошенная глубина {requested} выше предела {DEPTH_MAX}: разрешено {allowed}. "
             f"Дальше {DEPTH_MAX} обход не идёт.",
         )
 
@@ -284,6 +290,18 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                     total_s = done.get("total_time_s")
                     if isinstance(retrieval_s, (int, float)) and isinstance(total_s, (int, float)):
                         caption += f" · retrieval {float(retrieval_s):.3f} с · total {float(total_s):.3f} с"
+                    # Настоящий расход токенов от модели. При отсутствии `usage` подпись
+                    # молчит, а не пишет «0 токенов»: провайдер мог не отдать счётчики, и
+                    # это «не измерено», а не «расхода не было».
+                    usage = done.get("usage")
+                    if isinstance(usage, dict) and usage:
+                        spent = ", ".join(
+                            f"{key} {usage[key]}"
+                            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                            if isinstance(usage.get(key), int)
+                        )
+                        if spent:
+                            caption += f" · токены: {spent}"
                     st.caption(caption)
                     sources = done.get("sources")
                     if isinstance(sources, list) and sources:

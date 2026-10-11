@@ -125,6 +125,10 @@ class OpenAICompatibleAdapter(LLMInference):
         # него без переписывания всех вызывающих нельзя, поэтому состояние явное и
         # одноимённое: относится к ПОСЛЕДНЕМУ вызову и обнуляется в его начале.
         self.last_usage: dict[str, int] | None = None
+        # Причина завершения последнего вызова, по данным сервера. Обнуляется там же,
+        # где `last_usage`: состояние относится к последнему вызову, и пережить его не
+        # должно - иначе предыдущий `length` приписывался бы следующему `stop`.
+        self.last_finish_reason: str | None = None
         self._exchange = _ExchangeLog()
         self._exchange_stage = exchange_stage
 
@@ -148,6 +152,7 @@ class OpenAICompatibleAdapter(LLMInference):
         `LLM_EXCHANGE_LOG_FILE` позволяет увести записи из stdout и из Loki.
         """
         self.last_usage = None
+        self.last_finish_reason = None
         body = {
             "model": self._model,
             "messages": [
@@ -163,6 +168,12 @@ class OpenAICompatibleAdapter(LLMInference):
         # игнорируется. При `temperature = 0` он не нужен - жадный декодер детерминирован.
         if self._seed is not None:
             body["seed"] = self._seed
+        if stream:
+            # Без этого флага сервер в потоковом режиме `usage` не присылает, и расход
+            # токенов по стриминговому запросу не известен: пайплайн и UI отвечают молчанием,
+            # а это читается как «расхода не было». Проверено на llama.cpp напрямую:
+            # без флага 7 чанков и `usage: null`, с флагом 8 чанков и точные числа.
+            body["stream_options"] = {"include_usage": True}
         req = urllib.request.Request(
             f"{self._base_url}/v1/chat/completions",
             data=json.dumps(body).encode("utf-8"),
@@ -173,9 +184,10 @@ class OpenAICompatibleAdapter(LLMInference):
             deadline = time.monotonic() + self._timeout_s if self._timeout_s > 0 else None
             started = time.monotonic()
             collected: list[str] = []
+            stream_usage: list[dict[str, int]] = []
             with urllib.request.urlopen(req, timeout=self._timeout_s) as resp:
                 if stream:
-                    yield from self._iter_stream(resp, deadline, collected)
+                    yield from self._iter_stream(resp, deadline, collected, stream_usage)
                 else:
                     # НЕ `text = yield ...`: в генераторе такая запись присваивает значение,
                     # которое потребитель отправляет через send(), а `"".join(...)` не
@@ -184,6 +196,11 @@ class OpenAICompatibleAdapter(LLMInference):
                     text = self._extract_content(resp.read().decode("utf-8"))
                     collected.append(text)
                     yield text
+            # Учёт из потока обязан стать тем же `last_usage`, что и в нестриминговом
+            # ответе: иначе вызывающий, читающий одно поле, получает расход при одном
+            # режиме и `None` при другом - то есть тихо перестаёт мерить.
+            if stream_usage:
+                self.last_usage = dict(stream_usage[0])
             self._exchange.record(
                 model=self._model,
                 stage=self._exchange_stage,
@@ -191,9 +208,11 @@ class OpenAICompatibleAdapter(LLMInference):
                 system=system,
                 prompt=prompt,
                 response="".join(collected),
+                finish_reason=self.last_finish_reason,
                 usage=self.last_usage,
                 duration_ms=int((time.monotonic() - started) * 1000),
                 labels=labels,
+                max_tokens=self._max_tokens,
             )
         except LLMAdapterError as exc:
             # Уже классифицировано: перечитывать текст префикса, чтобы угадать причину,
@@ -207,9 +226,11 @@ class OpenAICompatibleAdapter(LLMInference):
                 system=system,
                 prompt=prompt,
                 response=getattr(exc, "raw", None),
+                finish_reason=self.last_finish_reason,
                 usage=self.last_usage,
                 error=type(exc).__name__,
                 labels=labels,
+                max_tokens=self._max_tokens,
             )
             raise
         except TimeoutError as exc:
@@ -248,7 +269,12 @@ class OpenAICompatibleAdapter(LLMInference):
         # вопрос «кто жрёт токены - промпт или ответ» не имел ответа.
         usage = payload.get("usage")
         self.last_usage = _normalize_usage(usage)
-        _reject_truncation(first.get("finish_reason"), content)
+        # Причина завершения запоминается ДО проверки обрыва: иначе в записи обмена она
+        # была бы `null` именно тогда, когда обрыв и случился, и журнал не отвечал бы на
+        # вопрос «модель дошла до конца или её остановили». Именно так и вышло: при
+        # `completion_tokens`, равном лимиту, в записи стояло `finish_reason: null`.
+        self.last_finish_reason = first.get("finish_reason")
+        _reject_truncation(self.last_finish_reason, content)
         return content
 
     @staticmethod
@@ -256,6 +282,7 @@ class OpenAICompatibleAdapter(LLMInference):
         resp: Any,
         deadline: float | None = None,
         collected: list[str] | None = None,
+        usage_sink: list[dict[str, int]] | None = None,
     ) -> Iterator[str]:
         finish_reason: str | None = None
         # Ответ накапливается, хотя и отдаётся по частям: без накопленного текста обрыв по
@@ -271,6 +298,19 @@ class OpenAICompatibleAdapter(LLMInference):
             raw = line[len("data:"):].strip()
             if raw == "[DONE]":
                 break
+            # Счётчик приезжает ОТДЕЛЬНЫМ чанком, у которого `choices` пуст, поэтому
+            # `_extract_delta` такой чанк молча пропускает. Считывать надо ДО разбора
+            # дельты, иначе расход токенов теряется именно в потоковом режиме - то есть
+            # ровно в том, которым пользуется UI.
+            if usage_sink is not None:
+                try:
+                    chunk_usage = json.loads(raw).get("usage")
+                except (json.JSONDecodeError, AttributeError):
+                    chunk_usage = None
+                normalized = _normalize_usage(chunk_usage)
+                if normalized is not None:
+                    usage_sink.clear()
+                    usage_sink.append(normalized)
             delta, chunk_finish = _extract_delta(raw)
             if chunk_finish:
                 finish_reason = chunk_finish
@@ -347,6 +387,7 @@ class _ExchangeLog:
         error: str | None = None,
         duration_ms: int | None = None,
         labels: dict[str, str] | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         if not self.level:
             return
@@ -380,6 +421,19 @@ class _ExchangeLog:
         # поэтому и признака усечения промпта нет - ключ не выдумывается.
         if truncated:
             record["truncated"] = truncated
+        # `at_cap` - отдельный от `truncated` признак, и смешивать их нельзя.
+        # `truncated.response` означает «текст обрезан ПРИ ЗАПИСИ в журнал», то есть
+        # про ограничение логирования. Обрыв ответа МОДЕЛЬЮ - другое событие, и раньше оно
+        # в записи не читалось вовсе: при `completion_tokens`, равном лимиту, стояло
+        # `truncated.response: false`, что выглядит как «ответ полный». Признак выводится
+        # из данных сервера, а не угадывается по длине текста.
+        at_cap = False
+        if isinstance(usage, dict):
+            completion = usage.get("completion_tokens")
+            if isinstance(completion, int) and max_tokens is not None and max_tokens > 0:
+                at_cap = completion >= max_tokens
+        if at_cap:
+            record["at_cap"] = True
         # Метки вызывающего. Без них записи не соединяются с документом и чанком, а
         # следующая обработка получает строки, которые нечем сгруппировать.
         if labels:
@@ -416,7 +470,7 @@ def _normalize_usage(usage: object) -> dict[str, int] | None:
 
 
 def _reject_truncation(finish_reason: object, raw: str | None = None) -> None:
-    """Обрыв ответа по длине должен быть виден, а не молча давать битый JSON.
+    """Ответ неполон - и это надо назвать правильно.
 
     Сервер присылает `finish_reason: "length"`, когда ответ упёрся в `max_tokens`. Раньше
     это поле не читалось, `content` оставался строкой - просто обрезанной посреди JSON, -
@@ -424,6 +478,16 @@ def _reject_truncation(finish_reason: object, raw: str | None = None) -> None:
     `optional_failure=True` это означало тихую деградацию к детерминированному пути:
     документ попадал в граф успешно, просто без извлечённых сущностей. Отказ выглядел
     как успех, и `enrichment.cause` не мог отличить обрыв по длине от таймаута.
+
+    ВАЖНО, и это меняет текст ошибки: `finish_reason = "length"` НЕ означает «увеличьте
+    лимит». На измеренном ответе (`docs/02_pipeline_and_normalizer.md`, чанк 0) модель
+    объявила 120 связей при 33 уникальных, 108 из них от одной вершины. Это зацикливание,
+    а не нехватка места: лимит 8192 добавил ещё круг и JSON не закрылся. Раньше здесь
+    стоял совет «увеличьте max_tokens либо уменьшите чанк», и он уводил оператора не на
+    тот рычаг - мы его проверили и он не работает.
+
+    Правильный порядок действий указывается явно, потому что неверная подсказка в тексте
+    ошибки хуже отсутствия подсказки: на неё будут опираться.
 
     Поле отсутствует у части серверов, поэтому отсутствие - не повод для ошибки: молчаливый
     отказ там, где сервер просто не сообщает причину, был бы хуже.
@@ -436,8 +500,12 @@ def _reject_truncation(finish_reason: object, raw: str | None = None) -> None:
     excerpt = _excerpt(raw)
     message = (
         f"ответ LLM неполон: finish_reason={finish_reason!r}. "
-        f"Почти всегда это обрыв по max_tokens - увеличьте его либо уменьшите чанк, "
-        f"иначе JSON не распарсится и извлечение молча деградирует к детерминированному пути."
+        f"Повышение max_tokens обычно НЕ помогает: на измеренных ответах причина - "
+        f"зацикливание модели (одна вершина повторяется десятки раз, уникальных связей "
+        f"втрое меньше объявленных), а не нехватка места. Проверьте повторяемость ответа, "
+        f"а не только лимит токенов; если объём велик - разделите задачу на шаги, "
+        f"например извлечение имён и связей отдельными вызовами. "
+        f"Иначе JSON не распарсится и извлечение молча деградирует."
     )
     if excerpt:
         message = f"{message}\n--- начало/конец ответа модели ---\n{excerpt}"

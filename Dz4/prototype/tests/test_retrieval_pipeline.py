@@ -697,6 +697,38 @@ def test_request_depth_overrides_profile_and_reaches_the_walk() -> None:
     assert done["effective_retrieval"]["depth_clamped"] is False
 
 
+def test_depth_permits_what_is_allowed_and_reports_what_was_walked() -> None:
+    """ADR-059: разрешённая глубина и пройденная - разные величины.
+
+    Пустой граф - не «граф не нужен», а ноль пройденных хопов. Счётчик, который на этом
+    случае показывает разрешённое число, выглядит работающим и не измеряет ничего.
+    """
+    graph = _CountingGraphStore(expansion_rows=[])
+    pipe = _pipeline(PROFILE, graph, vector_store=_RecordingVectorStore(_vector_rows()))
+
+    done = pipe.run("вопрос", domain="it", generate=False, max_depth=3)
+
+    effective = done["effective_retrieval"]
+    assert effective["max_depth_requested"] == 3
+    assert effective["max_depth_allowed"] == 3
+    assert effective["hops_traversed"] == 0, "обход шёл и ничего не нашёл - честный ноль"
+    assert effective["depth_clamped"] is False
+
+
+def test_hops_traversed_counts_rows_that_were_actually_returned() -> None:
+    """Сторож счётчика: ненулевой случай обязан отличаться от нулевого.
+
+    Тест на пустом графе проходит и при откате счётчика в константу, потому что там ноль
+    и так настоящий. Защищает только этот: строка с `depth=1` обязана дать 1, а не 0.
+    """
+    graph = _CountingGraphStore()  # строка с depth=1 по умолчанию
+    pipe = _pipeline(PROFILE, graph, vector_store=_RecordingVectorStore(_vector_rows()))
+
+    done = pipe.run("вопрос", domain="it", generate=False)
+
+    assert done["effective_retrieval"]["hops_traversed"] == 1
+
+
 def test_request_depth_above_cap_is_clamped_and_declared() -> None:
     """Просьба «дальше, чем готов обойти» - не ошибка запроса, но и не молчалка."""
     pipe, _ = _depth_pipeline()

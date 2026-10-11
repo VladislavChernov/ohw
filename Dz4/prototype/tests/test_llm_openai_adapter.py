@@ -78,6 +78,60 @@ def test_streaming_sse_deltas() -> None:
         server.shutdown()
 
 
+def test_streaming_usage_is_captured_from_trailing_chunk() -> None:
+    """Расход токенов обязан доезжать и в потоковом режиме.
+
+    Форма повторяет реальную от llama.cpp: счётчик приезжает ОТДЕЛЬНЫМ чанком с пустым
+    `choices`, поэтому разбор дельты его пропускает. Без приёма `usage` в потоке пайплайн
+    отдаёт `None`, и UI молчит - а это читается как «расхода не было».
+    """
+    sse = (
+        'data: {"choices":[{"delta":{"content":"привет"}}]}\n'
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n'
+        'data: {"choices":[],"usage":{"prompt_tokens":85,"completion_tokens":61,'
+        '"total_tokens":146}}\n'
+        "data: [DONE]\n"
+    )
+    handler = _make_handler({"/v1/chat/completions": (200, sse)})
+    server, port = _start_server(handler)
+    try:
+        llm = OpenAICompatibleAdapter(f"http://127.0.0.1:{port}", model="test", timeout_s=5)
+        list(llm.generate("вопрос", stream=True))
+        assert llm.last_usage == {
+            "prompt_tokens": 85,
+            "completion_tokens": 61,
+            "total_tokens": 146,
+        }
+    finally:
+        server.shutdown()
+
+
+def test_streaming_request_asks_for_usage() -> None:
+    """Флаг запрашивается у сервера, иначе счётчик не придёт даже при поддержке."""
+    captured: dict[str, Any] = {}
+
+    class _CapturingHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            captured.update(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            response = 'data: {"choices":[{"delta":{"content":"x"}}]}\ndata: [DONE]\n'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(response.encode("utf-8"))
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server, port = _start_server(_CapturingHandler)
+    try:
+        llm = OpenAICompatibleAdapter(f"http://127.0.0.1:{port}", model="test", timeout_s=5)
+        list(llm.generate("вопрос", stream=True))
+    finally:
+        server.shutdown()
+
+    assert captured.get("stream_options") == {"include_usage": True}
+
+
 def test_streaming_total_deadline_stops_slow_token_stream() -> None:
     class _SlowStream:
         def __iter__(self):

@@ -820,6 +820,19 @@ class QueryPipeline:
                 active,
                 revision=cache_revision,
             )
+        # ADR-059: `max_depth_effective` - это зажим числа в диапазон, а не результат обхода,
+        # поэтому объявлять его под именем "применено" нельзя. Разрешённая глубина и
+        # ВЫПОЛНЕННАЯ - разные величины, и обе обязаны быть видны. Пустой список строк -
+        # честный ноль, а не "не измерено": обход отработал и ничего не нашёл.
+        effective_retrieval["max_depth_allowed"] = effective_depth
+        effective_retrieval["hops_traversed"] = max(
+            (int(row.get("depth") or 0) for row in expanded_rows),
+            default=0,
+        )
+        # ADR-059, часть вторая: настоящие токены приходят от модели в `usage`. Оценка
+        # `estimate_tokens(prompt)` остаётся в трейсе и в неё не превращается: это разные
+        # числа, и подмена одного другим делает расход невидимым.
+        llm_usage = getattr(self._llm, "last_usage", None)
         done: dict[str, Any] = {
             "text": text,
             "sources": sources,
@@ -839,6 +852,9 @@ class QueryPipeline:
             # Что ПРИМЕНЕНО, а не что запрошено: иначе «применилось с дефолтом» и
             # «применилось как просили» неразличимы в артефакте.
             "effective_retrieval": effective_retrieval,
+            # Настоящий расход токенов по модели. `None`, когда провайдер их не отдал, а
+            # не `0`: отсутствие данных и нулевой расход - разные результаты.
+            "usage": dict(llm_usage) if isinstance(llm_usage, dict) and llm_usage else None,
             # Имена параметров, ушедших в дефолт. Пустой список — тоже факт: значит
             # применено ровно то, что объявлено.
             "config_fallbacks": config_fallbacks,
