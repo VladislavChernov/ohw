@@ -314,14 +314,26 @@ class JobStore:
             "llm_edges INTEGER NOT NULL DEFAULT 0, "
             "llm_names_total INTEGER NOT NULL DEFAULT 0, "
             "llm_names_grounded INTEGER NOT NULL DEFAULT 0, "
-            # ADR-053: ограничение списком кандидатов. `candidates_absent` хранится как
+# ADR-053: ограничение списком кандидатов. `candidates_absent` хранится как
             # 0/1, а не выводится из `candidates_total`: «список был пуст» и «список не
             # нашли» - разные события, и оба означают разбор, которого не было.
-"candidates_absent INTEGER NOT NULL DEFAULT 0, "
+            "candidates_absent INTEGER NOT NULL DEFAULT 0, "
             "candidates_total INTEGER NOT NULL DEFAULT 0, "
             "llm_names_off_list INTEGER NOT NULL DEFAULT 0, "
             "chunks_without_candidates INTEGER NOT NULL DEFAULT 0, "
             "chunks_total INTEGER NOT NULL DEFAULT 0, "
+            # ADR-056: вырождение ответа модели. `llm_answer_brace_balance` может быть
+            # отрицательным, поэтому у него дефолт 0, а «NOT NULL DEFAULT 0» не мешает:
+            # миграция ниже добавляет именно эту колонку отдельно от остальных.
+            "llm_names_raw INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_raw_unique INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_raw_off_list INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_raw_grounded INTEGER NOT NULL DEFAULT 0, "
+            "llm_relations_declared INTEGER NOT NULL DEFAULT 0, "
+            "llm_relations_unique INTEGER NOT NULL DEFAULT 0, "
+            "llm_answer_lines INTEGER NOT NULL DEFAULT 0, "
+            "llm_answer_lines_unique INTEGER NOT NULL DEFAULT 0, "
+            "llm_answer_brace_balance INTEGER NOT NULL DEFAULT 0, "
             "ts TEXT NOT NULL"
             ")"
         )
@@ -345,6 +357,16 @@ class JobStore:
             "llm_names_off_list",
             "chunks_without_candidates",
             "chunks_total",
+            # ADR-056: те же колонки, тот же идемпотентный ALTER.
+            "llm_names_raw",
+            "llm_names_raw_unique",
+            "llm_names_raw_off_list",
+            "llm_names_raw_grounded",
+            "llm_relations_declared",
+            "llm_relations_unique",
+            "llm_answer_lines",
+            "llm_answer_lines_unique",
+            "llm_answer_brace_balance",
         ):
             try:
                 self._conn.execute(
@@ -913,13 +935,24 @@ class JobStore:
         lost_edges: int,
         llm_records: int,
         llm_edges: int,
-        llm_names_total: int = 0,
+llm_names_total: int = 0,
         llm_names_grounded: int = 0,
-candidates_absent: bool = False,
+        candidates_absent: bool = False,
         candidates_total: int = 0,
         llm_names_off_list: int = 0,
         chunks_without_candidates: int = 0,
         chunks_total: int = 0,
+        # ADR-056: вырождение ответа. Без этих чисел на живом прогоне видно только
+        # `cause: model_error`, и по нему нельзя отличить нехватку токенов от зацикливания.
+        llm_names_raw: int = 0,
+        llm_names_raw_unique: int = 0,
+        llm_names_raw_off_list: int = 0,
+        llm_names_raw_grounded: int = 0,
+        llm_relations_declared: int = 0,
+        llm_relations_unique: int = 0,
+        llm_answer_lines: int = 0,
+        llm_answer_lines_unique: int = 0,
+        llm_answer_brace_balance: int = 0,
     ) -> None:
         """Записать числовые факты обогащения джобы (одна строка на джобу).
 
@@ -933,10 +966,14 @@ candidates_absent: bool = False,
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO job_enrichment (job_id, cause, lost_entities, "
-                "lost_edges, llm_records, llm_edges, llm_names_total, llm_names_grounded, "
-"candidates_absent, candidates_total, llm_names_off_list, "
+"lost_edges, llm_records, llm_edges, llm_names_total, llm_names_grounded, "
+                "candidates_absent, candidates_total, llm_names_off_list, "
                 "chunks_without_candidates, chunks_total, "
-                "ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "llm_names_raw, llm_names_raw_unique, llm_names_raw_off_list, "
+                "llm_names_raw_grounded, llm_relations_declared, llm_relations_unique, "
+                "llm_answer_lines, llm_answer_lines_unique, llm_answer_brace_balance, "
+                "ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     job_id,
                     cause,
@@ -951,6 +988,15 @@ candidates_absent: bool = False,
                     int(llm_names_off_list),
                     int(chunks_without_candidates),
                     int(chunks_total),
+                    int(llm_names_raw),
+                    int(llm_names_raw_unique),
+                    int(llm_names_raw_off_list),
+                    int(llm_names_raw_grounded),
+                    int(llm_relations_declared),
+                    int(llm_relations_unique),
+                    int(llm_answer_lines),
+                    int(llm_answer_lines_unique),
+                    int(llm_answer_brace_balance),
                     datetime.now(UTC).isoformat(timespec="seconds"),
                 ),
             )
@@ -1184,8 +1230,11 @@ candidates_absent: bool = False,
             row = self._conn.execute(
                 "SELECT cause, lost_entities, lost_edges, llm_records, llm_edges, "
                 "llm_names_total, llm_names_grounded, "
-                "candidates_absent, candidates_total, llm_names_off_list, "
-                "chunks_without_candidates, chunks_total "
+"candidates_absent, candidates_total, llm_names_off_list, "
+                "chunks_without_candidates, chunks_total, "
+                "llm_names_raw, llm_names_raw_unique, llm_names_raw_off_list, "
+                "llm_names_raw_grounded, llm_relations_declared, llm_relations_unique, "
+                "llm_answer_lines, llm_answer_lines_unique, llm_answer_brace_balance "
                 "FROM job_enrichment WHERE job_id=?",
                 (job_id,),
             ).fetchone()
@@ -1209,9 +1258,27 @@ candidates_absent: bool = False,
             # Сколько имён модель выдала вне списка и сколько типов вне онтологии.
             # Ненулевое значение означает, что ограничение нарушено, а не «список был
             # плохой»: список из отчёта не читается, а имя видно в логе EXTRACT.
-            "llm_names_off_list": int(row[9]),
+"llm_names_off_list": int(row[9]),
             "chunks_without_candidates": int(row[10]),
             "chunks_total": int(row[11]),
+            # ADR-056: вырождение ответа, посчитанное по сырому тексту.
+            #
+            # `llm_names_raw_off_list` и `llm_names_raw_grounded` читаются ВМЕСТЕ, и это
+            # единственная пара, которая различает две разные поломки с разным лечением:
+            # имя вне списка, но присутствующее в тексте чанка, - это провал полноты
+            # пре-ингеста; имя вне списка и вне текста - выдумка модели.
+            #
+            # `llm_relations_declared` против `llm_relations_unique` - мера зацикливания.
+            # Отрицательный баланс скобок означает, что JSON не закрылся.
+            "llm_names_raw": int(row[12]),
+            "llm_names_raw_unique": int(row[13]),
+            "llm_names_raw_off_list": int(row[14]),
+            "llm_names_raw_grounded": int(row[15]),
+            "llm_relations_declared": int(row[16]),
+            "llm_relations_unique": int(row[17]),
+            "llm_answer_lines": int(row[18]),
+            "llm_answer_lines_unique": int(row[19]),
+            "llm_answer_brace_balance": int(row[20]),
         }
 
     def stages(self, job_id: str) -> builtins.list[dict[str, Any]]:

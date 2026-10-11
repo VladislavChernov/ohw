@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging as _logging
 import os
+import sys
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -384,8 +385,20 @@ class Executor:
                         candidates_absent=ctx.candidates_absent,
                         candidates_total=ctx.candidates_total,
                         llm_names_off_list=ctx.llm_names_off_list,
-                        chunks_without_candidates=ctx.chunks_without_candidates,
+chunks_without_candidates=ctx.chunks_without_candidates,
                         chunks_total=ctx.chunks_total,
+                        # ADR-056: вырождение ответа. Без этих чисел джоба с обрывом
+                        # отличается от джобы без вызова LLM только по `cause`, а по нему
+                        # «зациклилась модель» и «не хватило токенов» не различить.
+                        llm_names_raw=ctx.llm_names_raw,
+                        llm_names_raw_unique=ctx.llm_names_raw_unique,
+                        llm_names_raw_off_list=ctx.llm_names_raw_off_list,
+                        llm_names_raw_grounded=ctx.llm_names_raw_grounded,
+                        llm_relations_declared=ctx.llm_relations_declared,
+                        llm_relations_unique=ctx.llm_relations_unique,
+                        llm_answer_lines=ctx.llm_answer_lines,
+                        llm_answer_lines_unique=ctx.llm_answer_lines_unique,
+                        llm_answer_brace_balance=ctx.llm_answer_brace_balance,
                     )
                     # Неразрешённые концы — фактом, а не поводом снести слой (ADR-037).
                     # Пишутся на каждой джобе, где они были; джоба уборки обходит их по
@@ -696,14 +709,43 @@ def create_app(
     return app
 
 
+#: Уровень журнала пайплайна. ADR-058 требует INFO для плана записи, и без явной настройки
+#: он недостижим: uvicorn поднимает корневой логгер на WARNING, поэтому INFO-строки не
+#: доходят ни до stdout, ни до Loki. Молчание здесь опаснее объёма - именно отсутствие
+#: записи уже стоило двух неверных выводов о состоянии графа.
+LOG_LEVEL_ENV = "GRAPH_LOG_LEVEL"
+DEFAULT_LOG_LEVEL = "INFO"
+
+
 def main() -> None:
+    import logging
+
     import uvicorn
 
     from graphrag_proto.security import install_redaction
 
     install_redaction()
+    requested = (os.environ.get(LOG_LEVEL_ENV) or "").strip().upper()
+    level = requested or DEFAULT_LOG_LEVEL
+    if not getattr(logging, level, None):
+        # Неизвестное значение не должно молча подменяться: иначе оператор задал
+        # `GRAPH_LOG_LEVEL=INFOO` и думает, что видит журнал, а не видит ничего.
+        print(
+            f"{LOG_LEVEL_ENV}={requested!r} - неизвестный уровень, "
+            f"используется {DEFAULT_LOG_LEVEL}",
+            file=sys.stderr,
+        )
+        level = DEFAULT_LOG_LEVEL
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        stream=sys.stdout,
+    )
+    # uvicorn поднимает корневой логгер сам и своим `log_config`; без этого наша настройка
+    # была бы перезаписана при старте сервера.
+    logging.getLogger("graphrag_proto").setLevel(level)
     api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
-    uvicorn.run(create_app(api_key=api_key), host=HOST, port=PORT)
+    uvicorn.run(create_app(api_key=api_key), host=HOST, port=PORT, log_config=None)
 
 
 if __name__ == "__main__":

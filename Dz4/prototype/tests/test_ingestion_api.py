@@ -907,6 +907,18 @@ def test_job_enrichment_carries_counts_not_just_a_flag(tmp_path: Path) -> None:
         llm_names_off_list=9,
         chunks_without_candidates=6,
         chunks_total=77,
+        # ADR-056: вырождение ответа. Значения соответствуют измеренному случаю
+        # (120 объявленных пар против 33 уникальных), и они НЕ нулевые: нули означали бы,
+        # что ответа не было, и проверка перестала бы различать «выродилось» и «не вызвали».
+        llm_names_raw=77,
+        llm_names_raw_unique=71,
+        llm_names_raw_off_list=9,
+        llm_names_raw_grounded=5,
+        llm_relations_declared=120,
+        llm_relations_unique=33,
+        llm_answer_lines=901,
+        llm_answer_lines_unique=120,
+        llm_answer_brace_balance=2,
     )
 
     facts = jobs.enrichment("job-1")
@@ -923,6 +935,15 @@ def test_job_enrichment_carries_counts_not_just_a_flag(tmp_path: Path) -> None:
         "llm_names_off_list": 9,
         "chunks_without_candidates": 6,
         "chunks_total": 77,
+        "llm_names_raw": 77,
+        "llm_names_raw_unique": 71,
+        "llm_names_raw_off_list": 9,
+        "llm_names_raw_grounded": 5,
+        "llm_relations_declared": 120,
+        "llm_relations_unique": 33,
+        "llm_answer_lines": 901,
+        "llm_answer_lines_unique": 120,
+        "llm_answer_brace_balance": 2,
     }
 
     # джоба без записанных фактов — пустой словарь, а не нули с выдуманной причиной

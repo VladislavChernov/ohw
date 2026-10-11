@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 import unicodedata
@@ -194,6 +195,47 @@ def _extraction_template(profile: dict[str, Any]) -> dict[str, Any]:
     if "user" in template and not isinstance(template.get("user"), str):
         raise ExtractionConfigError("extraction.prompt_template.user задан, но не является строкой")
     return template
+
+
+def _declared_names_in_answer(raw: str) -> list[str]:
+    """Имена, объявленные в СЫРОМ ответе, — в том числе в обрезанном.
+
+    Разбор не должен требовать валидного JSON: смысл функции в том, чтобы посчитать
+    имена тогда, когда JSON не закрылся. Поэтому это не `json.loads`, а поиск полей
+    регуляркой: ответ в этом состоянии невалиден по построению, и строгий разбор не
+    ответил бы на вопрос «что модель вообще выдала».
+
+    Регулярка смотрит `canonical_name` и `name` рядом с фигурными скобками, потому что
+    в обрезанном ответе значения иногда остаются, а закрывающих скобок уже нет.
+    """
+    found = re.findall(r'"(?:canonical_name|name)"\s*:\s*"([^"]+)"', raw)
+    return [item.strip() for item in found if item.strip()]
+
+
+def _declared_relations_in_answer(raw: str) -> list[tuple[str, str]]:
+    """Пары (`from`, `to`) из сырого ответа, включая обрезанный.
+
+    Ключ пары склеивается из обоих концов: у вырожденного ответа вершина одна и та же,
+    и считать нужно уникальные ПАРЫ, а не число концов - иначе 108 повторов
+    `NormalizeStage -> ...` посчитались бы как 108 разных связей.
+    """
+    pairs = re.findall(r'"from"\s*:\s*"([^"]*)"\s*,\s*"to"\s*:\s*"([^"]*)"', raw)
+    return [
+        (source.strip(), target.strip())
+        for source, target in pairs
+        if source.strip() and target.strip()
+    ]
+
+
+def _answer_shape(raw: str) -> tuple[int, int, int]:
+    """(строк всего, строк уникальных, баланс фигурных скобок) по сырому ответу.
+
+    Доля дублирующихся строк и незакрытый JSON - два разных признака одного вырождения,
+    и оба видны без разбора JSON. Баланс скобок берётся по всему ответу, включая
+    обрамление: незакрытая скобка означает, что JSON не закрылся никогда.
+    """
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    return len(lines), len(set(lines)), raw.count("{") - raw.count("}")
 
 
 def _parse_extraction_payload(raw: str) -> dict[str, Any]:
@@ -514,6 +556,28 @@ class PipelineContext:
     llm_names_off_list: int = 0
     chunks_without_candidates: int = 0
     chunks_total: int = 0
+    # ADR-056: вырождение ответа модели, а не обрыв по длине. Измерено на
+    # `docs/02_pipeline_and_normalizer.md`: модель объявила 120 связей, из которых
+    # уникальны 33, а 108 из 120 имели `from = NormalizeStage`. `max_tokens` тут ни при
+    # чём - увеличение лимита даёт ещё цикл, а не закрытый JSON.
+    #
+    # Числа считаются по СЫРОМУ ответу, а не по распарсенным записям: при обрыве
+    # распарсенных записей нет вовсе, и счётчики выше дают ноль при полном отсутствии
+    # проверки. Молчащий ноль читается как «модель не нарушила ограничение».
+    #
+    # `*_declared` — сколько объявлено, `*_unique` — сколько уникально. Диагноз делается
+    # по отношению уникальных к объявленным, а не по соседним дублям: в измеренном ответе
+    # одинаковых пар подряд не было ни разу, и детектор соседних повторов эту поломку
+    # пропустил бы.
+    llm_names_raw: int = 0
+    llm_names_raw_unique: int = 0
+    llm_names_raw_off_list: int = 0
+    llm_names_raw_grounded: int = 0
+    llm_relations_declared: int = 0
+    llm_relations_unique: int = 0
+    llm_answer_lines: int = 0
+    llm_answer_lines_unique: int = 0
+    llm_answer_brace_balance: int = 0
     # Счётчика «тип вне онтологии» здесь НЕТ, и это решение, а не недосмотр: тип
     # сущности задаётся ключом payload, который определяет СХЕМА ответа, а не модель.
     # Поэтому значение вне онтологии невозможно by construction, и счётчик был бы
@@ -960,6 +1024,59 @@ class ExtractStage(Stage):
             ctx.llm_layer_lost_edges,
         )
 
+    def _measure_raw_answer(
+        self,
+        raw: str,
+        chunk: str,
+        chunk_candidates: tuple[str, ...],
+        chunk_id: str,
+        ctx: PipelineContext,
+    ) -> None:
+        """Считает по сырому ответу то, что разбор не доносит.
+
+        Здесь три разных вопроса, и раньше не отвечал ни один из них при обрыве:
+
+        * сколько имён и сколько из них уникально - дубли имён означают вырождение на
+          нодах, а не на связях (в измеренном ответе с 120 связями имена были чистыми,
+          а в ответе с запрещёнными связями наоборот - 35 вхождений против 24 уникальных);
+        * сколько имён вне списка кандидатов и сколько при этом есть в тексте - только
+          эти два числа вместе различают провал полноты пре-ингеста и выдумку модели,
+          а лечение у них противоположное;
+        * сколько пар объявлено и сколько уникально - это и есть мера зацикливания.
+
+        Имена сверяются с тем же списком кандидатов ЧАНКА, куда смотрит модель, и тем же
+        ключом `_identity_key`, что и остальной разбор: иначе прибор читал бы не то,
+        что читает код.
+        """
+        names = _declared_names_in_answer(raw)
+        unique_names = {_identity_key(name) for name in names}
+        allowed = self._allowed_keys(chunk_candidates)
+        chunk_keys = {_identity_key(word) for word in _iter_name_words(chunk)}
+
+        ctx.llm_names_raw += len(names)
+        ctx.llm_names_raw_unique += len(unique_names)
+        ctx.llm_names_raw_off_list += sum(1 for name in unique_names if name not in allowed)
+        ctx.llm_names_raw_grounded += sum(1 for name in unique_names if name in chunk_keys)
+
+        pairs = _declared_relations_in_answer(raw)
+        ctx.llm_relations_declared += len(pairs)
+        ctx.llm_relations_unique += len(set(pairs))
+
+        lines, unique_lines, brace = _answer_shape(raw)
+        ctx.llm_answer_lines += lines
+        ctx.llm_answer_lines_unique += unique_lines
+        ctx.llm_answer_brace_balance += brace
+
+        if len(pairs) >= 10 and len(set(pairs)) * 2 < len(pairs):
+            _log.error(
+                "ответ модели выродился в повтор пар (%d объявлено, %d уникальных, "
+                "вершин-источников мало). Похоже на зацикливание, а не на нехватку токенов: "
+                "чанк %s, повышение лимита ответа проблему не снимет",
+                len(pairs),
+                len(set(pairs)),
+                chunk_id,
+            )
+
     def _check_candidate_membership(
         self,
         record: dict[str, Any],
@@ -1108,6 +1225,11 @@ class ExtractStage(Stage):
             usage = getattr(llm, "last_usage", None)
             if isinstance(usage, dict) and usage:
                 ctx.llm_usage = usage
+            # ADR-056: вырождение и ограничение имён меряются по сырому ответу ДО разбора.
+            # После разбора эти числа не восстановимы: на обрезанном JSON парсер падает,
+            # и все счётчики выше остаются нулём при полном отсутствии проверки - то есть
+            # отчёт называет нормой ситуацию, где модель выдала 35 имён, 21 вне списка.
+            self._measure_raw_answer(raw, chunk, chunk_candidates, chunk_id, ctx)
             payload = _parse_extraction_payload(raw)
             records: list[dict[str, Any]] = []
             unknown_fields = set(payload) - allowed_fields
@@ -2084,6 +2206,55 @@ class CommitStage(Stage):
         )
         nodes: list[dict[str, Any]] = []
         entity_ids: dict[str, dict[str, Any]] = {}
+        # ADR-058: что ФАКТИЧЕСКИ уходит в запись, видно здесь и нигде больше.
+        #
+        # Зачем: потеря ноды или связи не видна ни в одном счётчике, потому что она
+        # происходит в адаптере, ниже пайплайна - `DedupStage` отработал, отчёт заполнен,
+        # документ `succeeded`, а граф просто тише на одну запись. На живом прогоне это дало
+        # два неверных вывода подряд: по `size(chunk_ids) = 1` была объявлена «потеря
+        # привязки», а по расхождению счётчиков - «дедуп не применился». Оба раза вывод
+        # строился по симптому, потому что записи не было видно.
+        #
+        # Лог стоит ДО сборки `nodes`: обращение к реестру ниже может отказать, и тогда
+        # факт «дошло до сборки плана записи» должен остаться в журнале - иначе отказ
+        # реестра неотличим от «стадия не запускалась».
+        #
+        # Пишутся идентификаторы и имена, НЕ содержимое свойств: журнал не должен
+        # превращаться в копию корпуса (то же основание, что у `LLM_EXCHANGE_LOG`).
+        # Объём заведомо приемлем: 56 нод на документ, при 225 чанках корпуса это порядка
+        # трёх тысяч строк на полную перезагрузку - цена, которую платит отсутствие
+        # диагностики.
+        if _log.isEnabledFor(logging.INFO):
+            _log.info(
+                "COMMIT: план записи, источник=%s, домен=%s, нод=%d, связей=%d, "
+                "кандидатов документа=%s, неразрешённых концов=%d",
+                source_url,
+                domain,
+                len(entities),
+                len(entity_edges),
+                ctx.candidates_total,
+                len(ctx.unresolved_endpoints),
+            )
+            for entity in entities:
+                _log.info(
+                    "COMMIT нода: node_id=%s имя=%r чанки=%s источники=%s",
+                    _context_node_id(domain, entity),
+                    str(
+                        entity.get("canonical_name")
+                        or entity.get("canonical")
+                        or entity.get("name")
+                        or ""
+                    ),
+                    _entity_chunk_ids(entity),
+                    _entity_sources(entity),
+                )
+            for relation in entity_edges:
+                _log.info(
+                    "COMMIT связь: %r -[%s]-> %r",
+                    relation.get("from"),
+                    relation.get("kind") or relation.get("type"),
+                    relation.get("to"),
+                )
         # ADR-044: версия, которую присвоит эта загрузка (`registry.upsert` = current + 1).
         # Считается под `source_lock`, поэтому две загрузки одного источника не сойдутся.
         owner_version = self._registry.current_version(doc.domain, doc.source_url) + 1
