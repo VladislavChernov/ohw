@@ -8,34 +8,37 @@
 - [x] Добавить том `../src → /app/src:ro`
 - [x] Исправить дефолт `PRE_INGEST_SRC`: `../docs` → `../../docs`
 - [x] Исправить дефолт `PRE_INGEST_DST`: `../pre-ingest` → `../../pre-ingest`
-- [ ] Проверить: `docker compose -f compose.preingest.yaml config` разрешает пути в `Dz4/docs`
-- [ ] Проверить: число шаблонов в контейнере равно числу в `CANDIDATE_PATTERNS`
+- [x] Проверить: `docker compose -f compose.preingest.yaml config` разрешает пути в `Dz4/docs`
+- [x] Проверить: число шаблонов в контейнере равно числу в `CANDIDATE_PATTERNS`
 
 ## 2. Остальные compose-файлы
 
-- [ ] `compose.yaml`: том `../src → /app/src:ro` во всех сервисах своего кода
-- [ ] `compose.eval-minimal.yaml`: то же
-- [ ] `compose.eval-qwen3b.yaml`: то же
-- [ ] `compose.eval.yaml`: то же
-- [ ] `compose.runtime.yaml`: то же
-- [ ] Сервисы без своего кода (llm, embeddings, reranker) не трогать
+- [x] `compose.yaml`: том `../src → /app/src:ro` во всех сервисах своего кода
+- [x] `compose.eval-minimal.yaml`: то же
+- [x] `compose.eval-qwen3b.yaml`: то же
+- [x] `compose.eval.yaml`: то же
+- [x] `compose.runtime.yaml`: то же
+- [x] Внешние инструменты не тронуты: `llm` и `reranker` (`Dockerfile.llm`,
+      `Dockerfile.reranker` — llama.cpp и модель) монтирования не имеют, прибор падает на
+      попытке смонтировать туда исходники. `embeddings-service` смонтирован: код наш,
+      образ печётся из `Dockerfile.embeddings`, модель лежит в томе.
 
 ## 3. Проверка, что монтирование работает
 
-- [ ] Внести правку в исходник, **не** пересобирая образ
-- [ ] Увидеть правку в контейнере через `docker compose run --rm <svc> ...`
-- [ ] Зафиксировать результат в отчёте прогона
+- [x] Внести правку в исходник, **не** пересобирая образ
+- [x] Увидеть правку в контейнере через `docker compose run --rm <svc> ...`
+- [x] Зафиксировать результат в отчёте прогона
 
 ## 4. Данные
 
-- [ ] Перегенерировать `pre-ingest/` с новым правилом
-- [ ] Убедиться, что `Glossary Service` и `Topology Orchestrator` присутствуют
-- [ ] Сверить `source_sha256` всех 30 файлов с текущими документами
+- [x] Перегенерировать `pre-ingest/` с новым правилом
+- [x] Убедиться, что `Glossary Service` и `Topology Orchestrator` присутствуют
+- [x] Сверить `source_sha256` всех 30 файлов с текущими документами
 
 ## 5. Гейт
 
-- [ ] `pytest`, `ruff`, `mypy` без ослаблений
-- [ ] Ни одного абсолютного пути в отслеживаемых файлах
+- [x] `pytest`, `ruff`, `mypy` без ослаблений
+- [x] Ни одного абсолютного пути в отслеживаемых файлах
 
 ## Что осталось открытым
 
