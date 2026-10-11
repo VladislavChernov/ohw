@@ -40,6 +40,7 @@ services:
       NAMESPACES_PATH: /config/namespaces.yaml
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
+      - ../src:/app/src:ro
       - config_data:/data
       - ../domain_profiles:/profiles:ro
       - ./config:/config:ro
@@ -72,6 +73,7 @@ services:
       CONFIG_URL: http://config-service:8001
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
+      - ../src:/app/src:ro
       - ../domain_profiles:/glossaries:ro
     healthcheck:
       test:
@@ -126,6 +128,7 @@ services:
       TOPOLOGY_DB_PATH: /data/topology.sqlite
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
+      - ../src:/app/src:ro
       - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
       - topology_data:/data
     healthcheck:
@@ -175,6 +178,7 @@ services:
       EMBEDDINGS_DEVICE: ${EMBEDDINGS_DEVICE:-cuda}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
+      - ../src:/app/src:ro
       - models_data:/models
     healthcheck:
       test:
@@ -221,6 +225,7 @@ services:
       INGEST_MAX_CONCURRENT: ${INGEST_MAX_CONCURRENT:-2}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
+      - ../src:/app/src:ro
       - ingestion_data:/data
       - ../domain_profiles:/profiles:ro
       - projection_data:/var/lib/graphrag/projection
@@ -265,6 +270,7 @@ services:
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-graphrag}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
+      - ../src:/app/src:ro
       - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
       - ../domain_profiles:/profiles:ro
       - ingestion_data:/data
@@ -321,6 +327,7 @@ services:
       TOPOLOGY_URL: ${TOPOLOGY_URL:-http://topology-orchestrator:8005}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
+      - ../src:/app/src:ro
       - ../domain_profiles:/profiles:ro
       - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
       - query_data:/data
@@ -379,6 +386,7 @@ services:
       PROJECTION_CONFIG_FINGERPRINT: ${PROJECTION_CONFIG_FINGERPRINT:-default}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
     volumes:
+      - ../src:/app/src:ro
       - ../domain_profiles:/profiles:ro
       - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
       - query_data:/data
@@ -423,6 +431,8 @@ services:
   # (Dockerfile.llm скачивает GGUF с Hugging Face по pin-ревизии и проверяет SHA-256).
   # Рантайм не зависит от ФС хоста — локальный GGUF-файл не требуется.
   # Смена модели = build-arg'и HF_REPO/HF_REVISION/HF_FILE/HF_SHA256.
+    volumes:
+      - ../src:/app/src:ro
   llm:
     build:
       context: ..

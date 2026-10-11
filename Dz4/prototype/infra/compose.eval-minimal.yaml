@@ -46,6 +46,7 @@ services:
       DOMAIN_PROFILES_DIR: /profiles
       NAMESPACES_PATH: /config/namespaces.yaml
     volumes:
+      - ../src:/app/src:ro
       - config_data:/data
       - ../domain_profiles:/profiles:ro
       - ./config:/config:ro
@@ -64,6 +65,7 @@ services:
       CONFIG_URL: http://config-service:8001
       DOMAIN_PROFILES_DIR: /profiles
     volumes:
+      - ../src:/app/src:ro
       - ../domain_profiles:/profiles:ro
     depends_on:
       config-service:
@@ -105,6 +107,7 @@ services:
       EMBEDDINGS_DEVICE: cpu
       HF_HOME: /models/huggingface
     volumes:
+      - ../src:/app/src:ro
       - models_data:/models
     healthcheck:
       # Health is not a model warmup; use the upload preflight before ingestion.
@@ -157,9 +160,17 @@ services:
       # отсутствие LLM_MODEL - ошибка конфигурации, а не повод угадать.
       LLM_MODEL: "${LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}"
       # EXTRACT генерирует полный JSON по документу — токенов по умолчанию (2048) мало.
-      LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-4096}"
+      # 4096 не хватало: замер обрыва по длине показал, что ровно один чанк из N упирался
+      # в потолок, ответ резался посреди JSON, и терялся документ целиком (минус записи
+      # и рёбра). Поднятие потолка вопрос не закрывает само по себе, но 4096 заведомо
+      # ниже измеренной потребности.
+      LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-6144}"
       LLM_TIMEOUT_S: "${LLM_TIMEOUT_S:-600}"
+      # Логи должны быть видны без правки кода: по умолчанию INFO, иначе причина отказа
+      # остаётся только в отчёте, а на экране выглядит как пустой результат.
+      GRAPH_LOG_LEVEL: "${GRAPH_LOG_LEVEL:-INFO}"
     volumes:
+      - ../src:/app/src:ro
       - ingestion_data:/data
       - projection_data:/var/lib/graphrag/projection
       - ../domain_profiles:/profiles:ro
@@ -234,6 +245,7 @@ services:
       # опрос/генерация могут занимать минуты.
       HTTP_CLIENT_TIMEOUT_S: "${HTTP_CLIENT_TIMEOUT_S:-600}"
     volumes:
+      - ../src:/app/src:ro
       - ./eval:/app/infra/eval:ro
       - ../..:/repo:ro
       - ./config:/config:ro

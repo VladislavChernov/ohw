@@ -21,12 +21,23 @@ services:
     # `--src`/`--dst` приходят из run_pre_ingest.ps1, поэтому здесь не зашиты: путь
     # источника выбирает владелец запуска, а не образ.
     volumes:
+      # ADR-060: код монтируется, образ несёт только внешнее. Пакет установлен в режиме
+      # редактирования (`graphrag_proto.pth` -> `/app/src`), поэтому том перекрывает путь
+      # импорта и правила кандидатов всегда те, что в рабочей копии. Без этого тома образ
+      # молча отдаёт результат по старому коду: команда успешна, данные чужие.
       - type: bind
-        source: ${PRE_INGEST_SRC:-../docs}
+        source: ../src
+        target: /app/src
+        read_only: true
+      - type: bind
+        # Путь относительно каталога этого файла (`infra/`), поэтому до корня репозитория
+        # два уровня вверх. Прежний `../docs` разрешался в `prototype/docs`, где нет ни
+        # одного `.md`, и давал `в папке нет .md` - пустой результат вместо ошибки.
+        source: ${PRE_INGEST_SRC:-../../docs}
         target: /data/src
         read_only: true
       - type: bind
-        source: ${PRE_INGEST_DST:-../pre-ingest}
+        source: ${PRE_INGEST_DST:-../../pre-ingest}
         target: /data/dst
     command: ["--src", "/data/src", "--dst", "/data/dst"]
     # Стадия одноразовая: без сети она всё равно работает, потому что модель NER лежит
