@@ -3,11 +3,11 @@
   "source_sha256": "7fa30d231fae5350ff75acf42c10f346a5573356f5cdf2ab56700ec0863977af",
   "source_bytes": 106251,
   "generated_by": "natasha+CANDIDATE_PATTERNS",
-  "generated_at": "2026-10-05T14:53:40+00:00",
-  "count": 372,
+  "generated_at": "2026-10-11T04:31:40+00:00",
+  "count": 376,
   "counts": {
-    "by_rule": 364,
-    "by_ner_only": 13
+    "by_rule": 369,
+    "by_ner_only": 12
   },
   "candidates": [
     "01_ontology_and_domain_profile.md",
@@ -96,6 +96,7 @@
     "concurrent-ingest-write-policy",
     "concurrent-ingest-write-policy/tasks.md",
     "conditional",
+    "Config Service",
     "connectors",
     "connectors/base.py",
     "connectors_guide.md",
@@ -138,6 +139,7 @@
     "e-discovery",
     "edge_types",
     "endpoints_resolved",
+    "Entity Resolution",
     "entity_edges",
     "entry_points",
     "eval-graph-contribution-experiment",
@@ -290,6 +292,7 @@
     "qa_log.jsonl",
     "Qdrant",
     "QdrantVectorStore",
+    "Query Worker",
     "QUERY_GUARDS",
     "query_service",
     "query_service/revision_client.py",
@@ -370,6 +373,7 @@
     "unique_key",
     "update_stage",
     "upload",
+    "User Guide",
     "validation.rules",
     "vector_fingerprint",
     "vector_store",

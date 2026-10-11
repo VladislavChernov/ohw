@@ -3,14 +3,15 @@
   "source_sha256": "f41123e3453f921d803efd76d89a9a53d57f69eb694080829ce9301a38e9fb84",
   "source_bytes": 11859,
   "generated_by": "natasha+CANDIDATE_PATTERNS",
-  "generated_at": "2026-10-05T14:53:39+00:00",
-  "count": 81,
+  "generated_at": "2026-10-11T04:31:39+00:00",
+  "count": 83,
   "counts": {
-    "by_rule": 79,
+    "by_rule": 81,
     "by_ner_only": 4
   },
   "candidates": [
     "ABC",
+    "Adapter Guide",
     "adapters",
     "adapters.yaml",
     "adapters_specification.md",
@@ -25,6 +26,7 @@
     "BgeM3ServiceAdapter",
     "BgeRerankerAdapter",
     "chunk_id",
+    "Cohere Rerank",
     "CohereRerankAdapter",
     "CONCEPT",
     "CONCEPT.md",

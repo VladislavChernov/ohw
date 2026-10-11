@@ -3,14 +3,15 @@
   "source_sha256": "f154d2e2631fa9facb2676cc8df372dd9596b1eb8322241c09df7f961a3c4612",
   "source_bytes": 13905,
   "generated_by": "natasha+CANDIDATE_PATTERNS",
-  "generated_at": "2026-10-05T14:53:39+00:00",
-  "count": 90,
+  "generated_at": "2026-10-11T04:31:39+00:00",
+  "count": 92,
   "counts": {
-    "by_rule": 84,
-    "by_ner_only": 9
+    "by_rule": 87,
+    "by_ner_only": 8
   },
   "candidates": [
     "ABC",
+    "Adapters Management",
     "adapters_guide.md",
     "add-source-connectors",
     "ADR",
@@ -89,6 +90,7 @@
     "SourceProvider",
     "SourceRef",
     "tasks.md",
+    "Test Management Systems",
     "TestRail",
     "txt",
     "uv run pytest -q",

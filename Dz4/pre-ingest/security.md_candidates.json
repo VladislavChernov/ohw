@@ -3,14 +3,15 @@
   "source_sha256": "483fa3977b463b3ea2662c5ebe2f5cce653b05a2a73189f6ca354c71f9fb8b71",
   "source_bytes": 9842,
   "generated_by": "natasha+CANDIDATE_PATTERNS",
-  "generated_at": "2026-10-05T14:53:42+00:00",
-  "count": 50,
+  "generated_at": "2026-10-11T04:31:43+00:00",
+  "count": 54,
   "counts": {
-    "by_rule": 49,
-    "by_ner_only": 1
+    "by_rule": 54,
+    "by_ner_only": 0
   },
   "candidates": [
     "401 Unauthorized",
+    "Active Directory",
     "ADR",
     "ADR-017",
     "ADR-019",
@@ -22,6 +23,7 @@
     "Authorization",
     "changeme",
     "CLI",
+    "Coder Abliterate",
     "Config Service",
     "configurator",
     "docs/05_adr_log.md",
@@ -55,10 +57,12 @@
     "prototype_requirements.md",
     "prototype_requirements.md §2",
     "q4_K_M",
+    "Query Worker",
     "QUERY_GUARDS",
     "RedactingFilter",
     "security.py",
     "TLS",
+    "Topology Orchestrator",
     "X-API-Key"
   ]
 }

@@ -3,10 +3,10 @@
   "source_sha256": "132eb420c4aba9db05f9419c55e286ccf829a0458cb711cefa02a3301849bbb8",
   "source_bytes": 117233,
   "generated_by": "natasha+CANDIDATE_PATTERNS",
-  "generated_at": "2026-10-05T14:53:43+00:00",
-  "count": 390,
+  "generated_at": "2026-10-11T04:31:43+00:00",
+  "count": 391,
   "counts": {
-    "by_rule": 390,
+    "by_rule": 391,
     "by_ner_only": 6
   },
   "candidates": [
@@ -32,6 +32,7 @@
     "ADR-046",
     "ALCE",
     "answer",
+    "Apache Airflow",
     "API",
     "app.py",
     "as_of",

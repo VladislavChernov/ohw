@@ -3,11 +3,11 @@
   "source_sha256": "bcce4e917f99d05481006770ccc5f62ecabe08f45cd5ad16f032ddfe4ac29789",
   "source_bytes": 65210,
   "generated_by": "natasha+CANDIDATE_PATTERNS",
-  "generated_at": "2026-10-05T14:53:35+00:00",
-  "count": 199,
+  "generated_at": "2026-10-11T04:31:27+00:00",
+  "count": 200,
   "counts": {
-    "by_rule": 198,
-    "by_ner_only": 5
+    "by_rule": 200,
+    "by_ner_only": 4
   },
   "candidates": [
     "01_ontology",
@@ -49,6 +49,7 @@
     "CommitStage",
     "CommitStage.try_noop",
     "confidence",
+    "Config Service",
     "config_fingerprint",
     "content_hash",
     "context_ids",
