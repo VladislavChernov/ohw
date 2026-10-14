@@ -161,8 +161,9 @@ Query API Gateway совмещает роль **MCP-шлюза** для авто
 | Метод | Путь | Назначение |
 |-------|------|------------|
 | POST | `/api/v1/ingestion/documents` | Загрузка документа; обязательны `source_url`, `domain`, `doc_type`; optional `tags`, `links`, `metadata`. Ответ `202` — `{job_id, status, created_at}` |
+| POST | `/api/v1/ingestion/documents/status` | «Загружен ли документ в текущем виде?» без загрузки и без джобы. Обязательны `source_url`, `domain`, `doc_type`, `content`. Ответ — `{content_hash, known, unchanged, version, doc_id}`. Ничего не пишет и не создаёт |
 | GET | `/api/v1/ingestion/jobs` | Список джоб индексации (пагинация: `page`, `page_size`) |
-| GET | `/api/v1/ingestion/jobs/{job_id}` | Статус джобы: `{job_id, status, stage}` |
+| GET | `/api/v1/ingestion/jobs/{job_id}` | Статус джобы: `{job_id, status, stage}`, список стадий `stages`, длительности `stage_durations_ms` (по стадиям) и `total_duration_ms` (сумма) |
 | DELETE | `/api/v1/ingestion/jobs/{job_id}` | Отмена джобы (освобождение GPU) |
 | DELETE | `/api/v1/ingestion/documents?domain=&source_url=` | Soft-delete источника: чанки снимаются с поиска, context nodes сохраняются при активном provenance |
 
@@ -170,6 +171,13 @@ Query API Gateway совмещает роль **MCP-шлюза** для авто
 имеет degraded/quarantine status и не превращает primitive ingest в failure. Offline graph
 rebuild запускается отдельной operator job-командой и не является обязательным публичным API
 этапа baseline.
+
+**Почему `/documents/status` считает хэш сам, а не принимает его от вызывающей стороны.**
+Для markdown `content_hash` зависит от разбиения на блоки, а оно переключается переменной
+`MD_KEEP_CODE_SPLIT` (ADR-054). Если бы хэш считался на стороне вызывающей, она могла бы
+получить другую величину — и `unchanged` всегда был бы `false`, то есть отсечка не сработала
+бы ни разу, молча и без следов. Здесь единственный источник — тот же ридер, которым считает
+реестр.
 
 **Выход INGEST:** canonical `Document { source_id, source_url, domain, doc_type, content_hash,
 blocks }`; graph enrichment и vector metadata — отдельные проекции.

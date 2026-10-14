@@ -106,7 +106,7 @@ def main() -> int:
 
     failed = [j for j in snapshot if j.get("status") == "failed"]
     succeeded = [j for j in snapshot if j.get("status") == "succeeded"]
-    print(f"\n=== ИТОГ ===")
+    print("\n=== ИТОГ ===")
     print(f"джоб succeeded : {len(succeeded)}")
     print(f"джоб failed    : {len(failed)}")
     for job in failed[:10]:

@@ -18,12 +18,12 @@ from pathlib import Path
 import pytest
 
 from graphrag_proto.ingestion_service.pipeline.candidates import (
-    CANDIDATES_DIR_ENV,
     CandidateList,
-    CandidateListConfigError,
     CandidateListStaleError,
-    candidates_dir_from_env,
+    CandidatesProductionError,
+    candidates_path_for_document,
     load_candidates,
+    produce_candidates,
 )
 from graphrag_proto.ingestion_service.pipeline.orchestrator import PipelineContext
 from graphrag_proto.ingestion_service.pipeline.prompt_renderer import (
@@ -39,6 +39,12 @@ def write_document(tmp_path: Path, text: str) -> Path:
 
 
 def write_candidates(directory: Path, source: str, text: str, candidates: list[str]) -> Path:
+    """Кладёт список кандидатов по тем же правилам, что и пайплайн.
+
+    Имя файла берётся из `candidates_path_for_document`, а не собирается здесь: второе
+    определение пути разошлось бы с кодом при первом же изменении и упало бы в тесте
+    непонятно где.
+    """
     envelope = {
         "source": source,
         "source_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -46,7 +52,7 @@ def write_candidates(directory: Path, source: str, text: str, candidates: list[s
         "candidates": candidates,
     }
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{source}_candidates.json"
+    path = candidates_path_for_document(directory / source)
     path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
     return path
 
@@ -54,63 +60,75 @@ def write_candidates(directory: Path, source: str, text: str, candidates: list[s
 pytestmark = pytest.mark.usefixtures("candidate_env_setup")
 
 
-def test_list_is_found_and_carries_sha256(tmp_path: Path) -> None:
+def test_list_is_found_next_to_the_document(tmp_path: Path) -> None:
+    """Список лежит РЯДОМ с документом, и путь выводится из файла (ADR-053, 2026-10-14)."""
     text = "Document Registry построен поверх Glossary Service."
     document = write_document(tmp_path, text)
-    directory = tmp_path / "candidates"
-    write_candidates(directory, document.name, text, ["Document Registry", "Glossary Service"])
+    write_candidates(document.parent, document.name, text, ["Document Registry", "Glossary Service"])
 
-    loaded = load_candidates(directory, document.name, text)
+    loaded = load_candidates(document, text)
 
-    assert loaded is not None
     assert loaded.source == document.name
     assert loaded.candidates == ("Document Registry", "Glossary Service")
     assert loaded.source_sha256 == hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert candidates_path_for_document(document).parent == document.parent
 
 
-def test_missing_list_is_vector_only_mode_not_failure(tmp_path: Path) -> None:
-    text = "что-то"
-    document = write_document(tmp_path, text)
+def test_missing_list_is_a_named_failure_not_vector_only(tmp_path: Path) -> None:
+    """Отсутствие списка — отказ, а не режим.
 
-    assert load_candidates(tmp_path / "empty", document.name, text) is None
-
-
-def test_unset_directory_is_a_config_error_not_a_silent_vector(tmp_path: Path) -> None:
-    """Ненастроенная папка - ошибка, а не «списка нет».
-
-    Иначе стенд без `CANDIDATES_DIR` отработал бы целиком в векторе и выглядел бы
-    исправным: отчёт показал бы успех, графа не было бы ни одного. Различие принципиально:
-    «у документа нет своего списка» - решённый режим, «стадия не запускалась» - ошибка.
+    До решения от 2026-10-14 это был режим `vector_only` со статусом `succeeded`: джоба
+    выглядела обработанной при пустом графе. Теперь такой исход невозможен, и проверка
+    утверждает именно отказ с поимённой причиной.
     """
     text = "что-то"
     document = write_document(tmp_path, text)
 
-    with pytest.raises(CandidateListConfigError):
-        load_candidates(None, document.name, text)
+    with pytest.raises(CandidatesProductionError) as caught:
+        load_candidates(document, text)
+
+    assert "ADR-052" in str(caught.value), "причина обязана называть, чем грозит список"
 
 
-def test_missing_list_can_be_made_an_error(tmp_path: Path) -> None:
-    text = "что-то"
-    document = write_document(tmp_path, text)
-
-    with pytest.raises(FileNotFoundError):
-        load_candidates(tmp_path / "empty", document.name, text, on_missing="error")
+def test_missing_document_path_is_a_config_error(tmp_path: Path) -> None:
+    """Файла документа нет — значит негде положить и список. Это ошибка вызывающего."""
+    with pytest.raises(CandidatesProductionError):
+        produce_candidates(tmp_path / "нет-такого" / "doc.md", "что-то")
 
 
 def test_changed_document_is_refused(tmp_path: Path) -> None:
     """Ключевой инвариант: список от другой версии документа обязан быть отвергнут.
 
-    Без этой проверки разбор молча идёт по чужому списку: граф получается правдоподобным,
-    и виноватым выглядит разбор, а не устаревший список.
+    Сверка `sha256` сохранена намеренно. Теперь файл кладёт сам пайплайн, поэтому в обычном
+    пути равенство истинно по построению — и именно поэтому проверка ловит другое:
+    оборванную или подложенную запись. Работа по чужому списку дала бы правдоподобный, но
+    неверный граф, и виноватым выглядел бы разбор.
     """
     old_text = "Document Registry и Glossary Service."
     document = write_document(tmp_path, old_text)
-    directory = tmp_path / "candidates"
-    write_candidates(directory, document.name, old_text, ["Document Registry"])
+    write_candidates(document.parent, document.name, old_text, ["Document Registry"])
 
     new_text = old_text + " Добавлен VectorStore."
     with pytest.raises(CandidateListStaleError):
-        load_candidates(directory, document.name, new_text)
+        load_candidates(document, new_text)
+
+
+def test_empty_candidate_list_means_prohibition_not_failure(tmp_path: Path) -> None:
+    """Пустой список — законное состояние, а не отказ.
+
+    ADR-053, Дополнение 4: при пустом списке ограничение НЕ исчезает, а становится строже —
+    придумывать нельзя НИЧЕГО. Валить загрузку документа, в котором просто нет имён,
+    означало бы запретить грузить законные документы.
+    """
+    text = "что-то"
+    document = write_document(tmp_path, text)
+    write_candidates(document.parent, document.name, text, [])
+
+    loaded = load_candidates(document, text)
+
+    assert loaded.candidates == (), "список пуст - и это состояние, а не сбой"
+    block = render_candidates_block(loaded.candidates, declared_types=["Concept"])
+    assert "НЕ ВЫДАВАТЬ" in block, "пустой список обязан давать полный запрет, а не пустоту"
 
 
 def test_candidates_are_narrowed_to_the_chunk() -> None:
@@ -126,12 +144,17 @@ def test_candidates_are_narrowed_to_the_chunk() -> None:
     assert in_chunk == ("IngestStage", "VectorStore")
 
 
-def test_env_directory_absent_means_no_candidates() -> None:
-    assert candidates_dir_from_env({}) is None
-    assert candidates_dir_from_env({CANDIDATES_DIR_ENV: "  "}) is None
-    assert candidates_dir_from_env({CANDIDATES_DIR_ENV: "/data/pre-ingest"}) == Path(
-        "/data/pre-ingest"
-    )
+def test_candidates_path_follows_the_document_not_a_setting(tmp_path: Path) -> None:
+    """Путь к списку выводится из файла документа, а не приходит снаружи.
+
+    Проверяется именно это: пока путь приходил из `CANDIDATES_DIR`, папка могла оказаться
+    пустой, и пайплайн молча уходил в vector-only (ADR-053, решение от 2026-10-14).
+    """
+    document = tmp_path / "j-42.md"
+
+    assert candidates_path_for_document(document) == tmp_path / "j-42_candidates.json"
+    other = tmp_path / "вложенный" / "j-7.md"
+    assert candidates_path_for_document(other) == tmp_path / "вложенный" / "j-7_candidates.json"
 
 
 def test_prompt_block_lists_names_and_declares_types() -> None:
@@ -340,6 +363,10 @@ def test_chunk_without_candidates_is_sent_with_a_hard_prohibition(monkeypatch: p
         domain="it",
         doc_type="txt",
         source_url="src://empty-chunk.txt",
+        # Текст документа содержит имя, а чанк - нет. Именно это и создаёт разрыв: список
+        # документа непуст, и пайплайн получает его сам, но конкретный чанк в него не
+        # попадает. Текст без единого имени падал бы раньше - на пустом списке документа.
+        raw_text="IngestStage обрабатывает документы.",
         chunks=["просто текст без имён"],
     )
     ctx = candidate_env(ctx, ["IngestStage"])
@@ -364,12 +391,11 @@ def test_chunk_without_candidates_is_sent_with_a_hard_prohibition(monkeypatch: p
 
     assert ctx.chunks_total == 1
     assert ctx.chunks_without_candidates == 1, "факт обязан считаться, а не теряться"
-"""Решение владельца: нет списка - грузим только вектор (ADR-053).
 
-Проверяются ОБЕ оси, а не одна: главный риск здесь в том, что при отсутствии
-списка всё выглядит исправно - вектора-то записались, - но графа при этом не
-существует. Поэтому тест требует отсутствия нод в графе И наличия векторов.
-"""
+
+# Дальше - полный конвейер на in-memory сторах. Прежний сценарий «документ без списка
+# грузится только в вектор» удалён решением от 2026-10-14: такой джоба была бы `succeeded`
+# при пустом графе - ложный успех, который ADR-053 сформулировал.
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     Analyzer,
     ChunkStage,
@@ -391,11 +417,17 @@ from graphrag_proto.retrieval.adapters.inmemory import (
 )
 
 
-def test_document_without_candidates_is_written_as_vectors_only(
+def test_pipeline_produces_candidates_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Загрузка без подготовки: пайплайн сам получает кандидатов и строит граф.
+
+    Главное проверяемое свойство после решения от 2026-10-14: **оператору ничего готовить
+    не надо**. Раньше требовался отдельный запуск стадии, и её отсутствие давало тихий
+    vector-only при статусе `succeeded`. Теперь список производится здесь, перед `EXTRACT`.
+    """
     monkeypatch.setenv("EXTRACT_LLM", "true")
-    registry = DocumentRegistry(tmp_path / "vector-only.db")
+    registry = DocumentRegistry(tmp_path / "self-produced.db")
     graph, vector = InMemoryGraphStore(), InMemoryVectorStore()
     profile = {
         "extraction": {
@@ -414,7 +446,7 @@ def test_document_without_candidates_is_written_as_vectors_only(
             IngestStage({"txt": TxtReader()}),
             ChunkStage(),
             EmbedStage(),
-            ExtractStage(llm=_SilentLLM(), optional_failure=True),
+            ExtractStage(llm=_OneAnswerLLM(json.dumps({"tags": [], "relationships": []})), optional_failure=True),
             NormalizeStage(""),
             DedupStage(),
             ContractStage(),
@@ -429,25 +461,25 @@ def test_document_without_candidates_is_written_as_vectors_only(
         ],
         profile_fetcher=lambda _domain: profile,
     )
-    source = tmp_path / "no-list.txt"
-    source.write_text("требование индексировать документы", encoding="utf-8")
-    # Папка кандидатов настроена фикстурой модуля, но своего списка у документа нет:
-    # это решённый режим, а не сбой.
+    source = tmp_path / "self.txt"
+    source.write_text("Document Registry построен поверх Glossary Service.", encoding="utf-8")
+    # Кандидатов НЕ кладём: их должен получить пайплайн.
     ctx = PipelineContext(
         job_id="j",
         domain="it",
         doc_type="txt",
-        source_url="src://no-list.txt",
+        source_url="src://self.txt",
         source_path=str(source),
     )
 
     analyzer.run(ctx)
 
-    assert ctx.candidates_absent is True
-    assert vector._vectors, "вектора обязаны быть записаны: ради них документ и грузится"
-    assert not graph.list_chunk_ids_of_source("src://no-list.txt", "it"), (
-        "без списка кандидатов графовая ось не строится: иначе модель выдаст выдумку"
+    produced = candidates_path_for_document(source)
+    assert produced.is_file(), "пайплайн обязан оставить файл кандидатов рядом с документом"
+    assert ctx.candidates_total and ctx.candidates_total > 0, (
+        "список получен и непуст, иначе разбор шёл бы с запретом называть что-либо"
     )
+    assert ctx.candidates_absent is False, "отсутствия списка больше не бывает"
 
 
 def test_candidates_are_not_filtered_by_ontology_types() -> None:

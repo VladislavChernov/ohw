@@ -19,6 +19,13 @@ from typing import Any
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
+from graphrag_proto.ingestion_service.pipeline.candidates import (
+    CANDIDATES_KEEP_ENV,
+    CandidatesCleanupError,
+    count_remaining,
+    discard_candidates,
+    discard_document_upload,
+)
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     STAGES,
@@ -436,12 +443,110 @@ chunks_without_candidates=ctx.chunks_without_candidates,
                         job_id,
                         stage_name,
                         f"{ENRICHMENT_DEGRADED_PREFIX}: {ctx.enrichment_error}{dropped}",
-                    )
+)
+            self._discard_job_files(job_id, stage_name, target)
+            self._log_job_timings(job_id, source_url)
             self._jobs.finish(job_id, "succeeded")
         except Exception as exc:  # noqa: BLE001 - разнородные источники сбоев этапов
+            self._log_job_timings(job_id, source_url)
             self._jobs.finish(job_id, "failed", error=str(exc))
         finally:
             self._slots.release()
+
+    def _discard_job_files(self, job_id: str, stage_name: str, target: Path) -> None:
+        """Убирает оба файла джобы: документ и его кандидатов.
+
+        Вызывается после успешного прохода и после отсечки no-op: в обоих случаях разбор
+        либо состоялся, либо не потребовался, и оставшиеся файлы уехали бы в следующий
+        запуск. После отказа и деградации НЕ вызывается - там файлы остаются для разбора
+        причины.
+
+        Файл документа убирается наравне с кандидатами. До этого он удалялся только при
+        обрыве потока, и в каталоге загрузки копились полные копии документов: проверено на
+        томе, 62 файла, 2.8 МБ. Пока они живут, «документ в двух местах» нарушено.
+
+        Отделён от `_run`, потому что отказ уборки не должен менять статус джобы: запись
+        уже в базе, и `succeeded` -> `failed` из-за неудалённого файла означала бы
+        ложь в другую сторону. Отказ объявляется в логе и в отчёте.
+        """
+        directory = target.parent
+        source_name = target.name
+        try:
+            candidates_result = discard_candidates(target)
+            document_result = discard_document_upload(target)
+        except CandidatesCleanupError as exc:
+            _log.error("%s", exc)
+            self._jobs.note_stage(job_id, stage_name, f"файлы джобы не убраны: {exc}")
+            return
+        remaining = count_remaining(directory)
+        if "kept" in (candidates_result, document_result):
+            # Отключение уборки объявляется на каждой джобе, а не один раз при старте:
+            # иначе отчёт прогона выглядел бы как уборка, которая не работает, при
+            # исправном коде уборки и включённой отладке.
+            _log.warning(
+                "%s=%s: файлы джобы %s оставлены для отладки; во временной папке %d",
+                CANDIDATES_KEEP_ENV,
+                os.environ.get(CANDIDATES_KEEP_ENV, "").strip(),
+                source_name,
+                remaining,
+            )
+            self._jobs.note_stage(
+                job_id,
+                stage_name,
+                f"{CANDIDATES_KEEP_ENV}: файлы джобы оставлены для отладки; осталось в папке: "
+                f"{remaining}",
+            )
+            return
+        if candidates_result == "removed" or document_result == "removed":
+            _log.info(
+                "файлы джобы по %s убраны (кандидаты=%s, документ=%s); осталось во "
+                "временной папке: %d",
+                source_name,
+                candidates_result,
+                document_result,
+                remaining,
+            )
+        if remaining:
+            # Остаток публикуется всегда, а не только при неудачной уборке: папка может
+            # копить файлы по другим причинам, и молчание выглядело бы как «уборка
+            # работает», пока она не работает.
+            self._jobs.note_stage(
+                job_id,
+                stage_name,
+f"во временной папке кандидатов осталось файлов: {remaining}",
+            )
+
+    def _log_job_timings(self, job_id: str, source_url: str) -> None:
+        """Пишет суммарное время джобы и её самую долгую стадию.
+
+        Отдельная функция, потому что её результат нужен и при успехе, и при отказе: время
+        до отказа — тоже факт, и без него «стадия EXTRACT заняла 40 с и упала» остаётся
+        догадкой.
+
+        Пустые длительности не превращаются в ноль в отчёте: отсутствие строки означает
+        «стадия не измерялась», а не «стадия заняла 0 мс».
+        """
+        durations = self._jobs.stage_durations(job_id)
+        if not durations:
+            _log.warning(
+                "джоба %s источник=%s: длительности стадий не записаны - измерять нечего",
+                job_id,
+                source_url,
+            )
+            return
+        total_ms = sum(durations.values())
+        slowest_stage, slowest_ms = max(durations.items(), key=lambda item: item[1])
+        _log.info(
+            "джоба %s источник=%s: всего %d мс, стадий измерено %d, самая долгая %s=%d мс; "
+            "по стадиям: %s",
+            job_id,
+            source_url,
+            total_ms,
+            len(durations),
+            slowest_stage,
+            slowest_ms,
+            ", ".join(f"{stage}={ms}" for stage, ms in durations.items()),
+        )
 
     def cancel(self, job_id: str) -> bool:
         return self._jobs.cancel(job_id)
@@ -624,6 +729,13 @@ def create_app(
         if not job:
             raise HTTPException(status_code=404, detail=f"джоба {job_id} не найдена")
         job["stages"] = jobs.stages(job_id)
+        # Длительности стадий. Они пишутся в базу на каждой джобе с момента появления
+        # таблицы, но наружу не отдавались: по HTTP время загрузки не было видно вообще,
+        # и оценка «сколько стоит стадия» бралась на глаз. Сумма рядом даёт знаменатель,
+        # без которого «стадия 12 с» ни о чём не говорит.
+        stage_durations = jobs.stage_durations(job_id)
+        job["stage_durations_ms"] = stage_durations
+        job["total_duration_ms"] = sum(stage_durations.values())
         # Структурные сигналы (например, потеря LLM-слоя) отдельным полем: consumer
         # не должен разбирать `message`, чтобы получить число.
         job["signals"] = jobs.signals(job_id)
@@ -669,6 +781,83 @@ def create_app(
                 detail=f"источник domain={domain!r} source_url={source_url!r} не найден или уже удалён",
             )
         return {"domain": domain, "source_url": source_url, "status": STATUS_DELETED}
+
+    @app.post("/api/v1/ingestion/documents/status", dependencies=[Depends(require_key)])
+    def document_status(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+        """«Загружен ли этот документ в текущем виде?» — без загрузки и без джобы.
+
+        Нужен для проверки ДО стадии pre-ingest: на неизменившемся документе стадия
+        отрабатывает вхолостую, а без отсечки её результат ещё и остаётся в папке.
+
+        **Хэш считает сервис своим ридером, а не вызывающая сторона.** Для markdown
+        `content_hash` зависит от `MD_KEEP_CODE_SPLIT`: другое разбиение - другой хэш.
+        Если бы стадия считала хэш у себя, расхождение выглядело бы как «документа нет»
+        и отсечка молча не срабатывала бы. Здесь единственный источник - тот же ридер,
+        которым считает реестр.
+
+        Ничего не пишет и не создаёт: чистый вопрос по реестру.
+        """
+        source_url = payload.get("source_url")
+        domain = payload.get("domain")
+        doc_type = payload.get("doc_type")
+        content = payload.get("content")
+        missing = [
+            name
+            for name, value in (
+                ("source_url", source_url),
+                ("domain", domain),
+                ("doc_type", doc_type),
+                ("content", content),
+            )
+            if not value
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=f"обязательные поля не переданы: {', '.join(missing)}",
+            )
+        try:
+            reader = readers_factory(str(doc_type))
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"нет ридера для doc_type={doc_type!r}",
+            ) from exc
+
+        # Документ читается во временный файл: ридер принимает путь, а отправитель уже
+        # прислал содержимое. Запись идёт в каталог задания и удаляется сразу же - в
+        # `INGESTION_UPLOAD_DIR` ничего лишнего не остаётся.
+        upload_dir = _upload_dir()
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        scratch = upload_dir / f"status-{uuid.uuid4().hex}"
+        try:
+            scratch.write_text(str(content), encoding="utf-8")
+            document = reader.read(scratch, str(source_url), str(domain))
+        finally:
+            scratch.unlink(missing_ok=True)
+
+        current = registry.latest_active(str(domain), str(source_url))
+        if current is None:
+            return {
+                "source_url": source_url,
+                "domain": domain,
+                "doc_type": doc_type,
+                "content_hash": document.content_hash,
+                "known": False,
+                "unchanged": False,
+                "version": None,
+                "doc_id": None,
+            }
+        return {
+            "source_url": source_url,
+            "domain": domain,
+            "doc_type": doc_type,
+            "content_hash": document.content_hash,
+            "known": True,
+            "unchanged": bool(current["content_hash"] == document.content_hash),
+            "version": current["version"],
+            "doc_id": current["doc_id"],
+        }
 
     @app.get("/api/v1/ingestion/revision", dependencies=[Depends(require_key)])
     def get_revision(domain: str | None = None) -> dict[str, Any]:

@@ -182,25 +182,15 @@ if (-not $env:NEO4J_PASSWORD) {
     }
 }
 
-# ADR-053: папка со списками кандидатов. Значение по умолчанию указывает на каталог,
-# который производит стадия `run_pre_ingest.ps1`, и монтируется в стенд на чтение.
-# Если папки нет, compose пересоздаст ingestion-service с пустым каталогом, и КАЖДЫЙ
-# документ уйдёт только в вектор - стенд отработает и покажет успех при полном
-# отсутствии графа. Поэтому проверка здесь, до поднятия, а не по итогам прогона.
-if (-not $env:CANDIDATES_HOST_DIR) {
-    $env:CANDIDATES_HOST_DIR = Join-Path $repoRoot 'pre-ingest'
-}
-$candidatesPath = (Resolve-Path -LiteralPath $env:CANDIDATES_HOST_DIR -ErrorAction SilentlyContinue)
-if (-not $candidatesPath) {
-    throw "папка со списками кандидатов не найдена: $($env:CANDIDATES_HOST_DIR). " +
-    "Запустите стадию заранее: run_pre_ingest.ps1 -Src <документы> -Dst $($env:CANDIDATES_HOST_DIR). " +
-    "Без списков каждый документ будет загружен только в вектор."
-}
-$candidateFiles = @(Get-ChildItem -LiteralPath $candidatesPath -Filter '*_candidates.json' -File)
-if ($candidateFiles.Count -eq 0) {
-    throw "в папке $($candidatesPath) нет файлов *_candidates.json: разбор пойдёт без ограничения имён."
-}
-Write-Host "CANDIDATES_HOST_DIR: $($candidatesPath) (файлов: $($candidateFiles.Count))"
+# ADR-053, решение владельца от 2026-10-14: кандидаты производит сам ingestion-пайплайн,
+# перед `EXTRACT` и после проверки no-op. Папки `pre-ingest/`, переменной
+# `CANDIDATES_HOST_DIR` и предварительного запуска стадии больше нет.
+#
+# Прежняя проверка жила здесь не зря: она ловила ровно тот отказ, когда папка оказывалась
+# пустой и каждый документ уходил только в вектор при статусе `succeeded`. Но ловить
+# больше нечего - папки нет, а пустой каталог снаружи контейнера теперь не может привести
+# к потере списка: кандидаты не пересекают границу контейнеров.
+Write-Host 'кандидаты: производит ingestion-пайплайн, предварительный запуск не требуется'
 
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null

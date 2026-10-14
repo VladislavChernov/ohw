@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 
 from graphrag_proto.demo_ui.client import DemoClient, Settings
-from graphrag_proto.ingestion_service.pipeline.candidates import CANDIDATES_DIR_ENV
 from graphrag_proto.pre_ingest.generate import rule_candidates
 
 # Имя модели LLM обязано приходить из окружения: в коде больше нет зашитого имени,
@@ -118,22 +117,21 @@ _LISTS_DIR: Path | None = None
 @pytest.fixture()
 def candidate_env_setup(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,
 ) -> None:
-    """Готовит папку списков кандидатов на время теста.
+    """Готовит кандидатов рядом с документами на время теста.
 
     Объявляется через `pytestmark` в файлах, где идёт извлечение. Не автоскупная: папка
-    кандидатов не должна появляться у тестов, которые её не проверяют, иначе пустой
-    список начал бы молча переводить их в режим «только вектор».
+    кандидатов не должна появляться у тестов, которые её не проверяют.
+
+    С 2026-10-14 кандидаты лежат РЯДОМ с файлом документа, а не в отдельной папке, и путь
+    никуда не задаётся снаружи (ADR-053). Фикстура кладёт файл туда же, куда его положил бы
+    пайплайн, поэтому проверки `load_candidates` видят то же, что увидит разбор.
     """
     global _FACTORY, _LISTS_DIR
-    lists_dir = tmp_path / "candidates"
     documents = tmp_path / "documents"
-    lists_dir.mkdir(parents=True, exist_ok=True)
     documents.mkdir(parents=True, exist_ok=True)
-    _LISTS_DIR = lists_dir
-    monkeypatch.setenv(CANDIDATES_DIR_ENV, str(lists_dir))
+    _LISTS_DIR = documents
 
     def factory(ctx: Any, candidates: list[str] | None = None) -> Any:
         # Текст берётся из файла документа, если он уже есть. Чанками пользоваться нельзя:
@@ -156,7 +154,7 @@ def candidate_env_setup(
         # против выдуманного набора имён, а не против того, что на самом деле нашлось
         # в тексте.
         names = sorted(rule_candidates(text)) if candidates is None else candidates
-        write_candidate_envelope(lists_dir, source_name, text, names)
+        write_candidate_envelope(document.parent, document.name, text, names)
         ctx.raw_text = text
         return ctx
 
@@ -201,4 +199,5 @@ def candidate_env_for(path: Path, candidates: list[str] | None = None) -> None:
         )
     text = path.read_text(encoding="utf-8")
     names = sorted(rule_candidates(text)) if candidates is None else candidates
-    write_candidate_envelope(_LISTS_DIR, path.name, text, names)
+    # Рядом с документом: путь выводится из файла, отдельной папки больше нет.
+    write_candidate_envelope(path.parent, path.name, text, names)

@@ -363,6 +363,11 @@ def test_executor_loads_profile_once_per_job(tmp_path: Path) -> None:
     jobs.create("job", "src://profile.txt", "it", "txt")
     assert executor.start_reserved_guarded("job", source, "src://profile.txt", "it", "txt") is True
     assert wait_until(lambda: jobs.get("job")["status"] == "succeeded")
+    # Тот же `source_url` с тем же содержимым = no-op. Содержимое обязано совпадать с первой
+    # джобой: другой текст - это другой документ, и отсечка не сработает.
+    # Файл пересоздаётся: первая джоба убрала его как временный.
+    source.write_text("тест документа", encoding="utf-8")
+    candidate_env_for(source)
     jobs.create("job-noop", "src://profile.txt", "it", "txt")
     assert executor.start_reserved_guarded("job-noop", source, "src://profile.txt", "it", "txt") is True
     assert wait_until(lambda: jobs.get("job-noop")["status"] == "succeeded")

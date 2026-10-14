@@ -24,11 +24,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from itertools import pairwise
+from pathlib import Path
 from typing import Any, TypeVar
 
 from graphrag_proto.ingestion_service.pipeline.candidates import (
-    candidates_dir_from_env,
+    CandidatesProductionError,
     load_candidates,
+    produce_candidates,
 )
 from graphrag_proto.ingestion_service.pipeline.chunker import (
     Chunker,
@@ -1146,20 +1148,26 @@ class ExtractStage(Stage):
         llm = self._llm
         if llm is None:
             raise ExtractionConfigError("EXTRACT: LLM adapter is required for profile extraction")
-        # Список кандидатов документа (ADR-053). Без него разбор не выполняется вовсе:
-        # решение владельца - документ без списка грузится только в вектор.
-        candidate_list = load_candidates(
-            candidates_dir_from_env(),
-            str(ctx.source_url).rsplit("/", 1)[-1],
-            ctx.raw_text or "",
-        )
-        if candidate_list is None:
-            ctx.candidates_absent = True
-            _log.warning(
-                "кандидаты для %s не найдены, документ грузится только в вектор",
-                ctx.source_url,
+        # Список кандидатов документа (ADR-053, решение владельца от 2026-10-14). Его производит
+        # сам пайплайн, прямо здесь: до правки список лежал в папке и требовал ручного запуска
+        # стадии, а отсутствие файла означало тихий уход в vector-only со статусом
+        # `succeeded`. Теперь файла нет «просто так», а список получен из того же текста,
+        # который идёт в разбор.
+        #
+        # Стадия не запускается на неизменившемся документе: до этой точки доходит только
+        # джоба, не отсечённая no-op, - иначе NER отрабатывал бы вхолостую.
+        if not ctx.source_path:
+            raise CandidatesProductionError(
+                f"неизвестен файл документа для {ctx.source_url}: негде положить кандидатов"
             )
-            return
+        document_path = Path(ctx.source_path)
+        produced_at = produce_candidates(document_path, ctx.raw_text or "")
+        _log.info(
+            "кандидаты для %s получены и положены рядом с документом: %s",
+            ctx.source_url,
+            produced_at,
+        )
+        candidate_list = load_candidates(document_path, ctx.raw_text or "")
         ctx.candidates_total = len(candidate_list)
         # Знаменатель для «чанков без кандидатов»: без него доля не считается, а
         # «пропущено 10 чанков» неизвестно из чего - из десяти или из трёхсот.
