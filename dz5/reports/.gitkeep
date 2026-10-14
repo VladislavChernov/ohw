@@ -1,0 +1,2 @@
+# Attack-run reports are produced under reports/<run-id>/ at runtime.
+# This placeholder keeps the directory in the repo.

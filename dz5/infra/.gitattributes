@@ -1,0 +1,4 @@
+# Keep SQL seeds/init as LF so they load correctly inside Linux containers
+# (root .gitattributes does not pin *.sql). Shell/yaml/Dockerfile LF is already
+# enforced by the repository-root .gitattributes.
+*.sql text eol=lf

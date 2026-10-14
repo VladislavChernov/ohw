@@ -1,0 +1,6 @@
+# Local artifacts that must not be committed.
+*.sqlite
+*.sqlite3
+*.db
+*.log
+.env.local

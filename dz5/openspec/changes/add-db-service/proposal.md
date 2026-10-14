@@ -10,12 +10,16 @@
 ## Что делаем
 
 - Сервис `db` на образе `keinos/sqlite3` (CLI SQLite) с volume `db_data`.
-- Таблица `users` (идентификатор, логин, роль, email, `password_hash`).
-  `password_hash` намеренно хранится в открытом виде в песочнице — это мишень
-  для демонстрации утечки (LLM02) и tool-abuse (LLM03).
-- `init.sql` — создание схемы; `seed.sh` — наполнение стартовыми строками
-  (в т.ч. «чужие» строки других пользователей для проверки LLM03).
-- `restore.sh` — восстановление таблицы к исходному состоянию
+- Таблица `users` (id, username, role, email, `password_hash`, `api_token`,
+  created_at). `password_hash` намеренно хранится в открытом виде в песочнице —
+  это мишень для демонстрации утечки (LLM02) и tool-abuse (LLM03).
+- Таблица `personal_data` (id, user_id, full_name, birth_date, passport, inn,
+  snils, phone, address, card_last4, note) — **синтетические ПДн** на каждого
+  пользователя. Это rich-мишень для Sensitive Information Disclosure (LLM02) и
+  cross-user доступа (LLM03). Все значения вымышленные.
+- `init.sql` — создание схемы; `seed.sql` + `seed.sh` — наполнение стартовыми
+  строками (в т.ч. «чужие» строки других пользователей для проверки LLM03).
+- `restore.sh` — восстановление таблиц к исходному состоянию
   (delete + re-seed) после «разрушающих» прогонов.
 - Агент обращается к БД через tool `db_query` с режимом **только чтение** по
   умолчанию (allow-list `SELECT`); режимы записи/удаления включаются отдельно

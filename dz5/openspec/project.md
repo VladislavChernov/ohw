@@ -84,4 +84,22 @@
 - `docs/` — design-заметки (архитектура защиты; SSOT авторитет — в `openspec/`).
 - `openspec/` — спеки изменений (по вехам).
 - `infra/` — собственный инфра-слой стенда (compose, Dockerfile'ы, конфиги).
+- `infra/scripts/` — кросс-платформенные демо-скрипты (`*.sh` + `*.ps1`),
+  по образцу `Dz4/Demo/demo-cpu.*`.
 - `reports/` — артефакты прогонов атак.
+
+## Вехи (план работ)
+
+1. `add-db-service` — SQLite + seed с ПДн-мишенями + восстановление. ✅
+2. `add-abliterated-llm` — локальный контейнер abliterated-модели.
+3. `add-agent-core` — Go-агент (`drujensen@<commit>`), tool `db_query`
+   (read-only по умолчанию / tool-abuse за флагом), конфиг промпта.
+4. `add-external-defense` — FastAPI + `llm-guard` (внешний контур).
+5. `add-defense-modes` / L3 — 4 пресета через env + compose-лимиты ресурсов.
+6. `add-attack-harness` — garak + свой раннер: OWASP Top-10 2026 × 4 пресета +
+   DoS (LLM06); сравнительный отчёт.
+7. `add-reports` — структура `reports/<run-id>/` + сводный `reports/latest.md`.
+8. `add-demo-scripts` — `infra/scripts/demo.{sh,ps1}`: поднять стенд → смоук →
+   прогнать атаки по 4 пресетам → сгенерировать отчёт (оркестрация всей демонстрации).
+9. `add-compose-and-devcontainer` — финальный compose всех сервисов,
+   `.devcontainer`, `infra.yaml`, README.
