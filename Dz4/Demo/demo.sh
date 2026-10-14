@@ -239,26 +239,36 @@ PY
     fi
 }
 
-cmd_export() {
-    vol="ohw-runtime_${SET}_neo4j"
-    volume_exists "$vol" || die "том $vol не найден: набор '$SET' ещё не поднимался"
-    out="${EXPORT_OUT:-$SCRIPT_DIR/fixtures/ready-neo4j.tar.gz}"
-    mkdir -p "$(dirname -- "$out")"
+# Тома набора. `query` намеренно не входит: в нём только журнал задач запросов, он пуст,
+# и compose создаст его при первом же запросе. Том `projection` входит: в нём состояние
+# инкрементальной проекции, без него набор не знает, что уже спроецировано.
+VOLUMES='neo4j ingestion projection'
 
-    echo "Архивирую $vol -> $out (база будет остановлена на время выгрузки)"
+cmd_export() {
+    for suffix in $VOLUMES; do
+        vol="ohw-runtime_${SET}_${suffix}"
+        volume_exists "$vol" || die "том $vol не найден: набор '$SET' ещё не поднимался"
+    done
+
     was_up=$(docker ps --filter "name=^/${NEO4J_CONTAINER}$" --format '{{.Names}}' | grep -c . || true)
-    if [ "$was_up" != "0" ]; then
-        docker stop "$NEO4J_CONTAINER" >/dev/null
-    fi
-    docker run --rm \
-        --mount "type=volume,source=$vol,target=/from" \
-        --mount "type=bind,source=$(CDPATH= cd -- "$(dirname -- "$out")" && pwd),target=/to" \
-        alpine sh -c "tar czf /to/$(basename -- "$out") -C /from ."
-    if [ "$was_up" != "0" ]; then
-        docker start "$NEO4J_CONTAINER" >/dev/null
-    fi
-    [ -f "$out" ] || die "архив не появился: $out"
-    echo "Готово: $out ($(du -h "$out" | cut -f1))"
+    [ "$was_up" = "0" ] || docker stop "$NEO4J_CONTAINER" >/dev/null
+
+    for suffix in $VOLUMES; do
+        vol="ohw-runtime_${SET}_${suffix}"
+        out="${EXPORT_OUT:-$SCRIPT_DIR/fixtures/ready-${suffix}.tar.gz}"
+        # Один -Out на все тома не годится: имена различаются.
+        out=${out/ready.tar.gz/ready-${suffix}.tar.gz}
+        mkdir -p "$(dirname -- "$out")"
+        docker run --rm \
+            --mount "type=volume,source=$vol,target=/from" \
+            --mount "type=bind,source=$(CDPATH= cd -- "$(dirname -- "$out")" && pwd),target=/to" \
+            alpine sh -c "tar czf /to/$(basename -- "$out") -C /from ."
+        [ -f "$out" ] || die "архив не появился: $out"
+        echo "  $vol -> $(basename -- "$out") ($(du -h "$out" | cut -f1))"
+    done
+
+    [ "$was_up" = "0" ] || docker start "$NEO4J_CONTAINER" >/dev/null
+    echo "Набор '$SET' выгружен."
 }
 
 restore_one() {
@@ -284,11 +294,13 @@ restore_one() {
 }
 
 cmd_restore() {
-    # Набор - это ДВА тома: база с графом и реестр источников. Без реестра сервис не
+    # Набор - это несколько томов. Реестр источников обязателен: без него сервис не
     # знает, что документы уже загружены, и повторная загрузка того же документа создаёт
-    # вторую копию вместо сигнала no-op.
-    restore_one neo4j "${RESTORE_NEO4J:-$FIXTURES_DIR/ready-neo4j.tar.gz}"
-    restore_one ingestion "${RESTORE_INGESTION:-$FIXTURES_DIR/ready-ingestion.tar.gz}"
+    # вторую копию вместо сигнала no-op. Проекция - чтобы набор знал, что уже спроецировано.
+    for suffix in $VOLUMES; do
+        archive="${RESTORE_ARCHIVE:-$FIXTURES_DIR/ready-${suffix}.tar.gz}"
+        restore_one "$suffix" "$archive"
+    done
     echo "Набор '$SET' восстановлен."
     echo "Пароль базы: $DEMO_PASSWORD   ключ API: $DEMO_API_KEY"
 }

@@ -311,42 +311,61 @@ switch ($Command) {
     }
 
     'export' {
-        $vol = "ohw-runtime_${Set}_neo4j"
-        if (-not (Test-Volume $vol)) { throw "том $vol не найден: набор '$Set' ещё не поднимался" }
-        $target = if ($Out) { $Out } else { Join-Path $fixturesDir 'ready-neo4j.tar.gz' }
-        $targetFull = [System.IO.Path]::GetFullPath($target)
-        New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($targetFull)) | Out-Null
+        # Тома набора. `query` намеренно не входит: в нём только журнал задач запросов, он
+        # пуст, и compose создаст его при первом же запросе. Том `projection` входит: в нём
+        # состояние инкрементальной проекции, без него набор не знает, что уже спроецировано.
+        $suffixes = @('neo4j', 'ingestion', 'projection')
+        foreach ($s in $suffixes) {
+            $v = "ohw-runtime_${Set}_${s}"
+            if (-not (Test-Volume $v)) { throw "том $v не найден: набор '$Set' ещё не поднимался" }
+        }
 
-        Write-Host "Архивирую $vol -> $targetFull (база будет остановлена на время выгрузки)"
+        $targetDir = if ($Out) {
+            [System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($Out))
+        }
+        else { $fixturesDir }
+        New-Item -ItemType Directory -Force -Path $targetDir | Out-Null
+
         $wasUp = Test-ContainerRunning $neo4jContainer
         if ($wasUp) { Invoke-Native -Exe 'docker' -Arguments @('stop', $neo4jContainer) }
         try {
-            Invoke-Native -Exe 'docker' -Arguments @(
-                'run', '--rm',
-                '--mount', "type=volume,source=$vol,target=/from",
-                '--mount', "type=bind,source=$([System.IO.Path]::GetDirectoryName($targetFull)),target=/to",
-                'alpine', 'sh', '-c', "tar czf /to/$([System.IO.Path]::GetFileName($targetFull)) -C /from ."
-            )
+            foreach ($s in $suffixes) {
+                $v = "ohw-runtime_${Set}_${s}"
+                $name = "ready-$s.tar.gz"
+                $targetFull = Join-Path $targetDir $name
+                Invoke-Native -Exe 'docker' -Arguments @(
+                    'run', '--rm',
+                    '--mount', "type=volume,source=$v,target=/from",
+                    '--mount', "type=bind,source=$targetDir,target=/to",
+                    'alpine', 'sh', '-c', "tar czf /to/$name -C /from ."
+                )
+                if (-not (Test-Path -LiteralPath $targetFull)) { throw "архив не появился: $targetFull" }
+                $size = [math]::Round((Get-Item -LiteralPath $targetFull).Length / 1MB, 1)
+                Write-Host "  $v -> $name ($size МБ)"
+            }
         }
         finally {
             if ($wasUp) { Invoke-Native -Exe 'docker' -Arguments @('start', $neo4jContainer) -AllowFailure }
         }
-        if (-not (Test-Path -LiteralPath $targetFull)) { throw "архив не появился: $targetFull" }
-        $size = [math]::Round((Get-Item -LiteralPath $targetFull).Length / 1MB, 1)
-        Write-Host "Готово: $targetFull ($size МБ)"
+        Write-Host "Набор '$Set' выгружен."
     }
 
     'restore' {
-        # Набор - это ДВА тома: база с графом и реестр источников. Без реестра сервис не
+        # Набор - это несколько томов. Реестр источников обязателен: без него сервис не
         # знает, что документы уже загружены, и повторная загрузка того же документа
-        # создаёт вторую копию вместо сигнала no-op.
+        # создаёт вторую копию вместо no-op. Проекция - чтобы набор знал, что уже
+        # спроецировано.
         $plan = @(
-            @{ Suffix = 'neo4j'; Archive = (Join-Path $fixturesDir 'ready-neo4j.tar.gz') },
-            @{ Suffix = 'ingestion'; Archive = (Join-Path $fixturesDir 'ready-ingestion.tar.gz') }
+            @{ Suffix = 'neo4j' },
+            @{ Suffix = 'ingestion' },
+            @{ Suffix = 'projection' }
         )
         foreach ($item in $plan) {
             $vol = "ohw-runtime_${Set}_$($item.Suffix)"
-            $archiveFull = [System.IO.Path]::GetFullPath($item.Archive)
+            # `if` и `Join-Path` нельзя ставить аргументом вызова в PowerShell 5.1 -
+            # только в присваивании. Поэтому промежуточная переменная.
+            $archivePath = Join-Path $fixturesDir "ready-$($item.Suffix).tar.gz"
+            $archiveFull = [System.IO.Path]::GetFullPath($archivePath)
 
             if (-not (Test-Path -LiteralPath $archiveFull)) { throw "архив не найден: $archiveFull" }
             if (Test-Volume $vol) {
