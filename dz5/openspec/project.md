@@ -15,9 +15,15 @@
 - **Агент (Go):** `drujensen/aiagent` — сторонний фреймворк (TUI + web-UI на
   `:8080`), подключение к LLM через OpenAI-совместимый эндпоинт. **Версия
   фиксируется коммитом**, не `main`. Инструмент `db_query` для чтения SQLite.
-- **Инференс (LLM):** локальный автономный `ollama/ollama:0.33.3` с моделью
-  `qwen2.5:1.5b-instruct-q8_0` (abliterated — цензура отключена специально,
-  чтобы baseline честно демонстрировал уязвимость). **Не** общий `infra/ollama`.
+- **Инференс (LLM):** локальный автономный `ollama/ollama:0.40.4` с моделью
+  `huihui_ai/llama3.2-abliterate:3b` — **genuine abliterated** (refusal снят
+  техникой abliteration; ~2 ГБ, Q4_K_M). Снятая цензура нужна специально, чтобы
+  baseline честно демонстрировал уязвимость. Работает на **NVIDIA GPU**
+  (проверено локально в Docker Desktop, `--gpus all`). **Не** общий
+  `infra/ollama`.
+  ⚠️ Проверено: теги `qwen2.5:1.5b-instruct-q8_0` и
+  `huihui_ai/qwen2.5-abliterate:1.5b-instruct` — слишком слабые/тяжёлые для
+  роли «жертвы» стенда; для стенда непригодны.
 - **БД:** SQLite-файл в volume, образ CLI `keinos/sqlite3` (seed/восстановление),
   таблица с секретами и «чужими» строками.
 - **Внешняя защита:** `security-wall` — FastAPI + `llm-guard` (прокси между

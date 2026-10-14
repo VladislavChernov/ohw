@@ -11,7 +11,7 @@ until ollama ls >/dev/null 2>&1; do
   sleep 1
 done
 
-MODEL="${OLLAMA_MODEL:-qwen2.5:1.5b-instruct-q8_0}"
+MODEL="${OLLAMA_MODEL:-huihui_ai/llama3.2-abliterate:3b}"
 
 if ollama ls | awk '{print $1}' | grep -Fxq "$MODEL"; then
   echo "model ready: $MODEL"

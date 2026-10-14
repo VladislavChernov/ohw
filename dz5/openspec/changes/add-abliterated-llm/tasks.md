@@ -2,16 +2,21 @@
 
 ## 1. Образ и entrypoint
 
-- [ ] `infra/ollama/Dockerfile`: `ollama/ollama:0.33.3`, копирование
-      `entrypoint.sh`, `ENV OLLAMA_MODEL=qwen2.5:1.5b-instruct-q8_0`.
-- [ ] `infra/ollama/entrypoint.sh`: поднять `ollama serve`, дождаться API,
+- [x] `infra/ollama/Dockerfile`: `ollama/ollama:0.40.4` (GPU, проверен локально),
+      копирование `entrypoint.sh`,
+      `ENV OLLAMA_MODEL=huihui_ai/llama3.2-abliterate:3b`.
+      `Dockerfile_ll_ablitirated` в работу НЕ принят: `:latest`, лишний `curl`-слой,
+      русскоязычные комментарии — нарушает стандарты (см. proposal).
+- [x] `infra/ollama/entrypoint.sh`: поднять `ollama serve`, дождаться API,
       однократно `ollama pull` модели, держать сервер на переднем плане.
 
 ## 2. Сервис в compose
 
-- [ ] Сервис `ollama`, volume `ollama_data`, порт `11434` (для отладки).
-- [ ] `deploy.resources.limits.memory` (L3 / LLM06).
-- [ ] Healthcheck `ollama show <model>`.
+- [x] Сервис `ollama` (контейнер `ollama_target`), volume `ollama_data`,
+      порт `11434` (для отладки).
+- [x] `deploy.resources.limits.memory` (L3 / LLM06) + GPU reservation
+      (`driver: nvidia, count: all`).
+- [x] Healthcheck `ollama show <model>`.
 
 ## 3. Проверка (прогнать вживую)
 
@@ -19,6 +24,8 @@
 - [ ] `docker compose up -d ollama` — сервер поднимается, модель тянутся.
 - [ ] `ollama ls` показывает модель; `POST /api/generate` отвечает.
 - [ ] Healthcheck `healthy`.
+- [ ] Старый образ/контейнер qwen2.5-abliterate удалён
+      (`docker rmi dz5-ollama-abliterated:local`, volume при необходимости).
 
 ## 4. Отметка выполнения
 

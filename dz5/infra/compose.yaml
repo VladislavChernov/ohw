@@ -7,7 +7,7 @@ name: dz5-stand
 # isolated from the shared model volume used by other homeworks.
 #
 # Services are added incrementally as their bundles land:
-#   - ollama  (abliterated LLM)          add-abliterated-llm  ✅
+#   - ollama  (abliterated GPU target)    add-abliterated-llm  ✅
 #   - db      (SQLite + seed/restore)    add-db-service       ✅
 #   - agent   (drujensen @ pinned tag)   add-agent-core
 #   - wall    (llm-guard proxy)          add-external-defense
@@ -17,16 +17,16 @@ name: dz5-stand
 #   BUILTIN_GUARDS, EXTERNAL_GUARD. L3 (resource limits) is always on.
 
 services:
-  # Abliterated local LLM. Safety alignment stripped on purpose so the
-  # baseline preset can honestly show vulnerabilities.
+  # Abliterated local LLM (GPU target). Safety alignment stripped on purpose so
+  # the baseline preset can honestly show vulnerabilities.
   ollama:
     build:
       context: ./ollama
       dockerfile: Dockerfile
-    image: dz5-ollama-abliterated:local
-    container_name: dz5-ollama
+    image: dz5-ollama-target:local
+    container_name: ollama_target
     environment:
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b-instruct-q8_0}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-huihui_ai/llama3.2-abliterate:3b}
     volumes:
       - ollama_data:/root/.ollama
     ports:
@@ -34,10 +34,16 @@ services:
       - "11434:11434"
     # L3 (Unbounded Consumption / LLM06): cap memory so a runaway generation
     # or resource-exhaustion attack cannot take down the host.
+    # GPU access (verified locally on Docker Desktop + NVIDIA, ollama 0.40.4).
     deploy:
       resources:
         limits:
           memory: 4000M
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD-SHELL", "ollama show \"$$OLLAMA_MODEL\" >/dev/null 2>&1"]
       interval: 10s
