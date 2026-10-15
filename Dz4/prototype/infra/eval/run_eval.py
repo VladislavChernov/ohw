@@ -1886,17 +1886,24 @@ def build_config_state(
     }
 
 
-def _format_causes(causes: dict[str, int]) -> str:
-    """Гистограмма причин поимённо, отсортированная по частоте.
+def _format_histogram(values: dict[str, int]) -> str:
+    """Гистограмма «имя=счёт» по убыванию счёта; пустая — «нет».
 
-    Порядок по частоте, а не по алфавиту: первым читается то, что чинить в первую
-    очередь, а не то, что первым попалось в словарь.
+    Порядок по частоте, а не по алфавиту: первым читается то, что крупнее, а не то,
+    что первым попалось в словаре.
     """
-    if not causes:
+    if not values:
         return "нет"
     return ", ".join(
-        f"{name}={count}" for name, count in sorted(causes.items(), key=lambda kv: (-kv[1], kv[0]))
+        f"{name}={count}" for name, count in sorted(values.items(), key=lambda kv: (-kv[1], kv[0]))
     )
+
+
+def _format_causes(causes: dict[str, int]) -> str:
+    """Гистограмма причин поимённо. Обёртка над `_format_histogram`: тот же порядок
+    по частоте, чтобы причина, которую чинят первой, читалась первой.
+    """
+    return _format_histogram(causes)
 
 
 def write_passport(
@@ -2054,6 +2061,33 @@ def write_passport(
                 f"- записей сущностей потеряно: {lost_entities} (рёбер: {lost_edges})  "
                 if dropped
                 else "- записей сущностей потеряно: 0 (рёбер: 0)  "
+            ),
+            # ADR-049 п. 4. Счётчики записи нод — здесь, а не только в
+            # `ingest_report.json`: «нод ноль» обязан быть отличим от «запись не
+            # состоялась», а вклад модели — назван числом со знаменателем рядом. Доля
+            # не печатается при нулевом знаменателе: ноль на пустой базе читался бы
+            # как «модель не работает», тогда как верный смысл — «нечего измерять».
+            (
+                f"- записано нод: {int(ingest.get('nodes_written') or 0)} "
+                f"(из них моделью: {int(ingest.get('llm_nodes') or 0)}); "
+                f"документов с записью нод: "
+                f"{int(ingest.get('documents_with_nodes_recorded') or 0)} "
+                f"из {int(ingest.get('documents_total') or 0)}  "
+            ),
+            (
+                f"- кто записал ноды: "
+                f"{_format_histogram(ingest.get('nodes_by_extractor_version') or {})}  "
+            ),
+            (
+                f"- документов с LLM-экстракцией: "
+                f"{int(ingest.get('documents_with_llm_extraction') or 0)} "
+                f"(стадия EXTRACT достигнута в "
+                f"{int(ingest.get('documents_with_extraction_stage') or 0)}); "
+                f"потеря LLM-слоя целиком: {dropped}  "
+            ),
+            (
+                f"- документов с LLM-экстракцией без записанных нод: "
+                f"{int(ingest.get('documents_with_llm_extraction_without_records') or 0)}  "
             ),
             "",
             (

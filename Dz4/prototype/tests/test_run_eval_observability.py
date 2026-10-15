@@ -574,6 +574,66 @@ def test_main_writes_passport_command_and_qa_review(monkeypatch: Any, tmp_path: 
     assert "projection" in review
 
 
+def test_passport_reports_node_counters(monkeypatch: Any, tmp_path: Path) -> None:
+    """Паспорт обязан показывать, кто и сколько нод записал (ADR-049 п. 4).
+
+    «Нод ноль» должен быть отличим от «запись не состоялась», а вклад модели —
+    назван числом. Джоба собрана так, как её отдаёт сервис (`nodes_by_extractor`),
+    а не идентификаторами из кода: подделка проверяла бы не то, что видит прогон.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "doc.md").write_text("текст документа", encoding="utf-8")
+    dataset = _write_dataset(tmp_path, [_question("nodes-01")])
+
+    monkeypatch.setattr(
+        _run_eval,
+        "ingest_corpus",
+        lambda *a, **k: [
+            {
+                "job_id": "j-nodes",
+                "source_url": "src://doc.md",
+                "relpath": "doc.md",
+                "bytes": 14,
+                "submitted_at": time.time(),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _run_eval,
+        "wait_jobs",
+        lambda *a, **k: {
+            "j-nodes": {
+                "status": "succeeded",
+                "stage": "COMMIT",
+                "error": None,
+                "signals": {"enrichment_degraded": "EXTRACT"},
+                "enrichment": {
+                    "cause": "model_error",
+                    "lost_entities": 3,
+                    "lost_edges": 1,
+                    "llm_records": 80,
+                    "llm_edges": 10,
+                },
+                "nodes_by_extractor": {
+                    "by_extractor_version": {"llm:it@1:cafe": 77, "user:manual": 5},
+                    "graph_projection_status": "ready",
+                },
+                "stages": [
+                    {"stage": "EXTRACT", "status": "succeeded", "message": "enrichment_degraded: x"}
+                ],
+            }
+        },
+    )
+    out = _run_main(monkeypatch, tmp_path, "--corpus", str(corpus), dataset=dataset)
+
+    passport = (out / "PASSPORT.md").read_text(encoding="utf-8")
+    assert "записано нод" in passport
+    assert "llm:it@1:cafe=77" in passport
+    assert "user:manual=5" in passport
+    assert "model_error" in passport
+
+
 def test_main_writes_empty_failures_file_on_clean_run(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
