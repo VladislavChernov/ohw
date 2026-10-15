@@ -108,6 +108,50 @@ def _commands(text: str) -> set[str]:
     return found & COMMANDS
 
 
+def test_gpu_layers_variable_is_single_named() -> None:
+    """Имя переменной слоёв должно быть одно на все стенды.
+
+    Два имени для одного параметра - это расхождение, которое обнаруживается только по
+    скорости: переменная задана, а на стенд не действует.
+    """
+    infra = DEMO_DIR.parent / "prototype" / "infra"
+    compose_files = sorted(infra.glob("compose*.yaml"))
+    assert compose_files, "не найдено ни одного compose-файла"
+
+    legacy = "RUNTIME_LLM_GPU_LAYERS"
+    for path in compose_files:
+        text = path.read_text(encoding="utf-8-sig")
+        if "--n-gpu-layers" not in text:
+            continue
+        assert legacy not in text, (
+            f"{path.name} читает {legacy}. Единое имя - LLM_NGPU_LAYERS, как в eval; "
+            "второе имя означает, что переменная молча не действует."
+        )
+
+    for path in (SH, PS1, SH_CPU, PS1_CPU):
+        assert legacy not in _read(path), f"{path.name} ссылается на устаревшее {legacy}"
+
+
+def test_cpu_variant_zeroes_gpu_layers() -> None:
+    """Вариант на процессоре обязан сам ставить ноль слоёв.
+
+    Без видеокарты значение 99 бессмысленно. Рассчитывать на то, что llama.cpp сам
+    перейдёт на CPU, нельзя: молчаливое решение за ресурс выглядит как «тормозит».
+    """
+    for path in (SH_CPU, PS1_CPU):
+        code = "\n".join(_code_lines(path))
+        assert re.search(r"LLM_NGPU_LAYERS\s*=\s*['\"]?0", code), (
+            f"{path.name} обязан задавать LLM_NGPU_LAYERS=0: без видеокарты слои некуда "
+            "выгружать."
+        )
+    for path in (SH, PS1):
+        code = "\n".join(_code_lines(path))
+        assert not re.search(r"LLM_NGPU_LAYERS\s*=\s*['\"]?0", code), (
+            f"{path.name} не должен обнулять слои: это вариант на видеокарте, где модель "
+            "должна выгружаться целиком."
+        )
+
+
 @pytest.mark.parametrize(("sh", "ps1", "expected_compose"), PAIRS)
 def test_commands_match(sh: Path, ps1: Path, expected_compose: set[str]) -> None:
     sh_commands = _commands(_read(sh))

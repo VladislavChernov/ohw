@@ -110,6 +110,10 @@ function Set-CommonEnv {
     $env:VOL = $Set
     $env:NEO4J_PASSWORD = $DEMO_PASSWORD
     $env:GRAPH_AUTH_API_KEY = $DEMO_API_KEY
+    # Ноль слоёв на GPU. Без видеокарты значение 99 бессмысленно, но полагаться на то, что
+    # llama.cpp сам перейдёт на процессор, нельзя: молчаливое решение за ресурс выглядело бы
+    # как «тормозит», а не как «считает не там». Ноль говорит прямо.
+    $env:LLM_NGPU_LAYERS = '0'
 }
 
 function Test-Volume {

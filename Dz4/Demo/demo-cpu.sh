@@ -82,7 +82,11 @@ set_common_env() {
     VOL="$SET"
     NEO4J_PASSWORD="$DEMO_PASSWORD"
     GRAPH_AUTH_API_KEY="$DEMO_API_KEY"
-    export VOL NEO4J_PASSWORD GRAPH_AUTH_API_KEY
+    # Ноль слоёв на GPU. Без видеокарты значение 99 бессмысленно, но полагаться на то, что
+    # llama.cpp сам перейдёт на процессор, нельзя: молчаливое решение за ресурс выглядело бы
+    # как «тормозит», а не как «считает не там». Ноль говорит прямо.
+    LLM_NGPU_LAYERS=0
+    export VOL NEO4J_PASSWORD GRAPH_AUTH_API_KEY LLM_NGPU_LAYERS
 }
 
 cmd_up() {

@@ -185,7 +185,7 @@ services:
       - "--ctx-size"
       - "${RUNTIME_LLM_CTX_SIZE:-16384}"
       - "--n-gpu-layers"
-      - "${RUNTIME_LLM_GPU_LAYERS:-99}"
+      - "${LLM_NGPU_LAYERS:-99}"
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
       interval: 30s
