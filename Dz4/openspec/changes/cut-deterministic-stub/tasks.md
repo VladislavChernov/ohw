@@ -45,9 +45,13 @@
 
 ## Открыто и не сделано
 
-- [ ] Устаревший текст про заглушку в `Ingest/analitic/manual_tags_and_ingest_open_questions.md`
-      (строки 160, 206) и `analitic/eval/dataset_and_docs_review.md` (строка 274): файлы вне
-      этого изменения, а правка корпуса меняет то, что система ест
+- [x] Устаревший текст про заглушку в `Ingest/analitic/manual_tags_and_ingest_open_questions.md`
+      (строки 160, 206) и `analitic/eval/dataset_and_docs_review.md` (строка 274). Проверено
+      2026-10-15: ссылки на `_extract_deterministic` закрыты блоками «Закрыто: ADR-049»
+      (`160→167`, `217→239`, `274`; «206» в тикете — сдвиг строк, рядом 217), код подтверждает
+      (`_declare_extraction_fallback`, `_degradation_cause`, `llm_layer_lost_*`). Правка доков не
+      потребовалась — закрывающие блоки внесены ранее; сверено чтением кода против дока (гейт к
+      prose не применим).
 - [ ] `PASSPORT.md` не показывает `enrichment_causes` и новые счётчики нод
 - [ ] Закрытый список тегов, который LLM выбирает вместо имени: названо владельцем, не сделано
 - [ ] Бандл на preflight: пишет READY при мёртвом query-контуре

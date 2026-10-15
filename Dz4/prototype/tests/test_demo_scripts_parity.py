@@ -152,6 +152,60 @@ def test_cpu_variant_zeroes_gpu_layers() -> None:
         )
 
 
+def test_gpu_overlay_reserves_only_real_gpu_consumers() -> None:
+    """Оверлей GPU выдаёт бронь только тем, кто на самом деле считает на GPU.
+
+    Уже было: в оверлей попал `embeddings-service`, у которого `EMBEDDINGS_DEVICE` по
+    умолчанию `cpu`. Модель считала на процессоре, а compose требовал под неё драйвер
+    NVIDIA и держал видеопамять. Выглядело безобидно, но на машине без карты такая бронь
+    ломает подъём целиком.
+
+    Контракт сформулирован положительно: «оверлей даёт бронь, и каждый получивший её
+    сервис по умолчанию считает на GPU». Отрицание «в оверлее не должно быть N сервисов»
+    было бы замороженным списком и завтра начало бы врать.
+    """
+    infra = DEMO_DIR.parent / "prototype" / "infra"
+    overlay = infra / GPU_OVERLAY
+    runtime = infra / "compose.runtime.yaml"
+    for path in (overlay, runtime):
+        if not path.is_file():
+            pytest.fail(f"нет файла {path.name}")
+
+    overlay_text = overlay.read_text(encoding="utf-8-sig")
+    base_text = runtime.read_text(encoding="utf-8-sig")
+
+    granted = {
+        name for name in re.findall(r"^  ([a-z0-9-]+):", overlay_text, re.MULTILINE)
+        if name in ("llm", "embeddings-service")
+    }
+    assert granted, (
+        f"{GPU_OVERLAY} не объявляет ни одного сервиса с бронью - оверлей пуст, "
+        "вариант на видеокарте не отличается от варианта на процессоре"
+    )
+
+    # Разделитель `:-` отделяем от значения. Если написать `(:-?...)`, группа захватит
+    # и дефис разделителя, получится "-cpu" вместо "cpu", и сравнение `!= "cpu"` будет
+    # всегда истинным: гард молча ничего не проверяет.
+    pattern = r"(\w*DEVICE\w*):\s*\$\{\s*\w*DEVICE\s*:-\s*([^}]+)\}"
+    assert re.search(pattern, base_text), (
+        "в базовом runtime файле не найдено ни одного *DEVICE* параметра - гард нечем проверять"
+    )
+
+    for service in granted:
+        m = re.search(
+            rf"^  {re.escape(service)}:\n(.*?)(?=^  [a-z0-9-]+:\n|\Z)",
+            base_text,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert m, f"сервис {service} есть в оверлее, но его нет в базовом файле"
+        for var, default in re.findall(pattern, m.group(1)):
+            assert default != "cpu", (
+                f"{service} получает бронь видеокарты, но `{var}` по умолчанию `cpu`. "
+                "Требование без пользы: на машине без карты ломает подъём, на машине с "
+                "картой занимает память впустую."
+            )
+
+
 @pytest.mark.parametrize(("sh", "ps1", "expected_compose"), PAIRS)
 def test_commands_match(sh: Path, ps1: Path, expected_compose: set[str]) -> None:
     sh_commands = _commands(_read(sh))

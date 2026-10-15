@@ -38,7 +38,7 @@
 | Ingestion API | Приём файлов/URL, управление джобами индексации | Python | 8002 | ingestion | docs/04 §1, docs/02 §1 |
 | Ingestion Pipeline Workers | primitive-этапы: chunk, embed, vector commit; graph projection опционально | Python | — | ingestion | docs/02 §1, docs/06 §3 (профиль ingestion) |
 | Glossary Service | Словари доменов, трансляция тегов → канонический ряд | Python | 8003 | config | docs/04 §4, docs/00 |
-| Embeddings Service | Расчёт векторов bge-m3; **по умолчанию CPU**, `EMBEDDINGS_DEVICE` переключает | Python | 8004 | embeddings | docs/04 §1, docs/02 §1 (EMBED) |
+| Embeddings Service | Расчёт векторов bge-m3; **в Demo и eval — CPU**, в отладочном стенде — CUDA, `EMBEDDINGS_DEVICE` переключает | Python | 8004 | embeddings | docs/04 §1, docs/02 §1 (EMBED) |
 | Neo4j Community | Граф + нативный векторный индекс (ADR-001) | Java (сторонний) | 7687 (Bolt) / 7474 (HTTP) | graph | docs/04 §1, docs/06 §3 |
 | llama.cpp Server | Инференс Qwen 2.5 Coder 7B Abliterate q4_K_M (GGUF; GPU - вариант Demo, см. §4) | C++ (сторонний) | 8080 (/v1) | llm | docs/04 §1, ADR-022 |
 | bge-m3 (LocalSentenceTransformerAdapter) | Встроенный эмбеддер без отдельного контейнера | Python | — | — | docs/02 §1, adapters_specification.md |
