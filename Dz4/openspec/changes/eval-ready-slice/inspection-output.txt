@@ -1,0 +1,95 @@
+labels, n
+["ContextNode"], 717
+["Chunk"], 432
+rel, n
+"MENTIONS", 1046
+"REFERENCES", 348
+"REQUIRES_CONSTRAINT", 299
+"SIMILAR_TO", 20
+"CONTRADICTS", 17
+"RELATED", 1
+rel, kind, n
+"REFERENCES", "REFERENCES", 348
+"REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT", 299
+"SIMILAR_TO", "SIMILAR_TO", 20
+"CONTRADICTS", "CONTRADICTS", 17
+"MENTIONS", "MENTIONS", 2
+"RELATED", "RELATED", 1
+source_url, ctx_nodes
+"docs/04_services_config.md", 148
+"docs/api_reference.md", 117
+"docs/adapters_specification.md", 109
+"docs/defense_notes_session_plan.md", 90
+"docs/adapters_guide.md", 88
+"docs/chunkers_guide.md", 81
+"docs/README.md", 72
+"docs/00_hi_level_architecture.md", 68
+"docs/03_retriever.md", 56
+"docs/data_model.md", 49
+"docs/defense_notes_graph_scaling.md", 8
+source_url, chunks
+"docs/05_adr_log.md", 191
+"docs/defense_notes_simplifications.md", 30
+"docs/adapters_guide.md", 22
+"docs/adapters_specification.md", 22
+"docs/02_pipeline_and_normalizer.md", 21
+"docs/06_operations_and_risks.md", 20
+"docs/connectors_guide.md", 17
+"docs/04_services_config.md", 15
+"docs/defense_notes_session_plan.md", 14
+"docs/README.md", 13
+"docs/api_reference.md", 13
+"docs/defense_notes_graph_scaling.md", 12
+"docs/01_ontology_and_domain_profile.md", 10
+"docs/chunkers_guide.md", 10
+"docs/data_model.md", 10
+"docs/03_retriever.md", 7
+"docs/00_hi_level_architecture.md", 5
+name, origin, sources, docs
+"llm", "ai", ["docs/00_hi_level_architecture.md", "docs/03_retriever.md", "docs/04_services_config.md", "docs/adapters_guide.md", "docs/adapters_specification.md", "docs/api_reference.md"], 6
+"neo4j", "ai", ["docs/00_hi_level_architecture.md", "docs/03_retriever.md", "docs/04_services_config.md", "docs/adapters_guide.md", "docs/adapters_specification.md"], 5
+"api", "ai", ["docs/03_retriever.md", "docs/04_services_config.md", "docs/README.md", "docs/adapters_guide.md", "docs/api_reference.md"], 5
+"failed", "ai", ["docs/03_retriever.md", "docs/adapters_specification.md", "docs/api_reference.md", "docs/data_model.md"], 4
+"ingestion api", "ai", ["docs/00_hi_level_architecture.md", "docs/04_services_config.md", "docs/README.md", "docs/api_reference.md"], 4
+"entry_points", "ai", ["docs/README.md", "docs/adapters_guide.md", "docs/adapters_specification.md", "docs/chunkers_guide.md"], 4
+"reranker", "ai", ["docs/00_hi_level_architecture.md", "docs/adapters_guide.md", "docs/adapters_specification.md", "docs/api_reference.md"], 4
+"docs/history.md", "ai", ["docs/00_hi_level_architecture.md", "docs/README.md", "docs/api_reference.md"], 3
+"chunk", "ai", ["docs/adapters_specification.md", "docs/chunkers_guide.md", "docs/data_model.md"], 3
+"glossary service", "ai", ["docs/00_hi_level_architecture.md", "docs/04_services_config.md", "docs/api_reference.md"], 3
+"vector_store", "ai", ["docs/04_services_config.md", "docs/adapters_guide.md", "docs/adapters_specification.md"], 3
+"graph experiment", "ai", ["docs/00_hi_level_architecture.md", "docs/03_retriever.md", "docs/api_reference.md"], 3
+"embedder", "ai", ["docs/00_hi_level_architecture.md", "docs/adapters_guide.md", "docs/adapters_specification.md"], 3
+"graph_store", "ai", ["docs/04_services_config.md", "docs/adapters_guide.md", "docs/adapters_specification.md"], 3
+"vectorstoreprovider", "ai", ["docs/00_hi_level_architecture.md", "docs/adapters_guide.md", "docs/adapters_specification.md"], 3
+"qdrantvectorstore", "ai", ["docs/04_services_config.md", "docs/adapters_guide.md", "docs/adapters_specification.md"], 3
+"llminference", "ai", ["docs/00_hi_level_architecture.md", "docs/adapters_guide.md", "docs/adapters_specification.md"], 3
+"ingestion pipeline", "ai", ["docs/00_hi_level_architecture.md", "docs/README.md", "docs/adapters_specification.md"], 3
+"ssot", "ai", ["docs/00_hi_level_architecture.md", "docs/04_services_config.md", "docs/README.md"], 3
+"qdrant", "ai", ["docs/00_hi_level_architecture.md", "docs/adapters_guide.md", "docs/adapters_specification.md"], 3
+"source_ids", "ai", ["docs/03_retriever.md", "docs/adapters_specification.md", "docs/data_model.md"], 3
+"graph projection", "ai", ["docs/04_services_config.md", "docs/chunkers_guide.md", "docs/data_model.md"], 3
+"graphstoreprovider", "ai", ["docs/00_hi_level_architecture.md", "docs/adapters_guide.md", "docs/adapters_specification.md"], 3
+"docs/02_pipeline_and_normalizer.md", "ai", ["docs/README.md", "docs/chunkers_guide.md", "docs/defense_notes_session_plan.md"], 3
+"docs/05_adr_log.md", "ai", ["docs/00_hi_level_architecture.md", "docs/README.md", "docs/defense_notes_session_plan.md"], 3
+"docs/04_services_config.md", "ai", ["docs/00_hi_level_architecture.md", "docs/README.md", "docs/chunkers_guide.md"], 3
+"query api", "ai", ["docs/04_services_config.md", "docs/README.md", "docs/api_reference.md"], 3
+"config service", "ai", ["docs/00_hi_level_architecture.md", "docs/04_services_config.md"], 2
+"concept.md", "ai", ["docs/00_hi_level_architecture.md", "docs/README.md"], 2
+"cypher", "ai", ["docs/adapters_guide.md", "docs/adapters_specification.md"], 2
+"adapter layer", "ai", ["docs/00_hi_level_architecture.md", "docs/adapters_specification.md"], 2
+"vllmadapter", "ai", ["docs/adapters_guide.md", "docs/adapters_specification.md"], 2
+"connectors_guide.md", "ai", ["docs/adapters_guide.md", "docs/defense_notes_session_plan.md"], 2
+"operations_requirements.md", "ai", ["docs/README.md", "docs/defense_notes_session_plan.md"], 2
+"vector_search", "ai", ["docs/adapters_guide.md", "docs/adapters_specification.md"], 2
+"upsert_vectors", "ai", ["docs/adapters_guide.md", "docs/adapters_specification.md"], 2
+"bgererankeradapter", "ai", ["docs/adapters_guide.md", "docs/adapters_specification.md"], 2
+"self-contained", "ai", ["docs/adapters_guide.md", "docs/adapters_specification.md"], 2
+"openaicompatibleadapter", "ai", ["docs/adapters_guide.md", "docs/adapters_specification.md"], 2
+"bgem3serviceadapter", "ai", ["docs/adapters_guide.md", "docs/adapters_specification.md"], 2
+empty_sources, n
+FALSE, 717
+origin, n
+"ai", 717
+Type mismatch: expected Relationship but was Path (line 8, column 18 (offset: 359))
+"       startNode(path).source_ids AS a_sources,"
+                  ^

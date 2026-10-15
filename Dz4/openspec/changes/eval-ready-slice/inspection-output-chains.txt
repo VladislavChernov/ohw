@@ -1,0 +1,113 @@
+from_name, to_name, depth, a_doc, b_doc, rels
+"00_hi_level_architecture.md", "graphstoreprovider", 2, "docs/README.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"00_hi_level_architecture.md", "vectorstoreprovider", 2, "docs/README.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"05_adr_log.md", "graphstoreprovider", 2, "docs/README.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"05_adr_log.md", "vectorstoreprovider", 2, "docs/README.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"abstract base class", "ssot", 2, "docs/adapters_specification.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"abstract base class", "concept.md", 2, "docs/adapters_specification.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"abstract base class", "topology orchestrator", 2, "docs/adapters_specification.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"abstract base class", "векторная бд без графа не может реализовать graphstoreprovider", 2, "docs/adapters_specification.md", "docs/adapters_guide.md", ["REQUIRES_CONSTRAINT", "CONTRADICTS"]
+"abstract base class", "умеет cypher и логику связей", 2, "docs/adapters_specification.md", "docs/adapters_guide.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"accepted_at", "api_key", 2, "docs/api_reference.md", "docs/04_services_config.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"accepted_at", "put /config/adapters", 2, "docs/api_reference.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"accepted_at", "url", 2, "docs/api_reference.md", "docs/04_services_config.md", ["REFERENCES", "REFERENCES"]
+"accepted_at", "get /config/adapters", 2, "docs/api_reference.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"accepted_at", "get /config/adapters/available", 2, "docs/api_reference.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"accepted_at", "adapters", 2, "docs/api_reference.md", "docs/04_services_config.md", ["REFERENCES", "REFERENCES"]
+"accepted_at", "my_vector_db", 2, "docs/api_reference.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"accepted_at", "vector_store", 2, "docs/api_reference.md", "docs/04_services_config.md", ["REFERENCES", "REFERENCES"]
+"adapter guide", "prototype_requirements.md", 2, "docs/adapters_guide.md", "docs/README.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter guide", "vector-only baseline graph adapter", 2, "docs/adapters_guide.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter guide", "adapters_guide.md", 2, "docs/adapters_guide.md", "docs/README.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter guide", "vector-only baseline graph adapter", 2, "docs/adapters_guide.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter layer", "search", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"adapter layer", "upsert", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"adapter layer", "умеет только косинусный поиск векторов", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter layer", "openaiembeddingsadapter", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"adapter layer", "coherererankadapter", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"adapter layer", "генерирует текст", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter layer", "считает векторы", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter layer", "query api", 2, "docs/00_hi_level_architecture.md", "docs/04_services_config.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter layer", "умеет cypher и логику связей", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter layer", "гибридная rag", 2, "docs/00_hi_level_architecture.md", "docs/README.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adapter layer", "переранжирует", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter layer", "векторная бд без графа не может реализовать graphstoreprovider", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "CONTRADICTS"]
+"adapter layer", "графовая без векторного индекса — vectorstoreprovider", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "CONTRADICTS"]
+"adapter layer", "adapters", 2, "docs/00_hi_level_architecture.md", "docs/04_services_config.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapter layer", "myvectordbstore", 2, "docs/00_hi_level_architecture.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"adapters", "neo4j_uri", 2, "docs/04_services_config.md", "docs/adapters_specification.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"adapters", "task_id", 2, "docs/04_services_config.md", "docs/api_reference.md", ["REFERENCES", "REFERENCES"]
+"adapters", "neo4j_uri", 2, "docs/04_services_config.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapters", "stage", 2, "docs/04_services_config.md", "docs/api_reference.md", ["REQUIRES_CONSTRAINT", "SIMILAR_TO"]
+"adapters", "status", 2, "docs/04_services_config.md", "docs/api_reference.md", ["REFERENCES", "REFERENCES"]
+"adapters", "adapter layer", 2, "docs/04_services_config.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adapters", "post /query", 2, "docs/04_services_config.md", "docs/api_reference.md", ["REFERENCES", "REFERENCES"]
+"adapters", "vector-only baseline graph adapter", 2, "docs/04_services_config.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapters", "accepted_at", 2, "docs/04_services_config.md", "docs/api_reference.md", ["REFERENCES", "REFERENCES"]
+"adapters", "api reference", 2, "docs/04_services_config.md", "docs/README.md", ["REFERENCES", "REFERENCES"]
+"adapters", "выбор стека", 2, "docs/04_services_config.md", "docs/adapters_specification.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"adapters", "application/json", 2, "docs/04_services_config.md", "docs/api_reference.md", ["REFERENCES", "REFERENCES"]
+"adapters", "api reference", 2, "docs/04_services_config.md", "docs/README.md", ["REFERENCES", "REFERENCES"]
+"adapters", "vector-only baseline graph adapter", 2, "docs/04_services_config.md", "docs/adapters_specification.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"adapters", "vector_index", 2, "docs/04_services_config.md", "docs/adapters_specification.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"adapters", "vector_index", 2, "docs/04_services_config.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapters", "changeme", 2, "docs/04_services_config.md", "docs/api_reference.md", ["REFERENCES", "REFERENCES"]
+"adapters", "vector-only baseline graph adapter", 2, "docs/04_services_config.md", "docs/adapters_specification.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"adapters.yaml", "neo4j_uri", 2, "docs/adapters_guide.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapters.yaml", "vector-only baseline graph adapter", 2, "docs/adapters_guide.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapters.yaml", "vector_index", 2, "docs/adapters_guide.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"adapters_guide.md", "adapter guide", 2, "docs/README.md", "docs/adapters_guide.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adr-012", "topology orchestrator", 2, "docs/adapters_guide.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adr-012", "topology orchestrator", 2, "docs/adapters_guide.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adr-012", "topology orchestrator", 2, "docs/adapters_guide.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adr-012", "topology orchestrator", 2, "docs/adapters_guide.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adr-012", "ssot", 2, "docs/adapters_guide.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"adr-012", "ssot", 2, "docs/adapters_guide.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"adr-012", "concept.md", 2, "docs/adapters_guide.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adr-012", "concept.md", 2, "docs/adapters_guide.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adr-012", "topology orchestrator", 2, "docs/adapters_guide.md", "docs/00_hi_level_architecture.md", ["REQUIRES_CONSTRAINT", "REFERENCES"]
+"adr-012", "query api", 2, "docs/adapters_guide.md", "docs/04_services_config.md", ["REQUIRES_CONSTRAINT", "REQUIRES_CONSTRAINT"]
+"adr-037", "concept.md", 2, "docs/defense_notes_session_plan.md", "docs/00_hi_level_architecture.md", ["REFERENCES", "REFERENCES"]
+"adr-038", "concept.md", 2, "docs/defense_notes_session_plan.md", "docs/00_hi_level_architecture.md", ["REFERENCES", "REFERENCES"]
+"aliases", "soft-delete", 2, "docs/data_model.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"api", "neo4j_uri", 2, "docs/03_retriever.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"api", "vector-only baseline graph adapter", 2, "docs/03_retriever.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"api", "выбор стека", 2, "docs/03_retriever.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"api", "vector_index", 2, "docs/03_retriever.md", "docs/adapters_specification.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"api reference", "get /config/adapters", 2, "docs/README.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"api reference", "adapters", 2, "docs/README.md", "docs/04_services_config.md", ["REFERENCES", "REFERENCES"]
+"api reference", "api_key", 2, "docs/README.md", "docs/04_services_config.md", ["REFERENCES", "REQUIRES_CONSTRAINT"]
+"api reference", "get /config/adapters/available", 2, "docs/README.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+"api reference", "get /config/adapters", 2, "docs/README.md", "docs/adapters_guide.md", ["REFERENCES", "REFERENCES"]
+name, degree, docs
+"chunk", 43, 3
+"topology orchestrator", 32, 2
+"chunker", 32, 2
+"concept.md", 31, 2
+"graph projection", 31, 3
+"vectorstoreprovider", 29, 3
+"api", 27, 5
+"vector_store", 27, 3
+"graphstoreprovider", 27, 3
+"config service", 23, 2
+"querypipeline", 22, 2
+"bounded expansion", 21, 2
+"adapters", 19, 2
+"contextnode", 19, 2
+"infra/config/namespaces.yaml", 18, 1
+"sse", 18, 2
+"data_model.md", 17, 2
+"ssot", 16, 3
+"neo4j", 16, 5
+"entry-point", 16, 1
+"storage", 15, 2
+"reranker", 15, 4
+"config api", 15, 2
+"soft-delete", 15, 1
+"entry_points", 14, 4
+from_name, to_name, rel, m_docs, m_sources
+"llm", "api", "REFERENCES", 5, ["docs/03_retriever.md", "docs/04_services_config.md", "docs/README.md", "docs/adapters_guide.md", "docs/api_reference.md"]
+"llm", "adapters", "REQUIRES_CONSTRAINT", 2, ["docs/04_services_config.md", "docs/adapters_guide.md"]
+"llm", "config service", "REQUIRES_CONSTRAINT", 2, ["docs/00_hi_level_architecture.md", "docs/04_services_config.md"]
+"llm", "stage", "SIMILAR_TO", 1, ["docs/api_reference.md"]
+"llm", "выбор стека", "REQUIRES_CONSTRAINT", 1, ["docs/adapters_specification.md"]
