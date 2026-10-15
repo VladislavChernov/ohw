@@ -1,0 +1,68 @@
+# Селектор гейта: какие тесты обязаны упасть, если изменился файл из области.
+#
+# Это единственное место, где область сопоставлена тестам. Скрипт `infra/scripts/gate.sh`
+# читает его, а `tests/test_gate_selectors.py` падает, если путь перестал существовать:
+# селектор, который молча ничего не запускает, хуже отсутствия селектора.
+#
+# `match` пишется относительно корня git-репозитория, потому что именно в таком виде
+# отдаёт пути `git status --porcelain`. Обрезать префикс на границе нельзя: это второе
+# место, где живёт правило сопоставления, то есть будущий дрейф.
+#
+# Область добавляется только после того, как её прогон однажды прошёл зелёным. У гейта
+# нет отрицательных утверждений, только «эти тесты обязаны упасть вместе с файлом».
+
+defaults:
+  # Что делать с файлом вне описанных областей: `full` - требовать ручной полный
+  # прогон. Молча пропустить нельзя: зелёный селектор при незакрытой правке читается
+  # как «всё прошло», хотя проверялось меньше, чем кажется.
+  unknown: full
+
+areas:
+  docs:
+    # Корпус `docs/` система ест сама, поэтому правка документа обязана быть видна
+    # тестам согласованности, ссылок и as-built ссылок.
+    match:
+      - "Dz4/docs/*"
+      - "Dz4/CONCEPT.md"
+      - "Dz4/AGENTS.md"
+      - "Dz4/README-deployment.md"
+      - "Dz4/README-acceptance.md"
+    tests:
+      - "tests/test_docs_consistency.py"
+      - "tests/test_doc_links.py"
+      - "tests/test_as_built_references.py"
+
+  adapters:
+    # Каталог реализаций, YAML-namespaces и протокол адаптеров.
+    match:
+      - "Dz4/prototype/src/graphrag_proto/retrieval/adapters/*"
+      - "Dz4/prototype/infra/config/namespaces.yaml"
+    tests:
+      - "tests/test_factory_adapters.py"
+      - "tests/test_adapter_catalog_ssot.py"
+      - "tests/test_retrieval_adapters.py"
+
+  demo_scripts:
+    # Launcher-скрипты и их parity-гард.
+    match:
+      - "Dz4/Demo/demo.sh"
+      - "Dz4/Demo/demo.ps1"
+      - "Dz4/Demo/demo-cpu.sh"
+      - "Dz4/Demo/demo-cpu.ps1"
+      - "Dz4/Demo/README.md"
+      - "Dz4/prototype/infra/compose.runtime.yaml"
+      - "Dz4/prototype/infra/compose.runtime-gpu.yaml"
+    tests:
+      - "tests/test_demo_scripts_parity.py"
+
+  gate_tooling:
+    # Гейт и его селектор. Правка здесь меняет то, что считается проверенным,
+    # поэтому площадка не должна проходить проверку сама собой.
+    match:
+      - "Dz4/prototype/infra/gate_selectors.yaml"
+      - "Dz4/prototype/infra/scripts/gate.sh"
+      - "Dz4/prototype/infra/checks/gate_changed_areas.py"
+      - "Dz4/prototype/infra/checks/gate_select_targets.py"
+      - "Dz4/prototype/tests/test_gate_selectors.py"
+    tests:
+      - "tests/test_gate_selectors.py"
