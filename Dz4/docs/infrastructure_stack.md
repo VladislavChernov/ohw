@@ -56,7 +56,7 @@
 | Глоссарий | YAML + SQLite | Postgres | Postgres | Glossary Service |
 | Кэш / очередь задач | — | Valkey (Redis) | Valkey (кластер) | Runtime Query Queue |
 | Очередь ingestion | синхронно | Redis / RabbitMQ | Kafka | Ingestion |
-| LLM | Qwen 2.5 Coder 7B Abliterate (dev/demo; GPU либо CPU, см. §4; любая `/v1`-совместимая — через конфиг, ADR-022) | Qwen 14B (1 GPU) | Qwen 72B (multi-GPU) | `LLMInference` |
+| LLM | Qwen 2.5 Coder 7B Abliterate (dev/demo; GPU либо CPU, см. §4; любая `/v1`-совместимая — через конфиг, ADR-022) | — | — | `LLMInference` |
 | Embeddings | bge-m3 (1 GPU) | bge-m3 (1 GPU) | bge-m3 (отдельный) | `Embedder` |
 | Reranker | bge-reranker-base (CPU) | — | — | `Reranker` |
 | Оркестрация | Docker Compose | K3s | Managed K8s | — |
@@ -107,8 +107,8 @@
 раздельных вариантов для него не заводилось. Это осознанная граница, а не упущение.
 
 Модель в обоих вариантах одна: Qwen 2.5 Coder 7B Abliterate q4_K_M, ~5,35 ГБ VRAM при
-полной выгрузке. Целевые 14B и 72B из §3 на карте в 8 ГБ целиком не помещаются, и переход
-потребовал бы частичной выгрузки, то есть ровно того, что в демо убрано.
+полной выгрузке. Других моделей не планируется: задачи «считать на 14B» у проекта нет, и
+кто захочет — подбирает под своё железо сам.
 
 ## 5. Модели и лицензии
 

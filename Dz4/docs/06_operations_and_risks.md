@@ -565,7 +565,7 @@ $scalar_properties`, то есть побеждает пришедший пос�
 | Кэш                  | Valkey (semantic cache, ADR-025, M3.3) | Valkey (Redis) | Valkey (кластер)    |
 | Query-воркеры        | 1 (ThreadPoolExecutor(2) в пайплайне) | 2–4 (S2 закрыт 2026-09-15: fencing reclaim — worker_id в ack/fail, skip уже-терминальной задачи, идемпотентный commit mark_succeeded; таймауты зависимостей — socket_timeout=2s у клиента очереди, `LLM_TIMEOUT_S` у LLM-адаптера; fail-open кэша — P0) | N + автоскейлинг по `queue_depth` |
 | Очередь ingestion    | Синхронно         | Redis / RabbitMQ  | Kafka               |
-| Модель LLM           | Qwen 2.5 Coder 7B Abliterate q4_K_M (1 GPU)   | Qwen 14B (1 GPU)  | Qwen 72B (multi-GPU)|
+| Модель LLM           | Qwen 2.5 Coder 7B Abliterate q4_K_M (1 GPU)   | — | — |
 | Модель эмбеддингов   | bge-m3 (**в Demo считает на CPU**) | bge-m3 (1 GPU) | bge-m3 (отдельный)  |
 | GPU                  | 1 (поэтапно)      | 2 (параллельно)\* | N (автоскейлинг)    |
 
