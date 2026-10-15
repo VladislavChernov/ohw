@@ -44,7 +44,6 @@ export UV_PROJECT_ENVIRONMENT INGESTION_UPLOAD_DIR PYTHONPATH
 # Оба кэша уводятся в записываемый каталог.
 CACHE_DIR="${GATE_CACHE_DIR:-/tmp/dz4-gate-cache}"
 export CACHE_DIR
-UV_RUN="uv run --frozen"
 
 mkdir -p "$UV_PROJECT_ENVIRONMENT" "$INGESTION_UPLOAD_DIR" "$CACHE_DIR"
 
@@ -87,7 +86,9 @@ changed)
     exit 3
   fi
   MODE=$(uv run --frozen python "$CHECKS/gate_changed_areas.py" --selectors "$SELECTORS" "$@") || exit 3
-  [ -n "$MODE" ] || { echo "=== pytest: изменённых файлов нет ==="; exit 0; }
+  # Пустой список - это «проверять нечего», а не «проверилось всё». Ранний выход здесь
+  # обязан нести накопленный FAILED, иначе гейт скажет «всё прошло» при упавшем ruff.
+  [ -n "$MODE" ] || { echo "=== pytest: изменённых файлов нет ==="; exit "$FAILED"; }
   ;;
 docs | adapters | demo_scripts | gate_tooling)
   ;;

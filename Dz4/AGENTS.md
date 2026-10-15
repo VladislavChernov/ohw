@@ -181,6 +181,15 @@ characters in a document is a signal that a repair script wrote mojibake as data
 **Git считает хост, контейнер его не видит.** Поэтому список изменённых файлов
 передаётся аргументами, а не вычисляется в контейнере:
 
+Запуск из PowerShell 5.1 — список файлов получается через `git` самого хоста, без `cut`:
+
+```powershell
+$files = git status --porcelain | ForEach-Object { $_.Substring(3) }
+docker exec ohw-dz4-dev sh -c "cd /repo/prototype && sh infra/scripts/gate.sh changed $files"
+```
+
+Запуск из `sh`/`bash`:
+
 ```sh
 docker exec ohw-dz4-dev sh -c "cd /repo/prototype && \
   sh infra/scripts/gate.sh changed $(git status --porcelain | cut -c4-)"
@@ -188,12 +197,17 @@ docker exec ohw-dz4-dev sh -c "cd /repo/prototype && \
 
 Инструменты запускаются через `uv` (`uv run --frozen`), а не прямым вызовом
 интерпретатора: так состав берётся из `uv.lock`, и гейт падает на рассинхроне
-зависимостей, а не разъезжается с ним молча. Окружение uv и каталог загрузок
-кладутся в записываемый `/tmp`, потому что рабочая копия смонтирована `read-only`;
-переопределяются через `GATE_VENV` и `GATE_UPLOADS`.
+зависимостей, а не разъезжается с ним молча. Окружение uv, каталог загрузок
+и кэши линтеров кладутся в записываемый `/tmp`, потому что рабочая копия смонтирована
+`read-only`; переопределяются через `GATE_VENV`, `GATE_UPLOADS`, `GATE_CACHE_DIR` и
+`GATE_SRC`.
 
-`ruff`, `mypy` и прибор grounding в обоих режимах идут по всему репозиторию: они
-дешёвые, и селектор по ним ничего не выигрывает. Режим влияет только на `pytest`.
+`mypy` проверяет `src`, а не весь репозиторий: так задано в `pyproject.toml`
+(`files = ["src"]`). Код вне `src` — в том числе `infra/checks` — типов не проверяется.
+
+`ruff`, прибор grounding и `pytest` в обоих режимах идут по всему репозиторию: они
+дешёвые, и селектор по ним ничего не выигрывает. Режим влияет только на выбор тестов
+для `pytest`.
 
 **Где описан селектор.** Единственное место — `prototype/infra/gate_selectors.yaml`:
 область → `match`-шаблоны изменяемых файлов и тесты, которые обязаны упасть вместе с

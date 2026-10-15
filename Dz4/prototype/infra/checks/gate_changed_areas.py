@@ -32,14 +32,14 @@ def classify(path: str, areas: dict[str, dict[str, object]]) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--selectors", type=Path, required=True)
-    parser.add_argument("--prefix", default="", help="префикс, добавляемый к путям (корень git)")
     parser.add_argument("paths", nargs="*")
     args = parser.parse_args()
 
     spec = yaml.safe_load(args.selectors.read_text(encoding="utf-8")) or {}
     areas = spec.get("areas") or {}
 
-    if not args.paths:
+    paths = [item for item in args.paths if item.strip()]
+    if not paths:
         print(
             "список изменённых файлов пуст. Git считает хост, контейнер его не видит",
             file=sys.stderr,
@@ -48,12 +48,10 @@ def main() -> int:
 
     found: list[str] = []
     unknown: list[str] = []
-    for raw in args.paths:
+    for raw in paths:
         path = raw.strip().strip('"').replace("\\", "/")
         if not path:
             continue
-        if args.prefix:
-            path = f"{args.prefix.rstrip('/')}/{path}"
         hits = classify(path, areas)
         if not hits:
             unknown.append(path)
