@@ -16,6 +16,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INFRA_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../prototype/infra" 2>/dev/null && pwd || echo "")
 COMPOSE_RUNTIME="$INFRA_DIR/compose.runtime.yaml"
 COMPOSE_INGEST="$INFRA_DIR/compose.ingest.yaml"
+# Подкладывается ВСЕГДА: именно этот файл выдаёт контейнерам видеокарту. Без него LLM
+# считает на процессоре - это не ошибка, а вариант `demo-cpu.sh`.
+COMPOSE_GPU="$INFRA_DIR/compose.runtime-gpu.yaml"
 FIXTURES_DIR="$SCRIPT_DIR/fixtures"
 
 NEO4J_CONTAINER='ohw-runtime-neo4j'
@@ -59,7 +62,8 @@ compose_files() {
 }
 
 compose_cmd() {
-    set -- --project-directory "$INFRA_DIR" --file "$COMPOSE_RUNTIME"
+    # Порядок важен: оверлей GPU идёт сразу за базовым, иначе его `deploy` перепишется.
+    set -- --project-directory "$INFRA_DIR" --file "$COMPOSE_RUNTIME" --file "$COMPOSE_GPU"
     if [ "${WITH_INGEST:-0}" = "1" ]; then
         set -- "$@" --file "$COMPOSE_INGEST" --profile ingest
     fi

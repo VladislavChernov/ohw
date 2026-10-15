@@ -42,6 +42,9 @@ $scriptDir = $PSScriptRoot
 $infraDir = Resolve-Path (Join-Path $scriptDir '..\prototype\infra')
 $composeRuntime = Join-Path $infraDir 'compose.runtime.yaml'
 $composeIngest = Join-Path $infraDir 'compose.ingest.yaml'
+# Подкладывается ВСЕГДА: именно этот файл выдаёт контейнерам видеокарту. Без него LLM
+# считает на процессоре - это не ошибка, а вариант `demo-cpu.ps1`.
+$composeGpu = Join-Path $infraDir 'compose.runtime-gpu.yaml'
 $fixturesDir = Join-Path $scriptDir 'fixtures'
 
 $neo4jContainer = 'ohw-runtime-neo4j'
@@ -76,7 +79,8 @@ function Invoke-Native {
 }
 
 function Get-ComposeArguments {
-    $args = @('--project-directory', $infraDir, '--file', $composeRuntime)
+    # Порядок важен: оверлей GPU идёт сразу за базовым, иначе его `deploy` перепишется.
+    $args = @('--project-directory', $infraDir, '--file', $composeRuntime, '--file', $composeGpu)
     if ($WithIngest) {
         $args += @('--file', $composeIngest, '--profile', 'ingest')
     }
