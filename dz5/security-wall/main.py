@@ -87,8 +87,11 @@ def _validate(text: str, kind: str):
             else:
                 reason = "validation failed"
         return text, violated, reason
-    except Exception:
-        return text, False, ""
+    except Exception as exc:
+        # Guardrails raises ValidationError on violation (e.g. prompt injection
+        # detected). Treat any validator exception as a violation so the wall
+        # blocks instead of silently passing through.
+        return text, True, f"validator error: {exc}"
 
 
 class ChatMessage(BaseModel):
