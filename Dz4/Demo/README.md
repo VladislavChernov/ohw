@@ -290,6 +290,13 @@ docs/defense_notes_simplifications.md
   отметка: **прогон не делался**, список подготовлен. Отдельное предусловие группы E: кэш на
   обоих стендах выключен жёстко (`SEMANTIC_CACHE_ENABLED: "false"` в `compose.runtime.yaml` и
   `compose.eval-minimal.yaml`), время ответа при этом меряется всегда.
+- [eval-slice.jsonl](./eval-slice.jsonl) — **машинная форма того же списка** в формате ADR-015
+  (12 строк: 8 вопросов плюс повторы группы E). Проверен загрузчиком `run_eval`: id уникальны,
+  все `golden_source` существуют, `as_of` не старше источников. Прогон:
+  `--dataset Demo/eval-slice.jsonl --mode both --no-judge`. Отчёт прогона при этом кладётся
+  в папку `--out` целиком: `qa_review.md` и `PASSPORT.md` — для чтения глазами,
+  `run_manifest.json`, `qa_log.jsonl`, `lift_report.json`, `failures.jsonl` и `run_state.json` —
+  машинно.
 - [measured-load-time.md](./measured-load-time.md) — **измеренное время загрузки** документа в
   набор: постадийный замер пилота (330 с на 10 чанков, `EXTRACT` 20,3 с/чанк,
   `EMBED` 11,4 с/чанк) и прогноз на остальные документы, включая `05_adr_log.md` (191 чанк,

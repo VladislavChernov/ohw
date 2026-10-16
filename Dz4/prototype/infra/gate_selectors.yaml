@@ -45,7 +45,8 @@ areas:
       - "tests/test_llm_openai_adapter.py"
 
   demo_scripts:
-    # Launcher-скрипты и их parity-гард.
+    # Launcher-скрипты и их parity-гард. Сюда же оверлеи runtime-контура: их правильность
+    # проверяет тот же гард (том проекции у eval-runner общий с query-worker).
     match:
       - "Dz4/Demo/demo.sh"
       - "Dz4/Demo/demo.ps1"
@@ -54,8 +55,26 @@ areas:
       - "Dz4/Demo/README.md"
       - "Dz4/prototype/infra/compose.runtime.yaml"
       - "Dz4/prototype/infra/compose.runtime-gpu.yaml"
+      - "Dz4/prototype/infra/compose.eval-runtime.yaml"
+      - "Dz4/prototype/tests/test_demo_scripts_parity.py"
     tests:
       - "tests/test_demo_scripts_parity.py"
+
+  eval_runner:
+    # Eval-раннер и его контрактные тесты. Отдельная область, а не хвост demo_scripts:
+    # правка раннера ничего не меняет в launcher-скриптах, и приписывать её туда значило
+    # бы гонять не относящиеся к ней тесты и делать вид, что это проверка парности.
+    # Тестовые файлы названы здесь же, как в `gate_tooling`: правка гарда обязана
+    # запускать гейт, иначе ослабленный гард проходит незамеченным.
+    match:
+      - "Dz4/prototype/infra/eval/run_eval.py"
+      - "Dz4/prototype/tests/test_run_eval_artifacts.py"
+      - "Dz4/prototype/tests/test_run_eval_observability.py"
+      - "Dz4/prototype/tests/test_run_eval_preflight.py"
+    tests:
+      - "tests/test_run_eval_artifacts.py"
+      - "tests/test_run_eval_observability.py"
+      - "tests/test_run_eval_preflight.py"
 
   gate_tooling:
     # Гейт и его селектор. Правка здесь меняет то, что считается проверенным,

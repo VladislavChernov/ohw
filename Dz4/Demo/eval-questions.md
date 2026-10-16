@@ -123,3 +123,19 @@ uv run --no-sync python infra/eval/run_eval.py --domain it --mode both --no-judg
 Нет вопросов вида «чем именно связаны A и B в графе» с опорой на вид ребра: вид извлечённого
 ребра текстом не подтверждается (проверено на двух рёбрах, `slice-feasibility.md`), поэтому
 такой вопрос защищал бы извлечение, а не документ.
+
+## Машинная форма списка
+
+`Demo/eval-slice.jsonl` — тот же список в формате ADR-015, который читает `run_eval`.
+Источник правды — этот файл; jsonl из него выведен и при правке списка пересобирается.
+12 строк: A1, A2, B1, B2, C1, C2, D1, D2 и повторы E1a/E1b, E2a/E2b.
+
+Проверено загрузчиком самого eval'а (`load_dataset`): 12 строк, id уникальны, все
+`golden_source` существуют, `as_of` (2026-10-15) не старше самого свежего источника,
+правило `graph_required ⇒ golden_graph_evidence: true` выполняется. Поля `golden_facts`
+взяты из текста документов, не из графа.
+
+```powershell
+uv run --no-sync python infra/eval/run_eval.py --domain it --mode both --no-judge `
+  --dataset Demo/eval-slice.jsonl --out reports/ready-slice --no-preflight
+```

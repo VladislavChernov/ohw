@@ -100,6 +100,27 @@ DEFAULT_CONTOUR_TIMEOUT_S = 5.0
 EVAL_K = 5
 _REVISION_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
+# Откуда взята ревизия в манифесте. Три значения, и различие между ними не украшение:
+# «прочитана у контура», «контур не ответил» и «не просили» — три разных результата, из
+# которых третий выбирают руками, а второй означает, что графическая ось не измерялась.
+REVISION_SOURCE_REPORTED = "reported"
+REVISION_SOURCE_UNAVAILABLE = "unavailable"
+REVISION_SOURCE_SKIPPED = "skipped"
+
+# Режим покрытия эталонных источников. `measured` — состав известен, и ноль в нём означает
+# факт о корпусе. `unknown` — состава взять негде: прибор молчит, и подставлять вместо
+# молчания `0.0` нельзя, потому что это читается как «эталонных источников в корпусе нет».
+COVERAGE_MODE_MEASURED = "measured"
+COVERAGE_MODE_UNKNOWN = "unknown"
+COVERAGE_UNKNOWN_REASON = "corpus_composition_unavailable"
+
+# Гард среза. `unavailable` — не синоним `stable`: первый означает «проверить не удалось»,
+# второй — «проверено и не менялось», и смешивать их значит выдавать отсутствие данных за
+# подтверждение.
+PARITY_STABLE = "stable"
+PARITY_CHANGED = "changed"
+PARITY_UNAVAILABLE = "unavailable"
+
 # generation.mode (design.md §5.2): judge / n/a / skipped / empty
 GENERATION_MODE_SKIPPED = "skipped"
 GENERATION_MODE_NO_JUDGE = "n/a"
@@ -191,15 +212,20 @@ def required_contours(
 ) -> list[dict[str, Any]]:
     """Контуры, нужные для сконфигурированных адаптеров (env): ingestion + backend'ы.
 
-    Всегда требуется Ingestion API (revision fetch). Neo4j/embeddings/reranker/llm
-    проверяются, только если соответствующий адаптер выбран env-переменными.
+    Ingestion API обязателен **только когда прогон сам загружает корпус**
+    (`include_ingestion=True`). Он не является предусловием старта: без него ревизия
+    домена не измеряется, и графовая ось уходит в vector-only с именованной причиной
+    `revision_unknown`, а сам замер продолжает быть корректным — просто не про граф
+    (ADR-029, поправка 2026-10-16; тот же отказ объявлен в ADR-058 для runtime-контура).
+    Neo4j/embeddings/reranker/llm проверяются, только если соответствующий адаптер выбран
+    env-переменными.
     `include_generation=False` (--retrieval-only) исключает LLM генерации;
     `include_ingestion=True` сохраняет LLM-контур, если ingestion использует
     `EXTRACT_LLM=true`.
     """
-    contours: list[dict[str, Any]] = [
-        {"name": "ingestion-api", "kind": "http", "target": INGESTION_URL},
-    ]
+    contours: list[dict[str, Any]] = []
+    if include_ingestion:
+        contours.append({"name": "ingestion-api", "kind": "http", "target": INGESTION_URL})
     config_url = os.environ.get("CONFIG_URL", "").strip()
     if config_url:
         contours.append({"name": "config-service", "kind": "http", "target": config_url})
@@ -1046,25 +1072,89 @@ def build_ingest_quality(ingest: dict[str, Any] | None) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Revision fetch
+# Revision: чтение best-effort + гард среза (ADR-029, поправка 2026-10-16)
 # ---------------------------------------------------------------------------
 
-def _invalid_revision(domain: str) -> RuntimeError:
-    return RuntimeError(f"revision для домена {domain!r} некорректна")
+def observe_domain_revision(domain: str) -> tuple[str | None, str]:
+    """Прочитать ревизию домена, не роняя прогон: `(ревизия, откуда она)`.
 
+    Fail-open здесь — решение, а не мягкость: контур может быть не поднят (runtime-стенд
+    без ingestion-api, ADR-058), и прогон против заранее наполненной базы всё равно
+    корректен — просто не про граф. Строгая функция, падавшая на том же месте, была
+    предусловием старта и роняла замер, который можно сделать.
 
-def fetch_revision(domain: str) -> str:
-    """GET /api/v1/ingestion/revision?domain= → non-empty revision string."""
+    Нечитаемый ответ и недоступный контур дают один и тот же `unavailable`: различить их
+    по этому каналу нельзя, а выдавать неразличимое за два разных факта — значит выдумать
+    один из них.
+    """
     try:
         resp = _get_json(f"{INGESTION_URL}/api/v1/ingestion/revision?domain={domain}")
-    except RuntimeError as exc:
-        raise RuntimeError(f"не удалось получить revision для домена {domain!r}") from exc
+    except RuntimeError:
+        return None, REVISION_SOURCE_UNAVAILABLE
     if not isinstance(resp, dict):
-        raise _invalid_revision(domain)
-    rev = resp.get("revision")
-    if not isinstance(rev, str) or not _REVISION_RE.fullmatch(rev):
-        raise _invalid_revision(domain)
-    return rev
+        return None, REVISION_SOURCE_UNAVAILABLE
+    revision = resp.get("revision")
+    if not isinstance(revision, str) or not _REVISION_RE.fullmatch(revision):
+        return None, REVISION_SOURCE_UNAVAILABLE
+    return revision, REVISION_SOURCE_REPORTED
+
+
+def guard_projection_revision(records: list[dict[str, Any]], mode: str) -> None:
+    """Остановить прогон, если проекция перестроилась посреди измерения.
+
+    Сигнал независим от того, что eval передал в пайплайн: `projection_revision` приходит
+    из `ProjectionStateStore` при каждом запросе. Первое наблюдение — база; другое значение
+    ниже по прогону означает, что вопросы собраны по разным срезам, и разность метрик
+    между рукавами перестаёт быть вкладом компонента.
+
+    Прежняя проверка сравнивала `done["revision"]` с переданным значением, но это эхо
+    аргумента (`retrieval/pipeline.py:842`): eval собирает пайплайн в процессе и вызывает
+    его напрямую, минуя query-worker с его `RevisionClient`. Сравнение совпадало всегда,
+    то есть прибор парности не измерял ничего.
+    """
+    observed = sorted(
+        {
+            str(record["projection_revision"])
+            for record in records
+            if record.get("projection_revision")
+        }
+    )
+    if len(observed) > 1:
+        raise RuntimeError(
+            f"projection revision changed during {mode}: {', '.join(observed)} — "
+            "проекция перестроилась посреди прогона, дальше измеряется другой срез"
+        )
+
+
+def run_revision_parity(revision_before: str | None, revision_after: str | None) -> dict[str, Any]:
+    """Итог гарда доменной ревизии: что удалось проверить, а что осталось неизвестным.
+
+    Три исхода, и третий не равен первому: `unavailable` — это «проверить не удалось»,
+    а не «проверено и не менялось». Раньше эти два случая попадали в одну ячейку, и
+    прогон без ревизии выглядел прошедшим проверку.
+    """
+    if revision_before is None or revision_after is None:
+        return {
+            "revision": PARITY_UNAVAILABLE,
+            "reason": "ревизия домена не была прочитана — гард не исполнился",
+            "revision_before": revision_before,
+            "revision_after": revision_after,
+        }
+    if revision_before != revision_after:
+        return {
+            "revision": PARITY_CHANGED,
+            "reason": (
+                f"ревизия домена разошлась внутри прогона: {revision_before} → {revision_after}"
+            ),
+            "revision_before": revision_before,
+            "revision_after": revision_after,
+        }
+    return {
+        "revision": PARITY_STABLE,
+        "reason": None,
+        "revision_before": revision_before,
+        "revision_after": revision_after,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1338,7 +1428,8 @@ def build_run_manifest(
     run_id: str,
     started_at: str,
     domain: str,
-    revision: str,
+    revision: str | None,
+    revision_source: str,
     datasets: list[str],
     mode_arg: str,
     corpus: str | None = None,
@@ -1354,6 +1445,10 @@ def build_run_manifest(
     note: str = "",
 ) -> dict[str, Any]:
     """Манифест условий прогона (design.md §5.1) — «что именно сравнивалось».
+
+    ``revision`` может быть ``None``, и рядом лежит ``revision_source``: без него `null`
+    читался бы как «ревизии не было», хотя различаются «контур не ответил» и «не просили»
+    (ADR-029, поправка 2026-10-16).
 
     ``corpus_documents``/``corpus_limit``/``golden`` — обязательны для усечённых
     прогонов: без них прогон на 3 документах неотличим от прогона на 36 и
@@ -1377,6 +1472,7 @@ def build_run_manifest(
         "domain": domain,
         "revision": revision,
         "revision_fingerprint": revision,
+        "revision_source": revision_source,
         "datasets": datasets,
         "corpus": corpus,
         "config": config or {},
@@ -1519,6 +1615,12 @@ def eval_question(
     graph_contribution по срезу `golden_graph_evidence`, answer, generation
     (mode: judge / n/a / skipped) и timings. При `trace_enabled` кладёт
     `trace_events` из `done["trace"]` (слой 4; из qa_log-строки удаляются).
+
+    `revision` — замороженная величина, по которой собраны оба рукава (ADR-029 п.1); она
+    пишется в строку пары как атрибуция. Сверять её с `done["revision"]` здесь нельзя и
+    раньше было бессмысленно: это эхо того же аргумента, а не чтение контура. Гард среза
+    живёт в `guard_projection_revision` (сигнал из `ProjectionStateStore`) и в
+    `run_revision_parity` (повторное чтение ревизии).
     """
     golden_sources = set(question.get("golden_sources", []))
     golden_facts = question.get("golden_facts", [])
@@ -1534,11 +1636,6 @@ def eval_question(
         trace=trace_enabled or graph_enabled,
     )
 
-    observed_revision = done.get("revision")
-    if observed_revision != revision:
-        raise RuntimeError(
-            f"revision mismatch: expected {revision!r}, got {observed_revision!r}"
-        )
     sources = done.get("sources") or []
     raw_urls = [
         src.get("source_url")
@@ -1741,17 +1838,40 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 def golden_coverage(
     questions: list[dict[str, Any]],
-    ingested_urls: set[str],
+    ingested_urls: set[str] | None,
 ) -> dict[str, Any]:
-    """Доля вопросов, чьи ``golden_sources`` реально лежат в загруженном корпусе.
+    """Доля вопросов, чьи ``golden_sources`` реально лежат в корпусе — или «не измерено».
 
-    Обязательно для усечённых прогонов: если корпус — 3 документа, то у
-    большинства вопросов эталонных источников в базе нет, и recall низкий не
-    из-за качества системы, а из-за усечения. Без этой цифры любой вывод по
-    smoke-прогону ложен.
+    ``ingested_urls`` — состав корпуса **как его знает прибор**: множество означает, что
+    состав известен (пустое множество — тоже известный факт: загруженных документов не было),
+    ``None`` — что взять состав негде, и тогда любое число было бы выдумкой.
+
+    Флаг «известен ли состав» рядом с данными не берётся намеренно: он может разойтись с
+    самими данными, и прибор объявит ноль по корпусу, которого он не видел.
+
+    Обязательно для усечённых прогонов: если корпус — 3 документа, то у большинства
+    вопросов эталонных источников в базе нет, и recall низкий не из-за качества системы,
+    а из-за усечения. Но прогон против заранее наполненной базы (демо-набор) загрузок не
+    содержит, и прежний `0.0` в этом случае утверждал, что эталонных источников в корпусе
+    нет, — то есть ложно утверждал о базе, в которой они есть.
     """
+    questions_total = len(questions)
+    if ingested_urls is None:
+        # Счётчики — `null`, а не `0` и не отсутствующие ключи: пустой результат и
+        # ненайденный прибор не должны выглядеть одинаково. `questions_total` при этом
+        # измерим — размер датасета известен всегда.
+        return {
+            "mode": COVERAGE_MODE_UNKNOWN,
+            "reason": COVERAGE_UNKNOWN_REASON,
+            "questions_total": questions_total,
+            "fully_covered": None,
+            "partially_covered": None,
+            "uncovered": None,
+            "fully_covered_ratio": None,
+        }
     if not questions:
         return {
+            "mode": COVERAGE_MODE_MEASURED,
             "questions_total": 0,
             "fully_covered": 0,
             "partially_covered": 0,
@@ -1769,13 +1889,13 @@ def golden_coverage(
             fully += 1
         elif hits:
             partially += 1
-    total = len(questions)
     return {
-        "questions_total": total,
+        "mode": COVERAGE_MODE_MEASURED,
+        "questions_total": questions_total,
         "fully_covered": fully,
         "partially_covered": partially,
-        "uncovered": total - fully - partially,
-        "fully_covered_ratio": round(fully / total, 4),
+        "uncovered": questions_total - fully - partially,
+        "fully_covered_ratio": round(fully / questions_total, 4),
     }
 
 
@@ -1849,7 +1969,7 @@ def build_config_state(
 
     **Дрейф между режимами — разрушающий для пары.** Baseline и target обязаны быть измерены
     одним конфигом: иначе delta измеряет не «вклад графа», а «вклад графа плюс разницу между
-    двумя настройками». Проверка по образцу `revision mismatch` — не тихо, а Invalid.
+    двумя настройками». Проверка по образцу расхождения среза — не тихо, а Invalid.
     Конфигурация закрепляется на первый запрос каждого режима, поэтому дрейф возможен, если
     файл изменили между режимами, — и это видно, а не предполагается.
     """
@@ -1906,6 +2026,22 @@ def _format_causes(causes: dict[str, int]) -> str:
     return _format_histogram(causes)
 
 
+def _format_parity(parity: dict[str, Any]) -> str:
+    """Гард среза одной строкой: состояние + причина, если она есть.
+
+    Отдельная функция, а не f-строка на месте: причина обязана быть видна рядом с
+    состоянием, а «состояние есть, а причина потерялась» — это ровно тот молчащий отказ,
+    который тут и чиним.
+    """
+    state = parity.get("revision") or PARITY_UNAVAILABLE
+    projection = parity.get("projection")
+    text = f"ревизия={state}"
+    if projection:
+        text += f", проекция={projection}"
+    reason = parity.get("reason")
+    return f"{text} — {reason}" if reason else text
+
+
 def write_passport(
     manifest: dict[str, Any],
     report: dict[str, Any] | None,
@@ -1932,10 +2068,15 @@ def write_passport(
         "",
         f"- **run_id**: `{manifest.get('run_id', 'n/a')}`  ",
         f"- **started_at**: {manifest.get('started_at', 'n/a')}  ",
+        f"- **finished_at**: {manifest.get('finished_at') or 'н/д (прогон не завершён)'}  ",
         f"- **code_commit**: `{manifest.get('code_commit', 'n/a')}`  ",
         f"- **code_tree**: `{manifest.get('code_tree', 'unknown')}`  ",
         f"- **домен**: {manifest.get('domain', 'n/a')}  ",
-        f"- **revision**: `{manifest.get('revision', 'n/a')}`  ",
+        (
+            f"- **revision**: `{manifest.get('revision') or 'null'}` "
+            f"(источник: {manifest.get('revision_source', 'n/a')})  "
+        ),
+        f"- **гард среза**: {_format_parity(manifest.get('parity') or {})}  ",
         f"- **корпус**: {manifest.get('corpus', 'n/a')}  ",
         f"- **документов загружено**: {manifest.get('corpus_documents_count', 0)}  ",
         f"- **лимит документов**: {manifest.get('corpus_limit') or 'нет'}  ",
@@ -1969,7 +2110,14 @@ def write_passport(
         "",
     ]
     ratio = golden.get("fully_covered_ratio")
-    if ratio is not None and ratio < 0.5:
+    if golden.get("mode") == COVERAGE_MODE_UNKNOWN:
+        lines.append(
+            f"- ⚠️ **`golden_coverage` не измерено** (`{golden.get('reason')}`): в прогоне не "
+            f"было загрузок, поэтому состав корпуса прибор не знает. Это **не** «покрытие 0» — "
+            f"вопросов в наборе {golden.get('questions_total')}, а доля полного покрытия "
+            "неизвестна."
+        )
+    elif ratio is not None and ratio < 0.5:
         lines.append(
             f"- ⚠️ **`golden_coverage` = {ratio}** ({golden.get('fully_covered')} из "
             f"{golden.get('questions_total')} вопросов имеют все эталонные источники "
@@ -2168,7 +2316,7 @@ def write_lift_report(report: dict[str, Any], out_dir: Path, manifest: dict[str,
         f"**Run ID:** {report.get('run_id', 'n/a')}  ",
         f"**Created:** {report.get('created_at', 'n/a')}  ",
         f"**Verdict:** `{report.get('verdict', 'n/a')}`  ",
-        f"**Revision:** `{report.get('revision', 'n/a')}`\n",
+        f"**Revision:** `{report.get('revision') or 'null'}`\n",
     ]
     # Причина вердикта идёт сразу под ним, а не в конце отчёта: вердикт без причины
     # выглядит как результат, и его читают как результат.
@@ -2180,10 +2328,13 @@ def write_lift_report(report: dict[str, Any], out_dir: Path, manifest: dict[str,
         lines.append("\n## Условия прогона\n")
         lines.append(f"- **run_id**: {manifest.get('run_id', 'n/a')}  ")
         lines.append(f"- **started_at**: {manifest.get('started_at', 'n/a')}  ")
+        lines.append(f"- **finished_at**: {manifest.get('finished_at') or 'н/д'}  ")
         lines.append(f"- **code_commit**: {manifest.get('code_commit', 'n/a')}  ")
         lines.append(f"- **domain**: {manifest.get('domain', 'n/a')}  ")
-        lines.append(f"- **revision**: {manifest.get('revision', 'n/a')}  ")
-        lines.append(f"- **revision_fingerprint**: {manifest.get('revision_fingerprint', 'n/a')}  ")
+        lines.append(f"- **revision**: {manifest.get('revision') or 'null'}  ")
+        lines.append(f"- **revision_source**: {manifest.get('revision_source', 'n/a')}  ")
+        lines.append(f"- **revision_fingerprint**: {manifest.get('revision_fingerprint') or 'null'}  ")
+        lines.append(f"- **гард среза**: {_format_parity(manifest.get('parity') or {})}  ")
         lines.append(f"- **datasets**: {', '.join(manifest.get('datasets', []))}  ")
         lines.append(f"- **k**: {manifest.get('k', 'n/a')}  ")
         lines.append(f"- **mode**: {manifest.get('mode', 'n/a')}  ")
@@ -2379,6 +2530,17 @@ help="насколько наращивать паузу после каждог
         "Различие больше чем в одном поле фактора (mode/graph_enabled) → "
         "'прогоны не парные' и вердикт invalid",
     )
+    parser.add_argument(
+        "--revision",
+        choices=("auto", "none"),
+        default="auto",
+        help="Откуда берётся доменная ревизия для среза (ADR-029, поправка 2026-10-16). "
+        "auto (по умолчанию) читает GET /api/v1/ingestion/revision один раз до прогона и "
+        "передаёт её обоим рукавам замороженной; отказ контура не роняет прогон, но пишет "
+        "revision_source=unavailable, и тогда графическая ось не измеряется "
+        "(projection_status=revision_unknown). none не читает ревизию вовсе и меряет "
+        "только vector: это осознанный режим, а не аварийный",
+    )
     args = parser.parse_args()
 
     # Единый лимит ожидания сети: если LLM_TIMEOUT_S не задан явно — 5 минут, не 600с.
@@ -2454,8 +2616,17 @@ help="насколько наращивать паузу после каждог
             record["waited_s"] = finished_at - record["submitted_at"]
         print(f"ingest: завершено ({len(statuses)}/{len(submitted)})")
     ingested_urls = {record["source_url"] for record in submitted}
-    revision = fetch_revision(args.domain)
-    print(f"revision: {revision}")
+
+    # Ревизия читается один раз и уходит в оба рукава замороженной (ADR-029 п.1).
+    # Отказ контура — не причина отменять замер: на демо-стенде ingestion-api поднимается
+    # для этого отдельно (`up --with-ingest`), а без него граф не измеряется вовсе.
+    if args.revision == "none":
+        revision: str | None = None
+        revision_source = REVISION_SOURCE_SKIPPED
+        print("revision: не запрашивается (--revision none), графическая ось не измеряется")
+    else:
+        revision, revision_source = observe_domain_revision(args.domain)
+        print(f"revision: {revision or 'null'} ({revision_source})")
 
     # 2. Один run_id на прогон; манифест условий (design.md §5.1) пишется один раз.
     run_id = f"eval_{int(time.time())}"
@@ -2463,6 +2634,10 @@ help="насколько наращивать паузу после каждог
     flags = ["--retrieval-only"] if args.retrieval_only else (["--no-judge"] if args.no_judge else [])
     if args.trace:
         flags.append("--trace")
+    if args.revision == "none":
+        # Флаг попадает в манифест: два прогона, из которых один мерил только вектор, не
+        # должны выглядеть в артефакте одинаково.
+        flags.append("--revision=none")
     if args.compare_with:
         flags.append(f"--compare-with={args.compare_with}")
     manifest = build_run_manifest(
@@ -2470,6 +2645,7 @@ help="насколько наращивать паузу после каждог
         started_at=started_at,
         domain=args.domain,
         revision=revision,
+        revision_source=revision_source,
         datasets=[args.dataset] + args.extra_dataset,
         mode_arg=args.mode,
         corpus=args.corpus,
@@ -2479,7 +2655,9 @@ help="насколько наращивать паузу после каждог
         flags=flags,
         corpus_documents=[record["source_url"] for record in submitted],
         corpus_limit=args.limit_docs,
-        golden=golden_coverage(questions, ingested_urls),
+        # `None` вместо пустого множества: без загрузок в прогоне состав корпуса неизвестен,
+        # и это должно попасть в отчёт как «не измерено», а не как «покрытие 0».
+        golden=golden_coverage(questions, ingested_urls or None),
         timeouts=resolved_timeouts,
         note=args.note,
     )
@@ -2535,12 +2713,10 @@ help="насколько наращивать паузу после каждог
                         trace_enabled=args.trace,
                     )
                 except RuntimeError as exc:
-                    # Расхождение revision несовместимо с корректным измерением
-                    # (данные меняются под ногами) — это валит прогон целиком.
-                    if "revision mismatch" in str(exc):
-                        raise
-                    # Остальное (таймаут LLM, сбой адаптера) уходит в failures.jsonl:
-                    # усечённый прогон не должен теряться из-за одного вопроса.
+                    # Ошибка вопроса (таймаут LLM, сбой адаптера) уходит в failures.jsonl:
+                    # усечённый прогон не должен теряться из-за одного вопроса. Расхождение
+                    # среза сюда не попадает намеренно — оно ловится гардом проекции после
+                    # каждого вопроса, вне этого except.
                     _append_jsonl(
                         failures_path,
                         {
@@ -2562,6 +2738,10 @@ help="насколько наращивать паузу после каждог
                 records.append(record)
                 if sink is not None:
                     sink.append(record)
+                # Гард среза срабатывает сразу после вопроса, а не в конце прогона:
+                # дальше измеряется другой срез, и ждать ради заведомо испорченной
+                # разности метрик незачем.
+                guard_projection_revision(records, mode)
         aggregate_r = aggregate(records)
         print(f"run: {mode} → retrieval.recall@5={aggregate_r['retrieval'].get('recall_at_k')}")
         return aggregate_r
@@ -2573,6 +2753,40 @@ help="насколько наращивать паузу после каждог
         key = "baseline" if mode == "baseline" else "target"
         print(f"run: {key} ({len(questions)} вопросов) ...")
         reports[key] = _run_mode(mode, all_records)
+
+    # Гард доменной ревизии: перечитываем её после измерения. Это независимое чтение того же
+    # источника, поэтому оно способно увидеть изменение, которого не видит эхо в ответе.
+    if args.revision == "none":
+        revision_after: str | None = None
+    else:
+        revision_after, _ = observe_domain_revision(args.domain)
+    revision_parity = run_revision_parity(revision, revision_after)
+    observed_projection_revisions = sorted(
+        {
+            str(record.get("projection_revision"))
+            for record in all_records
+            if record.get("projection_revision")
+        }
+    )
+    parity = {
+        "revision": revision_parity["revision"],
+        "reason": revision_parity["reason"],
+        "revision_before": revision_parity["revision_before"],
+        "revision_after": revision_parity["revision_after"],
+        # `projection` здесь — итог гарда проекции: он останавливает прогон на первом же
+        # расхождении, поэтому ненулевой список после завершения означает, что гард не
+        # стоял на месте (например, отключён флагом теста).
+        "projection": (
+            observed_projection_revisions[0]
+            if len(observed_projection_revisions) == 1
+            else None
+        ),
+        "projection_revisions": observed_projection_revisions,
+    }
+    print(
+        f"parity: ревизия={parity['revision']}"
+        + (f" — {parity['reason']}" if parity.get("reason") else "")
+    )
 
     config_state = build_config_state(reports, all_records)
     for mode_report in reports.values():
@@ -2594,8 +2808,19 @@ help="насколько наращивать паузу после каждог
     report["ingest_quality"] = ingest_quality
     report["config"] = config_state
     report["run_id"] = run_id
+    report["parity"] = parity
     report["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     report["manifest"] = manifest
+    # Расхождение среза внутри прогона — факт о том, на чём считались числа, а не о
+    # качестве ответов. Оно делает результат непригодным для вывода о вкладе графа, поэтому
+    # вердикт становится `invalid`, а причина обязана быть названа: молчаливый `invalid`
+    # читается как «что-то сломалось в системе».
+    if parity["revision"] == PARITY_CHANGED:
+        report["verdict"] = "invalid"
+        report["verdict_reasons"] = [
+            *(report.get("verdict_reasons") or []),
+            str(parity["reason"]),
+        ]
     manifest["projection_observed"] = {
         mode: {
             "statuses": sorted(
@@ -2611,8 +2836,11 @@ help="насколько наращивать паузу после каждог
         for mode, aggregate_report in reports.items()
     }
     # Конфигурация дописывается после прогона: она известна только из ответов, а манифест
-    # перезаписывается тут же — тот же приём, что с наблюдённой проекцией.
+    # перезаписывается тут же — тот же приём, что с наблюдённой проекцией. Сюда же ложатся
+    # границы прогона и итог гарда: `finished_at` иначе известны только из `run_state.json`.
     manifest["config"] = config_state
+    manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    manifest["parity"] = parity
     write_run_manifest(manifest, out_dir)
 
     # 4. Сравнение с парным прогоном (design.md §5.1): расхождение факторов → invalid.
@@ -2664,7 +2892,10 @@ help="насколько наращивать паузу после каждог
                 "questions": len(questions),
                 "failed_questions": len(failures),
                 "verdict": report.get("verdict"),
-                "finished_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                # Метка времени из манифеста, а не новая: два «конца прогона» в двух файлах,
+                # разошедшиеся на секунду, выглядят как два разных прогона.
+                "finished_at": manifest.get("finished_at"),
+                "parity": parity.get("revision"),
             },
             ensure_ascii=False,
             indent=2,

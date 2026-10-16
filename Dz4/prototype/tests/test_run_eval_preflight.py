@@ -87,17 +87,31 @@ def test_probe_bolt_invalid_uri() -> None:
 
 # --- contours ---------------------------------------------------------
 
-def test_required_contours_defaults_include_ingestion_and_llm(monkeypatch: Any) -> None:
+def test_required_contours_defaults_skip_ingestion_but_keep_llm(monkeypatch: Any) -> None:
+    """Ingestion-api не входит в дефолтный список: он обязателен только при `--corpus`.
+
+    Раньше он был в списке всегда, и прогон против заранее наполненной базы требовал
+    поднять контур, который этот режим не использует (ADR-029, поправка 2026-10-16).
+    """
     monkeypatch.delenv("GRAPH_STORE", raising=False)
     monkeypatch.delenv("VECTOR_STORE", raising=False)
     monkeypatch.delenv("EMBEDDER", raising=False)
     monkeypatch.delenv("RERANKER", raising=False)
     monkeypatch.delenv("LLM_ADAPTER", raising=False)
-    contours = _run_eval.required_contours()
-    names = {c["name"] for c in contours}
-    assert "ingestion-api" in names
+    names = {c["name"] for c in _run_eval.required_contours()}
+    assert "ingestion-api" not in names
     assert "neo4j" not in names
     assert "llm" in names  # дефолт LLM_ADAPTER=openai → нужен LLM-контур
+
+
+def test_required_contours_include_ingestion_when_corpus_uploaded(monkeypatch: Any) -> None:
+    monkeypatch.delenv("GRAPH_STORE", raising=False)
+    monkeypatch.delenv("VECTOR_STORE", raising=False)
+    monkeypatch.delenv("EMBEDDER", raising=False)
+    monkeypatch.delenv("RERANKER", raising=False)
+    monkeypatch.delenv("LLM_ADAPTER", raising=False)
+    names = {c["name"] for c in _run_eval.required_contours(include_ingestion=True)}
+    assert "ingestion-api" in names
 
 
 def test_required_contours_include_backends_when_configured(monkeypatch: Any) -> None:
@@ -106,7 +120,7 @@ def test_required_contours_include_backends_when_configured(monkeypatch: Any) ->
     monkeypatch.setenv("EMBEDDER", "bge_m3_service")
     monkeypatch.setenv("RERANKER", "bge_reranker")
     monkeypatch.setenv("LLM_ADAPTER", "openai")
-    contours = _run_eval.required_contours()
+    contours = _run_eval.required_contours(include_ingestion=True)
     names = {c["name"] for c in contours}
     assert {"ingestion-api", "neo4j", "embeddings-service", "reranker-service", "llm"} <= names
 
@@ -138,13 +152,52 @@ def test_preflight_writes_log_and_verdict(monkeypatch: Any, tmp_path: Path) -> N
         monkeypatch.setenv("EVAL_LLM_ADAPTER", "fake")
         monkeypatch.delenv("GRAPH_STORE", raising=False)
         monkeypatch.delenv("EMBEDDER", raising=False)
-        ok = _run_eval.preflight(tmp_path, timeout_s=2)
+        ok = _run_eval.preflight(tmp_path, timeout_s=2, include_ingestion=True)
         assert ok is True
     finally:
         server.shutdown()
     log = (tmp_path / "preflight.log").read_text(encoding="utf-8")
     assert "verdict: READY" in log
     assert "ingestion-api" in log
+
+
+def test_preflight_does_not_gate_run_on_dead_ingestion(monkeypatch: Any, tmp_path: Path) -> None:
+    """Мёртвый ingestion-api не блокирует прогон, который ничего не загружает.
+
+    Это и есть снятие предусловия: раньше такой прогон падал на preflight, хотя замер
+    против готовой базы без ингеста полностью корректен. Отсутствие ревизии при этом не
+    скрывается — оно попадает в манифест как `revision_source=unavailable`, и графическая
+    ось отвечает `revision_unknown`.
+    """
+    monkeypatch.setattr(_run_eval, "INGESTION_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("LLM_ADAPTER", "fake")
+    monkeypatch.setenv("EVAL_LLM_ADAPTER", "fake")
+    monkeypatch.delenv("GRAPH_STORE", raising=False)
+    monkeypatch.delenv("VECTOR_STORE", raising=False)
+    monkeypatch.delenv("EMBEDDER", raising=False)
+    monkeypatch.delenv("CONFIG_URL", raising=False)
+
+    ok = _run_eval.preflight(tmp_path, timeout_s=1)
+
+    assert ok is True
+    log = (tmp_path / "preflight.log").read_text(encoding="utf-8")
+    assert "ingestion-api" not in log
+
+
+def test_preflight_still_fails_when_upload_contour_down(monkeypatch: Any, tmp_path: Path) -> None:
+    """С загрузкой корпуса (`--corpus`) мёртвый ingestion-api обязан валить прогон."""
+    monkeypatch.setattr(_run_eval, "INGESTION_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("LLM_ADAPTER", "fake")
+    monkeypatch.setenv("EVAL_LLM_ADAPTER", "fake")
+    monkeypatch.delenv("GRAPH_STORE", raising=False)
+    monkeypatch.delenv("VECTOR_STORE", raising=False)
+    monkeypatch.delenv("EMBEDDER", raising=False)
+    monkeypatch.delenv("CONFIG_URL", raising=False)
+
+    ok = _run_eval.preflight(tmp_path, timeout_s=1, include_ingestion=True)
+
+    assert ok is False
+    assert "DOWN" in (tmp_path / "preflight.log").read_text(encoding="utf-8")
 
 
 def test_preflight_fails_when_contour_down(monkeypatch: Any, tmp_path: Path) -> None:

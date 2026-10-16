@@ -34,6 +34,9 @@ _run_eval = _load_run_eval()
 
 GRAPH_SOURCE = "docs/02_profiling.md"
 VECTOR_SOURCE = "docs/03_indexes.md"
+# Ревизия в тестах — фикстура, а не значение, которое что-то проверяет на форму: форма
+# проверяется отдельно, в `observe_domain_revision`.
+REV_FAKE = "rev-fake"
 
 
 def _question(qid: str, graph_evidence: bool = True) -> dict[str, Any]:
@@ -116,7 +119,11 @@ def _run_main(
         *extra_args,
     ])
     monkeypatch.setattr(_run_eval, "build_eval_pipeline", lambda: _FakePipeline())
-    monkeypatch.setattr(_run_eval, "fetch_revision", lambda domain: "rev-fake")
+    monkeypatch.setattr(
+        _run_eval,
+        "observe_domain_revision",
+        lambda domain: (REV_FAKE, _run_eval.REVISION_SOURCE_REPORTED),
+    )
     monkeypatch.setattr(_run_eval, "code_commit", lambda: "abc1234")
     monkeypatch.setenv("LLM_ADAPTER", "fake")
     monkeypatch.setenv("EVAL_LLM_ADAPTER", "fake")
@@ -143,24 +150,71 @@ def test_build_judge_defaults_to_openai(monkeypatch: Any) -> None:
     assert judge is not None
 
 
-def test_eval_question_rejects_revision_mismatch() -> None:
-    class MismatchedPipeline(_FakePipeline):
+def test_eval_question_does_not_reject_echoed_revision() -> None:
+    """`done["revision"]` — эхо аргумента, и сравнивать его с переданным нельзя.
+
+    Прежняя проверка сравнивала две ссылки на одну величину, то есть всегда совпадала и
+    ничего не измеряла. Тест закрепляет именно это: значение может отличаться от
+    переданного (например, контур не знал ревизии и подставил дефолт), и вопрос всё равно
+    измеряется — парность проверяют гарды среза, а не этот вызов.
+    """
+
+    class EchoChangingPipeline(_FakePipeline):
         def run(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
             result = super().run(*args, **kwargs)
-            result["revision"] = "other-revision"
+            result["revision"] = "другая-ревизия"
             return result
 
-    with pytest.raises(RuntimeError, match="revision mismatch"):
-        _run_eval.eval_question(
-            _question("art-01"),
-            MismatchedPipeline(),
-            "it",
-            "rev-fake",
-            None,
-            mode="target",
-            graph_enabled=True,
-            run_id="run-1",
+    record = _run_eval.eval_question(
+        _question("art-01"),
+        EchoChangingPipeline(),
+        "it",
+        "rev-fake",
+        None,
+        mode="target",
+        graph_enabled=True,
+        run_id="run-1",
+    )
+
+    # В строке пары лежит величина, по которой вопрос реально собран.
+    assert record["revision"] == "rev-fake"
+
+
+def test_guard_projection_revision_passes_on_single_revision() -> None:
+    _run_eval.guard_projection_revision(
+        [{"projection_revision": "proj-1"}, {"projection_revision": "proj-1"}],
+        "target",
+    )
+    # Ответы без проекции (vector-only, проекция не открылась) не ломают гард: отсутствие
+    # наблюдения — не расхождение.
+    _run_eval.guard_projection_revision([{}, {}], "baseline")
+
+
+def test_guard_projection_revision_stops_run_on_change() -> None:
+    with pytest.raises(RuntimeError, match="projection revision changed"):
+        _run_eval.guard_projection_revision(
+            [{"projection_revision": "proj-1"}, {"projection_revision": "proj-2"}],
+            "target",
         )
+
+
+def test_run_revision_parity_states_are_not_collapsed() -> None:
+    """`unavailable` и `stable` — разные результаты, и смешивать их нельзя.
+
+    Без этого прогон без ревизии выглядел бы прошедшим проверку среза.
+    """
+    assert _run_eval.run_revision_parity("rev", "rev")["revision"] == _run_eval.PARITY_STABLE
+    assert (
+        _run_eval.run_revision_parity("rev-a", "rev-b")["revision"]
+        == _run_eval.PARITY_CHANGED
+    )
+    assert (
+        _run_eval.run_revision_parity(None, None)["revision"] == _run_eval.PARITY_UNAVAILABLE
+    )
+    # Прочиталась в конце, но не читалась на старте — тоже «не измерено», а не «стабильно».
+    assert (
+        _run_eval.run_revision_parity(None, "rev")["revision"] == _run_eval.PARITY_UNAVAILABLE
+    )
 
 
 def test_eval_question_mode_skipped_when_not_generate() -> None:
@@ -343,6 +397,7 @@ def test_build_run_manifest_fields(monkeypatch: Any) -> None:
         started_at="2026-01-01T00:00:00Z",
         domain="it",
         revision="rev-fake",
+        revision_source=_run_eval.REVISION_SOURCE_REPORTED,
         datasets=["questions.jsonl"],
         mode_arg="both",
         corpus="/repo/docs",
@@ -355,6 +410,7 @@ def test_build_run_manifest_fields(monkeypatch: Any) -> None:
     assert manifest["corpus"] == "/repo/docs"
     assert manifest["source_prefix"] == "docs"
     assert manifest["revision_fingerprint"] == "rev-fake"
+    assert manifest["revision_source"] == _run_eval.REVISION_SOURCE_REPORTED
     assert manifest["graph_enabled"] == [False, True]
     assert manifest["projection"]["config_fingerprint"] == "projection-config-1"
     assert manifest["components"]["dimensions"] == 8
@@ -371,26 +427,77 @@ def test_manifest_graph_enabled_per_mode() -> None:
 
 # --- 5.1: правило парности манифестов ---------------------------------------
 
-def test_fetch_revision_fails_closed_on_error(monkeypatch: Any) -> None:
-    monkeypatch.setattr(_run_eval, "_get_json", lambda _url: {"revision": None})
-    try:
-        _run_eval.fetch_revision("it")
-    except RuntimeError as exc:
-        assert "revision" in str(exc)
-    else:
-        raise AssertionError("empty revision must stop the run")
+def test_observe_domain_revision_reports_healthy_contour(monkeypatch: Any) -> None:
+    sha = "a" * 64
+    monkeypatch.setattr(_run_eval, "_get_json", lambda _url: {"revision": sha})
+
+    revision, source = _run_eval.observe_domain_revision("it")
+
+    assert (revision, source) == (sha, _run_eval.REVISION_SOURCE_REPORTED)
 
 
-def test_fetch_revision_rejects_non_hex(monkeypatch: Any) -> None:
+def test_observe_domain_revision_fails_open_when_contour_silent(monkeypatch: Any) -> None:
+    """Контур не ответил — это «не измерено», а не падение прогона.
+
+    Раньше здесь был fail-closed и прогон без ingestion-api не стартовал. На демо-стенде
+    ingestion-api поднимается ради этого отдельно, и ронять из-за него замер, который
+    можно сделать, незачем.
+    """
+    monkeypatch.setattr(
+        _run_eval,
+        "_get_json",
+        lambda _url: (_ for _ in ()).throw(RuntimeError("connection refused")),
+    )
+    assert _run_eval.observe_domain_revision("it") == (
+        None,
+        _run_eval.REVISION_SOURCE_UNAVAILABLE,
+    )
+
+
+def test_observe_domain_revision_rejects_non_hex(monkeypatch: Any) -> None:
     monkeypatch.setattr(_run_eval, "_get_json", lambda _url: {"revision": "not-a-sha"})
-    with pytest.raises(RuntimeError, match="некорректна"):
-        _run_eval.fetch_revision("it")
+    assert _run_eval.observe_domain_revision("it") == (
+        None,
+        _run_eval.REVISION_SOURCE_UNAVAILABLE,
+    )
 
 
-def test_fetch_revision_rejects_non_mapping(monkeypatch: Any) -> None:
+def test_observe_domain_revision_rejects_non_mapping(monkeypatch: Any) -> None:
     monkeypatch.setattr(_run_eval, "_get_json", lambda _url: [])
-    with pytest.raises(RuntimeError, match="некорректна"):
-        _run_eval.fetch_revision("it")
+    assert _run_eval.observe_domain_revision("it") == (
+        None,
+        _run_eval.REVISION_SOURCE_UNAVAILABLE,
+    )
+
+
+def test_observe_domain_revision_accepts_null_revision(monkeypatch: Any) -> None:
+    """Домен без документов отдаёт `revision: null` — это тоже «не измерено».
+
+    Подставлять вместо этого 64 hex-символа нельзя: выдуманная ревизия в манифесте
+    выглядит как зафиксированный срез.
+    """
+    monkeypatch.setattr(_run_eval, "_get_json", lambda _url: {"revision": None})
+    assert _run_eval.observe_domain_revision("it") == (
+        None,
+        _run_eval.REVISION_SOURCE_UNAVAILABLE,
+    )
+
+
+def test_preflight_does_not_require_ingestion_without_corpus(monkeypatch: Any) -> None:
+    """Ingestion-api обязателен только когда прогон сам грузит корпус.
+
+    Раньше он был в списке всегда, и «измерить заранее наполненную базу» означало
+    «должно быть поднято то, что этот режим не использует».
+    """
+    monkeypatch.delenv("GRAPH_STORE", raising=False)
+    monkeypatch.delenv("VECTOR_STORE", raising=False)
+    monkeypatch.delenv("CONFIG_URL", raising=False)
+
+    without = {c["name"] for c in _run_eval.required_contours()}
+    with_ingest = {c["name"] for c in _run_eval.required_contours(include_ingestion=True)}
+
+    assert "ingestion-api" not in without
+    assert "ingestion-api" in with_ingest
 
 
 def test_compare_run_manifests_paired_and_unpaired() -> None:
@@ -937,6 +1044,7 @@ def test_run_manifest_records_resolved_timeouts(monkeypatch: Any) -> None:
         started_at="2026-01-01T00:00:00Z",
         domain="it",
         revision="rev-fake",
+        revision_source=_run_eval.REVISION_SOURCE_REPORTED,
         datasets=["q.jsonl"],
         mode_arg="both",
         k=5,
@@ -970,7 +1078,11 @@ def test_main_rejects_empty_dataset(monkeypatch: Any, tmp_path: Path) -> None:
         "--no-preflight",
     ])
     monkeypatch.setattr(_run_eval, "build_eval_pipeline", lambda: _FakePipeline())
-    monkeypatch.setattr(_run_eval, "fetch_revision", lambda domain: "rev-fake")
+    monkeypatch.setattr(
+        _run_eval,
+        "observe_domain_revision",
+        lambda domain: (REV_FAKE, _run_eval.REVISION_SOURCE_REPORTED),
+    )
     monkeypatch.setenv("RUN_CODE_COMMIT", "host-hash")
     with pytest.raises(ValueError, match="empty"):
         _run_eval.main()

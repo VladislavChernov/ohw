@@ -56,6 +56,12 @@
       `evidence_policy`, `rubric`, `category`, `golden_graph_evidence`). `golden_facts` — из
       ТЕКСТА документов, не из графа; для группы D эталона нет, она идёт только на чтение.
 - [ ] Прогон `run_eval.py --mode both --no-judge` по срезу (требует поднятого стенда).
+      **Прогон выполнен 2026-10-16** (`prototype/reports/slice-2026-10-16b/`), но чек не
+      закрыт: 12/12 вопросов получили `projection_status=sources_without_graph`, потому что в
+      томе `ready` 17 документов с графом против 30 в журнале проекции (13
+      `sources_without_graph`). Вклад графа не измерен — это состояние корпуса, работа по
+      нему в `fill-ready-corpus`. Разбор замеров и причина — в
+      `eval-measures-loaded-corpus/tasks.md` §«Что показал прогон».
 - [ ] Проставить `evidence_policy` и `golden_graph_evidence` явно у всех строк; пройти
       валидатор и линтер набора
 - [ ] Ручная проверка «векторного среза» по каждому вопросу; переформулировать или

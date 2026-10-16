@@ -90,7 +90,7 @@ changed)
   # обязан нести накопленный FAILED, иначе гейт скажет «всё прошло» при упавшем ruff.
   [ -n "$MODE" ] || { echo "=== pytest: изменённых файлов нет ==="; exit "$FAILED"; }
   ;;
-docs | adapters | demo_scripts | gate_tooling)
+docs | adapters | demo_scripts | eval_runner | gate_tooling)
   ;;
 *)
   echo "режим неизвестен: $MODE" >&2

@@ -249,6 +249,55 @@ docker compose -f prototype/infra/compose.preingest.yaml run --rm pre-ingest
 
 ---
 
+## 5.1 Прогон eval на runtime-стенде (`compose.eval-runtime.yaml`)
+
+Оверлей поверх runtime с **одним** сервисом — `eval-runner` (профиль `eval`, one-shot). Нужен
+для прогона против демо-набора: тот живёт в runtime-контуре, и мерить его на копии в
+`compose.eval-minimal.yaml` — значит предъявлять числа не по тому контуру, который стоит.
+
+```powershell
+$env:VOL = "ready"
+$env:RUN_CODE_COMMIT = (git -C . rev-parse --short HEAD)
+$env:NEO4J_PASSWORD = [guid]::NewGuid().ToString("N")
+
+# Поднять runtime + ингест (ревизия домена) + runner
+docker compose -f prototype/infra/compose.runtime.yaml `
+  -f prototype/infra/compose.ingest.yaml -f prototype/infra/compose.eval-runtime.yaml `
+  --profile ingest --profile eval up -d --wait --wait-timeout 300
+
+# Прогон среза золотого набора: без загрузки, без судьи.
+# Домен `it` — под ним наполнен набор `ready` (`Demo/demo.sh load --domain it`).
+docker compose -f prototype/infra/compose.runtime.yaml `
+  -f prototype/infra/compose.ingest.yaml -f prototype/infra/compose.eval-runtime.yaml `
+  --profile ingest --profile eval run --rm eval-runner python /app/infra/eval/run_eval.py `
+  --domain it --mode both --no-judge `
+  --dataset /repo/Demo/eval-slice.jsonl --out /reports/slice
+
+# Гасить
+docker compose -f prototype/infra/compose.runtime.yaml `
+  -f prototype/infra/compose.ingest.yaml -f prototype/infra/compose.eval-runtime.yaml `
+  --profile ingest --profile eval down
+```
+
+**Том `projection` обязателен и общий с `query-worker`.** Runner монтирует его же, и
+`PROJECTION_CONFIG_FINGERPRINT` у них один. При отдельном состоянии readiness-gate отвечает
+`missing`, графическая ось выключается, и прогон меряет vector-only, оставаясь «графовым» по
+названию режима: `--mode both` печатает recall, а `graph_axis_active=false`. Гард на это есть в
+`tests/test_demo_scripts_parity.py`; проверять руками не нужно, но знать полезно.
+
+**`RUN_CODE_COMMIT` обязателен.** Ревизию кода контейнер не вычисляет: source control
+принадлежит хосту, а манифест обязан сказать, чем именно мерили.
+
+**Артефакты** (`run_manifest.json`, `qa_log.jsonl`, `lift_report.*`, `PASSPORT.md`) пишутся в
+`prototype/reports/` на хосте. Датасет берётся с хоста же — `/repo/Demo/eval-slice.jsonl`.
+
+Что покажет манифест: `revision` и `revision_source` (ревизия не обязательна для старта, но без
+неё `revision_unknown` и графическая ось не измеряется), блок `parity` (что гард проверил, а
+что не исполнил — это разные значения), `golden_coverage.mode` (на прогоне без загрузки это
+`unknown`, а не ноль) и `finished_at`.
+
+---
+
 ## 6. Оверлеи eval-стенда
 
 `compose.eval-minimal.yaml` самодостаточен, но два оверлея меняют его поведение. Оверлей
@@ -258,6 +307,7 @@ docker compose -f prototype/infra/compose.preingest.yaml run --rm pre-ingest
 |---|---|---|
 | `compose.eval.yaml` | `EMBEDDER=bge_m3_service`, `EMBEDDINGS_DEVICE=cpu`, `LLM_NGPU_LAYERS=${LLM_NGPU_LAYERS:-99}` (2 = 0, CPU) | прогон M5, когда LLM целиком на CPU |
 | `compose.eval-qwen3b.yaml` | модель и имя проекта: `ohw-eval-qwen3b_*` | прогон на instruct-варианте |
+| `compose.eval-runtime.yaml` | сервис `eval-runner` поверх **runtime**-контура (§5.1) | прогон против демо-набора (`VOL=ready`), а не против копии базы |
 
 ```powershell
 $env:VOL = ""   # eval-стенд не использует наборы томов runtime - сбросьте, если задавали
@@ -387,6 +437,9 @@ $env:NEO4J_PASSWORD     = [guid]::NewGuid().ToString("N")
 $env:VOL = "empty"
 docker compose -f prototype/infra/compose.runtime.yaml up -d --wait --wait-timeout 300
 ```
+
+**Runtime + прогон eval** против демо-набора: §5.1. Там же — почему `RUN_CODE_COMMIT`
+обязателен и зачем runner делит том `projection` с `query-worker`.
 
 > Если после Full Stack задана `$env:VOL`, следующий запуск Runtime его подхватит. Перед
 > запуском runtime сбросьте переменную явно: `$env:VOL = "empty"`.

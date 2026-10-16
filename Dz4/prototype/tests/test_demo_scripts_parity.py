@@ -17,14 +17,17 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 DEMO_DIR = Path(__file__).resolve().parents[2] / "Demo"
 SH = DEMO_DIR / "demo.sh"
 PS1 = DEMO_DIR / "demo.ps1"
 SH_CPU = DEMO_DIR / "demo-cpu.sh"
 PS1_CPU = DEMO_DIR / "demo-cpu.ps1"
+INFRA = DEMO_DIR.parent / "prototype" / "infra"
 
 COMMANDS = {"up", "down", "status", "load", "export", "restore"}
 
@@ -204,6 +207,124 @@ def test_gpu_overlay_reserves_only_real_gpu_consumers() -> None:
                 "Требование без пользы: на машине без карты ломает подъём, на машине с "
                 "картой занимает память впустую."
             )
+
+
+def _compose(path: Path) -> dict[str, Any]:
+    data = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
+    return data
+
+
+def _mounts(service: dict[str, Any]) -> dict[str, str]:
+    """`источник → точка` для длинной и короткой формы объявления томов.
+
+    У короткой формы точка идёт с суффиксом режима (`:ro`), и его надо снять: иначе
+    сравнение точек монтирования молча всегда расходится, а гард не проверяет ничего.
+    """
+    result: dict[str, str] = {}
+    for entry in service.get("volumes") or []:
+        if isinstance(entry, dict):
+            result[str(entry.get("source"))] = str(entry.get("target"))
+        else:
+            parts = str(entry).split(":")
+            result[parts[0]] = parts[1] if len(parts) > 1 else ""
+    return result
+
+
+def test_eval_runner_shares_projection_state_with_query_worker() -> None:
+    """Runner и `query-worker` обязаны смотреть в одно состояние проекции.
+
+    Отдельный путь состояния даёт `projection_status=missing`, и тогда readiness-gate
+    выключает графическую ось: замер честно меряет vector-only, оставаясь «графовым» по
+    названию режима. Отказ выглядит как успех, поэтому он закрывается гардом, а не
+    аккуратностью в комментарии.
+
+    Контракт положительный: «у обоих том проекции», а не «в оверлее нет такого-то тома» —
+    замороженный список завтра начал бы врать при легитимной правке.
+    """
+    runtime = _compose(INFRA / "compose.runtime.yaml")
+    overlay = _compose(INFRA / "compose.eval-runtime.yaml")
+
+    worker = (runtime.get("services") or {}).get("query-worker")
+    runner = (overlay.get("services") or {}).get("eval-runner")
+    assert worker, "в compose.runtime.yaml нет query-worker"
+    assert runner, "в compose.eval-runtime.yaml нет eval-runner"
+
+    worker_projection = {
+        target for target in _mounts(worker).values() if "projection" in target
+    }
+    runner_projection = {
+        target for target in _mounts(runner).values() if "projection" in target
+    }
+    assert worker_projection, "у query-worker нет тома проекции — гард нечем проверять"
+    assert runner_projection == worker_projection, (
+        f"eval-runner монтирует {sorted(runner_projection)}, а query-worker — "
+        f"{sorted(worker_projection)}. Графическая ось уйдёт в vector-only с "
+        "`projection_status=missing`, и прогон это не заметит."
+    )
+
+    # Тот же отпечаток конфигурации: иначе `config_mismatch` выключит граф по другой
+    # причине с тем же результатом.
+    worker_fingerprint = (worker.get("environment") or {}).get("PROJECTION_CONFIG_FINGERPRINT")
+    runner_fingerprint = (runner.get("environment") or {}).get("PROJECTION_CONFIG_FINGERPRINT")
+    assert runner_fingerprint == worker_fingerprint, (
+        "PROJECTION_CONFIG_FINGERPRINT у eval-runner и query-worker разный: проекция "
+        "считается готовой по одному отпечатку, а проверяется по другому."
+    )
+
+
+def test_eval_runner_measures_working_copy_and_reports_to_host() -> None:
+    """Runner меряет рабочую копию и оставляет артефакты на хосте.
+
+    Две тихие поломки, которые выглядят как успешный прогон: запечённый в образ код вместо
+    рабочего (пакет ставится editable и указывает на `/app/src`, поэтому без монтирования
+    измеряется снимок образа), и артефакты, исчезающие вместе с контейнером.
+    """
+    runner = (_compose(INFRA / "compose.eval-runtime.yaml").get("services") or {}).get(
+        "eval-runner"
+    )
+    assert runner, "в compose.eval-runtime.yaml нет eval-runner"
+
+    mounts = _mounts(runner)
+    assert any(target == "/app/src" for target in mounts.values()), (
+        "eval-runner не монтирует рабочую копию на /app/src: пакет указывает на этот путь, "
+        "и без монтирования измеряется код, запечённый в образ."
+    )
+    assert any(target == "/reports" for target in mounts.values()), (
+        "eval-runner не отдаёт артефакты на хост: они исчезнут вместе с контейнером."
+    )
+    # Ревизия кода приходит с хоста, а не вычисляется в контейнере: source control
+    # принадлежит хосту, и контейнер не угадывает.
+    assert "RUN_CODE_COMMIT" in (runner.get("environment") or {})
+
+
+def test_eval_runner_authenticates_with_the_same_key_as_the_contours() -> None:
+    """Ключ прибора должен называть оба имени, которые читают стороны.
+
+    Контур проверяет `AUTH_API_KEY`, а `run_eval.py` (`X_API_KEY` или `GRAPH_AUTH_API_KEY`)
+    — разные переменные для одного значения. Объявить только одну значит отправить
+    `changeme` вместо ключа стенда: ingestion-api ответит 401, и прогон измерит vector вместо
+    графа, отчитавшись `revision_unknown`. Отказ выглядит как успех, поэтому он закрыт
+    гардом.
+
+    Контракт положительный: оба имени есть и оба выведены из одного `GRAPH_AUTH_API_KEY`.
+    Литерал означал бы второй источник правды для ключа.
+    """
+    runner = (_compose(INFRA / "compose.eval-runtime.yaml").get("services") or {}).get(
+        "eval-runner"
+    )
+    assert runner, "в compose.eval-runtime.yaml нет eval-runner"
+    environment = runner.get("environment") or {}
+
+    for name in ("AUTH_API_KEY", "X_API_KEY"):
+        assert name in environment, (
+            f"у eval-runner нет {name}. Контур проверяет AUTH_API_KEY, а прибор читает "
+            "X_API_KEY или GRAPH_AUTH_API_KEY: без второго имени запрос уходит с ключом по "
+            "умолчанию и измерение молча деградирует до vector-only."
+        )
+        assert "GRAPH_AUTH_API_KEY" in str(environment[name]), (
+            f"{name} задан литералом, а не из GRAPH_AUTH_API_KEY: значение разойдётся со "
+            "стендом при смене ключа."
+        )
 
 
 @pytest.mark.parametrize(("sh", "ps1", "expected_compose"), PAIRS)

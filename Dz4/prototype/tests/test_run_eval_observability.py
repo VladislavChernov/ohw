@@ -37,6 +37,9 @@ _run_eval = _load_run_eval()
 
 GRAPH_SOURCE = "docs/02_profiling.md"
 VECTOR_SOURCE = "docs/03_indexes.md"
+# Фикстура ревизии: форма проверяется в тестах `observe_domain_revision`, здесь важно лишь
+# чтобы оба рукава получили одно и то же значение.
+REV_FAKE = "rev-fake"
 
 
 def _question(qid: str, golden: list[str] | None = None) -> dict[str, Any]:
@@ -175,6 +178,7 @@ def test_golden_coverage_counts_fully_and_partially() -> None:
 
     coverage = _run_eval.golden_coverage(questions, {GRAPH_SOURCE, VECTOR_SOURCE})
 
+    assert coverage["mode"] == _run_eval.COVERAGE_MODE_MEASURED
     assert coverage["questions_total"] == 4
     assert coverage["fully_covered"] == 2
     assert coverage["partially_covered"] == 1
@@ -187,6 +191,38 @@ def test_golden_coverage_empty_dataset_is_null_ratio() -> None:
 
     assert coverage["questions_total"] == 0
     assert coverage["fully_covered_ratio"] is None
+
+
+def test_golden_coverage_zero_is_a_fact_when_composition_known() -> None:
+    """Пустой загруженный корпус — измеренный ноль, а не «неизвестно».
+
+    Различие принципиально: пустое множество означает «загрузок не было», и это факт,
+    который прибор видел; `None` означает «состава взять негде».
+    """
+    coverage = _run_eval.golden_coverage([_question("q1", [GRAPH_SOURCE])], set())
+
+    assert coverage["mode"] == _run_eval.COVERAGE_MODE_MEASURED
+    assert coverage["fully_covered"] == 0
+    assert coverage["fully_covered_ratio"] == 0.0
+
+
+def test_golden_coverage_unknown_is_not_zero() -> None:
+    """Прогон против готовой базы: состава нет — покрытие обязано молчать, а не врать нулём.
+
+    Прежний код отдавал здесь `0.0`, и отчёт утверждал, что эталонных источников в корпусе
+    нет, — то есть ложно утверждал о базе, в которой они есть. Счётчики остаются `null`:
+    пустой результат и ненайденный прибор не должны выглядеть одинаково.
+    """
+    questions = [_question("q1", [GRAPH_SOURCE]), _question("q2", [VECTOR_SOURCE])]
+
+    coverage = _run_eval.golden_coverage(questions, None)
+
+    assert coverage["mode"] == _run_eval.COVERAGE_MODE_UNKNOWN
+    assert coverage["reason"] == _run_eval.COVERAGE_UNKNOWN_REASON
+    # Размер датасета измерим, поэтому он заполнен; покрытие — нет.
+    assert coverage["questions_total"] == 2
+    for field in ("fully_covered", "partially_covered", "uncovered", "fully_covered_ratio"):
+        assert coverage[field] is None, field
 
 
 # --- graph_axis_active -----------------------------------------------------
@@ -392,6 +428,7 @@ def test_manifest_records_golden_coverage_and_tree_state(monkeypatch: Any) -> No
         started_at="2026-01-01T00:00:00Z",
         domain="it",
         revision="rev-fake",
+        revision_source=_run_eval.REVISION_SOURCE_REPORTED,
         datasets=["q.jsonl"],
         mode_arg="both",
         corpus="/repo/docs",
@@ -445,6 +482,8 @@ def _run_main(
     pipeline_factory: Any = None,
     dataset: Path | None = None,
     mode: str = "both",
+    ingestion: bool = False,
+    revision_read: Any = None,
 ) -> Path:
     dataset_path = dataset if dataset is not None else _write_dataset(tmp_path)
     monkeypatch.setattr(
@@ -462,7 +501,42 @@ def _run_main(
     )
     factory = pipeline_factory or (lambda: _FakePipeline())
     monkeypatch.setattr(_run_eval, "build_eval_pipeline", factory)
-    monkeypatch.setattr(_run_eval, "fetch_revision", lambda domain: "rev-fake")
+    monkeypatch.setattr(
+        _run_eval,
+        "observe_domain_revision",
+        revision_read
+        or (lambda domain: (REV_FAKE, _run_eval.REVISION_SOURCE_REPORTED)),
+    )
+    if ingestion:
+        # Один документ как будто загружен: этого достаточно, чтобы состав корпуса был
+        # известен прибору, и покрытие считалось как измеренное.
+        monkeypatch.setattr(
+            _run_eval,
+            "ingest_corpus",
+            lambda *a, **k: [
+                {
+                    "job_id": "j-one",
+                    "source_url": "src://doc.md",
+                    "relpath": "doc.md",
+                    "bytes": 14,
+                    "submitted_at": time.time(),
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            _run_eval,
+            "wait_jobs",
+            lambda *a, **k: {
+                "j-one": {
+                    "status": "succeeded",
+                    "stage": "COMMIT",
+                    "error": None,
+                    "signals": {},
+                    "attempts": 1,
+                    "waited_s": 0.1,
+                }
+            },
+        )
     monkeypatch.setattr(_run_eval, "code_commit", lambda: "abc1234")
     monkeypatch.setenv("LLM_ADAPTER", "fake")
     monkeypatch.setenv("EVAL_LLM_ADAPTER", "fake")
@@ -670,7 +744,17 @@ def test_main_records_failed_question_and_completes(
 
 
 def test_main_revision_mismatch_still_aborts(monkeypatch: Any, tmp_path: Path) -> None:
-    class _WrongRevisionPipeline(_BoomPipeline):
+    """Смена проекции посреди прогона останавливает измерение.
+
+    Сигнал берётся из `ProjectionStateStore`, то есть независим от того, что eval передал
+    в пайплайн: прежняя проверка сравнивала эхо аргумента и не могла сработать.
+    """
+
+    class _DriftingProjectionPipeline(_FakePipeline):
+        def __init__(self) -> None:
+            self._calls = 0
+            super().__init__()
+
         def run(
             self,
             query: str,
@@ -680,29 +764,131 @@ def test_main_revision_mismatch_still_aborts(monkeypatch: Any, tmp_path: Path) -
             generate: bool = True,
             trace: bool = False,
         ) -> dict[str, Any]:
-            raise RuntimeError("revision mismatch: expected 'rev-fake', got 'other'")
+            done = super().run(query, domain, emit, revision, generate, trace)
+            self._calls += 1
+            done["projection_revision"] = f"proj-{self._calls}"
+            return done
 
-    with pytest.raises(RuntimeError, match="revision mismatch"):
+    dataset = _write_dataset(tmp_path, [_question("obs-01"), _question("obs-02")])
+
+    with pytest.raises(RuntimeError, match="projection revision changed"):
         _run_main(
             monkeypatch,
             tmp_path,
-            pipeline_factory=lambda: _WrongRevisionPipeline(),
+            pipeline_factory=_DriftingProjectionPipeline,
+            dataset=dataset,
         )
+
+
+def test_main_survives_missing_revision_contour(monkeypatch: Any, tmp_path: Path) -> None:
+    """Контур без ревизии не валит прогон — но и не выдаётся за замеренный граф."""
+    out = _run_main(
+        monkeypatch,
+        tmp_path,
+        revision_read=lambda domain: (None, _run_eval.REVISION_SOURCE_UNAVAILABLE),
+    )
+
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["revision"] is None
+    assert manifest["revision_source"] == _run_eval.REVISION_SOURCE_UNAVAILABLE
+    # Гард, который не исполнился, не должен выглядеть как гард, который прошёл.
+    assert manifest["parity"]["revision"] == _run_eval.PARITY_UNAVAILABLE
+    report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
+    assert report["revision"] is None
+
+
+def test_main_revision_none_skips_reading(monkeypatch: Any, tmp_path: Path) -> None:
+    def _boom(domain: str) -> tuple[str | None, str]:
+        raise AssertionError("--revision none не должен читать ревизию")
+
+    out = _run_main(monkeypatch, tmp_path, "--revision", "none", revision_read=_boom)
+
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["revision"] is None
+    assert manifest["revision_source"] == _run_eval.REVISION_SOURCE_SKIPPED
+    # Флаг в манифесте: прогон «только вектор» не должен выглядеть как обычный.
+    assert "--revision=none" in manifest["flags"]
+
+
+def test_main_invalidates_verdict_when_revision_changed_mid_run(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Ревизия разошлась внутри прогона — числа нельзя предъявлять как вклад графа."""
+    # Ровно два чтения за прогон: одно до измерения, одно после.
+    readings = [
+        (REV_FAKE, _run_eval.REVISION_SOURCE_REPORTED),
+        ("rev-other", _run_eval.REVISION_SOURCE_REPORTED),
+    ]
+
+    def _read(domain: str) -> tuple[str | None, str]:
+        return readings.pop(0) if readings else ("rev-other", _run_eval.REVISION_SOURCE_REPORTED)
+
+    out = _run_main(monkeypatch, tmp_path, revision_read=_read)
+
+    report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
+    assert report["verdict"] == "invalid"
+    assert any("разошлась" in reason for reason in report["verdict_reasons"])
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["parity"]["revision"] == _run_eval.PARITY_CHANGED
+    # Причина обязана быть и в паспорте: вердикт без причины читают как «что-то сломалось».
+    assert "разошлась" in (out / "PASSPORT.md").read_text(encoding="utf-8")
+
+
+def test_main_manifest_names_run_boundaries(monkeypatch: Any, tmp_path: Path) -> None:
+    out = _run_main(monkeypatch, tmp_path)
+
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["started_at"]
+    assert manifest["finished_at"]
+    assert manifest["revision_source"] == _run_eval.REVISION_SOURCE_REPORTED
+    assert manifest["parity"]["revision"] == _run_eval.PARITY_STABLE
+    state = json.loads((out / "run_state.json").read_text(encoding="utf-8"))
+    assert state["finished_at"] == manifest["finished_at"]
 
 
 def test_main_passport_warns_when_golden_coverage_low(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
-    # Один вопрос, эталонного источника в корпусе нет ⇒ recall не интерпретируется.
+    # Загрузка была, эталонного источника в ней нет ⇒ recall не интерпретируется.
     dataset = _write_dataset(tmp_path, [_question("obs-01", ["docs/missing.md"])])
+    corpus = _corpus(tmp_path, ["doc.md"])
 
-    out = _run_main(monkeypatch, tmp_path, dataset=dataset)
+    out = _run_main(
+        monkeypatch,
+        tmp_path,
+        "--corpus",
+        str(corpus),
+        "--documents",
+        "doc.md",
+        dataset=dataset,
+        ingestion=True,
+    )
 
     manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["golden_coverage"]["mode"] == _run_eval.COVERAGE_MODE_MEASURED
     assert manifest["golden_coverage"]["fully_covered"] == 0
     passport = (out / "PASSPORT.md").read_text(encoding="utf-8")
     assert "golden_coverage" in passport
     assert "не** характеризуют" in passport or "не характеризуют" in passport
+
+
+def test_main_passport_says_coverage_not_measured_without_ingest(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Демо-стенд: загрузок в прогоне нет, и покрытие обязано молчать, а не врать нулём."""
+    dataset = _write_dataset(tmp_path, [_question("obs-01")])
+
+    out = _run_main(monkeypatch, tmp_path, dataset=dataset)
+
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    coverage = manifest["golden_coverage"]
+    assert coverage["mode"] == _run_eval.COVERAGE_MODE_UNKNOWN
+    assert coverage["questions_total"] == 1
+    assert coverage["fully_covered"] is None
+    passport = (out / "PASSPORT.md").read_text(encoding="utf-8")
+    assert "не измерено" in passport
+    # Предупреждение о низком покрытии здесь неуместно: покрытие не измеряли.
+    assert "не характеризуют" not in passport
 
 
 def _vector_only_pipeline() -> _FakePipeline:
