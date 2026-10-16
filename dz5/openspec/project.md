@@ -100,7 +100,7 @@
 2. `add-abliterated-llm` — локальный контейнер abliterated-модели.
 3. `add-agent-core` — Go-агент (`drujensen@<commit>`), tool `db_query`
    (read-only по умолчанию / tool-abuse за флагом), конфиг промпта.
-4. `add-external-defense` — FastAPI + `llm-guard` (внешний контур).
+4. `add-external-defense` — FastAPI + `llm-guard` (внешний контур). 🔄 в работе
 5. `add-defense-modes` / L3 — 4 пресета через env + compose-лимиты ресурсов.
 6. `add-attack-harness` — garak + свой раннер: OWASP Top-10 2026 × 4 пресета +
    DoS (LLM06); сравнительный отчёт.

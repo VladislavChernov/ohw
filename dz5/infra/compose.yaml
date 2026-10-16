@@ -161,6 +161,41 @@ services:
     networks:
       - ib-network
 
+  # External LLM guard proxy (FastAPI + llm-guard) between agent and Ollama.
+  # Receives Ollama-compatible POST /api/chat, scans input/output, blocks on
+  # violation. Agent reaches it via EXTERNAL_GUARD=on + WALL_BASE_URL.
+  wall:
+    build:
+      context: ../security-wall
+      dockerfile: Dockerfile
+    image: dz5-security-wall:local
+    container_name: dz5-wall
+    ports:
+      # Published for local debugging; services reach it as wall:5000.
+      - "5000:5000"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      SCAN_INPUT: "on"
+      SCAN_OUTPUT: "on"
+      BLOCK_ON_FAIL: "on"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    # L3 (Unbounded Consumption / LLM06): cap memory.
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:5000/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    networks:
+      - ib-network
+
 networks:
   ib-network:
     driver: bridge
