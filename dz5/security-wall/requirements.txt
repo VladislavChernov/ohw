@@ -2,4 +2,6 @@ fastapi==0.115.0
 uvicorn==0.32.0
 httpx==0.28.0
 guardrails-ai
+guardrails-ai-detect-prompt-injection
+guardrails-ai-detect-pii
 pydantic==2.9.2

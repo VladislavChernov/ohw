@@ -31,6 +31,33 @@ abliterated-моделью. Валидирует входящий prompt (prompt
 - Input: `DetectPromptInjection` (prompt injection, jailbreak) — при отсутствии пакета валидатор пропускается (passthrough)
 - Output: `DetectPII` (PII — имена, email, телефоны, адреса) — при отсутствии пакета валидатор пропускается (passthrough)
 
+### Установка пакетов валидаторов (обязательно для блокировки угроз)
+
+Базовый пакет `guardrails-ai` содержит только ядро `Guard`. Специализированные
+валидаторы — отдельные пакеты, берутся из **PyPI** (https://pypi.org):
+
+| Угроза | Валидатор | Пакет на PyPI | Команда |
+|--------|-----------|---------------|---------|
+| Prompt injection / jailbreak | `DetectPromptInjection` | `guardrails-ai-detect-prompt-injection` | `pip install guardrails-ai-detect-prompt-injection` |
+| PII (имена, email, телефоны, адреса) | `DetectPII` | `guardrails-ai-detect-pii` | `pip install guardrails-ai-detect-pii` |
+
+Без этих пакетов `security-wall` работает в режиме **passthrough** (прокси без
+блокировки). Чтобы блокировка заработала, установите оба пакета в окружении/образе `wall`:
+
+```bash
+# локально / в контейнере wall
+pip install guardrails-ai-detect-prompt-injection guardrails-ai-detect-pii
+```
+
+В `dz5/security-wall/Dockerfile` зависимости ставятся из `requirements.txt`
+(`pip install --no-cache-dir -r requirements.txt`), поэтому достаточно добавить
+оба пакета в `requirements.txt` и пересобрать образ:
+
+```bash
+cd dz5/security-wall
+DOCKER_BUILDKIT=1 docker build -t dz5-security-wall:local .
+```
+
 ## Конфигурация (env)
 | Переменная | По умолчанию | Назначение |
 |------------|--------------|------------|
