@@ -10,7 +10,7 @@ name: dz5-stand
 #   - ollama  (abliterated GPU target)    add-abliterated-llm  ✅
 #   - db      (SQLite + seed/restore)    add-db-service       ✅
 #   - agent   (drujensen @ pinned tag)   add-agent-core
-#   - wall    (llm-guard proxy)          add-external-defense
+#   - wall    (Guardrails AI proxy)      add-external-defense
 #   - attacker(garak + runner)           add-attack-harness
 #
 # Two protection presets are toggled by env (see project.md):
@@ -161,8 +161,8 @@ services:
     networks:
       - ib-network
 
-  # External LLM guard proxy (FastAPI + llm-guard) between agent and Ollama.
-  # Receives Ollama-compatible POST /api/chat, scans input/output, blocks on
+  # External LLM guard proxy (FastAPI + Guardrails AI) between agent and Ollama.
+  # Receives Ollama-compatible POST /api/chat, validates input/output, blocks on
   # violation. Agent reaches it via EXTERNAL_GUARD=on + WALL_BASE_URL.
   wall:
     build:

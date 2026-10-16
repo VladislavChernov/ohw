@@ -1,19 +1,19 @@
-"""dz5 security-wall: Ollama-compatible reverse proxy with llm-guard scanners.
+"""dz5 security-wall: Ollama-compatible reverse proxy with Guardrails AI validators.
 
 Exposes:
   GET  /healthz  — liveness + Ollama reachability
-  POST /api/chat — Ollama-compatible chat proxy with input/output scanning
+  POST /api/chat — Ollama-compatible chat proxy with input/output validation
 
 Environment variables:
   OLLAMA_BASE_URL   upstream Ollama (default http://ollama:11434)
   WALL_LISTEN       listen address (default :5000)
-  SCAN_INPUT        scan user prompts with llm-guard (default on)
-  SCAN_OUTPUT       scan assistant replies with llm-guard (default on)
+  SCAN_INPUT        validate user prompts with Guardrails AI (default on)
+  SCAN_OUTPUT       validate assistant replies with Guardrails AI (default on)
   BLOCK_ON_FAIL     return 403 on violation instead of passthrough (default on)
 
-Note: llm-guard is loaded lazily and optionally. If the package is not
-available (heavy torch/transformers deps), the wall still works as a plain
-Ollama proxy — scanning is skipped and requests pass through.
+Note: Guardrails AI is loaded lazily and optionally. If the package is not
+available, the wall still works as a plain Ollama proxy — validation is
+skipped and requests pass through.
 """
 import os
 from typing import List, Optional
@@ -28,52 +28,67 @@ SCAN_INPUT = os.getenv("SCAN_INPUT", "on").lower() == "on"
 SCAN_OUTPUT = os.getenv("SCAN_OUTPUT", "on").lower() == "on"
 BLOCK_ON_FAIL = os.getenv("BLOCK_ON_FAIL", "on").lower() == "on"
 
-app = FastAPI(title="dz5 security-wall", version="0.1.0")
+app = FastAPI(title="dz5 security-wall", version="0.2.0")
 
-# Lazy scanner initialisation (llm-guard is heavy; load on first request).
-# None = llm-guard not installed or scanning disabled.
-_input_fn = None
-_output_fn = None
+# Lazy validator initialisation (Guardrails AI is heavy; load on first request).
+# None = not yet initialised; False = unavailable/disabled.
+_input_guard = None
+_output_guard = None
 
 
-def _init_scanners():
-    global _input_fn, _output_fn
-    if _input_fn is None and SCAN_INPUT:
+def _init_guards():
+    global _input_guard, _output_guard
+    if _input_guard is None and SCAN_INPUT:
         try:
-            from llm_guard import scan_prompt
-            from llm_guard.scanners import PromptInjection, Toxicity
-            _input_fn = (scan_prompt, [PromptInjection(), Toxicity()])
+            from guardrails import Guard
+            g = Guard()
+            # Try dedicated prompt-injection validator if installed
+            try:
+                from guardrails_ai.detect_prompt_injection import DetectPromptInjection
+                g = g.use(DetectPromptInjection())
+            except Exception:
+                pass
+            _input_guard = g
         except Exception:
-            _input_fn = False  # mark as unavailable
-    if _output_fn is None and SCAN_OUTPUT:
+            _input_guard = False  # mark as unavailable
+    if _output_guard is None and SCAN_OUTPUT:
         try:
-            from llm_guard import scan_response
-            from llm_guard.scanners import SensitiveInformation
-            _output_fn = (scan_response, [SensitiveInformation()])
+            from guardrails import Guard
+            g = Guard()
+            # Try dedicated PII validator if installed
+            try:
+                from guardrails_ai.detect_pii import DetectPII
+                g = g.use(DetectPII())
+            except Exception:
+                pass
+            _output_guard = g
         except Exception:
-            _output_fn = False
+            _output_guard = False
 
 
-def _scan(text: str, kind: str):
-    """Run scanners for *kind* (input|output).
-    Returns (sanitized, violated, reason). If scanner unavailable → passthrough.
+def _validate(text: str, kind: str):
+    """Run Guardrails AI validators for *kind* (input|output).
+    Returns (sanitized, violated, reason). If validator unavailable → passthrough.
     """
-    fn = _input_fn if kind == "input" else _output_fn
-    if fn is None:
-        _init_scanners()
-        fn = _input_fn if kind == "input" else _output_fn
-    if not fn:
+    guard = _input_guard if kind == "input" else _output_guard
+    if guard is None:
+        _init_guards()
+        guard = _input_guard if kind == "input" else _output_guard
+    if not guard:
         return text, False, ""
-    scan_fn, scanners = fn
     try:
-        sanitized, results, is_violated = scan_fn(scanners, text)
+        result = guard.validate(text)
+        violated = not getattr(result, "validation_passed", True)
+        reason = ""
+        if violated:
+            failures = getattr(result, "failures", None) or getattr(result, "errors", None)
+            if failures:
+                reason = "; ".join(str(f) for f in failures)
+            else:
+                reason = "validation failed"
+        return text, violated, reason
     except Exception:
         return text, False, ""
-    reason = ""
-    if is_violated:
-        reasons = [name for name, res in results.items() if res.get("is_violated")]
-        reason = "; ".join(reasons)
-    return sanitized, is_violated, reason
 
 
 class ChatMessage(BaseModel):
@@ -110,7 +125,7 @@ async def chat(request: Request):
     blocked_reasons: List[str] = []
     for m in messages:
         if m.get("role") == "user" and m.get("content"):
-            sanitized, violated, reason = _scan(m["content"], "input")
+            sanitized, violated, reason = _validate(m["content"], "input")
             if violated:
                 blocked_reasons.append(f"input:{reason}")
             m["content"] = sanitized
@@ -125,6 +140,9 @@ async def chat(request: Request):
         )
 
     # ---- proxy to Ollama --------------------------------------------------
+    # Ollama defaults to stream=true (NDJSON). Force stream=false so the
+    # wall returns a single JSON object; callers can still override via body.
+    body.setdefault("stream", False)
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             upstream = await client.post(
@@ -146,7 +164,7 @@ async def chat(request: Request):
     message = data.get("message", {})
     content = message.get("content", "")
     if content:
-        sanitized, violated, reason = _scan(content, "output")
+        sanitized, violated, reason = _validate(content, "output")
         if violated:
             blocked_reasons.append(f"output:{reason}")
             message["content"] = sanitized

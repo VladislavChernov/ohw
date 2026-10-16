@@ -2,9 +2,9 @@
 
 ## Цель
 Внешний контур защиты LLM-агента: `security-wall` — Ollama-совместимый прокси
-на FastAPI + `llm-guard`, стоящий между агентом и локальной abliterated-моделью.
-Сканирует входящий prompt (инъекции, токсичность) и исходящий ответ (PII,
-утечка данных), блокирует или маскирует при нарушении.
+на FastAPI + Guardrails AI (`guardrails-ai`), стоящий между агентом и локальной
+abliterated-моделью. Валидирует входящий prompt (prompt injection, токсичность)
+и исходящий ответ (PII, утечка данных), блокирует или маскирует при нарушении.
 
 ## Интеграция с агентом
 Агент (Go) уже поддерживает `EXTERNAL_GUARD=on`: в этом режиме `LLMBaseURL`
@@ -27,9 +27,9 @@
 | Прокси без изменений | Оба флага off, либо сканирование прошло |
 | Ответ на блок | JSON `{"error":"blocked by security-wall","reason":...}` с HTTP 403 |
 
-## Сканеры llm-guard
-- Input: `PromptInjection`, `Toxicity`
-- Output: `SensitiveInformation` (PII — имена, email, телефоны, адреса)
+## Валидаторы Guardrails AI
+- Input: `DetectPromptInjection` (prompt injection, jailbreak) — при отсутствии пакета валидатор пропускается (passthrough)
+- Output: `DetectPII` (PII — имена, email, телефоны, адреса) — при отсутствии пакета валидатор пропускается (passthrough)
 
 ## Конфигурация (env)
 | Переменная | По умолчанию | Назначение |
@@ -43,7 +43,7 @@
 ## Образ
 База: `python:3.12-slim` (локально проверен; `ohw-python:3.13` из Dz4 не
 извлекается из-за ошибки Docker-слоя `0xc000013a` на этой машине).
-Зависимости: `fastapi`, `uvicorn`, `llm-guard`, `httpx`. Сборка:
+Зависимости: `fastapi`, `uvicorn`, `guardrails-ai`, `httpx`. Сборка:
 `dz5/security-wall/Dockerfile`, образ `dz5-security-wall:local`.
 
 ## Состав сервиса в compose (`dz5/infra/compose.yaml`)
@@ -63,7 +63,7 @@
 
 ## Definition of done
 - [x] Spec written (этот файл)
-- [ ] `dz5/security-wall/` — FastAPI + llm-guard, `/api/chat` прокси, `/healthz`
+- [ ] `dz5/security-wall/` — FastAPI + Guardrails AI, `/api/chat` прокси, `/healthz`
 - [ ] `dz5/security-wall/Dockerfile` на `ohw-python:3.13`, сборка зелёная
 - [ ] Сервис `wall` в `dz5/infra/compose.yaml`, поднимается через `docker compose up -d wall`
 - [ ] `EXTERNAL_GUARD=on` агент ходит через wall и получает ответ

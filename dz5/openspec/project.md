@@ -26,7 +26,7 @@
   роли «жертвы» стенда; для стенда непригодны.
 - **БД:** SQLite-файл в volume, образ CLI `keinos/sqlite3` (seed/восстановление),
   таблица с секретами и «чужими» строками.
-- **Внешняя защита:** `security-wall` — FastAPI + `llm-guard` (прокси между
+- **Внешняя защита:** `security-wall` — FastAPI + `Guardrails AI` (прокси между
   агентом и LLM), на базовом образе `ohw-python:3.13`.
 - **Атака:** `attack-runner` — `garak` + собственный раннер сценариев (Python).
 - **Инфраструктура стенда:** своя `dz5/infra/` (compose, Dockerfile'ы, `.env`).
@@ -38,7 +38,7 @@
 Переключение через env: `BUILTIN_GUARDS=on|off`, `EXTERNAL_GUARD=on|off`.
 `L3` (Runtime-контроль) — предохранитель стенда, присутствует во всех режимах.
 
-| Пресет | Промпт/ограничения агента | Внешний llm-guard | L3 (compose-лимиты) |
+| Пресет | Промпт/ограничения агента | Внешний Guardrails AI | L3 (compose-лимиты) |
 |---|:--:|:--:|:--:|
 | 1 Baseline | ❌ | ❌ | ✅ floor |
 | 2 Только встроенная | ✅ | ❌ | ✅ |
@@ -100,7 +100,7 @@
 2. `add-abliterated-llm` — локальный контейнер abliterated-модели.
 3. `add-agent-core` — Go-агент (`drujensen@<commit>`), tool `db_query`
    (read-only по умолчанию / tool-abuse за флагом), конфиг промпта.
-4. `add-external-defense` — FastAPI + `llm-guard` (внешний контур). 🔄 в работе
+4. `add-external-defense` — FastAPI + Guardrails AI (внешний контур). 🔄 в работе
 5. `add-defense-modes` / L3 — 4 пресета через env + compose-лимиты ресурсов.
 6. `add-attack-harness` — garak + свой раннер: OWASP Top-10 2026 × 4 пресета +
    DoS (LLM06); сравнительный отчёт.
