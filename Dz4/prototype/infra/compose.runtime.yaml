@@ -289,6 +289,16 @@ services:
       QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
       INGESTION_URL: ${INGESTION_URL:-http://ingestion-api:8002}
       SEMANTIC_CACHE_ENABLED: "false"
+      # Флаг оси графа обязателен и здесь, а не только у `query-worker`. Сегодня api
+      # отдаёт задание воркеру (`QUERY_QUEUE: redis`) и пайплайн не исполняет, поэтому
+      # отсутствие флага было безобидно. Но обход очереди — это синхронный путь, и тогда
+      # api исполнил бы пайплайн с дефолтом профиля, то есть ось была бы ВКЛЮЧЕНА при
+      # выключенной настройке оператора. Обнаружить это можно было только сравнением
+      # окружений двух контейнеров, и на замере 2026-10-17 так и вышло: переменная была
+      # у воркера и отсутствовала у api.
+      # Инвариант: компонент, который МОЖЕТ исполнить пайплайн, читает тот же флаг с тем
+      # же дефолтом. Сторожит `tests/test_runtime_compose_env.py`.
+      RETRIEVAL_GRAPH_ENABLED: ${RETRIEVAL_GRAPH_ENABLED:-true}
       AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
       GRAPH_LOG_LEVEL: ${GRAPH_LOG_LEVEL:-INFO}
     volumes:

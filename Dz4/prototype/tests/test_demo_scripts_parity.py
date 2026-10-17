@@ -38,15 +38,24 @@ NAMED_VOLUME_SUFFIXES = ("neo4j", "ingestion")
 # Пары файлов, которые обязаны вести себя одинаково, и ожидаемый набор compose-файлов
 # у каждой. Видеокарту выдаёт compose сам, поэтому GPU-вариант подкладывает оверлей, а
 # CPU-вариант обходится базовым файлом: на этом различии и держится всё разделение.
+# Оверлей реранкера подключается по флагу и потому назван во всех четырёх скриптах, но
+# включается только по требованию: сам факт упоминания не обязан его поднимать.
+RERANKER_OVERLAY = "compose.runtime-reranker.yaml"
+
 PAIRS = (
     pytest.param(
         SH, PS1,
-        {"compose.runtime.yaml", "compose.ingest.yaml", "compose.runtime-gpu.yaml"},
+        {
+            "compose.runtime.yaml",
+            "compose.ingest.yaml",
+            "compose.runtime-gpu.yaml",
+            RERANKER_OVERLAY,
+        },
         id="gpu",
     ),
     pytest.param(
         SH_CPU, PS1_CPU,
-        {"compose.runtime.yaml", "compose.ingest.yaml"},
+        {"compose.runtime.yaml", "compose.ingest.yaml", RERANKER_OVERLAY},
         id="cpu",
     ),
 )
@@ -442,3 +451,58 @@ def test_sh_has_no_bash_only_constructs(
         (r"<<-", "heredoc с табами — это bash"),
     ):
         assert not re.search(marker, text), f"{why}: {marker} в {sh.name}"
+
+def test_reranker_overlay_is_reachable_from_every_demo_script() -> None:
+    """Реранкерный запуск обязан существовать во всех скриптах Демо.
+
+    Отдельный запуск с реранкером — это оверлей плюс флаг. Если флаг есть хотя бы в
+    одном скрипте, стенд ведёт себя по-разному в зависимости от того, на какой системе
+    его запустили, и это обнаружится замерами, а не чтением.
+    """
+    infra = DEMO_DIR.parent / "prototype" / "infra"
+    overlay = infra / RERANKER_OVERLAY
+    assert overlay.is_file(), f"нет оверлея {RERANKER_OVERLAY}: запуск с реранкером недостижим"
+    for path in (SH, PS1, SH_CPU, PS1_CPU):
+        assert RERANKER_OVERLAY in _read(path), (
+            f"{path.name} не умеет подключить {RERANKER_OVERLAY}: запуск с реранкером "
+            "существует только на части систем"
+        )
+
+
+def test_reranker_overlay_enables_slot_on_both_pipeline_services() -> None:
+    """Оверлей включает слот реранкера у обоих сервисов, способных исполнить пайплайн.
+
+    `query-api` сегодня только принимает задание и отдаёт его воркеру, поэтому отсутствие
+    слота у него безобидно. Но обход очереди — это синхронный путь, и тогда api исполнил бы
+    пайплайн с дефолтом профиля, то есть ось переранжирования оказалась бы выключенной при
+    включённой настройке. Проверяется положительный инвариант: оба сервиса объявляют слот.
+    """
+    import yaml
+
+    infra = DEMO_DIR.parent / "prototype" / "infra"
+    document = yaml.safe_load((infra / RERANKER_OVERLAY).read_text(encoding="utf-8"))
+    services = document.get("services") or {}
+    for service in ("query-api", "query-worker"):
+        environment = (services.get(service) or {}).get("environment") or {}
+        assert environment.get("RERANKER") == "bge_reranker", (
+            f"{service} в оверлее реранкера не переводит слот в bge_reranker: "
+            "запуск поднимет сервис, но выдача продолжит идти без переранжирования"
+        )
+        assert environment.get("RERANKER_URL"), f"{service} не знает адрес сервиса реранкера"
+    assert "reranker" in services, "оверлей объявляет слот, но не поднимает сам сервис"
+
+
+def test_reranker_stays_off_in_plain_demo_run() -> None:
+    """Штатный запуск Демо переранживание не включает.
+
+    Оверлей подключается флагом, а базовый runtime-контур слот не трогает. Если в базовом
+    файле появится `bge_reranker`, демо начнёт обращаться к сервису, которого в этом
+    запуске нет, - то есть поведение станет зависеть от того, переопределил ли кто-то
+    переменную окружения.
+    """
+    infra = DEMO_DIR.parent / "prototype" / "infra"
+    base = (infra / "compose.runtime.yaml").read_text(encoding="utf-8")
+    assert "bge_reranker" not in base, (
+        "базовый runtime-контур включает bge_reranker: штатный запуск Демо начнёт "
+        "обращаться к сервису реранкера, которого в нём нет"
+    )

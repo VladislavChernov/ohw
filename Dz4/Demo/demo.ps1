@@ -26,6 +26,10 @@ param(
     [string]$Set = 'empty',
 
     [switch]$WithIngest,
+    # Отдельный запуск С реранкером bge. По умолчанию выключен: без этого флага слот
+    # `RERANKER` остаётся `noop` и сервис реранкера не поднимается. Оверлей выдаёт
+    # устройство, поэтому флагом в командной строке, как и видеокарту.
+    [switch]$WithReranker,
     [int]$WaitTimeoutSec = 300,
     [string]$Path,
     [string]$Domain = 'it',
@@ -42,6 +46,7 @@ $scriptDir = $PSScriptRoot
 $infraDir = Resolve-Path (Join-Path $scriptDir '..\prototype\infra')
 $composeRuntime = Join-Path $infraDir 'compose.runtime.yaml'
 $composeIngest = Join-Path $infraDir 'compose.ingest.yaml'
+$composeReranker = Join-Path $infraDir 'compose.runtime-reranker.yaml'
 # Подкладывается ВСЕГДА: именно этот файл выдаёт контейнерам видеокарту. Без него LLM
 # считает на процессоре - это не ошибка, а вариант `demo-cpu.ps1`.
 $composeGpu = Join-Path $infraDir 'compose.runtime-gpu.yaml'
@@ -83,6 +88,11 @@ function Get-ComposeArguments {
     $args = @('--project-directory', $infraDir, '--file', $composeRuntime, '--file', $composeGpu)
     if ($WithIngest) {
         $args += @('--file', $composeIngest, '--profile', 'ingest')
+    }
+    # Ранкерный оверлей идёт ПОСЛЕ оверлея GPU: он переопределяет слот `RERANKER` у
+    # `query-api` и `query-worker`, и порядок файлов фиксирует, чьё значение победит.
+    if ($WithReranker) {
+        $args += @('--file', $composeReranker)
     }
     return $args
 }

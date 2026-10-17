@@ -282,7 +282,7 @@ def test_eval_question_records_projection_state() -> None:
             result = super().run(*args, **kwargs)
             result["projection_status"] = "ready"
             result["projection_revision"] = "projection-1"
-            result["effective_retrieval"] = {"graph_boost": 0.2, "max_depth": 2}
+            result["effective_retrieval"] = {"ordering_applied": "rerank_bge", "max_depth": 2}
             result["trace"] = [
                 *self._trace_events,
                 {
@@ -310,11 +310,11 @@ def test_eval_question_records_projection_state() -> None:
     assert record["seed_chunk_ids"] == ["c1"]
     assert record["graph_paths"] == [["tag:it:a", "tag:it:b"]]
     assert record["graph_depths"] == [1]
-    # Применённый boost берётся из канала применённой конфигурации, а НЕ из trace-события.
-    # В фикстуре trace-события `boost` больше нет намеренно: раньше поле читалось оттуда, и
-    # при выключенном trace оно было всегда `None` — то есть запись о применённой настройке
-    # зависела от отладочного флага.
-    assert record["graph_boost"] == 0.2
+    # Применённая реализация порядка берётся из канала применённой конфигурации, а НЕ из
+    # trace-события: при выключенном trace событий нет, и запись о применённой политике
+    # зависела бы от отладочного флага.
+
+    assert record["ordering_applied"] == "rerank_bge"
 
 
 def test_eval_question_does_not_count_degraded_graph_as_measured() -> None:
@@ -978,14 +978,14 @@ def test_config_state_names_identity_and_applied_settings() -> None:
             "profile_fingerprint": "abc123def456",
             "profile_pinned_at": "2026-09-27T10:00:00+00:00",
             "config_fallbacks": [],
-            "effective_retrieval": {"max_depth": 2, "graph_boost": 0.0},
+            "effective_retrieval": {"max_depth": 2, "filter_demote_scale": 0.5},
         },
         {
             "mode": "target",
             "profile_fingerprint": "abc123def456",
             "profile_pinned_at": "2026-09-27T10:00:00+00:00",
-            "config_fallbacks": ["retrieval.graph_boost"],
-            "effective_retrieval": {"max_depth": 2, "graph_boost": 0.0},
+            "config_fallbacks": ["retrieval.filter_demote_scale"],
+            "effective_retrieval": {"max_depth": 2, "filter_demote_scale": 0.5},
         },
     ]
 
@@ -994,7 +994,7 @@ def test_config_state_names_identity_and_applied_settings() -> None:
     assert state["profile_fingerprint"] == "abc123def456"
     assert state["profile_staleness"] == "immutable_for_session"
     assert state["config_drift"] is False
-    assert state["config_fallbacks"] == {"retrieval.graph_boost": 1}
+    assert state["config_fallbacks"] == {"retrieval.filter_demote_scale": 1}
     assert state["effective_retrieval"]["max_depth"] == 2
 
 
@@ -1828,6 +1828,105 @@ def _contribution_record(mode: str, projection_status: str | None) -> dict[str, 
         "graph_contribution": {"mode": mode},
         "projection_status": projection_status,
     }
+
+
+def _context_record(
+    skeleton: int,
+    body: int,
+    dropped: int,
+    lines: list[str] | None = None,
+) -> dict[str, Any]:
+    total = skeleton + body
+    return {
+        "context": {
+            "skeleton_tokens": skeleton,
+            "body_tokens": body,
+            "total_tokens": total,
+            "dropped_chunks": dropped,
+            "skeleton_token_share": round(skeleton / total, 4) if total else None,
+            "skeleton_lines": [f"строка {index}" for index in range(skeleton)] if lines is None else lines,
+        }
+    }
+
+
+def test_context_assembly_counts_questions_with_evidence_lines() -> None:
+    """Число вопросов, где блок свидетельства содержал хоть что-то.
+
+    Ноль при включённой оси означал бы, что ось отработала, а свидетельства не дала, — и
+    читался бы как «граф бесполезен», хотя на деле его просто не оказалось в ответе.
+    """
+    aggregate = _run_eval._aggregate_context_assembly(
+        [
+            _context_record(skeleton=3, body=700, dropped=0),
+            _context_record(skeleton=0, body=800, dropped=0),
+            _context_record(skeleton=1, body=600, dropped=0, lines=["База данных"]),
+        ]
+    )
+
+    assert aggregate["mode"] == "measured"
+    assert aggregate["questions_measured"] == 3
+    assert aggregate["questions_with_evidence_lines"] == 2
+
+
+def test_context_assembly_records_evidence_lines_into_artifact() -> None:
+    """Строки доезжают до строки вопроса в артефакте, а не теряются по дороге."""
+    record = _context_record(skeleton=1, body=10, dropped=0, lines=["Ingestion API"])
+
+    assert record["context"]["skeleton_lines"] == ["Ingestion API"]
+
+
+def test_context_assembly_reports_budget_split_and_dropped_chunks() -> None:
+    """Разбиение бюджета и число отброшенных фрагментов попадают в артефакт.
+
+    Именно по ним отличается «граф занял место текста» от «граф занял своё место»:
+    скелет входит первым и не вытесняется, тело получает остаток.
+    """
+    aggregate = _run_eval._aggregate_context_assembly(
+        [
+            _context_record(skeleton=300, body=700, dropped=2),
+            _context_record(skeleton=100, body=900, dropped=0),
+        ]
+    )
+
+    assert aggregate["mode"] == "measured"
+    assert aggregate["questions_measured"] == 2
+    assert aggregate["avg_skeleton_tokens"] == 200.0
+    assert aggregate["avg_body_tokens"] == 800.0
+    assert aggregate["total_dropped_chunks"] == 2
+    assert aggregate["questions_with_dropped_chunks"] == 1
+    assert 0.0 < aggregate["avg_skeleton_token_share"] < 1.0
+
+
+def test_context_assembly_unknown_is_not_reported_as_zero() -> None:
+    """Нет измерения — значит `unknown`, а не ноль.
+
+    Ноль означал бы «скелет и тело не заняли ничего», то есть утверждение о прогоне,
+    которого не было. Отдельно различаются два случая отсутствия данных: все ответы
+    из кэша (сборка не выполнялась) и блока нет вовсе.
+    """
+    cache_only = _run_eval._aggregate_context_assembly([{"context": None}, {"context": None}])
+    assert cache_only["mode"] == "cache_only"
+    assert cache_only["questions_measured"] == 0
+    assert cache_only["questions_unknown"] == 2
+    assert cache_only["avg_skeleton_tokens"] is None
+    assert cache_only["avg_body_tokens"] is None
+    assert cache_only["avg_skeleton_token_share"] is None
+    assert cache_only["total_dropped_chunks"] is None
+
+    absent = _run_eval._aggregate_context_assembly([{"id": "q1"}, {"id": "q2"}])
+    assert absent["mode"] == "not_assembled"
+    assert absent["avg_skeleton_tokens"] is None
+
+
+def test_context_assembly_counts_cache_hits_beside_measured_questions() -> None:
+    """Кэш-попадания считаются отдельным полем, а не молча выпадают из среднего."""
+    aggregate = _run_eval._aggregate_context_assembly(
+        [_context_record(skeleton=200, body=800, dropped=0), {"context": None}]
+    )
+
+    assert aggregate["mode"] == "measured"
+    assert aggregate["questions_measured"] == 1
+    assert aggregate["questions_unknown"] == 1
 
 
 def test_unmeasured_aggregate_carries_the_cause_into_the_artifact() -> None:

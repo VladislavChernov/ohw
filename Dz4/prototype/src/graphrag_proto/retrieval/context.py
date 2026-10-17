@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 CONTEXT_TOKEN_LIMIT = 4096
@@ -27,6 +27,18 @@ class ContextResult:
     skeleton_count: int
     body_count: int
     dropped: int
+    # Токены скелета и тела - РАЗДЕЛЬНО, а не только их сумму. Пока известна лишь сумма,
+    # нельзя отличить "граф занял место текста" от "граф занял своё место": скелет входит
+    # первым и не вытесняется, тело получает остаток, поэтому доля скелета - это и есть
+    # цена, которую платит тело.
+    skeleton_tokens: int = 0
+    body_tokens: int = 0
+    max_tokens: int = 0
+    # САМИ строки, попавшие в промпт. Без них вопрос "что именно модель увидела от графа"
+    # по готовому прогону не отвечается вовсе: числа говорят, сколько строк было, а что
+    # они содержали - остаётся догадкой. Объём ограничен сверху `max_graph_nodes` и бюджетом,
+    # то есть сохраняемое не превосходит того, что реально ушло в промпт.
+    skeleton_lines: list[str] = field(default_factory=list)
 
 
 def render_skeleton(rows: list[dict[str, Any]]) -> list[str]:
@@ -109,4 +121,8 @@ class ContextAssembly:
             skeleton_count=len(selected_skeleton),
             body_count=len(body_parts),
             dropped=dropped,
+            skeleton_tokens=skeleton_tokens,
+            body_tokens=body_tokens,
+            max_tokens=self._max_tokens,
+            skeleton_lines=list(selected_skeleton),
         )

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Демонстрационный стенд GraphRAG для Windows, ВАРИАНТ НА CPU.
 
@@ -26,6 +26,8 @@ param(
     [string]$Set = 'empty',
 
     [switch]$WithIngest,
+    # Отдельный запуск С реранкером bge; по умолчанию выключен, как и в GPU-варианте.
+    [switch]$WithReranker,
     [int]$WaitTimeoutSec = 300,
     [string]$Path,
     [string]$Domain = 'it',
@@ -42,6 +44,7 @@ $scriptDir = $PSScriptRoot
 $infraDir = Resolve-Path (Join-Path $scriptDir '..\prototype\infra')
 $composeRuntime = Join-Path $infraDir 'compose.runtime.yaml'
 $composeIngest = Join-Path $infraDir 'compose.ingest.yaml'
+$composeReranker = Join-Path $infraDir 'compose.runtime-reranker.yaml'
 # Оверлея GPU здесь нет и он не подкладывается: бронь видеокарты выдаёт compose сам, и
 # без неё модель считает на процессоре. Базового файла достаточно.
 $fixturesDir = Join-Path $scriptDir 'fixtures'
@@ -84,6 +87,12 @@ function Get-ComposeArguments {
     $args = @('--project-directory', $infraDir, '--file', $composeRuntime)
     if ($WithIngest) {
         $args += @('--file', $composeIngest, '--profile', 'ingest')
+    }
+    # Оверлей реранкера подключается только по флагу: слот RERANKER без него
+    # остаётся 
+oop, а сервис не поднимается.
+    if ($WithReranker) {
+        $args += @('--file', $composeReranker)
     }
     return $args
 }

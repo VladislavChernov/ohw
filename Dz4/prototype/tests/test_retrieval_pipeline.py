@@ -19,6 +19,7 @@ from graphrag_proto.retrieval.adapters.inmemory import InMemoryVectorStore
 from graphrag_proto.retrieval.adapters.llm import FakeLLM
 from graphrag_proto.retrieval.adapters.reranker import NoOpRerankerAdapter
 from graphrag_proto.retrieval.pipeline import (
+    FILTER_DEMOTE_SCALE,
     QueryPipeline,
     graph_search_enabled,
 )
@@ -33,7 +34,7 @@ PROFILE: dict[str, Any] = {
         "max_depth": 2,
         "max_fanout": 4,
         "max_graph_nodes": 8,
-        "graph_boost": 0.2,
+        "filter_demote_scale": 0.2,
     },
     "context_assembly": {"max_tokens": 4096},
 }
@@ -360,37 +361,179 @@ def test_empty_graph_projection_is_degraded_and_not_cached() -> None:
     assert cache.stats()["entries"] == 0
 
 
-def test_graph_boost_is_applied_after_external_reranker() -> None:
-    graph = _CountingGraphStore(
-        expansion_rows=[
+def test_no_constant_reaches_candidate_without_own_score() -> None:
+    """Константа не достаёт до кандидата, у которого нет собственной оценки.
+
+    Раньше параметр `graph_boost` прибавлял число к оценке ПОСЛЕ ранжирования, и буст
+    доставался всем кандидатам, чей источник был достигнут обходом. Векторный кандидат
+    при этом терял часть своей оценки, а кандидат из моста, у которого оценки нет вовсе,
+    получал от константы ВСЮ свою оценку — фору ровно за то, что он ничего не оценивал.
+
+    Проверка сформулирована как инвариант, а не как «параметра быть не должно»: запрет
+    конкретного имени ломается на первом же законном изменении и учит обходить тест.
+    """
+    vector = _RecordingVectorStore(_vector_rows())
+    vector.upsert_vectors(
+        [
             {
-                "node_id": "tag:it:first",
-                "canonical_name": "First",
-                "path": ["tag:it:first"],
-                "depth": 0,
-                "kind": "parent",
-                "source_ids": ["src://first"],
-                "domain": "it",
+                "chunk_id": "chk:graph",
+                "embedding": [0.1],
+                "text": "текст достигнутого обходом чанка",
+                "metadata": {"source_url": "src://graph", "domain": "it"},
             }
         ]
     )
-    vector = _RecordingVectorStore(_vector_rows())
+    recorder = _ChunkRecordingReranker()
     pipe = QueryPipeline(
         embedder=DeterministicEmbedder(),
-        graph_store=graph,
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:graph")),
         vector_store=vector,
-        reranker=_FixedReranker([0.1, 0.9]),
+        reranker=recorder,
         llm=FakeLLM(text="ответ"),
         profile_loader=_StubLoader(PROFILE),
     )
 
+    pipe.run("seed", generate=False, trace=True)
+
+    bridged = [chunk for chunk in recorder.seen if chunk.get("bridged")]
+    assert bridged, "нужен кандидат без собственной оценки - тест обязан его получить"
+    for chunk in bridged:
+        assert float(chunk.get("score") or 0.0) == pytest.approx(0.0), (
+            "кандидат без собственной оценки получил её из константы"
+        )
+    # Векторные кандидаты свою оценку сохраняют: инвариант про константу, а не про
+    # «у всех ноль».
+    vector_scored = [
+        float(chunk.get("score") or 0.0) for chunk in recorder.seen if not chunk.get("bridged")
+    ]
+    assert vector_scored, "векторные кандидаты должны получить оценку"
+    assert all(score > 0.0 for score in vector_scored)
+
+
+def test_ordering_names_are_recorded_in_the_artifact() -> None:
+    """Применённая реализация порядка пишется в артефакт вместе с параметрами.
+
+    Конфигурация меняется на лету, и из коммита имя не восстановить. Без этих полей
+    отчёт показывает политику, которую никто не просил.
+    """
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    effective = pipe.run("seed", generate=False)["effective_retrieval"]
+
+    assert effective["ordering_requested"] == "rerank_bge"
+    assert effective["ordering_applied"] == "rerank_bge"
+    assert effective["ordering_fallback"] is False
+    assert effective["ordering_params"]
+
+
+def test_unresolvable_ordering_falls_back_to_registered_implementation() -> None:
+    """Неразрешимое имя даёт зарегистрированный откат, а не возврат к приоритету оси.
+
+    Записаны ОБА имени: без запрошенного отчёт не покажет, что просили не то.
+    """
+    profile = {
+        **PROFILE,
+        "retrieval": {**PROFILE["retrieval"], "ordering": "нет_такой_реализации"},
+    }
+    events: list[tuple[str, dict[str, Any]]] = []
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(profile),
+    )
+
+    done = pipe.run(
+        "seed",
+        generate=False,
+        emit=lambda kind, payload: events.append((kind, payload)),
+    )
+
+    effective = done["effective_retrieval"]
+    assert effective["ordering_requested"] == "нет_такой_реализации"
+    assert effective["ordering_applied"] == "vector_order_fallback"
+    assert effective["ordering_fallback"] is True
+    # Откат виден и в событии, а не только в артефакте.
+    statuses = [
+        payload
+        for kind, payload in events
+        if kind == "status" and payload.get("stage") == "order"
+    ]
+    assert statuses, "откат порядка обязан быть виден в событиях"
+
+
+def test_rrf_ordering_fuses_two_rank_lists_without_scores() -> None:
+    """Запасная реализация сливает два списка по рангам, не выдумывая оценок.
+
+    Проверяется и что она даёт оценку всем кандидатам, включая пришедшего из моста, и
+    что кросс-энкодер при этом НЕ зовётся: RRF не должен превращаться во «вторую
+    политику, которая тихо перезаписала бы результат».
+    """
+    profile = {
+        **PROFILE,
+        "retrieval": {**PROFILE["retrieval"], "ordering": "rrf_fallback"},
+    }
+    recorder = _ChunkRecordingReranker()
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:graph")),
+        vector_store=_vector_store_with_graph_chunk(),
+        reranker=recorder,
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(profile),
+    )
+
     done = pipe.run("seed", generate=False, trace=True)
+    effective = done["effective_retrieval"]
 
-    rerank = next(event for event in done["trace"] if event.get("stage") == "rerank")
-    scores = {item["chunk_id"]: item["after"] for item in rerank["scores"]}
-    assert scores["chk:first"] == pytest.approx(0.3)
-    assert scores["chk:second"] == pytest.approx(0.9)
+    assert effective["ordering_applied"] == "rrf_fallback"
+    assert effective["ordering_fallback"] is False
+    assert effective["ordering_params"]["kind"] == "rank_fusion"
+    # Кросс-энкодер не вызывался: у RRF нет оценок, и он их не изобретает.
+    assert not recorder.seen, "RRF не должен звать реранкер"
+    order_event = next(
+        event for event in done["trace"] if event.get("stage") == "order" and "scores" in event
+    )
+    scores = {item["chunk_id"]: item["after"] for item in order_event["scores"]}
+    k = int(effective["ordering_params"]["k"])
+    # Векторные кандидаты по своим рангам, мостовый - по графовому. Все оценки положительны:
+    # «нет оценки» и «оценка нулевая» - разные вещи. Допуск по округлению: в трейсе
+    # оценки пишутся с четырьмя знаками.
+    assert scores["chk:first"] == pytest.approx(1.0 / (k + 0 + 1), abs=1e-4)
+    assert scores["chk:second"] == pytest.approx(1.0 / (k + 1 + 1), abs=1e-4)
+    assert scores["chk:graph"] > 0.0, "мостовый кандидат обязан получить оценку RRF"
 
+
+def _vector_store_with_graph_chunk() -> _RecordingVectorStore:
+    """Хранилище, где вектор вернул два чанка, а третий достаётся только через мост."""
+    vector = _RecordingVectorStore(_vector_rows())
+    vector.upsert_vectors(
+        [
+            {
+                "chunk_id": "chk:graph",
+                "embedding": [0.1],
+                "text": "текст достигнутого обходом чанка",
+                "metadata": {"source_url": "src://graph", "domain": "it"},
+            }
+        ]
+    )
+    return vector
+
+
+def _vector_score(chunk_id: str) -> float:
+    for row in _vector_rows():
+        if str(row["chunk_id"]) == str(chunk_id):
+            return float(row["score"])
+    return 0.0
 
 def test_pipeline_disabled_preserves_vector_baseline() -> None:
     profile: dict[str, Any] = {
@@ -468,11 +611,11 @@ def test_pipeline_vector_results_seed_bounded_expansion() -> None:
         "chk:first",
         "chk:second",
     ]
-    assert {
-        "source_url": "src://graph",
-        "relevance": 1.0,
-        "axis": "graph",
-    } in done["sources"]
+    graph_source = next(s for s in done["sources"] if s["source_url"] == "src://graph")
+    assert (graph_source["relevance"], graph_source["axis"]) == (1.0, "graph")
+    # Метка «что ось знает» обязана быть на источнике: без неё «граф не помог» и «граф про этот
+    # документ ничего не знает» дают один и тот же ответ по вектору.
+    assert graph_source["graph_knowledge"] == "contributed"
     assert done["graph_degraded"] is False
 
 
@@ -599,6 +742,529 @@ def test_cache_hit_returns_cached_answer_no_llm_no_token() -> None:
     assert llm.call_count == 1
     # token не шлётся при hit
     assert done_hit.get("sources") is not None
+
+
+def test_bridge_turns_reached_chunk_ids_into_readable_candidates() -> None:
+    """Мост превращает `chunk_ids` строки обхода в кандидата С ТЕКСТОМ.
+
+    Ключевая деталь теста: кандидат, которого достиг обход, **нет** среди строк, которые
+    отдаёт векторный поиск. Иначе тест проходил бы и без моста — вектор вернул бы этот
+    чанк сам, и проверка ничего бы не сторожила.
+
+    Текст берётся из НАСТОЯЩЕГО хранилища через `upsert_vectors`, а не из подставного
+    метода: подставной метод проверит, что пайплайн вызвал то, что мы и так написали.
+    """
+    hidden = "текст чанка, которого векторный поиск не вернул"
+    vector = _RecordingVectorStore(_vector_rows())
+    # Связь собирается так же, как её собирает обход: `chunk_ids` строки расширения.
+    vector.upsert_vectors(
+        [
+            {
+                "chunk_id": "chk:graph",
+                "embedding": [0.1],
+                "text": hidden,
+                "metadata": {"source_url": "src://first", "domain": "it"},
+            }
+        ]
+    )
+    graph = _CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:graph"))
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=vector,
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    done = pipe.run("seed", generate=False)
+
+    assert done["effective_retrieval"]["bridge_status"] == "ok"
+    assert done["effective_retrieval"]["bridged_chunks"] == 1
+    # Тело выросло ровно на один фрагмент: вектор отдаёт два чанка, мост добавляет третий.
+    # Если бы мост не сработал, `body_count` остался бы равен двум.
+    assert done["context"]["body_count"] == len(_vector_rows()) + 1
+
+
+def _expansion_rows_reaching(chunk_id: str) -> list[dict[str, Any]]:
+    """Строка расширения, чей `chunk_ids` указывает на недоступный вектору чанк."""
+    return [
+        {
+            "node_id": "tag:it:first",
+            "canonical_name": "First",
+            "path": ["tag:it:first", "tag:it:neighbour"],
+            "depth": 1,
+            "kind": "related",
+            "origin": "user",
+            "confidence": 0.8,
+            "source_ids": ["src://first"],
+            "chunk_ids": [chunk_id],
+            "domain": "it",
+        }
+    ]
+
+
+def test_bridge_reports_unsupported_store_apart_from_empty_result() -> None:
+    """`None` и `[]` — разные вещи, и обе обязаны быть видны.
+
+    Если хранилище не умеет читать по идентификаторам, отчёт обязан сказать «возможности
+    нет», а не «прочитанного нет» и уж тем более не «граф не дал». Слив эти состояния
+    даёт молчащий ноль, который читается как результат.
+    """
+    graph = _CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:missing"))
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_NoBridgeStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    done = pipe.run("seed", generate=False)
+
+    assert done["effective_retrieval"]["bridge_status"] == "unsupported"
+    assert done["effective_retrieval"]["bridged_chunks"] == 0
+
+
+class _NoBridgeStore(InMemoryVectorStore):
+    """Хранилище, у которого возможности чтения по идентификаторам нет.
+
+    Заглушка вынуждена: сегодня возможность есть у обоих хранилищ, и «нет возможности»
+    нельзя получить иначе. Возвращается именно `None`, а не пустой список — в этом весь
+    смысл проверки.
+    """
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        super().__init__()
+        self._rows = rows
+
+    def vector_search(
+        self,
+        embedding: list[float],
+        top_k: int = 5,
+        domain: str | None = None,
+    ) -> list[dict[str, Any]]:
+        del embedding, domain
+        return [dict(row) for row in self._rows[:top_k]]
+
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: Sequence[str],
+        domain: str | None = None,
+    ) -> list[dict[str, Any]] | None:
+        del chunk_ids, domain
+        return None
+
+
+def test_bridge_does_not_invent_a_score_for_graph_candidates() -> None:
+    """Мост не выдаёт оценку: придуманная константа повторила бы старый вред.
+
+    Проверяется ровно то, что мост производит, — чанк уходит на ранжирование **без
+    собственной оценки**. Оценку назначает плагин смешения, и пока его нет кандидат
+    обязан уходить вниз.
+
+    Проверка намеренно НЕ смотрит на `relevance` источника: эту константу ставит
+    `build_sources` по оси графа, и она относится к задаче плагина, а не к мосту.
+    Смешивать здесь две разные правки значит написать проверку под ещё не принятое
+    поведение.
+    """
+    vector = _RecordingVectorStore(_vector_rows())
+    vector.upsert_vectors(
+        [
+            {
+                "chunk_id": "chk:graph",
+                "embedding": [0.1],
+                "text": "текст достигнутого обходом чанка",
+                "metadata": {"source_url": "src://first", "domain": "it"},
+            }
+        ]
+    )
+    reranker = _ChunkRecordingReranker()
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:graph")),
+        vector_store=vector,
+        reranker=reranker,
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    pipe.run("seed", generate=False)
+
+    bridged = [chunk for chunk in reranker.seen if chunk.get("chunk_id") == "chk:graph"]
+    # Кандидат дошёл до ранжирования — иначе проверка ниже прошла бы на пустом списке.
+    assert bridged, "мост не передал достигнутый чанк на ранжирование"
+    assert bridged[0].get("bridged") is True
+    assert not bridged[0].get("score"), (
+        "мост выдал оценку графическому кандидату; это константа вместо решения плагина"
+    )
+    # Векторные кандидаты оценку сохраняют: отсутствие оценки — свойство моста,
+    # а не общее правило для всех чанков.
+    scored = [chunk for chunk in reranker.seen if float(chunk.get("score") or 0.0) > 0.0]
+    assert scored, "векторные кандидаты должны сохранять оценку"
+
+
+class _ChunkRecordingReranker(Reranker):
+    """Запоминает чанки в том виде, в каком их передали на ранжирование."""
+
+    def __init__(self) -> None:
+        self.seen: list[dict[str, Any]] = []
+
+    def rerank(self, query: str, chunks: list[dict[str, Any]]) -> list[float]:
+        del query
+        self.seen = [dict(chunk) for chunk in chunks]
+        return [float(chunk.get("score") or 0.0) for chunk in chunks]
+
+
+def test_filter_demotes_uncorroborated_candidate_instead_of_dropping_it() -> None:
+    """Не подтверждённый пересечением кандидат ПОНИЖАЕТСЯ, а не выбрасывается.
+
+    Проверяются обе части решения: кандидат остаётся в выдаче, его оценка уменьшилась,
+    и сам факт отклонения записан в артефакт вместе с именем кандидата. Если бы падение
+    было молчащим, отчёт показал бы меньше источников без следа - ровно тот отказ, из-за
+    которого в проекте появилось правило о молчании.
+    """
+    recorder = _ChunkRecordingReranker()
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:graph")),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=recorder,
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    # Вопрос НЕ упоминает `First`, поэтому ни одна достигнутая сущность не подтверждена.
+    done = pipe.run("совсем другой вопрос", generate=False)
+
+    effective = done["effective_retrieval"]
+    assert effective["filter_status"] == "no_corroborated_entities"
+    # Ничего не отклонено, потому что отбирать было не по чему. Это не «фильтр сработал
+    # и никого не нашёл» - разные утверждения, и путать их нельзя.
+    assert effective["filter_demoted"] == 0
+
+    pipe_filtering = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:first")),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=recorder,
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+    filtered = pipe_filtering.run("расскажи про First", generate=False)
+
+    effective = filtered["effective_retrieval"]
+    assert effective["filter_status"] == "applied"
+    demoted = effective["filter_demoted_candidates"]
+    assert demoted, "не подтверждённый кандидат должен быть записан в артефакт"
+    for entry in demoted:
+        assert entry["chunk_id"], "отклонённый кандидат обязан быть опознан"
+
+    # Ключевое: отклонённый кандидат ДОШЁЛ до ранжирования. Если бы он был выброшен,
+    # его не было бы в списке - и проверка «понижен, а не выброшен» была бы пустой.
+    flagged = [chunk for chunk in recorder.seen if chunk.get("filter_demoted")]
+    assert flagged, "отклонённый кандидат выброшен вместо понижения"
+    untouched = [chunk for chunk in recorder.seen if not chunk.get("filter_demoted")]
+    assert untouched, "подтверждённый кандидат должен остаться нетронутым"
+    # Понижение ровно в масштабе, который ПРИМЕНИЛСЯ, а не в константе кода: масштаб
+    # приходит из профиля, и величина понижения обязана быть наблюдаемой.
+    original = {str(row["chunk_id"]): float(row["score"]) for row in _vector_rows()}
+    applied_scale = float(effective["filter_demote_scale"])
+    for chunk in flagged:
+        chunk_id = str(chunk["chunk_id"])
+        assert chunk_id in original, "отклонённый кандидат должен быть векторным"
+        assert float(chunk["score"]) == pytest.approx(original[chunk_id] * applied_scale)
+    for chunk in untouched:
+        assert float(chunk["score"]) == original[str(chunk["chunk_id"])]
+
+
+def test_filter_records_phrase_names_instead_of_using_them() -> None:
+    """Имя-фраза не участвует в отборе и попадает в счётчик.
+
+    Ровно тот случай, который описан в спецификации: в `canonical_name` попала целая
+    фраза. Если такое значение пошло бы в отбор, оно не подтвердило бы запрос - и
+    кандидат был бы отклонён по причине, которой нет.
+    """
+    phrase = "это не имя, а целая фраза, попавшая в поле имени"
+    rows = _expansion_rows_reaching("chk:first")
+    rows[0]["canonical_name"] = phrase
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=rows),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    done = pipe.run("расскажи про " + phrase, generate=False)
+
+    effective = done["effective_retrieval"]
+    assert effective["filter_phrase_names"] == 1
+    # Фраза не подтвердила запрос, поэтому отбор не состоялся - и это видно по статусу,
+    # а не выглядит как «фильтр отработал вхолостую».
+    assert effective["filter_status"] == "no_corroborated_entities"
+
+
+def test_filter_stays_inert_when_graph_is_off() -> None:
+    """При выключенном графе фильтр не трогает ничего и говорит об этом прямо.
+
+    Иначе «нет данных для отбора» выглядит как «все кандидаты не подтверждены», и
+    отрицательный результат механизма читается как результат.
+    """
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:first")),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(
+            {**PROFILE, "retrieval": {**PROFILE["retrieval"], "graph_search_enabled": False}}
+        ),
+    )
+
+    done = pipe.run("расскажи про First", generate=False)
+
+    effective = done["effective_retrieval"]
+    assert effective["filter_status"] == "not_requested"
+    assert effective["filter_demoted"] == 0
+
+
+def test_filter_rejects_scale_that_would_turn_demotion_into_a_boost() -> None:
+    """Масштаб вне (0, 1] отвергается: понижение не должно становиться подъёмом."""
+    profile = {**PROFILE, "retrieval": {**PROFILE["retrieval"], "filter_demote_scale": 1.5}}
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:first")),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(profile),
+    )
+
+    done = pipe.run("расскажи про другой вопрос", generate=False)
+
+    assert done["effective_retrieval"]["filter_demote_scale"] == FILTER_DEMOTE_SCALE
+
+
+def test_evidence_limit_drops_block_but_keeps_source_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ручка измерения убирает блок из промпта и НЕ трогает атрибуцию источников.
+
+    Это вторая рука измерения: всё, кроме строк свидетельства, остаётся прежним. Если
+    ограничение задевало бы список источников, сравнение смешивало бы два изменения, а
+    вывод «блок не нужен» опирался бы на сдвиг выдачи, а не на пустой блок.
+    """
+    monkeypatch.setenv("RETRIEVAL_EVIDENCE_MAX_LINES", "0")
+    graph = _CountingGraphStore(
+        expansion_rows=[
+            {
+                "node_id": "tag:it:first",
+                "canonical_name": "First",
+                "path": ["tag:it:first"],
+                "depth": 0,
+                "kind": "parent",
+                "source_ids": ["src://first"],
+                "domain": "it",
+            }
+        ]
+    )
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    done = pipe.run("seed", generate=False)
+
+    ctx = done["context"]
+    assert ctx["skeleton_count"] == 0
+    assert ctx["skeleton_lines"] == []
+    assert ctx["skeleton_tokens"] == 0
+    # Доля пустого блока при непустом теле - это ИЗМЕРЕННЫЙ ноль, а не "неизвестно":
+    # расход известен, он равен нулю. `None` здесь означал бы, что мы не смогли посчитать.
+    assert ctx["skeleton_token_share"] == 0.0
+    # Тело и атрибуция на месте: блок убран, а не выдача сломана.
+    assert ctx["body_count"] > 0
+    assert done["effective_retrieval"]["evidence_max_lines"] == 0
+    assert any(src.get("axis") == "graph" for src in done["sources"])
+
+
+def test_evidence_limit_absent_means_no_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Отсутствие ручки - это «без ограничения», а не «ноль строк»."""
+    monkeypatch.delenv("RETRIEVAL_EVIDENCE_MAX_LINES", raising=False)
+    graph = _CountingGraphStore(
+        expansion_rows=[
+            {
+                "node_id": "tag:it:first",
+                "canonical_name": "First",
+                "path": ["tag:it:first"],
+                "depth": 0,
+                "kind": "parent",
+                "source_ids": ["src://first"],
+                "domain": "it",
+            }
+        ]
+    )
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    done = pipe.run("seed", generate=False)
+
+    assert done["context"]["skeleton_count"] > 0
+    assert done["effective_retrieval"]["evidence_max_lines"] is None
+
+
+def test_evidence_limit_rejects_garbage_without_changing_behaviour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Негодное значение ручки не должно молча превращаться в «показать ноль строк».
+
+    Иначе опечатка в переменной выглядит как результат измерения: блок исчезает, и
+    артефакт честно описывает прогон, который никто не заказывал.
+    """
+    monkeypatch.setenv("RETRIEVAL_EVIDENCE_MAX_LINES", "не число")
+    graph = _CountingGraphStore(
+        expansion_rows=[
+            {
+                "node_id": "tag:it:first",
+                "canonical_name": "First",
+                "path": ["tag:it:first"],
+                "depth": 0,
+                "kind": "parent",
+                "source_ids": ["src://first"],
+                "domain": "it",
+            }
+        ]
+    )
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    done = pipe.run("seed", generate=False)
+
+    assert done["context"]["skeleton_count"] > 0
+    assert done["effective_retrieval"]["evidence_max_lines"] is None
+
+
+def test_done_records_what_the_model_saw_of_the_graph_axis() -> None:
+    """Артефакт должен отвечать не только «сколько строк», но и «что в них было».
+
+    Вопрос «помогает ли ось графа» без содержимого блока не отвечается: по прогону видно
+    число строк, а что именно модель получила — нет. Тест строит строки так же, как
+    пайплайн: `m` всегда `None`, поэтому форма `узел ~[ТИП]~ сосед` невозможна.
+    """
+    graph = _CountingGraphStore(
+        expansion_rows=[
+            {
+                "node_id": "tag:it:first",
+                "canonical_name": "First",
+                "path": ["tag:it:first"],
+                "depth": 0,
+                "kind": "parent",
+                "source_ids": ["src://first"],
+                "domain": "it",
+            }
+        ]
+    )
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    done = pipe.run("seed", generate=False)
+
+    lines = done["context"]["skeleton_lines"]
+    assert lines, "обход отработал, а содержимое блока в ответе отсутствует"
+    assert all("~[" not in line for line in lines), (
+        "в блок попала форма, которую пайплайн собрать не может"
+    )
+    # Содержимое обязано быть именно тем, что ушло в промпт, иначе артефакт описывает
+    # не тот ответ, который был дан.
+    assert len(lines) == done["context"]["skeleton_count"]
+
+
+def test_done_splits_context_budget_between_skeleton_and_body() -> None:
+    """Разбиение бюджета видно в ответе, а не только в runtime-трейсе.
+
+    Скелет входит первым и не вытесняется, тело получает остаток. Пока в ответе есть
+    только суммарное число токенов, два разных вреда неразличимы: «граф вытеснил текст»
+    и «граф занял своё место». Поэтому проверяем и раздельные величины, и их сумму.
+    """
+    graph = _CountingGraphStore(
+        expansion_rows=[
+            {
+                "node_id": "tag:it:first",
+                "canonical_name": "First",
+                "path": ["tag:it:first"],
+                "depth": 0,
+                "kind": "parent",
+                "source_ids": ["src://first"],
+                "domain": "it",
+            }
+        ]
+    )
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    done = pipe.run("seed", generate=False)
+
+    ctx = done["context"]
+    assert ctx["skeleton_count"] > 0, "обход дал строки, а скелет в ответ не попал"
+    assert ctx["max_tokens"] == PROFILE["context_assembly"]["max_tokens"]
+    assert ctx["skeleton_tokens"] + ctx["body_tokens"] == ctx["total_tokens"]
+    assert ctx["total_tokens"] <= ctx["max_tokens"]
+    assert ctx["skeleton_token_share"] == pytest.approx(
+        ctx["skeleton_tokens"] / ctx["total_tokens"], abs=1e-4
+    )
+    # Тело обязано что-то содержать: иначе «скелет занял весь бюджет» и «сборка не
+    # выполнилась» выглядели бы одинаково.
+    assert ctx["body_count"] > 0
+
+
+def test_cache_hit_reports_context_budget_as_unknown_not_zero() -> None:
+    """На кэш-попадании расход бюджета НЕИЗВЕСТЕН, а не нулевой.
+
+    Кэш отдаёт ранее собранный ответ, и в этом прогоне контекст не собирался. Ноль
+    означал бы «скелет и тело ничего не заняли», то есть молчаливое утверждение о том,
+    чего не измеряли.
+    """
+    cache = InMemorySemanticCache(threshold=0.80, ttl_s=0)
+    pipe = _pipeline_with_cache(cache)
+
+    done_miss = pipe.run("как устроена база данных")
+    assert done_miss["context"] is not None
+    assert done_miss["context"]["total_tokens"] >= 0
+
+    done_hit = pipe.run("как устроена база данных")
+    assert done_hit["cache_hit"] is True
+    assert done_hit["context"] is None
 
 
 def test_cache_miss_stores_answer() -> None:

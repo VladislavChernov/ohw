@@ -30,6 +30,7 @@
 |----------|----------|
 | [02_pipeline_and_normalizer.md](./02_pipeline_and_normalizer.md) | Регламент Ingestion Pipeline (primitive-этапов) и Normalizer v3 |
 | [chunkers_guide.md](./chunkers_guide.md) | Контракт Chunker и регламент добавления чанкер-стратегий (родные + плагин через entry_points) |
+| [plugins_guide.md](./plugins_guide.md) | Адаптер или плагин: как выбрать механизм расширения и как добавить своё |
 | [03_retriever.md](./03_retriever.md) | Стратегия ретривера и слияния контекста |
 
 ### API и сервисы

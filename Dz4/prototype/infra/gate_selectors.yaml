@@ -47,6 +47,9 @@ areas:
   demo_scripts:
     # Launcher-скрипты и их parity-гард. Сюда же оверлеи runtime-контура: их правильность
     # проверяет тот же гард (том проекции у eval-runner общий с query-worker).
+    # `test_runtime_compose_env.py` — про согласованность двух сервисов МЕЖДУ СОБОЙ,
+    # а не про чтение compose демо-скриптами, поэтому он не часть парности, но область
+    # та же: файл, который он сторожит, уже здесь.
     match:
       - "Dz4/Demo/demo.sh"
       - "Dz4/Demo/demo.ps1"
@@ -59,6 +62,7 @@ areas:
       - "Dz4/prototype/tests/test_demo_scripts_parity.py"
     tests:
       - "tests/test_demo_scripts_parity.py"
+      - "tests/test_runtime_compose_env.py"
 
   eval_runner:
     # Eval-раннер и его контрактные тесты. Отдельная область, а не хвост demo_scripts:

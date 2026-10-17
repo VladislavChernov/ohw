@@ -196,7 +196,7 @@ factorial: ["!", "fact"]
 | Дом | Что попадает | Последствие изменения |
 |---|---|---|
 | **Config Service** (`namespaces.yaml`) | выбор адаптеров (`adapters`), параметры LLM (`llm`), чанкинг-дефолты (`chunking`), `auth`, `domain.active_profile` | меняет ответ, но не то, что лежит в хранилище; переключается на hot |
-**Domain Profile** | поведение во время записи: чанкинг, промпт экстракции, `retrieval.graph_boost`, `expansion_direction`, `expansion_kinds`, `graph_source_relevance`, пороги дедупликации | версионируется вместе с корпусом и требует re-ingest |
+**Domain Profile** | поведение во время записи: чанкинг, промпт экстракции, `expansion_direction`, `expansion_kinds`, `graph_source_relevance`, `filter_demote_scale`, `ordering`, пороги дедупликации | версионируется вместе с корпусом и требует re-ingest |
 
 Отсюда важное следствие: пороги дедупликации, даже если будут реализованы, должны жить в
 профиле, а не в `namespace: normalizer` — изменение порога меняет уже слитые сущности в графе,
@@ -327,8 +327,8 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
 [`llm_exchange_log.md`](./llm_exchange_log.md).
 
 Параметры retrieval в текущем коде живут в секции `retrieval` Domain Profile
-(`graph_boost`, `expansion_direction`, `expansion_kinds`, `max_depth`, `max_fanout`,
-`max_graph_nodes`, `graph_source_relevance`). Это соответствует правилу 5.0 для параметров
+(`expansion_direction`, `expansion_kinds`, `max_depth`, `max_fanout`,
+`max_graph_nodes`, `graph_source_relevance`, `filter_demote_scale`, `ordering`, `rrf_k`). Это соответствует правилу 5.0 для параметров
 записи, но для параметров чтения домом должен стать Config Service — подключение namespaces
 к `QueryPipeline` не сделано. Отдельный конфигуратор для этого не требуется, требуется
 проводка существующего.

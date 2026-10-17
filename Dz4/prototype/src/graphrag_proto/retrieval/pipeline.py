@@ -54,6 +54,7 @@ from graphrag_proto.retrieval.context import (
     estimate_tokens,
     render_skeleton,
 )
+from graphrag_proto.retrieval.ordering import DEFAULT_ORDERING, RRF_K_DEFAULT, resolve_ordering
 from graphrag_proto.retrieval.profile import DomainProfileLoader, ProfileError
 from graphrag_proto.retrieval.retrievers import GraphRetriever, VectorRetriever
 from graphrag_proto.retrieval.semantic_cache import CachedAnswer, SemanticCache
@@ -63,6 +64,36 @@ Emit = Callable[[str, dict[str, Any]], None]
 # Relevance, приписываемая источникам графовой оси в ответе. Влияет только на порядок
 # и значение `relevance`; переопределяется профилем (`retrieval.graph_source_relevance`).
 GRAPH_SOURCE_RELEVANCE = 1.0
+
+# Множитель оценки кандидата, которого фильтр НЕ подтвердил пересечением с запросом.
+#
+# ВАЖНО: это ЗАГЛУШКА, а не измеренная величина. Число зафиксировано ДО того, как оно
+# было откалибровано, и обязано быть заменено результатом калибровки на наборе.
+# Требование «понизить» из спецификации выполняется механизмом; насколько именно -
+# решение, которое ещё не принято, и поэтому оно живёт в профиле, а не в коде.
+FILTER_DEMOTE_SCALE = 0.5
+
+# Что ось знает о документе-источнике (ADR-046, поправка владельца 2026-10-16). Три состояния,
+# и они не сводятся к двум: `reachable_unused` — «узлы есть, обход не дошёл» — это не то же
+# самое, что `blind` («нод нет»), хотя обе отвечают по вектору.
+GRAPH_KNOWLEDGE_CONTRIBUTED = "contributed"   # документ пришёл обходом
+GRAPH_KNOWLEDGE_REACHABLE = "reachable_unused"  # узлы в графе есть, обход не дошёл
+GRAPH_KNOWLEDGE_BLIND = "blind"                # нод документа в графе нет
+# Прибор не смотрел (ось выключена или проекция непроверяема). Отдельное значение, а не
+# `blind`: «нод нет» и «не смотрели» — разные утверждения, и подмена первого вторым вернула бы
+# ровно тот ложноотрицательный вывод, ради которого поправка вводится.
+GRAPH_KNOWLEDGE_UNKNOWN = "unknown"
+
+# Причины `reachable_unused`. Все три легитимны и дефектами не считаются: изолированная нода —
+# допущение схемы (идти некуда), лимиты — конфигурация, отсутствие семян — свойство загрузки.
+# Различать их надо, иначе три разных состояния схлопнутся в неразличимый ноль.
+GRAPH_REASON_NO_CONTEXT_IDS = "no_context_ids"
+GRAPH_REASON_NO_OUTGOING_EDGES = "no_outgoing_edges"
+GRAPH_REASON_TRUNCATED_BY_LIMITS = "truncated_by_limits"
+
+#: Переключатель измерения: сколько строк графового свидетельства уходит в промпт.
+#: ``None`` / пусто - без ограничения; ``0`` - свидетельство не показывается вовсе.
+EVIDENCE_MAX_LINES_ENV = "RETRIEVAL_EVIDENCE_MAX_LINES"
 
 _log = logging.getLogger(__name__)
 
@@ -136,6 +167,106 @@ def _config_int(
     return value
 
 
+def _config_optional_int(
+    section: Mapping[str, Any],
+    key: str,
+    fallbacks: builtins.list[str],
+    *,
+    path: str,
+    ) -> int | None:
+    """Необязательный целый параметр: отсутствие - это «не задан», а не ноль.
+
+    Отдельная функция, потому что `_config_int` не различает «ключа нет» и «негодное
+    значение»: обе ситуации дают дефолт. Здесь отсутствие ключа - это осмысленное
+    «ограничения нет», и подменять его нулём нельзя: ноль означал бы «свидетельства не
+    показывать никогда».
+    """
+    if key not in section or section.get(key) is None:
+        return None
+    raw = section[key]
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        fallbacks.append(f"{path}.{key}")
+        return None
+    if value < 0:
+        fallbacks.append(f"{path}.{key}")
+        return None
+    return value
+
+
+# Знаки, по которым видно, что в поле имени попала фраза, а не имя. Это не порог
+# подбора, а проверка «похоже ли на имя вообще»: перечисление знаков не требует
+# подбора, а длина потребовала бы произвольного порога, и такой порог был бы числом,
+# выбранным без данных.
+_PHRASE_MARKERS = (",", ";", ":", "—", "–", "?", "!", ". ")
+
+
+def _looks_like_name(value: str) -> bool:
+    """Отличает имя сущности от фразы, попавшей в то же поле.
+
+    Причина проверки - измеренный дефект данных: `canonical_name` местами равен целой
+    фразе. Такое значение обязано быть отражено в счётчике, а не молча участвовать в
+    отборе: не имя не может ни подтвердить запрос, ни честно его опровергнуть.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if any(marker in text for marker in _PHRASE_MARKERS):
+        return False
+    return len(text.split()) <= 3
+
+
+def _name_variants(value: str) -> set[str]:
+    """Формы имени, по которым оно ищется в тексте запроса.
+
+    Учитываются и полная форма, и хвост после двоеточия: идентификаторы вида
+    `Tag:Neo4j` и `entity:llm` приходят с префиксом, которого в вопросе нет.
+    """
+    text = str(value or "").strip().lower()
+    variants = {text}
+    for separator in (":", "/", "\\", "::"):
+        if separator in text:
+            tail = text.rsplit(separator, 1)[-1].strip()
+            if tail:
+                variants.add(tail)
+    return {item for item in variants if item}
+
+
+def _evidence_max_lines_from_env() -> int | None:
+    """Верхняя граница числа строк графового свидетельства, `None` - без ограничения.
+
+    Переключатель измерения, а не параметр домена: профиль версионируется вместе с
+    корпусом, и добавление параметра туда означало бы перезалив корпуса ради одного
+    сравнения. Поэтому здесь окружение, но применённое значение попадает в
+    `effective_retrieval` и, значит, в артефакт прогона: значение, применённое к
+    прогону, обязано быть видно, а не восстанавливаться из кода.
+
+    `0` означает «свидетельство не показывать» - это и есть вторая рука измерения,
+    где всё, кроме блока строк, остаётся прежним.
+    """
+    raw = os.environ.get(EVIDENCE_MAX_LINES_ENV)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        _log.error(
+            "%s=%r не целое число; ограничение не применено, свидетельство идёт как есть",
+            EVIDENCE_MAX_LINES_ENV,
+            raw,
+        )
+        return None
+    if value < 0:
+        _log.error(
+            "%s=%r отрицательно; ограничение не применено, свидетельство идёт как есть",
+            EVIDENCE_MAX_LINES_ENV,
+            raw,
+        )
+        return None
+    return value
+
+
 def profile_fingerprint(profile: Mapping[str, Any]) -> str:
     """Идентичность конфигурации: короткий отпечаток по канонической сериализации.
 
@@ -178,6 +309,8 @@ def build_sources(
     skeleton_rows: list[dict[str, Any]] | None = None,
     *,
     graph_relevance: float = GRAPH_SOURCE_RELEVANCE,
+    graph_knowledge: Mapping[str, str] | None = None,
+    graph_knowledge_reasons: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Уникальные источники с максимальным relevance по паре (source_url, axis).
 
@@ -185,11 +318,18 @@ def build_sources(
     (design.md §2, аддитивное поле `axis`, ADR-016). `retrieval_metrics`
     по-прежнему работает по `source_url`.
 
+    `graph_knowledge` — по `source_url`: `contributed` / `reachable_unused` / `blind`
+    (ADR-046, поправка владельца 2026-10-16). Без этой метки «граф не помог» и «граф про этот
+    документ ничего не знает» неразличимы, а на частично наполненном корпусе это разные
+    результаты. Причина для `reachable_unused` приходит отдельной картой: три её состояния
+    легитимны, но различать их надо, иначе они снова станут одним нулём.
+
     `graph_relevance` — relevance, приписываемый источникам графовой оси. Число
     влияет только на порядок и `relevance` в ответе; по умолчанию графовые источники
     идут раньше векторных, что и обеспечивает сортировка по оси.
     """
     best: dict[tuple[str, str], float] = {}
+    linked: dict[str, int] = {}
     for chunk in body_chunks:
         source = str(chunk.get("source_url") or "")
         if not source:
@@ -197,17 +337,98 @@ def build_sources(
         score = float(chunk.get("score") or 0.0)
         key = (source, "vector")
         best[key] = max(best.get(key, 0.0), score)
+        if chunk.get("context_ids") or chunk.get("tag_ids"):
+            linked[source] = linked.get(source, 0) + 1
     for row in skeleton_rows or []:
         for url in _skeleton_source_urls(row):
             best[(url, "graph")] = max(best.get((url, "graph"), 0.0), graph_relevance)
+    knowledge = graph_knowledge if graph_knowledge is not None else {}
+    reasons = graph_knowledge_reasons or {}
+    # Порядок источников - по лучшей оценке кандидата, а не по оси. Прежний ключ
+    # `(0 если ось graph, ...)` был вторым правилом порядка рядом с оценкой: он ставил
+    # всё, что нашёл обход, выше векторных ДО того, как оценки вообще были посчитаны.
+    # Теперь источник с кандидатом стоит там, куда его поставила реализация порядка,
+    # а источник без кандидата - после: у него нет оценки, и объявлять его высоким
+    # значит выдумать оценку.
+    ranked_sources = {source for source, _ in best if (source, "vector") in best}
     ordered = sorted(
         best.items(),
-        key=lambda pair: (0 if pair[0][1] == "graph" else 1, -pair[1], pair[0][0]),
+        key=lambda pair: (
+            0 if pair[0][0] in ranked_sources else 1,
+            -pair[1],
+            pair[0][0],
+        ),
+    )
+    # `graph_knowledge is None` — карту не вычисляли (ось выключена или проекция
+    # непроверяема). Метка по умолчанию тогда `unknown`, а не `blind`: прибор не смотрел, и
+    # объявлять «нод нет» он не вправе.
+    default_knowledge = (
+        GRAPH_KNOWLEDGE_BLIND if graph_knowledge is not None else GRAPH_KNOWLEDGE_UNKNOWN
     )
     return [
-        {"source_url": source, "relevance": round(score, 4), "axis": axis}
+        {
+            "source_url": source,
+            "relevance": round(score, 4),
+            "axis": axis,
+            "graph_knowledge": (
+                GRAPH_KNOWLEDGE_CONTRIBUTED
+                if axis == "graph"
+                else knowledge.get(source, default_knowledge)
+            ),
+            "graph_knowledge_reason": None if axis == "graph" else reasons.get(source),
+            "graph_linked_chunks": int(linked.get(source, 0)) if axis == "vector" else 0,
+        }
         for (source, axis), score in ordered
     ]
+
+
+def _graph_knowledge_for_sources(
+    *,
+    body_chunks: list[dict[str, Any]],
+    skeleton_rows: list[dict[str, Any]] | None,
+    graph_known_sources: set[str],
+    expanded_rows: list[dict[str, Any]],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Метка «что ось знает» по документу и причина для `reachable_unused`.
+
+    Вызывается только когда карта вычислена; «не считали» обрабатывает вызывающий, и
+    различение живёт в `None`, а не в пустом словаре.
+
+    Причины различаются по трём наблюдаемым признакам, и все три состояния легитимны:
+    семян не было — идти было не от чего; семены были, а обход пуст — из узлов нет исходящих
+    рёбер; обход отработал и вернул строки, но документа в них нет — документ не попал в
+    лимиты глубины/фанута/узлов.
+    """
+    reached = {
+        url
+        for row in skeleton_rows or []
+        for url in _skeleton_source_urls(row)
+    }
+    knowledge: dict[str, str] = {}
+    reasons: dict[str, str] = {}
+    for source in {str(chunk.get("source_url") or "") for chunk in body_chunks} - {""}:
+        if source in reached:
+            # Документ пришёл и по вектору, и обходом — это две записи об одном факте, и
+            # векторная не должна выглядеть «слепой»: обход до документа дошёл. Ось поля
+            # уже говорит, каким слотом запись пришла; метка отвечает на вопрос о документе.
+            knowledge[source] = GRAPH_KNOWLEDGE_CONTRIBUTED
+            continue
+        if source not in graph_known_sources:
+            knowledge[source] = GRAPH_KNOWLEDGE_BLIND
+            continue
+        knowledge[source] = GRAPH_KNOWLEDGE_REACHABLE
+        seeded = any(
+            chunk.get("context_ids") or chunk.get("tag_ids")
+            for chunk in body_chunks
+            if str(chunk.get("source_url") or "") == source
+        )
+        if not seeded:
+            reasons[source] = GRAPH_REASON_NO_CONTEXT_IDS
+        elif not expanded_rows:
+            reasons[source] = GRAPH_REASON_NO_OUTGOING_EDGES
+        else:
+            reasons[source] = GRAPH_REASON_TRUNCATED_BY_LIMITS
+    return knowledge, reasons
 
 
 def _skeleton_source_urls(row: dict[str, Any]) -> list[str]:
@@ -247,9 +468,19 @@ class ProjectionReadiness:
 
     @property
     def ready(self) -> bool:
+        """Готовность к обслуживанию, а не полнота корпуса.
+
+        `sources_without_graph` условием **не является**: документ, нод которого в графе нет,
+        обслуживается вектором, и это объявляется меткой `blind` у источника, а не отказом всей
+        оси (ADR-046, поправка владельца 2026-10-16). Счётчик остаётся в `projection_counters`,
+        то есть масштаб слепоты читатель видит.
+
+        Два оставшихся условия — настоящая рассинхронизация: чанк несёт ревизию не своего
+        источника либо у него нет владельца. Это не «документ ещё не загружен», и отучать гард
+        от них нельзя.
+        """
         return (
             self.sources_tracked > 0
-            and self.sources_without_graph == 0
             and self.revision_mismatches == 0
             and self.chunks_without_owner == 0
         )
@@ -447,8 +678,28 @@ class QueryPipeline:
         cfg_max_graph_nodes = _config_int(
             retrieval_cfg, "max_graph_nodes", self._max_graph_nodes, config_fallbacks, path="retrieval"
         )
-        cfg_boost = _config_number(
-            retrieval_cfg, "graph_boost", 0.0, config_fallbacks, path="retrieval"
+        # Масштаб понижения фильтра. ЧИТАЕТСЯ ИЗ ПРОФИЛЯ и применяется как есть: величина
+        # понижения - это решение, а не деталь реализации, и выбирать её в коде значило
+        # бы зашить число, у которого нет ни данных, ни владельца.
+        cfg_filter_scale = _config_number(
+            retrieval_cfg, "filter_demote_scale", FILTER_DEMOTE_SCALE, config_fallbacks,
+            path="retrieval",
+        )
+        if not 0.0 <= cfg_filter_scale <= 1.0:
+            # Вне (0, 1] понижение перестаёт быть понижением и становится подъёмом -
+            # ровно тот старый вред, который убирали.
+            config_fallbacks.append("retrieval.filter_demote_scale")
+            _log.error(
+                "retrieval.filter_demote_scale вне (0, 1]: %s, применён %s",
+                cfg_filter_scale,
+                FILTER_DEMOTE_SCALE,
+            )
+            cfg_filter_scale = FILTER_DEMOTE_SCALE
+        # Имя реализации порядка. Читается здесь, разрешается позже: момент чтения и
+        # момент применения - разные вещи, и оба попадают в артефакт.
+        cfg_ordering = str(retrieval_cfg.get("ordering") or DEFAULT_ORDERING).strip()
+        cfg_rrf_k = int(
+            _config_number(retrieval_cfg, "rrf_k", RRF_K_DEFAULT, config_fallbacks, path="retrieval")
         )
         cfg_source_relevance = _config_number(
             retrieval_cfg,
@@ -464,8 +715,17 @@ class QueryPipeline:
         if expansion_kinds_raw is not None and cfg_expansion_kinds is None:
             config_fallbacks.append("retrieval.expansion_kinds")
         cfg_direction = str(retrieval_cfg.get("expansion_direction", "both"))
+        # Ограничение числа строк свидетельства: окружение важнее профиля. Отделено от
+        # `max_graph_nodes` НАМЕРЕННО - тот ограничивает обход, этот ограничивает только
+        # то, что попадёт в промпт. Иначе невозможно снять блок, не сломав атрибуцию
+        # источников, а это разные вещи.
+        cfg_evidence_max_lines = _evidence_max_lines_from_env()
+        if cfg_evidence_max_lines is None:
+            cfg_evidence_max_lines = _config_optional_int(
+                retrieval_cfg, "evidence_max_lines", config_fallbacks, path="retrieval"
+            )
         # Считается один раз и здесь: и отчёт, и трассировка, и сам обход обязаны говорить
-        # об одном и том же числе, иначе «ч�� показал отчёт» и «что сделал обход» разъедутся.
+        # об одном и том же числе, иначе «что показал отчёт» и «что сделал обход» разъедутся.
         requested_depth = cfg_max_depth if request_depth is None else request_depth
         effective_depth = _expand_depth(requested_depth)
         effective_retrieval: dict[str, Any] = {
@@ -475,17 +735,32 @@ class QueryPipeline:
             "depth_clamped": effective_depth != requested_depth,
             "max_fanout": cfg_max_fanout,
             "max_graph_nodes": cfg_max_graph_nodes,
-            "graph_boost": cfg_boost,
             "graph_source_relevance": cfg_source_relevance,
             "expansion_kinds": cfg_expansion_kinds,
             "expansion_direction": cfg_direction,
             "graph_search_enabled": graph_requested,
+            "evidence_max_lines": cfg_evidence_max_lines,
             "context_limit": limit,
         }
+        # Имя реализации порядка пишется в тот же словарь, но ПОСЛЕ разрешения: пока
+        # имя только запрошено, записать «применённое» было бы выдумкой. Дописывается
+        # внизу, рядом с местом, где реализация реально отработала.
+        effective_retrieval["ordering_requested"] = cfg_ordering
+        effective_retrieval["ordering_applied"] = None
+        effective_retrieval["ordering_params"] = None
+        effective_retrieval["ordering_fallback"] = False
         projection_status = "not_requested" if not graph_requested else "not_tracked"
         projection_revision: str | None = None
         projection_state: ProjectionState | None = None
         projection_counters: ProjectionReadiness | None = None
+        # Документы, чьи строки есть в графе. Пусто не значит «граф ничего не знает»: при
+        # выключенной оси или непроверяемой проекции карта не вычислялась, и это обязано
+        # отличаться от вычисленного пустого множества — иначе «не измерено» станет нулём.
+        graph_known_sources: set[str] | None = None
+        # Семена обхода. Объявляется здесь, а не внутри ветки `if enabled`: метка источника
+        # читается при любом состоянии оси, и ссылка на неё из `build_sources` не должна
+        # зависеть от того, открылась ось или нет.
+        unique_seed_ids: list[str] = []
         if graph_requested and self._projection_state_store is None and self._projection_state_required:
             enabled = False
             graph_degraded = True
@@ -548,6 +823,12 @@ class QueryPipeline:
                     else:
                         projection_status = "ready"
                         projection_revision = projection_state.projection_revision
+                        # Что граф знает о документах домена — для метки у источника. При
+                        # `observed is None` карта пуста и все источники получают `blind`:
+                        # прибор не измерил, что знает граф, и не должен изображать знание.
+                        graph_known_sources = (
+                            set(observed) if isinstance(observed, dict) else set()
+                        )
         if enabled and self._graph_store is None:
             enabled = False
             graph_degraded = True
@@ -610,6 +891,9 @@ class QueryPipeline:
                     "graph_degraded": graph_degraded,
                     "projection_status": projection_status,
                     "projection_revision": projection_revision,
+                    # Сборка контекста не выполнялась: кэш отсюда не читался. None, а не
+                    # нули - см. ветку ниже без кэша.
+                    "context": None,
                 }
                 if graph_requested and graph_degraded:
                     self.projection_metrics.observe_fallback(
@@ -646,7 +930,10 @@ class QueryPipeline:
         }
         skeleton_rows: list[dict[str, Any]] = []
         expanded_rows: list[dict[str, Any]] = []
-        graph_boosts: dict[str, float] = {}
+        # Мост объявляется здесь, а заполняется ниже: `effective_retrieval` собирается
+        # раньше обхода, и итог моста дописывается в него после.
+        bridge_status = "not_requested"
+        bridged_chunks: list[dict[str, Any]] = []
         if enabled:
             emit("status", {"stage": "graph", "enabled": True})
             seed_ids = [
@@ -703,12 +990,11 @@ class QueryPipeline:
                                 "depths": [row.get("depth", 0) for row in expanded_rows],
                                 "origins": [row.get("origin") for row in expanded_rows],
                                 "confidences": [row.get("confidence") for row in expanded_rows],
-                                # Уже прочитанное и уже терпимо нормализованное значение, а не
-                                # второе чтение того же поля. Второе чтение здесь означало
-                                # `float(...)` на негодном значении, падало ВНУТРИ этого
-                                # `try` и делало именованный fallback ниже недостижимым.
-                                "boost": cfg_boost,
-                                "requested_depth": requested_depth,
+                                 # Уже прочитанное и уже терпимо нормализованное значение, а не
+                                 # второе чтение того же поля. Второе чтение здесь означало бы
+                                 # `float(...)` на негодном значении, падало ВНУТРИ этого
+                                 # `try` и делало именованный fallback ниже недостижимым.
+                                 "requested_depth": requested_depth,
                                 "effective_depth": effective_depth,
                                 "depth_clamped": effective_depth != requested_depth,
                             }
@@ -728,25 +1014,141 @@ class QueryPipeline:
                     }
                 )
 
+        # МОСТ «обход → читаемый кандидат». Обход отдаёт `chunk_ids` достигнутых сущностей,
+        # но не текст; без этого шага графовый кандидат остаётся именем.
+        #
+        # Оценки bridged-кандидатам НЕ выдаётся. Раньше документы, достигнутые обходом,
+        # получали константу и вставали выше векторных — это стоило нам -0.0417 recall@5.
+        # Выдумывать вторую константу значило бы повторить то же с другой стороны: порядок
+        # здесь должен задавать плагин смешения, а не этот шаг.
         if enabled and expanded_rows:
-            # Терпимой обработки здесь больше нет: значение прочитано один раз выше и уже
-            # приведено к дефолту с записью имени в `config_fallbacks`. Дублировать разбор
-            # значило бы снова получить два разных ответа на один вопрос «что применилось».
-            boost = cfg_boost
-            if boost:
-                graph_sources = {
-                    str(source)
-                    for row in expanded_rows
-                    for source in (row.get("source_ids") or [])
-                    if source
-                }
+            requested_ids = [
+                str(value)
+                for row in expanded_rows
+                for value in (row.get("chunk_ids") or [])
+                if value
+            ]
+            unique_requested = list(dict.fromkeys(requested_ids))
+            if unique_requested and self._vector_store is None:
+                bridge_status = "adapter_missing"
+            elif unique_requested:
+                try:
+                    fetched = self._vector_store.get_chunks_by_ids(unique_requested, domain=active)
+                except Exception as exc:  # noqa: BLE001 - деградация, а не отказ запроса
+                    bridge_status = "error"
+                    _trace({"stage": "bridge", "status": "error", "error": str(exc)})
+                else:
+                    if fetched is None:
+                        # Хранилище не умеет читать по идентификаторам. Это НЕ «чанков нет»
+                        # и не «граф ничего не дал»: отсутствие возможности обязано быть
+                        # видно, иначе пропадает различие между тремя разными причинами.
+                        bridge_status = "unsupported"
+                    else:
+                        bridge_status = "ok"
+                        already = {str(chunk.get("chunk_id")) for chunk in body_chunks}
+                        for row in fetched:
+                            chunk_id = str(row.get("chunk_id") or "")
+                            if not chunk_id or chunk_id in already:
+                                continue
+                            already.add(chunk_id)
+                            bridged_chunks.append(
+                                {
+                                    "chunk_id": chunk_id,
+                                    "text": str(row.get("text") or ""),
+                                    "source_url": row.get("source_url"),
+                                    "domain": row.get("domain"),
+                                    "index": row.get("index"),
+                                    "bridged": True,
+                                }
+                            )
+                        body_chunks = body_chunks + bridged_chunks
+
+        # Итог моста дописывается в `effective_retrieval` ЗДЕСЬ: сам словарь собирается
+        # раньше обхода, и записать в него значение можно только после того, как оно
+        # известно. Писать его в литерал означало бы зафиксировать «not_requested».
+        effective_retrieval["bridge_status"] = bridge_status
+        effective_retrieval["bridged_chunks"] = len(bridged_chunks)
+
+        # ФИЛЬТР: мягкий, по пересечению с запросом. Понижает оценку, не выбрасывает.
+        #
+        # Пересечение считается по тем же строкам обхода, которые построил обход: имя
+        # достигнутой сущности ищется в тексте запроса, и чанки подтверждённых сущностей
+        # пересекаются с запросом. Отдельный порт хранилища не нужен и в Neo4j, и в
+        # InMemory - один и тот же вход для обоих, а значит и один смысл.
+        #
+        # Пустой набор подтверждённых сущностей - это НЕ «всё не подтверждено»: это
+        # отсутствие данных, и в этом состоянии фильтр не трогает ничего. Иначе при
+        # выключенном графе он понизил бы весь выдачный набор и выглядел бы как
+        # отрицательный результат механизма.
+        filter_status = "not_requested"
+        filter_demoted: list[dict[str, Any]] = []
+        filter_phrase_names = 0
+        corroborated_chunk_ids: set[str] = set()
+        if enabled and expanded_rows and body_chunks:
+            query_text = str(query or "").lower()
+            for row in expanded_rows:
+                raw_name = str(row.get("canonical_name") or "")
+                if not _looks_like_name(raw_name):
+                    filter_phrase_names += 1
+                    continue
+                variants = _name_variants(raw_name)
+                if not any(variant in query_text for variant in variants):
+                    continue
+                corroborated_chunk_ids.update(
+                    str(value) for value in (row.get("chunk_ids") or []) if value
+                )
+            if not corroborated_chunk_ids:
+                # Ни одна достигнутая сущность не подтверждена запросом: данных для
+                # отбора нет, и отбор не производится.
+                filter_status = "no_corroborated_entities"
+            else:
+                filter_status = "applied"
                 for chunk in body_chunks:
-                    if str(chunk.get("source_url") or "") in graph_sources:
-                        graph_boosts[str(chunk.get("chunk_id"))] = boost
+                    if str(chunk.get("chunk_id") or "") in corroborated_chunk_ids:
+                        continue
+                    chunk["filter_demoted"] = True
+                    chunk["score"] = float(chunk.get("score") or 0.0) * cfg_filter_scale
+                    filter_demoted.append(
+                        {
+                            "chunk_id": str(chunk.get("chunk_id") or ""),
+                            "source_url": chunk.get("source_url"),
+                            "bridged": bool(chunk.get("bridged")),
+                        }
+                    )
+                # Ранжирование ниже заменит оценку своей, поэтому понижение видно только
+                # здесь. Это сказано прямо, иначе потеря понижения выглядела бы как
+                # «фильтр не сработал».
+                effective_retrieval["filter_applied_stage"] = "pre_order"
+        elif enabled and body_chunks:
+            filter_status = "no_expansion_rows"
+
+        effective_retrieval["filter_status"] = filter_status
+        effective_retrieval["filter_demote_scale"] = cfg_filter_scale
+        effective_retrieval["filter_demoted"] = len(filter_demoted)
+        effective_retrieval["filter_demoted_candidates"] = filter_demoted
+        # Отдельно от `filter_demoted`: это счётчик качества данных, а не отбор.
+        effective_retrieval["filter_phrase_names"] = filter_phrase_names
 
         if self._semantic_cache is not None and cache_allowed:
             _trace({"stage": "cache", "hit": False})
-        _trace({"stage": "graph", "enabled": enabled, "skeleton_rows": render_skeleton(skeleton_rows)})
+        # Ограничение применяется ТОЛЬКО к тому, что уходит в промпт. Список источников
+        # строится из всех строк обхода: сузить его здесь означало бы ещё и сузить
+        # атрибуцию, а это отдельная величина, из которой читаются метрики осей.
+        evidence_rows = (
+            skeleton_rows
+            if cfg_evidence_max_lines is None
+            else skeleton_rows[: cfg_evidence_max_lines]
+        )
+        if cfg_evidence_max_lines is not None and len(evidence_rows) != len(skeleton_rows):
+            _trace(
+                {
+                    "stage": "evidence_limited",
+                    "limit": cfg_evidence_max_lines,
+                    "rows_before": len(skeleton_rows),
+                    "rows_after": len(evidence_rows),
+                }
+            )
+        _trace({"stage": "graph", "enabled": enabled, "skeleton_rows": render_skeleton(evidence_rows)})
         _trace(
             {
                 "stage": "vector",
@@ -762,24 +1164,77 @@ class QueryPipeline:
             }
         )
 
-        emit("status", {"stage": "rerank"})
-        scores = self._reranker.rerank(query, body_chunks)
-        rerank_scores: list[dict[str, Any]] = []
-        for chunk, score in zip(body_chunks, scores):
-            score_before = float(chunk.get("score") or 0.0)
-            chunk_id = str(chunk.get("chunk_id"))
-            chunk["score"] = float(score) + graph_boosts.get(chunk_id, 0.0)
-            rerank_scores.append(
+        emit("status", {"stage": "order"})
+        # Порядок задаёт ОДНА реализация (ADR-061, ADR-062). До этого шага порядок
+        # складывался из двух правил сразу - константы оси графа в `build_sources` и
+        # прибавки `graph_boost` к оценке, - и обе давали оси фору за счёт отсутствия
+        # у неё оценки. Обе снесены.
+        ordering, requested_ordering = resolve_ordering(
+            cfg_ordering, reranker=self._reranker, rrf_k=cfg_rrf_k
+        )
+        ordering_name = ordering.name
+        ordering_fallback = requested_ordering != ordering_name
+        if ordering_fallback:
+            # Откат обязан быть виден в трёх местах, иначе «вышло как обычно» не
+            # отличить от «применилось то, что просили».
+            _log.error(
+                "реализация порядка %r не разрешилась, применён откат %r",
+                requested_ordering,
+                ordering_name,
+            )
+            _trace(
                 {
-                    "chunk_id": chunk.get("chunk_id"),
-                    "before": round(score_before, 4),
-                    "after": round(float(chunk["score"]), 4),
+                    "stage": "order",
+                    "reason": "mixer_unavailable",
+                    "requested": requested_ordering,
+                    "applied": ordering_name,
                 }
             )
-        body_chunks.sort(key=lambda chunk: chunk.get("score", 0.0), reverse=True)
-        _trace({"stage": "rerank", "scores": rerank_scores})
+            emit(
+                "status",
+                {
+                    "stage": "order",
+                    "reason": "mixer_unavailable",
+                    "requested": requested_ordering,
+                    "applied": ordering_name,
+                },
+            )
+        order_scores: list[dict[str, Any]] = []
+        score_before = {str(chunk.get("chunk_id")): float(chunk.get("score") or 0.0) for chunk in body_chunks}
+        body_chunks = ordering.order(
+            query,
+            body_chunks,
+            context={
+                "vector_ranks": {
+                    str(chunk.get("chunk_id")): index
+                    for index, chunk in enumerate(body_chunks)
+                    if not chunk.get("bridged")
+                },
+                "graph_ranks": {
+                    str(chunk.get("chunk_id")): index
+                    for index, chunk in enumerate(body_chunks)
+                    if chunk.get("bridged")
+                },
+                "max_vector_chunks": self._max_vector_chunks,
+            },
+        )
+        for chunk in body_chunks:
+            order_scores.append(
+                {
+                    "chunk_id": chunk.get("chunk_id"),
+                    "before": round(score_before.get(str(chunk.get("chunk_id")), 0.0), 4),
+                    "after": round(float(chunk.get("score") or 0.0), 4),
+                }
+            )
+        # Повторная сортировка здесь была бы вторым правилом порядка: реализация уже
+        # вернула упорядоченный список, и «ещё раз отсортируем по оценке» означало бы,
+        # что решение принимает не она.
+        _trace({"stage": "order", "scores": order_scores})
+        effective_retrieval["ordering_applied"] = ordering_name
+        effective_retrieval["ordering_params"] = ordering.params()
+        effective_retrieval["ordering_fallback"] = ordering_fallback
 
-        context = ContextAssembly(limit).assemble(skeleton_rows, body_chunks)
+        context = ContextAssembly(limit).assemble(evidence_rows, body_chunks)
         retrieval_s = round(time.monotonic() - retrieval_started, 3)
 
         prompt = _build_prompt(query, context.text)
@@ -806,7 +1261,27 @@ class QueryPipeline:
             generation_s = 0.0
 
         graph_relevance = cfg_source_relevance
-        sources = build_sources(body_chunks, skeleton_rows, graph_relevance=graph_relevance)
+        # Метка «что ось знает» строится здесь, а не внутри `build_sources`, потому что
+        # причину `reachable_unused` знает только пайплайн: она читается из того, отработал ли
+        # обход и были ли семена. `None` означает «карту не считали» (ось не открыта) и обязан
+        # дойти до `build_sources` именно как `None`: пустой словарь выглядел бы как
+        # «посчитали и не нашли», и метка стала бы `blind` там, где прибор не смотрел.
+        graph_knowledge: Mapping[str, str] | None = None
+        graph_knowledge_reasons: Mapping[str, str] | None = None
+        if graph_known_sources is not None:
+            graph_knowledge, graph_knowledge_reasons = _graph_knowledge_for_sources(
+                body_chunks=body_chunks,
+                skeleton_rows=evidence_rows,
+                graph_known_sources=graph_known_sources,
+                expanded_rows=expanded_rows,
+            )
+        sources = build_sources(
+            body_chunks,
+            skeleton_rows,
+            graph_relevance=graph_relevance,
+            graph_knowledge=graph_knowledge,
+            graph_knowledge_reasons=graph_knowledge_reasons,
+        )
         if graph_requested and graph_degraded:
             self.projection_metrics.observe_fallback(
                 projection_status if projection_status != "ready" else "graph_expansion"
@@ -858,6 +1333,29 @@ class QueryPipeline:
             # Имена параметров, ушедших в дефолт. Пустой список — тоже факт: значит
             # применено ровно то, что объявлено.
             "config_fallbacks": config_fallbacks,
+            # Что заняло бюджет контекста. Без этих чисел нельзя отличить "граф вытеснил
+            # текст документа" от "граф занял своё место": скелет входит первым и не
+            # вытесняется, а тело получает остаток. На кэш-попадании блок равен None,
+            # а не нулям: кэш отдаёт чужой ответ, и "сборка не выполнялась" - это
+            # отсутствие данных, а не нулевой расход.
+            "context": {
+                "skeleton_count": context.skeleton_count,
+                "body_count": context.body_count,
+                "dropped_chunks": context.dropped,
+                "skeleton_tokens": context.skeleton_tokens,
+                "body_tokens": context.body_tokens,
+                "total_tokens": context.tokens,
+                "max_tokens": context.max_tokens,
+                "skeleton_token_share": (
+                    round(context.skeleton_tokens / context.tokens, 4)
+                    if context.tokens
+                    else None
+                ),
+                # Что именно модель увидела от графа. Без этого отчёт отвечает на вопрос
+                # "сколько строк было", но не на "что в них было", а вопрос "помогает ли
+                # граф" без второго не имеет ответа.
+                "skeleton_lines": list(context.skeleton_lines),
+            },
         }
         if self._semantic_cache is not None and cache_allowed:
             done["cache_hit"] = False

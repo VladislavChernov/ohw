@@ -97,11 +97,13 @@ READ_BY_RETRIEVAL_KEYS: frozenset[str] = frozenset(
         "max_depth",
         "expansion_direction",
         "max_fanout",
-        "max_graph_nodes",
-        "graph_boost",
-        "graph_source_relevance",
-    }
-)
+            "max_graph_nodes",
+            "graph_source_relevance",
+            "filter_demote_scale",
+            "ordering",
+            "rrf_k",
+        }
+    )
 
 #: Ключи `retrieval.*`, обязательные ПО ТИПУ, если присутствуют. Неполное значение не
 #: ошибка само по себе: у каждого есть кодовый дефолт, и это нормальная практика. Ошибкой
@@ -382,6 +384,18 @@ def validate_retrieval_profile(profile: dict[str, Any] | None) -> ProfileValidat
         retrieval_map["expansion_kinds"], list
     ):
         errors.append("retrieval.expansion_kinds должен быть списком")
+    raw_scale = retrieval_map.get("filter_demote_scale")
+    if (
+        isinstance(raw_scale, (int, float))
+        and not isinstance(raw_scale, bool)
+        and not 0.0 <= float(raw_scale) <= 1.0
+    ):
+        # Понижение вне (0, 1] - это подъём. Значение отвергается здесь, а не молча
+        # приводится к дефолту, иначе профиль вроде бы задавал вес, а рантайм его игнорировал.
+        errors.append(
+            f"retrieval.filter_demote_scale должен быть в (0, 1], получено {raw_scale} — "
+            "значение вне диапазона превращает понижение в подъём"
+        )
     for key in sorted(set(retrieval_map) - READ_BY_RETRIEVAL_KEYS):
         warnings.append(f"retrieval.{key} не читается запросом — значение не влияет ни на что")
     return ProfileValidation(errors=tuple(errors), warnings=tuple(warnings))

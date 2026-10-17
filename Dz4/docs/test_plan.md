@@ -278,7 +278,7 @@ projection с актуальной revision может быть graph-success. C
 
 Пишется построчно (append) — переживает падение в середине прогона.
 Обязательный минимум строки: `id`, `query`, `graph_enabled`, `revision`,
-`retrieved[]` с axis, `seed_chunk_ids`, `graph_paths`/depth/boost (для experiment),
+`retrieved[]` с axis и `graph_knowledge`, `seed_chunk_ids`, `graph_paths`/depth/boost (для experiment),
 `golden_sources`, `golden_facts`, метрики вопроса, `answer`, `timings`.
 
 Не пишется: финальный промпт, тексты всех чанков, эмбеддинги (воспроизводятся
@@ -290,6 +290,14 @@ projection с актуальной revision может быть graph-success. C
 2. **Append, а не «сохранить в конце».** Иначе падение теряет прогон целиком.
 3. **Журнал не источник истины для метрик.** Метрики считаются по прогону;
    согласованность проверяется ручным сэмплом (§6.4).
+
+**`graph_knowledge` у источника** (`contributed` / `reachable_unused` / `blind`) обязателен
+вместе с `axis`: ось обслуживает частично наполненный корпус, и без метки нельзя отличить «граф
+не помог» от «граф про этот документ ничего не знает» (ADR-046, поправка 2026-10-16). У
+`reachable_unused` причина пишется рядом (`outside_vector_topk` / `truncated_by_limits` /
+`no_outgoing_edges`); все три легитимны и дефектами не считаются. `blind` означает, что нод
+документа в графе нет вовсе, — это путь ADR-053 (документ без списка кандидатов грузится только в
+вектор), а не отказ и не «источник не найден».
 
 ### 5.3 Трасса (`trace.jsonl`) — по требованию
 

@@ -1,0 +1,77 @@
+# Оверлей demo-стенда с реранкером bge. Подключается `demo.sh` и `demo.ps1`
+# по флагу `-WithReranker` / `--with-reranker`. Без флага стенд работает как раньше:
+# слот `RERANKER` остаётся `noop`, сервис не поднимается.
+#
+#   docker compose -f compose.runtime.yaml -f compose.runtime-reranker.yaml up -d --wait
+#
+# Устройство выдаёт только сам compose, флагом в командной строке — тот же приём, что
+# у оверлея видеокарты, и по той же причине: опция, которую выдаёт не тот файл, который
+# запускают, не имеет силы.
+#
+# ЧТО ЗДЕСЬ И ПОЧЕМУ ИМЕННО ТАК
+#
+# 1. Сервис `reranker` объявлен здесь, а не в `compose.runtime.yaml`. Он нужен ровно
+#    тогда, когда подключён этот оверлей. Объявлять его в базовом контуре означало бы
+#    либо поднимать сервис без слота (объявление без применения), либо молча включать
+#    объявлять его в базовом контуре означало бы либо поднимать сервис без слота (объявление без
+#    применения), либо молча включать переранжирование там, где его не просили.
+# 2. Модель `BAAI/bge-reranker-base` грузится ЛЕНИВО, при первом `/api/v1/rerank`.
+#    `/health` не доказывает готовность: контейнер будет healthy с незагруженной
+#    моделью, а первый настоящий запрос скачает веса. Воспроизводимость прогона
+#    требует прогрева ДО замера, иначе первый вопрос будет на 50+ секунд дольше
+#    остальных и испортит разброс времени.
+#
+# 3. `RERANKER` выставляется ЗДЕСЬ, на обоих сервисах, которые могут исполнить
+#    пайплайн: `query-api` и `query-worker`. Переменная окружения перебивает
+#    `namespaces.yaml`, поэтому объявлять её надо в том файле, который запускают.
+#    Согласованность двух сервисов сторожит `tests/test_runtime_compose_env.py`.
+#
+# 4. Порог по абсолютной оценке НЕ включается. Шкала `bge-reranker-base` сжата: на
+#    замере 2026-10-17 релевантные чанки получили 0.001 и 0.31, посторонний 0.00004.
+#    Порог отсюда не следует и калибруется на наборе, а не выставляется с потолка.
+
+# Логирование продублировано, а не взято якорем `&logging` из `compose.runtime.yaml`:
+# якоря YAML не переходят между файлами, и ссылка на чужой якорь сделала бы файл
+# нечитаемым. Значение обязано совпадать с базовым контуром.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  reranker:
+    image: ohw/reranker:prototype
+    container_name: ohw-runtime-reranker
+    command: ["graphrag-reranker"]
+    networks: [runtime_net]
+    ports: ["8006:8006"]
+    environment:
+      RERANKER_MODEL: bge-reranker-base
+      # Явно, а не дефолтом compose: значение `false` означает «реальная модель», и
+      # читать его должна сама конфигурация, а не соглашение о молчании.
+      RERANKER_MOCK: "false"
+      RERANKER_DEVICE: cpu
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    healthcheck:
+      test:
+        - "CMD"
+        - "sh"
+        - "-lc"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8006/health', timeout=2)\""
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    <<: *logging
+
+  query-api:
+    environment:
+      RERANKER: bge_reranker
+      RERANKER_URL: http://reranker:8006
+
+  query-worker:
+    environment:
+      RERANKER: bge_reranker
+      RERANKER_URL: http://reranker:8006

@@ -257,12 +257,14 @@ projection, backfill-ит metadata и фиксирует projection revision/rea
 
 State store допускает статусы `pending`, `ready`, `degraded`, `stale` и `failed`. `ready` сам по
 себе не разрешает graph experiment: QueryPipeline сверяет журнал `projection_state_sources` с
-ревизиями чанков в графе (`sources_tracked > 0`, `sources_without_graph = 0`,
-`revision_mismatches = 0`, `chunks_without_owner = 0`) и требует совпадения `config_fingerprint`.
-Доменная `data_revision` не сравнивается — она атрибуция («проекция построена из корпуса такой-то
-ревизии»), а не условие готовности (ADR-046 п. 8 и п. 10). Пока job не завершён, индекс отстал,
-счётчик расходится или state отсутствует, query получает vector-only fallback с degraded marker;
-job и baseline не блокируют друг друга.
+ревизиями чанков в графе (`sources_tracked > 0`, `revision_mismatches = 0`,
+`chunks_without_owner = 0`) и требует совпадения `config_fingerprint`. Доменная `data_revision`
+не сравнивается — она атрибуция («проекция построена из корпуса такой-то ревизии»), а не условие
+готовности (ADR-046 п. 8 и п. 10). Источник, нод которого в графе нет, условием готовности **не
+является**: ось обслуживает по нему вектор и помечает источник `graph_knowledge: blind`
+(ADR-046, поправка владельца 2026-10-16). Пока job не завершён, индекс отстал, счётчик ревизий
+разошёлся или state отсутствует, query получает vector-only fallback с degraded marker; job и
+baseline не блокируют друг друга.
 
 ## 3. Identity и multilingual aliases
 

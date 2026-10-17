@@ -109,6 +109,7 @@ def _corpus(tmp_path: Path, names: list[str]) -> Path:
 
 
 def _write_dataset(tmp_path: Path, questions: list[dict[str, Any]] | None = None) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "questions.jsonl"
     rows = questions if questions is not None else [_question("obs-01")]
     with open(path, "w", encoding="utf-8") as fh:
@@ -889,6 +890,92 @@ def test_main_passport_says_coverage_not_measured_without_ingest(
     assert "не измерено" in passport
     # Предупреждение о низком покрытии здесь неуместно: покрытие не измеряли.
     assert "не характеризуют" not in passport
+
+
+class _PartialGraphPipeline(_FakePipeline):
+    """Имитация частично наполненного корпуса: один источник слеп, другой известен оси.
+
+    `graph_knowledge` приходит из пайплайна, и раннер обязан разнести их по вопросу, иначе
+    `necessity = 0` на слепом эталоне читается как «граф не помог» — ровно тот вывод,
+    который поправка ADR-046 2026-10-16 отменяет.
+    """
+
+    def run(
+        self,
+        query: str,
+        domain: str | None = None,
+        emit: Any = None,
+        revision: str | None = None,
+        generate: bool = True,
+        trace: bool = False,
+    ) -> dict[str, Any]:
+        done = super().run(query, domain, emit, revision, generate, trace)
+        done["sources"] = [
+            {**GRAPH_SOURCE_HIT, "axis": "graph", "graph_knowledge": "contributed"},
+            {
+                "source_url": VECTOR_SOURCE,
+                "relevance": 0.8,
+                "axis": "vector",
+                "graph_knowledge": "blind",
+                "graph_knowledge_reason": None,
+                "graph_linked_chunks": 0,
+            },
+        ]
+        return done
+
+
+GRAPH_SOURCE_HIT = {"source_url": GRAPH_SOURCE, "relevance": 1.0}
+
+
+def test_blind_golden_source_is_reported_per_question(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Вопрос с эталоном, которого ось не видела, обязан сказать об этом поимённо.
+
+    Проверяется сквозной путь, а не только `eval_question`: счётчики считаются там, теряются
+    по дороге в агрегат, и гейт этого не ловит.
+    """
+    dataset = _write_dataset(tmp_path, [_question("obs-blind", [VECTOR_SOURCE])])
+
+    out = _run_main(
+        monkeypatch,
+        tmp_path,
+        pipeline_factory=_PartialGraphPipeline,
+        dataset=dataset,
+    )
+
+    row = json.loads((out / "qa_log.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["blind_golden"] == [VECTOR_SOURCE]
+    assert row["linked_golden"] == []
+    assert row["blind_golden_count"] == 1
+    report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
+    contribution = report["target"]["graph_contribution"]
+    assert contribution["questions_with_blind_golden"] == 1
+    assert contribution["questions_with_blind_golden_ids"] == ["obs-blind"]
+    assert contribution["per_question"][0]["blind_golden"] == [VECTOR_SOURCE]
+
+
+def test_passport_separates_blind_zero_from_measured_zero(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Ноль при слепом эталоне и ноль без слепых — разные выводы, и паспорт это различает."""
+    blind = _write_dataset(tmp_path, [_question("obs-blind", [VECTOR_SOURCE])])
+    blind_out = _run_main(
+        monkeypatch, tmp_path, pipeline_factory=_PartialGraphPipeline, dataset=blind
+    )
+    # Паспорт читается ДО второго прогона: оба пишут в один out-каталог, и иначе первый
+    # артефакт просто перезаписан вторым — тест проверял бы сам себя.
+    blind_passport = (blind_out / "PASSPORT.md").read_text(encoding="utf-8")
+
+    seen = _write_dataset(tmp_path / "seen", [_question("obs-seen", [GRAPH_SOURCE])])
+    seen_out = _run_main(
+        monkeypatch, tmp_path, pipeline_factory=_PartialGraphPipeline, dataset=seen
+    )
+    seen_passport = (seen_out / "PASSPORT.md").read_text(encoding="utf-8")
+
+    assert "слепым золотым источником" in blind_passport
+    assert "слепым золотым источником" not in seen_passport
+    assert "Вклад графа по вопросам" in blind_passport
 
 
 def _vector_only_pipeline() -> _FakePipeline:

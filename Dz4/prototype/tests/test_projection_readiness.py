@@ -61,15 +61,51 @@ def test_stale_chunk_revision_blocks_and_is_counted() -> None:
     assert readiness.chunks_total == 7
 
 
-def test_source_without_chunks_is_counted() -> None:
+def test_source_without_chunks_is_counted_but_does_not_block() -> None:
+    """Нет `Chunk`-нод у документа — это частичная проекция, а не рассинхронизация.
+
+    До поправки владельца 2026-10-16 это утверждалось как `ready = false`, и гард выключал ось
+    целиком: при 13 таких документах из 30 на демо-наборе графическая рукава не открылась ни для
+    одного вопроса, то есть вклад графа стал неизмерим на любом неполном корпусе. Теперь счётчик
+    остаётся (масштаб слепоты читатель должен видеть), но условием готовности не является.
+    """
     readiness = evaluate_projection_readiness(
         {"src://a": "rev-a", "src://b": "rev-b"},
         {"src://a": {"rev-a": 4}},
     )
 
-    assert readiness.ready is False
     assert readiness.sources_without_graph == 1
     assert readiness.revision_mismatches == 0
+    assert readiness.ready is True
+
+
+def test_ready_still_requires_revision_agreement_and_owner() -> None:
+    """Снятие одного условия не превращает гард в формальность.
+
+    Формулировка положительная и переживает правки списка: «`ready` ⇒ ревизии сошлись и у чанков
+    есть владелец», а не «в готовности нет такого-то счётчика».
+    """
+    mismatched = evaluate_projection_readiness(
+        {"src://a": "rev-new"},
+        {"src://a": {"rev-new": 4, "rev-old": 3}},
+    )
+    ownerless = evaluate_projection_readiness(
+        {"src://a": "rev-a"},
+        {"src://a": {"rev-a": 1}, "<ownerless>": {"rev-x": 2}},
+    )
+
+    assert mismatched.revision_mismatches == 3
+    assert mismatched.ready is False
+    assert ownerless.chunks_without_owner == 2
+    assert ownerless.ready is False
+
+
+def test_ready_requires_at_least_one_tracked_source() -> None:
+    """Пустой журнал — это «нечего проверять», а не «всё в порядке»."""
+    readiness = evaluate_projection_readiness({}, {"src://a": {"rev-a": 3}})
+
+    assert readiness.ready is False
+    assert readiness.reason == "no_tracked_sources"
 
 
 def test_chunk_without_owner_and_untracked_source_are_counted_separately() -> None:

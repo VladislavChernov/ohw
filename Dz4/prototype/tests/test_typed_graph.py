@@ -2143,11 +2143,21 @@ def test_vector_results_seed_bounded_expansion_before_graph() -> None:
     ]
     assert expansion_trace["depths"] == [1]
     assert done["graph_degraded"] is False
-    assert {
-        "source_url": "src://vector",
-        "relevance": 1.0,
-        "axis": "graph",
-    } in done["sources"]
+    # Источник, которого достиг обход, присутствует в выдаче ОБЕИМИ осями: по вектору он
+    # пришёл с кандидатом `chk:vector`, по графу — достигнут обходом. Раньше ось графа
+    # всегда печаталась первой, и первая запись была графовой; теперь порядок задаёт
+    # наличие кандидата, поэтому запись выбирается по оси явно.
+    graph_hit = next(
+        s
+        for s in done["sources"]
+        if s["source_url"] == "src://vector" and s["axis"] == "graph"
+    )
+    assert graph_hit["relevance"] == 1.0
+    assert graph_hit["graph_knowledge"] == "contributed"
+    vector_hit = next(
+        s for s in done["sources"] if s["source_url"] == "src://vector" and s["axis"] == "vector"
+    )
+    assert vector_hit["relevance"] == 1.0
 
 
 def test_vector_only_baseline_does_not_call_graph(

@@ -207,13 +207,17 @@ def test_graph_retriever_skips_empty_seed_and_unsupported_expansion() -> None:
 
 
 def test_context_assembly_skeleton_first_and_eviction() -> None:
-    skeleton = [
-        {
-            "n": {"tag_id": "tag:it:database", "canonical_name": "База данных"},
-            "m": {"tag_id": "tag:it:sql", "canonical_name": "SQL"},
-            "rel_type": "related",
-        }
-    ]
+    """Сборщик проверяется на ФОРМЕ, которую действительно собирает пайплайн.
+
+    Раньше строки строились руками с заполненным `m`, и тест закреплял вид
+    `узел ~[ТИП]~ сосед`. Пайплайн не может собрать такую строку: он всегда передаёт
+    `m = None`, условие требует непустого соседа, и работает только ветка с именем.
+    Тест на несуществующей форме был зелёным и ничего не сторожил.
+    """
+    skeleton = _skeleton_rows_like_pipeline(
+        {"canonical_name": "База данных"},
+        {"canonical_name": "SQL"},
+    )
     huge_text = " ".join(["слово"] * 3000)
     chunks = [
         {"text": huge_text, "source_url": "src://huge", "score": 0.1},
@@ -222,12 +226,44 @@ def test_context_assembly_skeleton_first_and_eviction() -> None:
 
     result = ContextAssembly(max_tokens=64).assemble(skeleton, chunks)
 
-    assert result.skeleton_count == 1
-    assert "База данных ~[related]~ SQL" in result.text
+    assert result.skeleton_count == 2
+    # Форма, которая получается в бою: имя сущности, без связи и без соседа.
+    assert result.skeleton_lines == ["База данных", "SQL"]
+    assert "~[" not in result.text
     assert "короткая выжившая" in result.text
     assert huge_text not in result.text
     assert result.body_count == 1
     assert result.dropped == 1
+
+
+def _skeleton_rows_like_pipeline(*names: dict[str, str]) -> list[dict[str, Any]]:
+    """Строки обхода ровно той формы, какой их собирает пайплайн.
+
+    Форма зафиксирована в `retrieval/pipeline.py`: `m` всегда `None`, тип ребра берётся
+    из `kind` строки расширения. Держать её здесь, а не в тесте, нельзя: расхождение
+    между тестом и пайплайном и есть тот отказ, который этот тест теперь сторожит.
+    """
+    return [
+        {"n": node, "m": None, "rel_type": node.get("kind", "RELATED")} for node in names
+    ]
+
+
+def test_skeleton_lines_are_persisted_for_reuse_in_artifacts() -> None:
+    """Сами строки попадают в результат сборки.
+
+    Отчёт отвечает на вопрос «что именно модель увидела от графа». Без самих строк он
+    отвечает только на «сколько строк было», а это другой вопрос.
+    """
+    skeleton = _skeleton_rows_like_pipeline({"canonical_name": "Ingestion API"})
+    chunks = [{"text": "текст документа", "source_url": "src://a", "score": 0.5}]
+
+    result = ContextAssembly(max_tokens=256).assemble(skeleton, chunks)
+
+    assert result.skeleton_lines == ["Ingestion API"]
+    assert result.skeleton_lines[0] in result.text
+    assert len(result.skeleton_lines) == result.skeleton_count
+    # Строки сохраняются именно те, что ушли в промпт, а не все до усечения бюджетом.
+    assert sum(len(part.split()) for part in result.skeleton_lines) == result.skeleton_tokens
 
 
 def test_context_assembly_evicts_lowest_score_first() -> None:
@@ -271,9 +307,12 @@ def test_build_sources_unique_by_source_url() -> None:
 
     sources = build_sources(chunks)
 
-    assert sources == [
-        {"source_url": "src://a", "relevance": 0.9, "axis": "vector"},
-        {"source_url": "src://b", "relevance": 0.4, "axis": "vector"},
+    # Сравнение по полям, а не по словарям целиком: форма источника расширяется
+    # (`graph_knowledge`, `graph_linked_chunks`), и равенство целиком превратилось бы в
+    # замороженный список полей — он завтра начал бы врать при легитимной правке.
+    assert [(s["source_url"], s["relevance"], s["axis"]) for s in sources] == [
+        ("src://a", 0.9, "vector"),
+        ("src://b", 0.4, "vector"),
     ]
 
 
@@ -313,10 +352,96 @@ def test_build_sources_keeps_axes_and_deduplicates_by_pair() -> None:
         "source_url": "src://graph-only",
         "relevance": 1.0,
         "axis": "graph",
+        "graph_knowledge": "contributed",
+        "graph_knowledge_reason": None,
+        "graph_linked_chunks": 0,
     }
     assert ("src://vector-only", "vector") in by_pair
     assert len(sources) == 4
     assert sources[0]["axis"] == "graph"
+
+
+def test_source_says_what_the_graph_knew_about_it() -> None:
+    """Метка `graph_knowledge` различает три состояния, а не два.
+
+    «Граф не помог» и «граф про этот документ ничего не знает» дают один и тот же ответ по
+    вектору, но это разные результаты: первый измерен, второй — слепота прибора. На частично
+    наполненном корпусе (ADR-046, поправка 2026-10-16) подстановка одного ноля вместо другого
+    возвращает ровно тот ложноотрицательный вывод, который поправка отменяет.
+    """
+    chunks = [
+        {"source_url": "src://known", "score": 0.8, "context_ids": ["ctx:1"]},
+        {"source_url": "src://no-nodes", "score": 0.7},
+    ]
+
+    sources = build_sources(
+        chunks,
+        graph_knowledge={"src://known": "reachable_unused"},
+        graph_knowledge_reasons={"src://known": "truncated_by_limits"},
+    )
+    by_url = {source["source_url"]: source for source in sources}
+
+    assert by_url["src://known"]["graph_knowledge"] == "reachable_unused"
+    assert by_url["src://known"]["graph_knowledge_reason"] == "truncated_by_limits"
+    assert by_url["src://known"]["graph_linked_chunks"] == 1
+    # Карта вычислена, и документа в ней нет — это честный `blind`.
+    assert by_url["src://no-nodes"]["graph_knowledge"] == "blind"
+    assert by_url["src://no-nodes"]["graph_linked_chunks"] == 0
+
+
+def test_source_without_knowledge_map_is_unknown_not_blind() -> None:
+    """Карты нет — прибор не смотрел, и это не то же самое, что «нод нет».
+
+    Baseline-рукав парного прогона идёт с выключенной осью и в граф не заглядывает. Если бы
+    такие источники получали `blind`, отчёт утверждал бы «оси не было видно этих документов»
+    там, где ось просто не включалась.
+    """
+    sources = build_sources([{"source_url": "src://a", "score": 0.5}])
+
+    assert sources[0]["graph_knowledge"] == "unknown"
+    assert sources[0]["graph_knowledge_reason"] is None
+
+
+def test_vector_twin_of_a_reached_document_is_not_blind() -> None:
+    """Документ, найденный и вектором, и обходом, даёт две записи об одном факте.
+
+    Обход до него дошёл, поэтому векторная запись не «слепая». Метка отвечает на вопрос о
+    документе, а `axis` — каким слотом запись пришла; смешивать их нельзя, иначе золотой
+    источник, дошедший обходом, попадёт в счётчик слепых и испортит `necessity`.
+    """
+    chunks = [{"source_url": "src://both", "score": 0.7, "context_ids": ["ctx:1"]}]
+    skeleton = [
+        {
+            "n": {"tag_id": "tag:it:x", "name": "X", "source_ids": ["src://both"]},
+            "m": None,
+            "rel_type": None,
+        }
+    ]
+
+    sources = build_sources(
+        chunks,
+        skeleton,
+        graph_knowledge={"src://both": "contributed"},
+        graph_knowledge_reasons={},
+    )
+    twin = next(s for s in sources if s["source_url"] == "src://both" and s["axis"] == "vector")
+
+    assert twin["graph_knowledge"] == "contributed"
+    assert twin["graph_knowledge_reason"] is None
+
+
+def test_known_source_without_reason_is_still_labelled() -> None:
+    """Документ, известный графу, но без указанной причины, не превращается в `blind`.
+
+    Причина не обязана быть всегда: но подмена `reachable_unused` на `blind` стёрла бы различие
+    между «ось молчала» и «оси не было».
+    """
+    chunks = [{"source_url": "src://a", "score": 0.5}]
+
+    sources = build_sources(chunks, graph_knowledge={"src://a": "reachable_unused"})
+
+    assert sources[0]["graph_knowledge"] == "reachable_unused"
+    assert sources[0]["graph_knowledge_reason"] is None
 
 
 def test_query_pipeline_vector_only_baseline_skips_graph() -> None:
@@ -365,13 +490,13 @@ def test_query_pipeline_vector_only_baseline_skips_graph() -> None:
     assert graph.expansion_calls == []
     assert graph.query_called is False
     assert ("status", {"stage": "graph", "enabled": True}) not in events
-    for stage in ("embedding", "vector", "rerank", "llm"):
+    for stage in ("embedding", "vector", "order", "llm"):
         assert ("status", {"stage": stage}) in events
     assert any(event == "token" for event, _ in events)
     assert result["text"] == "Ответ: база данных это набор данных."
-    assert result["sources"] == [
-        {"source_url": "src://it", "relevance": 1.0, "axis": "vector"}
-    ]
+    assert [
+        (s["source_url"], s["relevance"], s["axis"]) for s in result["sources"]
+    ] == [("src://it", 1.0, "vector")]
     assert result["graph_degraded"] is False
     assert isinstance(result["generation_time_s"], float)
     assert isinstance(result["retrieval_time_s"], float)
@@ -452,10 +577,13 @@ def test_query_pipeline_runs_bounded_context_expansion_after_vector_search() -> 
     assert expansion_trace["context_ids"] == ["tag:it:database", "tag:it:storage"]
     assert expansion_trace["paths"] == [["tag:it:database", "tag:it:storage"]]
     assert expansion_trace["depths"] == [1]
-    assert result["sources"] == [
-        {"source_url": "src://graph", "relevance": 1.0, "axis": "graph"},
-        {"source_url": "src://it", "relevance": 1.0, "axis": "vector"},
-    ]
+    # Порядок источников - по кандидатам, а не по оси (ADR-061, ADR-063). `src://it`
+    # принёс кандидата `chk:it`, и его оценка получена переранжированием. `src://graph`
+    # обходом достигнут, но кандидата не дал: оценивать его нечем, поэтому он стоит
+    # после. Прежний ключ сортировки ставил его первым по признаку «ось = graph».
+    assert [
+        (s["source_url"], s["relevance"], s["axis"]) for s in result["sources"]
+    ] == [("src://it", 1.0, "vector"), ("src://graph", 1.0, "graph")]
     assert result["graph_degraded"] is False
 
 
@@ -486,9 +614,9 @@ def test_query_pipeline_graph_failure_preserves_vector_answer() -> None:
     )
 
     assert result["text"] == "векторный ответ"
-    assert result["sources"] == [
-        {"source_url": "src://it", "relevance": 1.0, "axis": "vector"}
-    ]
+    assert [
+        (s["source_url"], s["relevance"], s["axis"]) for s in result["sources"]
+    ] == [("src://it", 1.0, "vector")]
     assert result["graph_degraded"] is True
     degraded_trace = next(
         event for event in result["trace"] if event.get("stage") == "graph_expansion"

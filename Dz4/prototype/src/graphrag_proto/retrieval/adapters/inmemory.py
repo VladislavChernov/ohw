@@ -601,6 +601,39 @@ class InMemoryVectorStore(VectorStoreProvider):
             for item in self._vectors.values()
         )
 
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: Sequence[str],
+        domain: str | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """Тексты чанков по идентификаторам: мост «обход → читаемый кандидат».
+
+        Здесь вектор лежит по ключу `chunk_id`, поэтому чтение — прямой доступ, без
+        сортировки и без обхода всех записей. Идентификаторы приводятся к строке: обход
+        отдаёт их из свойств узла, где тип не закреплён.
+        """
+        wanted = [str(value) for value in chunk_ids if value]
+        if not wanted:
+            return []
+        rows: list[dict[str, Any]] = []
+        for chunk_id in wanted:
+            item = self._vectors.get(chunk_id)
+            if item is None:
+                continue
+            metadata = item.get("metadata") or {}
+            if domain is not None and str(metadata.get("domain") or "") != domain:
+                continue
+            rows.append(
+                {
+                    "chunk_id": chunk_id,
+                    "text": str(item.get("text") or ""),
+                    "source_url": str(metadata.get("source_url") or ""),
+                    "domain": metadata.get("domain"),
+                    "index": metadata.get("index"),
+                }
+            )
+        return rows
+
     def list_chunk_ids_of_source(
         self,
         source_url: str,

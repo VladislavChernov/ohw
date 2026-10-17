@@ -5,6 +5,11 @@
 вычислялось раньше в теле trace-события. Написанный обработчик и работающий обработчик —
 разные утверждения, и тест на достижимость — единственный способ их различить.
 
+Раньше в этой роли был `graph_boost`. Он снесён (ADR-063), и его место занял
+`filter_demote_scale`: он читается из того же места профиля, так же приводится к дефолту
+с записью имени в `config_fallbacks` и так же попадает в `effective_retrieval`. Проверки
+остались те же — сменился ключ, а не смысл.
+
 Граф в тестах непустой и расширение действительно происходит: на пустом графе код честно
 ставит `graph_degraded` с причиной `no_context_ids`, и тест на «дефект конфига не деградирует
 ось графа» прошёл бы впустую.
@@ -24,7 +29,11 @@ from graphrag_proto.retrieval.adapters.inmemory import (
 )
 from graphrag_proto.retrieval.adapters.llm import FakeLLM
 from graphrag_proto.retrieval.adapters.reranker import NoOpRerankerAdapter
-from graphrag_proto.retrieval.pipeline import QueryPipeline, profile_fingerprint
+from graphrag_proto.retrieval.pipeline import (
+    FILTER_DEMOTE_SCALE,
+    QueryPipeline,
+    profile_fingerprint,
+)
 from graphrag_proto.retrieval.profile import ProfileError
 
 VALID_RETRIEVAL: dict[str, Any] = {
@@ -33,7 +42,7 @@ VALID_RETRIEVAL: dict[str, Any] = {
     "max_depth": 2,
     "max_fanout": 4,
     "max_graph_nodes": 8,
-    "graph_boost": 0.2,
+    "filter_demote_scale": 0.2,
 }
 
 
@@ -171,17 +180,17 @@ def test_pinned_profile_survives_change_of_the_source() -> None:
 
     Это и есть смысл закрепления: не «ускорение», а решение о моменте применения. Тест
     моделирует ровно то событие, ради которого закрепление введено, и без закрепления
-    второй вопрос был бы измерен с другим `graph_boost`.
+    числа применяются, а профиль закрепляется по отпечатку, а не по значению ilter_demote_scale.
     """
     loader = _Loader()
     pipe = _pipeline(loader)
 
     first = _run(pipe)
-    loader.retrieval = {**VALID_RETRIEVAL, "graph_boost": 0.9, "max_depth": 5}
+    loader.retrieval = {**VALID_RETRIEVAL,         "filter_demote_scale": 0.9, "max_depth": 5}
     second = _run(pipe)
 
     assert first["profile_fingerprint"] == second["profile_fingerprint"]
-    assert second["effective_retrieval"]["graph_boost"] == 0.2
+    assert second["effective_retrieval"]["filter_demote_scale"] == 0.2
     assert second["effective_retrieval"]["max_depth"] == 2
     assert loader.loads == 1
 
@@ -222,7 +231,7 @@ def test_fingerprint_is_stable_and_sensitive() -> None:
 @pytest.mark.parametrize(
     ("key", "value", "expected_default"),
     [
-        ("graph_boost", "много", 0.0),
+        ("filter_demote_scale", "много", FILTER_DEMOTE_SCALE),
         ("max_depth", "глубоко", 2),
         ("max_fanout", [1], 8),
         ("max_graph_nodes", None, 5),
@@ -290,25 +299,25 @@ def test_clean_profile_has_empty_fallback_list() -> None:
     done = _run(pipe)
 
     assert done["config_fallbacks"] == []
-    assert done["effective_retrieval"]["graph_boost"] == 0.2
+    assert done["effective_retrieval"]["filter_demote_scale"] == 0.2
     assert done["effective_retrieval"]["max_depth"] == 2
 
 
 def test_boost_fallback_is_reachable_with_trace_off() -> None:
     """Регрессия на тот самый мёртвый код.
 
-    `graph_boost` вычислялся в теле trace-события, а аргумент функции вычисляется до вызова:
+    ilter_demote_scale применяется и без trace-событий: если поле видно только в
     при `trace=True` первое чтение падало раньше терпимой ветки, и обработчик не срабатывал
     никогда. Значит «работает» зависело от отладочного флага, и тест обязан ловить именно
     это — обе ветки проверяются, потому что ломалась только одна.
     """
-    pipe = _pipeline(_Loader({**VALID_RETRIEVAL, "graph_boost": "много"}))
+    pipe = _pipeline(_Loader({**VALID_RETRIEVAL, "filter_demote_scale": "много"}))
 
     for trace in (False, True):
         done = pipe.run("Quicksort", domain="it", generate=False, trace=trace)
-        assert "retrieval.graph_boost" in done["config_fallbacks"], f"trace={trace}"
+        assert "retrieval.filter_demote_scale" in done["config_fallbacks"], f"trace={trace}"
         assert done["graph_degraded"] is False, f"trace={trace}"
-        assert done["effective_retrieval"]["graph_boost"] == 0.0, f"trace={trace}"
+        assert done["effective_retrieval"]["filter_demote_scale"] == FILTER_DEMOTE_SCALE, f"trace={trace}"
 
 
 def test_applied_boost_available_without_trace() -> None:
@@ -321,7 +330,7 @@ def test_applied_boost_available_without_trace() -> None:
 
     done = _run(pipe, trace=False)
 
-    assert done["effective_retrieval"]["graph_boost"] == 0.2
+    assert done["effective_retrieval"]["filter_demote_scale"] == 0.2
 
 
 # --- контракт и строгий режим --------------------------------------------------

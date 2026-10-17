@@ -121,6 +121,11 @@ PARITY_STABLE = "stable"
 PARITY_CHANGED = "changed"
 PARITY_UNAVAILABLE = "unavailable"
 
+# Метки «что ось знает о документе» (ADR-046, поправка 2026-10-16). Имёнства берутся у пайплайна,
+# здесь только значения для чтения в отчёте: одно место правды — `retrieval.pipeline`.
+GRAPH_KNOWLEDGE_BLIND = "blind"
+GRAPH_KNOWLEDGE_REACHABLE = "reachable_unused"
+
 # generation.mode (design.md §5.2): judge / n/a / skipped / empty
 GENERATION_MODE_SKIPPED = "skipped"
 GENERATION_MODE_NO_JUDGE = "n/a"
@@ -1649,6 +1654,26 @@ def eval_question(
 
     graph_urls = [src["source_url"] for src in sources if isinstance(src, dict) and src.get("axis") == "graph"]
     vector_urls = [src["source_url"] for src in sources if isinstance(src, dict) and src.get("axis") == "vector"]
+    # Что ось знала о золотых источниках этого вопроса (ADR-046, поправка 2026-10-16).
+    # Без этих двух чисел `necessity = 0` неоднозначен: на частично наполненном корпусе ноль
+    # означает либо «ось не помогла», либо «оси не было видно этих документов» — разные выводы
+    # при одном числе.
+    golden_set = set(golden_sources)
+    knowledge_by_source = {
+        str(src.get("source_url")): src.get("graph_knowledge")
+        for src in sources
+        if isinstance(src, dict) and src.get("source_url")
+    }
+    blind_golden = sorted(
+        source
+        for source in golden_set
+        if knowledge_by_source.get(source) == GRAPH_KNOWLEDGE_BLIND
+    )
+    linked_golden = sorted(
+        source
+        for source in golden_set
+        if knowledge_by_source.get(source) == GRAPH_KNOWLEDGE_REACHABLE
+    )
     graph_degraded = bool(done.get("graph_degraded"))
     trace_events = done.get("trace") or []
     graph_trace = next(
@@ -1682,14 +1707,27 @@ def eval_question(
         "graph_degraded": graph_degraded,
         "projection_status": done.get("projection_status"),
         "projection_revision": done.get("projection_revision"),
-        # Применённый boost берётся из `done`, а не из trace-события: при выключенном trace
-        # trace-события нет, и поле было всегда `None` — то есть запись о применённой
-        # настройке зависела от отладочного флага.
-        "graph_boost": (done.get("effective_retrieval") or {}).get("graph_boost"),
+        # Применённая реализация порядка берётся из `done`, а не из trace-события: при
+        # выключенном trace событий нет, и поле было бы всегда `None` — то есть запись о
+        # применённой политике зависела бы от отладочного флага. Записаны оба имени:
+        # запрошенное и применённое.
+        "ordering_requested": (done.get("effective_retrieval") or {}).get("ordering_requested"),
+        "ordering_applied": (done.get("effective_retrieval") or {}).get("ordering_applied"),
+        "ordering_params": (done.get("effective_retrieval") or {}).get("ordering_params"),
+        "ordering_fallback": (done.get("effective_retrieval") or {}).get("ordering_fallback"),
+        "bridge_status": (done.get("effective_retrieval") or {}).get("bridge_status"),
+        "bridged_chunks": (done.get("effective_retrieval") or {}).get("bridged_chunks"),
+        "filter_status": (done.get("effective_retrieval") or {}).get("filter_status"),
+        "filter_demoted": (done.get("effective_retrieval") or {}).get("filter_demoted"),
         "profile_fingerprint": done.get("profile_fingerprint"),
         "profile_pinned_at": done.get("profile_pinned_at"),
         "config_fallbacks": done.get("config_fallbacks") or [],
         "effective_retrieval": done.get("effective_retrieval") or {},
+        # Что заняло бюджет контекста. Скелет входит первым и не вытесняется, тело получает
+        # остаток, поэтому `skeleton_token_share` - это цена, которую платит текст документа.
+        # На кэш-попадании здесь `None`: сборка не выполнялась, и это отсутствие данных,
+        # а не нулевой расход.
+        "context": done.get("context"),
         "seed_chunk_ids": graph_trace.get("seed_chunk_ids", []),
         "graph_paths": graph_trace.get("paths", []),
         "graph_depths": graph_trace.get("depths", []),
@@ -1700,6 +1738,11 @@ def eval_question(
                 "source_url": src.get("source_url"),
                 "axis": src.get("axis"),
                 "score": src.get("relevance"),
+                # Метка обязательна вместе с осью: без неё «граф не помог» и «граф про этот
+                # документ ничего не знает» в отчёте неразличимы.
+                "graph_knowledge": src.get("graph_knowledge"),
+                "graph_knowledge_reason": src.get("graph_knowledge_reason"),
+                "graph_linked_chunks": src.get("graph_linked_chunks"),
             }
             for src in sources
             if isinstance(src, dict) and src.get("source_url")
@@ -1709,6 +1752,11 @@ def eval_question(
         "golden_graph_evidence": graph_evidence,
         "retrieval": ret,
         "graph_contribution": gc,
+        # Поимённые счётчики слепоты: без них `necessity` на частичном корпусе неоднозначна.
+        "blind_golden": blind_golden,
+        "linked_golden": linked_golden,
+        "blind_golden_count": len(blind_golden),
+        "linked_golden_count": len(linked_golden),
         "answer": answer,
         "generation": gen,
         "timings": {
@@ -1719,6 +1767,65 @@ def eval_question(
         "trace_events": done.get("trace") if trace_enabled else [],
     }
     return record
+
+
+def _aggregate_context_assembly(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Разбиение бюджета контекста по прогону.
+
+    Скелет входит первым и не вытесняется, тело получает остаток, поэтому доля
+    скелета - это цена, которую платит текст документа. Без этих чисел два разных
+    вреда неразличимы: "граф занял место текста" и "граф занял своё место".
+
+    `mode` различает три случая, и они НЕ сводятся к нулю:
+    - `measured` - сборка выполнялась хотя бы раз;
+    - `cache_only` - ни разу: все ответы из кэша, расход неизвестен;
+    - `not_assembled` - блока нет ни у одного ответа.
+    Пустой результат и отсутствие блока не должны выглядеть одинаково.
+    """
+    blocks = [
+        r["context"]
+        for r in results
+        if isinstance(r.get("context"), dict)
+    ]
+    # Именно `is None` при НАЛИЧСТВИИ ключа: отсутствующий ключ и явный `None` - разные
+    # вещи. Ответ без блока означает, что блок не собирался вовсе, и приравнивать его
+    # к кэш-попаданию - значит стереть различие между двумя причинами отсутствия данных.
+    cache_only = sum(
+        1 for r in results if "context" in r and r["context"] is None
+    )
+    if not blocks:
+        return {
+            "mode": "cache_only" if cache_only else "not_assembled",
+            "questions_measured": 0,
+            "questions_unknown": cache_only,
+            "avg_skeleton_tokens": None,
+            "avg_body_tokens": None,
+            "avg_skeleton_token_share": None,
+"total_dropped_chunks": None,
+        "questions_with_dropped_chunks": None,
+        "questions_with_evidence_lines": None,
+    }
+
+    def _avg_int(key: str) -> float | None:
+        vals = [int(b[key]) for b in blocks if b.get(key) is not None]
+        return round(sum(vals) / len(vals), 4) if vals else None
+
+    shares = [b["skeleton_token_share"] for b in blocks if b.get("skeleton_token_share") is not None]
+    return {
+        "mode": "measured",
+        "questions_measured": len(blocks),
+        "questions_unknown": cache_only,
+        "avg_skeleton_tokens": _avg_int("skeleton_tokens"),
+        "avg_body_tokens": _avg_int("body_tokens"),
+        "avg_skeleton_token_share": round(sum(shares) / len(shares), 4) if shares else None,
+        "total_dropped_chunks": sum(int(b.get("dropped_chunks") or 0) for b in blocks),
+        "questions_with_dropped_chunks": sum(
+            1 for b in blocks if int(b.get("dropped_chunks") or 0) > 0
+        ),
+        # В скольких вопросах блок свидетельства содержал хоть что-то. Ноль при непустой
+        # выдаче означал бы, что ось отработала, а свидетельства не дала.
+        "questions_with_evidence_lines": sum(1 for b in blocks if b.get("skeleton_lines")),
+    }
 
 
 def _aggregate_graph_contribution(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1768,6 +1875,27 @@ def _aggregate_graph_contribution(results: list[dict[str, Any]]) -> dict[str, An
     def _avg(key: str) -> float:
         return round(sum(float(m[key]) for m in metric_slice) / n, 4)
 
+    # Поимённая строка вклада: срез из двух-трёх вопросов не читается средним, и без
+    # счётчиков слепоты ноль на строке неоднозначен (ADR-046, поправка 2026-10-16).
+    per_question = [
+        {
+            "id": r.get("id", ""),
+            "necessity": (r.get("graph_contribution") or {}).get("necessity"),
+            "delta_recall": (r.get("graph_contribution") or {}).get("delta_recall"),
+            "recall_graph": (r.get("graph_contribution") or {}).get("recall_graph"),
+            "recall_vector": (r.get("graph_contribution") or {}).get("recall_vector"),
+            "blind_golden": r.get("blind_golden") or [],
+            "linked_golden": r.get("linked_golden") or [],
+            "graph_axis_active": any(
+                isinstance(source, dict) and source.get("axis") == "graph"
+                for source in (r.get("retrieved") or [])
+            ),
+            "projection_status": r.get("projection_status"),
+        }
+        for r in results
+        if isinstance(r.get("graph_contribution"), dict)
+    ]
+    blind_questions = [row["id"] for row in per_question if row["blind_golden"]]
     return {
         "mode": "measured",
         "questions": n,
@@ -1777,6 +1905,12 @@ def _aggregate_graph_contribution(results: list[dict[str, Any]]) -> dict[str, An
         "recall_graph": _avg("recall_graph"),
         "recall_vector": _avg("recall_vector"),
         "evidence_recall_graph": _avg("evidence_recall_graph"),
+        # Агрегат по слепоте и поимённый список: ноль с `blind_golden` — это «вклад не измерен»,
+        # а ноль без слепых — измеренный результат. Среднего по слепоте здесь нет намеренно:
+        # знаменатель «вопросов» не тот же, что у `necessity`, и смешивать их нельзя.
+        "questions_with_blind_golden": len(blind_questions),
+        "questions_with_blind_golden_ids": blind_questions,
+        "per_question": per_question,
     }
 
 
@@ -1812,6 +1946,11 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
             "mode": results[0]["generation"].get("mode", "unknown") if results else "unknown",
         },
         "graph_contribution": _aggregate_graph_contribution(results),
+        # Разбиение бюджета контекста. Сводка - среднее по вопросам, у которых сборка
+        # вообще выполнялась (на кэш-попадании блок равен None и в среднее не идёт), плюс
+        # число таких попаданий отдельным полем: без него молчаливый ноль выглядит так же,
+        # как «граф ни разу не занял место».
+        "context_assembly": _aggregate_context_assembly(results),
         # Графовая ось фактически сработала? Без этого флага прогон, где граф
         # «готов», но ничего не дал, неотличим от чистого (verdict без судьи = n/a).
         "graph_axis_active": any(
@@ -2155,6 +2294,41 @@ def write_passport(
             f"статусы проекции: {statuses}). Число `necessity = 0.0` здесь означает "
             "'не считали', а не 'граф ничего не дал'."
         )
+    # Слепота золотых источников — то, что делает `necessity = 0` на частичном корпусе
+    # неоднозначным. Интерпретация зафиксирована заранее (ADR-046, поправка 2026-10-16):
+    # `blind_golden > 0` — вклад не измерен, ноль без слепых — измеренный результат.
+    blind_ids = gc.get("questions_with_blind_golden_ids") or []
+    if blind_ids:
+        lines.append(
+            f"- ⚠️ **вопросов со слепым золотым источником: {len(blind_ids)}** "
+            f"({', '.join(blind_ids)}): у них `necessity` считается по неполной части "
+            "эталонов, и ноль на них — это «ось не видела этих документов», а не «граф не помог»."
+        )
+    per_question = gc.get("per_question") or []
+    if per_question:
+        lines += [
+            "",
+            "## Вклад графа по вопросам",
+            "",
+            (
+                "Среднее по срезу не читается, когда вопросов единицы: ниже строки, "
+                "из которых среднее и складывается."
+            ),
+            "",
+            (
+                "| id | necessity | delta_recall | recall_graph | recall_vector | "
+                "слепых золотых | знала, не привела | ось |"
+            ),
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for row in per_question:
+            blind = ", ".join(row.get("blind_golden") or []) or "—"
+            linked = ", ".join(row.get("linked_golden") or []) or "—"
+            lines.append(
+                f"| `{row.get('id')}` | {row.get('necessity')} | {row.get('delta_recall')} | "
+                f"{row.get('recall_graph')} | {row.get('recall_vector')} | {blind} | {linked} | "
+                f"{'да' if row.get('graph_axis_active') else 'нет'} |"
+            )
     # Причина вердикта печатается здесь же: вердикт без причины в артефакте не
     # отличим от сбоя раннера, и следующий читатель примет прогон за измерение.
     for reason in (report or {}).get("verdict_reasons") or []:

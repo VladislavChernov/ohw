@@ -882,6 +882,52 @@ class Neo4jVectorStore(VectorStoreProvider):
             ).single()
         return not row or int(row["mismatches"] or 0) == 0
 
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: Sequence[str],
+        domain: str | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """Тексты чанков по идентификаторам: мост «обход → читаемый кандидат».
+
+        Идентификаторы из обхода — это `node_id`/`tag_id` строк расширения, а хранилище
+        адресует чанк по `node_id`. Поэтому значения разбиваются на два множества ДО
+        запроса: подстановка значения в поле не является поиском, и смешивать их в одном
+        списке значило бы сравнивать `node_id` с `tag_id` в одном столбце.
+        """
+        wanted = {str(value) for value in chunk_ids if value}
+        if not wanted:
+            return []
+        tag_ids = {value for value in wanted if value.startswith("tag:")}
+        node_ids = wanted - tag_ids
+        domain_clause = " AND c.domain = $domain" if domain is not None else ""
+        parameters: dict[str, Any] = {"node_ids": sorted(node_ids), "tag_ids": sorted(tag_ids)}
+        if domain is not None:
+            parameters["domain"] = domain
+        with self._session() as session:
+            rows = session.run(
+                f"MATCH (c:{CHUNK_LABEL}) WHERE (c.node_id IN $node_ids OR c.tag_id IN $tag_ids)"
+                f"{domain_clause} "
+                "RETURN c.node_id AS chunk_id, c.text AS text, c.source_url AS source_url, "
+                "c.domain AS domain, c.index AS index",
+                parameters=parameters,
+            ).data()
+        found = {
+            str(row["chunk_id"]): {
+                "chunk_id": str(row["chunk_id"]),
+                "text": str(row.get("text") or ""),
+                "source_url": str(row.get("source_url") or ""),
+                "domain": row.get("domain"),
+                "index": row.get("index"),
+            }
+            for row in rows
+            if row.get("chunk_id")
+        }
+        # Порядок запрошенных идентификаторов сохраняется: он несёт смысл обхода (ближняя
+        # вершина раньше дальней), и переупорядочивание здесь потеряло бы его безвозвратно.
+        # Сортировка по ключу, как было, теряла этот порядок молча — комментарий говорил
+        # об обратном.
+        return [found[key] for key in dict.fromkeys(str(value) for value in chunk_ids if value) if key in found]
+
     def list_chunk_ids_of_source(
         self,
         source_url: str,

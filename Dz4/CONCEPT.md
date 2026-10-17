@@ -200,9 +200,11 @@ state и partial projection дают vector-only fallback с degraded marker. С
 Отдельный **graph experiment** может выполнить после vector search bounded expansion по
 `context_ids`/`tag_ids`, если inline/offline projection готова. Expansion имеет depth/fanout/
 node/time budget, обходит рёбра любого вида в обе стороны и возвращает provenance/path вместе с
-фактическим видом ребра. Влияние на ранжирование задаётся профилем через
-`retrieval.graph_boost` и **по умолчанию равно нулю**, то есть без явной настройки граф даёт
-контекст для генерации, но не меняет порядок выдачи; сужение обхода видами задаётся
+фактическим видом ребра. На ранжирование ось графа **не влияет**: подъёма оценки
+константой больше нет, а порядок выдачи задаёт одна сменная реализация
+(`retrieval.ordering`: `rerank_bge` основным путём, `rrf_fallback` запасным,
+`vector_order_fallback` при неразрешимом имени). Кандидаты, которых дошёл обход, попадают
+в выдачу через мост — как текст, без собственной оценки; сужение обхода видами задаётся
 `retrieval.expansion_kinds`. При unavailable/stale graph, а также при пустом результате обхода
 используется vector-only fallback с degraded marker, причём причина различается: рёбер нет либо
 сужение ничего не нашло. Silent fallback не считается успешным graph experiment.
