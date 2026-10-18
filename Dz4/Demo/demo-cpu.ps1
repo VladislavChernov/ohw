@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Демонстрационный стенд GraphRAG для Windows, ВАРИАНТ НА CPU.
 
@@ -77,8 +77,7 @@ function Invoke-Native {
 function Get-ComposeArguments {
     $args = @('--project-directory', $infraDir, '--file', $composeRuntime)
     # Оверлей реранкера подключается только по флагу: слот RERANKER без него
-    # остаётся 
-oop, а сервис не поднимается.
+    # остаётся noop, а сервис реранкера не поднимается.
     if ($WithReranker) {
         $args += @('--file', $composeReranker)
     }

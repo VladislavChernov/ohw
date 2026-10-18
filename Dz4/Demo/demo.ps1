@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Демонстрационный стенд GraphRAG для Windows без bash.
 

@@ -398,6 +398,56 @@ def _sh_is_runnable(path: Path) -> bool:
     return shutil.which("sh") is not None
 
 
+def _powershell_is_runnable() -> bool:
+    """Есть ли PowerShell, которым можно разобрать скрипт."""
+    return shutil.which("powershell") is not None
+
+
+POWERSHELL_SCRIPTS = (PS1, PS1_CPU, PS1_INGEST)
+
+
+@pytest.mark.parametrize("script", POWERSHELL_SCRIPTS)
+def test_powershell_scripts_keep_their_bom(script: Path) -> None:
+    """PowerShell 5.1 читает `.ps1` БЕЗ BOM как ANSI, и кириллица в комментариях ломает парсер.
+
+    Найдено 2026-10-18: `demo.ps1` и `demo-cpu.ps1` работали годами, потом потеряли BOM при
+    правке, и перестали запускаться вообще — с ошибкой про неожиданный токен, а не про
+    кодировку. Заметить это без запуска нельзя: все проверки этого файла сравнивают текст,
+    а текст был в порядке.
+    """
+    raw = script.read_bytes()
+    assert raw[:3] == b"\xef\xbb\xbf", (
+        f"{script.name} без BOM. Windows PowerShell 5.1 прочитает его в ANSI-кодировке "
+        "хоста, кириллица в комментариях превратится в мусор, и парсер упадёт на "
+        "неожиданном токене. BOM обязателен."
+    )
+
+
+@pytest.mark.skipif(not _powershell_is_runnable(), reason="нет PowerShell")
+@pytest.mark.parametrize("script", POWERSHELL_SCRIPTS)
+def test_powershell_scripts_parse(script: Path) -> None:
+    """Скрипт обязан разбираться. Разбор не исполняет скрипт и ничего не меняет.
+
+    Более дешёвая проверка, чем запуск: она ловит синтаксис, включая порчу текста
+    строковыми заменами, и не поднимает ни одного контейнера.
+    """
+    check = (
+        "$e=$null;[void][System.Management.Automation.Language.Parser]"
+        ".ParseFile($args[0],[ref]$null,[ref]$e);"
+        "if($e -and $e.Count){$e[0].Message}"
+    )
+    completed = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", check, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert not completed.stdout.strip(), (
+        f"{script.name} не разбирается: {completed.stdout.strip()}"
+    )
+
+
 def _compose_arguments_seen_by_stub(script: Path, arguments: list[str]) -> list[str]:
     """Запустить скрипт с подменой `docker` и вернуть аргументы, дошедшие до compose.
 
