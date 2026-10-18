@@ -50,7 +50,7 @@ class _StaticProfileLoader:
                 "max_depth": 2,
                 "max_fanout": 4,
                 "max_graph_nodes": 8,
-                "graph_boost": 0.2,
+                "filter_demote_scale": 0.2,
             },
             "context_assembly": {"max_tokens": 512},
         }

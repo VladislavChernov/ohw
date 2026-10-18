@@ -47,7 +47,7 @@ from graphrag_proto.retrieval.semantic_cache import CachedAnswer, InMemorySemant
 class _ProfileLoader(DomainProfileLoader):
     def load(self, domain: str | None = None) -> dict[str, Any]:
         return {
-            "retrieval": {"graph_search_enabled": True, "graph_boost": 0.1},
+            "retrieval": {"graph_search_enabled": True, "filter_demote_scale": 0.1},
             "context_assembly": {"max_tokens": 128},
         }
 

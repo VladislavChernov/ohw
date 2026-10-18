@@ -1,38 +1,40 @@
-﻿<#
+<#
 .SYNOPSIS
     Демонстрационный стенд GraphRAG для Windows без bash.
 
 .DESCRIPTION
-    Тот же сценарий и те же команды, что в Demo/demo.sh, для Windows, где bash может
-    отсутствовать. На Linux и macOS используйте demo.sh.
+    Сценарий демо-стенда для Windows, где bash может отсутствовать. На Linux и macOS
+    используйте demo.sh.
+
+    ИНГЕСТА ЗДЕСЬ НЕТ, и это не ограничение, а решение (ADR-065): стенду нужны запросы,
+    поиск и UI, а наполнением базы занимается отдельный скрипт `Demo/ingest.ps1`
+    (на Linux и macOS - `Demo/ingest.sh`). Наполненный том - общий, поэтому после
+    `ingest.ps1 down` база остаётся на месте и стенд её читает.
 
     Учётные данные заданы здесь и больше нигде. Пароль базы менять нельзя: том набора
     `ready` создан один раз, Neo4j применяет NEO4J_AUTH только при первом старте, и смена
     пароля означала бы пересоздание тома вместе со всем наполнением.
 
 .EXAMPLE
-    powershell -File Demo\demo.ps1 up --set empty --with-ingest
+    powershell -File Demo\demo.ps1 up -Set ready
 
 .EXAMPLE
-    powershell -File Demo\demo.ps1 status --set ready
+    powershell -File Demo\demo.ps1 status -Set ready
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'down', 'status', 'load', 'export', 'restore', 'help')]
+    [ValidateSet('up', 'down', 'status', 'export', 'restore', 'help')]
     [string]$Command = 'help',
 
     [ValidateSet('empty', 'ready')]
     [string]$Set = 'empty',
 
-    [switch]$WithIngest,
     # Отдельный запуск С реранкером bge. По умолчанию выключен: без этого флага слот
     # `RERANKER` остаётся `noop` и сервис реранкера не поднимается. Оверлей выдаёт
     # устройство, поэтому флагом в командной строке, как и видеокарту.
     [switch]$WithReranker,
     [int]$WaitTimeoutSec = 300,
-    [string]$Path,
-    [string]$Domain = 'it',
     [string]$Out,
     [string]$Archive
 )
@@ -45,7 +47,6 @@ $DEMO_API_KEY = 'demo-key-2026'
 $scriptDir = $PSScriptRoot
 $infraDir = Resolve-Path (Join-Path $scriptDir '..\prototype\infra')
 $composeRuntime = Join-Path $infraDir 'compose.runtime.yaml'
-$composeIngest = Join-Path $infraDir 'compose.ingest.yaml'
 $composeReranker = Join-Path $infraDir 'compose.runtime-reranker.yaml'
 # Подкладывается ВСЕГДА: именно этот файл выдаёт контейнерам видеокарту. Без него LLM
 # считает на процессоре - это не ошибка, а вариант `demo-cpu.ps1`.
@@ -56,17 +57,17 @@ $neo4jContainer = 'ohw-runtime-neo4j'
 
 function Write-Usage {
     @'
-Демо-стенд GraphRAG.
+Демо-стенд GraphRAG. ИНГЕСТА ЗДЕСЬ НЕТ: он в отдельном скрипте.
 
-    demo.ps1 up       -Set empty|ready [-WithIngest]
-    demo.ps1 down     -Set empty|ready [-WithIngest]
+    demo.ps1 up       -Set empty|ready
+    demo.ps1 down     -Set empty|ready
     demo.ps1 status   -Set empty|ready
-    demo.ps1 load     -Path ФАЙЛ [-Domain it]
     demo.ps1 restore  -Set empty|ready [-Archive ФАЙЛ]
     demo.ps1 export   -Set ready [-Out ФАЙЛ]
 
-`-WithIngest` дополнительно поднимает ingestion-api - он нужен, чтобы грузить документы в
-пустую базу. Без него работает только просмотр того, что уже налито.
+Наполнение базы - отдельными скриптами: Demo/ingest.ps1 (Windows), Demo/ingest.sh (Linux, macOS).
+Тома наборов общие, поэтому наполненная база остаётся после `ingest.ps1 down`, а готовый
+набор выгружается архивом и восстанавливается без ингеста: demo.ps1 export / restore.
 
 Наборы:
   empty - пустая система, тома создаются заново.
@@ -86,9 +87,8 @@ function Invoke-Native {
 function Get-ComposeArguments {
     # Порядок важен: оверлей GPU идёт сразу за базовым, иначе его `deploy` перепишется.
     $args = @('--project-directory', $infraDir, '--file', $composeRuntime, '--file', $composeGpu)
-    if ($WithIngest) {
-        $args += @('--file', $composeIngest, '--profile', 'ingest')
-    }
+    # Оверлея ингеста здесь нет и быть не должно: ingestion-api не входит в стенд
+    # (ADR-058), и наполнением занимается отдельный скрипт (ADR-065).
     # Ранкерный оверлей идёт ПОСЛЕ оверлея GPU: он переопределяет слот `RERANKER` у
     # `query-api` и `query-worker`, и порядок файлов фиксирует, чьё значение победит.
     if ($WithReranker) {
@@ -139,104 +139,6 @@ function Get-ContainerPassword {
     return ''
 }
 
-function Invoke-Upload {
-    param([string]$Source, [string]$Domain)
-
-    $name = Split-Path -Leaf $Source
-    Write-Host "Загружаю $Source как docs/$name"
-    Invoke-Native -Exe 'docker' -Arguments @('cp', $Source, 'ohw-runtime-ingestion:/tmp/demo_doc.md')
-
-    # Запросы идут изнутри контейнера: его Python уже есть, и это снимает зависимость
-    # от Python на хосте и от вложенных кавычек в PowerShell.
-    $script = @'
-import json
-import sys
-import time
-import urllib.request
-
-domain, name = sys.argv[1], sys.argv[2]
-API = "demo-key-2026"
-BASE = "http://localhost:8002"
-SOURCE_URL = "docs/" + name
-
-
-def call(method, url, body=None, timeout=120):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"Content-Type": "application/json", "X-API-Key": API},
-    )
-    return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
-
-
-text = open("/tmp/demo_doc.md", encoding="utf-8").read()
-
-try:
-    st = call("POST", f"{BASE}/api/v1/ingestion/documents/status",
-              {"source_url": SOURCE_URL, "domain": domain,
-               "doc_type": "md", "content": text})
-    if st.get("unchanged"):
-        print(f"  уже загружен в текущем виде (версия {st.get('version')}). Пропуск.")
-        sys.exit(0)
-    print(f"  загружен ранее: {st.get('known')}")
-except Exception as exc:
-    print(f"  спросить статус не удалось ({exc}). Продолжаю без проверки.")
-
-job = call("POST", f"{BASE}/api/v1/ingestion/documents",
-           {"source_url": SOURCE_URL, "domain": domain,
-            "doc_type": "md", "content": text})
-job_id = job["job_id"]
-print(f"  джоба {job_id}, жду...")
-
-final = None
-for _ in range(3600):
-    time.sleep(5)
-    final = call("GET", f"{BASE}/api/v1/ingestion/jobs/{job_id}")
-    if final.get("status") in ("succeeded", "failed", "cancelled"):
-        break
-else:
-    raise SystemExit(f"  джоба {job_id} не завершилась за 3 часа")
-
-print(f"  статус: {final['status']}")
-if final.get("total_duration_ms"):
-    print(f"  всего {final['total_duration_ms']} мс")
-    print(f"  по стадиям {json.dumps(final.get('stage_durations_ms'), ensure_ascii=False)}")
-if final["status"] != "succeeded":
-    raise SystemExit(f"  джоба завершилась статусом {final['status']}")
-print("  загрузка завершилась")
-'@
-
-    $script | docker exec -i ohw-runtime-ingestion python - $Domain $name
-    if ($LASTEXITCODE -ne 0) {
-        throw "загрузка не удалась"
-    }
-
-    # Проверка графа - НА ХОСТЕ. Внутри контейнера `docker` нет, и вызов оттуда падал бы
-    # FileNotFoundError уже после успешной загрузки, то есть выглядел бы как сбой загрузки.
-    Write-Host '  проверяю, что граф вырос'
-    $pw = Get-ContainerPassword
-    if (-not $pw) {
-        Write-Warning '  количество нод НЕ измерено: не удалось получить пароль из контейнера'
-        return
-    }
-    $out = docker exec $neo4jContainer cypher-shell -u neo4j -p $pw --format plain `
-        'MATCH (n:ContextNode) RETURN count(*) AS c;'
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning '  количество нод НЕ измерено: запрос к базе не прошёл'
-        return
-    }
-    $count = -join ($out | Select-Object -Skip 1 | ForEach-Object { $_ } | ForEach-Object {
-        ($_ -replace '[^0-9]', '')
-    })
-    if (-not $count) {
-        Write-Warning '  количество нод НЕ измерено: ответ не содержит числа'
-        return
-    }
-    Write-Host "  ContextNode в базе: $count"
-    if ([int]$count -eq 0) {
-        throw 'граф пуст, а джоба succeeded - это vector-only загрузка'
-    }
-}
 
 switch ($Command) {
 
@@ -256,10 +158,6 @@ switch ($Command) {
 
     'down' {
         Set-CommonEnv
-        # Оверлей ингеста подключается ВСЕГДА, а не по флагу: если стенд поднимали с
-        # -WithIngest, то без него ingestion-api остался бы работать после остановки.
-        # Лишний оверлей при остановке безобиден.
-        $WithIngest = $true
         Invoke-Compose @('down')
         Write-Host "Набор '$Set' остановлен. Тома сохранены."
     }
@@ -311,18 +209,6 @@ switch ($Command) {
         }
     }
 
-    'load' {
-        if (-not $Path) { throw 'нужен -Path ФАЙЛ' }
-        $resolved = (Resolve-Path -LiteralPath $Path).Path
-        if (-not (Test-ContainerRunning $neo4jContainer)) {
-            throw 'стенд не поднят. Сначала: demo.ps1 up -WithIngest'
-        }
-        if (-not (Test-ContainerRunning 'ohw-runtime-ingestion')) {
-            throw 'ingestion-api не запущен. Нужен: demo.ps1 up -WithIngest'
-        }
-        Invoke-Upload -Source $resolved -Domain $Domain
-        Write-Host 'Загружено.'
-    }
 
     'export' {
         # Тома набора. `query` намеренно не входит: в нём только журнал задач запросов, он

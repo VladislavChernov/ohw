@@ -110,6 +110,28 @@ class DemoClient:
         domains = response.json().get("domains")
         return domains if isinstance(domains, list) else []
 
+    def ingestion_is_up(self) -> bool:
+        """Жив ли ingestion-api. `False` — это «сервис не запущен», а не «сломан».
+
+        Ингест вынесен в отдельный скрипт (ADR-065), поэтому в обычном запуске демо его
+        нет, и вкладка «Документы» большую часть времени недоступна. Различить «не
+        запущен» и «не отвечает» можно только пробой, поэтому она и делается - один раз
+        при загрузке страницы, а не по нажатию кнопки.
+
+        Отказ сети, отказ контейнера и неверный адрес дают одно и то же `False`: различие
+        между ними UI не показывает, и придумывать его значило бы показывать правдоподобную
+        догадку.
+        """
+        try:
+            response = requests.get(
+                f"{self._settings.ingestion_url}/health",
+                headers=self._headers,
+                timeout=3,
+            )
+        except requests.RequestException:
+            return False
+        return response.status_code < 400
+
     def upload_document(self, content: str, doc_type: str, domain: str, source_url: str) -> dict[str, Any]:
         response = requests.post(
             f"{self._settings.ingestion_url}/api/v1/ingestion/documents",

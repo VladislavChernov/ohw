@@ -1,13 +1,19 @@
-"""Гард: `Demo/demo.sh` и `Demo/demo.ps1` не должны разойтись.
+"""Гард: скрипты демо не должны разойтись между собой и не должны врать.
 
-Два файла с одной логикой - заведомое второе место правды, а в прошлой сессии расхождение
-между каталогом и прибором как раз стоило двух молчаливых отказов. Проверяем не текст, а то,
-что действительно ломает работу при расхождении:
+Четыре файла — две пары с одной логикой: стенд (`demo.sh` / `demo.ps1`, плюс вариант на
+процессоре) и наполнение базы (`ingest.sh` / `ingest.ps1`). Разведённые наборы команд у
+пар — не опечатка, а решение ADR-065.
+
+Проверяем не текст, а то, что действительно ломает работу при расхождении:
 
 - набор команд (не появилась новая команда только в одном файле);
 - учётные данные (разные пароль или ключ означают: один из них не поднимет стенд);
 - перечень compose-файлов;
-- набор томов и имён контейнеров, к которым идут обращения.
+- набор томов и имён контейнеров, к которым идут обращения;
+- **поведение shell-вариантов**: подкоманда обязана дойти до `docker compose`.
+
+Последнее - не украшение. Сравнением текста этот дефект пропускается: оба файла были
+сломаны одинаково, а значит одинаковы (см. `test_sh_passes_the_subcommand_to_compose`).
 
 Положительный контраст: «оба файла задают одинаковые учётные данные и одинаковый набор
 команд», а не «в файле нет такой-то строки».
@@ -15,7 +21,12 @@
 
 from __future__ import annotations
 
+import os
+import pathlib
 import re
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -27,9 +38,18 @@ SH = DEMO_DIR / "demo.sh"
 PS1 = DEMO_DIR / "demo.ps1"
 SH_CPU = DEMO_DIR / "demo-cpu.sh"
 PS1_CPU = DEMO_DIR / "demo-cpu.ps1"
+SH_INGEST = DEMO_DIR / "ingest.sh"
+PS1_INGEST = DEMO_DIR / "ingest.ps1"
+SH_INGEST_CPU = DEMO_DIR / "ingest-cpu.sh"
+PS1_INGEST_CPU = DEMO_DIR / "ingest-cpu.ps1"
 INFRA = DEMO_DIR.parent / "prototype" / "infra"
 
-COMMANDS = {"up", "down", "status", "load", "export", "restore"}
+# Стенд и ингест разведены (ADR-065), и наборы команд у них РАЗНЫЕ: `load` грузит
+# документы, то есть дело ингеста, а `export`/`restore` возят наполненный том, то есть
+# дело стенда. Смешанный набор означал бы, что разделение снова срослось.
+STAND_COMMANDS = {"up", "down", "status", "export", "restore"}
+INGEST_COMMANDS = {"up", "down", "status", "load"}
+COMMANDS = STAND_COMMANDS | INGEST_COMMANDS
 
 # Тома, к которым скрипты обращаются по имени: их нужно назвать, чтобы архивировать и
 # восстановить. Остальные тома создаёт compose, и скриптам их знать незачем.
@@ -38,7 +58,7 @@ NAMED_VOLUME_SUFFIXES = ("neo4j", "ingestion")
 # Пары файлов, которые обязаны вести себя одинаково, и ожидаемый набор compose-файлов
 # у каждой. Видеокарту выдаёт compose сам, поэтому GPU-вариант подкладывает оверлей, а
 # CPU-вариант обходится базовым файлом: на этом различии и держится всё разделение.
-# Оверлей реранкера подключается по флагу и потому назван во всех четырёх скриптах, но
+# Оверлей реранкера подключается по флагу и потому назван во всех скриптах, но
 # включается только по требованию: сам факт упоминания не обязан его поднимать.
 RERANKER_OVERLAY = "compose.runtime-reranker.yaml"
 
@@ -47,7 +67,6 @@ PAIRS = (
         SH, PS1,
         {
             "compose.runtime.yaml",
-            "compose.ingest.yaml",
             "compose.runtime-gpu.yaml",
             RERANKER_OVERLAY,
         },
@@ -55,7 +74,7 @@ PAIRS = (
     ),
     pytest.param(
         SH_CPU, PS1_CPU,
-        {"compose.runtime.yaml", "compose.ingest.yaml", RERANKER_OVERLAY},
+        {"compose.runtime.yaml", RERANKER_OVERLAY},
         id="cpu",
     ),
 )
@@ -342,9 +361,9 @@ def test_commands_match(sh: Path, ps1: Path, expected_compose: set[str]) -> None
     ps_commands = _commands(_read(ps1))
     assert sh_commands, f"в {sh.name} не найдено ни одной команды"
     assert ps_commands, f"в {ps1.name} не найдено ни одной команды"
-    assert sh_commands == ps_commands == COMMANDS, (
+    assert sh_commands == ps_commands == STAND_COMMANDS, (
         f"наборы команд разошлись: {sh.name}={sorted(sh_commands)}, "
-        f"{ps1.name}={sorted(ps_commands)}, ожидалось {sorted(COMMANDS)}"
+        f"{ps1.name}={sorted(ps_commands)}, ожидалось {sorted(STAND_COMMANDS)}"
     )
 
 
@@ -370,7 +389,151 @@ def test_compose_files_match(sh: Path, ps1: Path, expected_compose: set[str]) ->
         )
 
 
-def test_only_gpu_variant_uses_gpu_overlay() -> None:
+def _sh_is_runnable(path: Path) -> bool:
+    """Есть ли в системе `sh`, которым можно выполнить скрипт.
+
+    Гард поведенческий, поэтому на машине без POSIX-оболочки он честно пропускается, а
+    не делает вид, что проверил.
+    """
+    return shutil.which("sh") is not None
+
+
+def _compose_arguments_seen_by_stub(script: Path, arguments: list[str]) -> list[str]:
+    """Запустить скрипт с подменой `docker` и вернуть аргументы, дошедшие до compose.
+
+    Подмена нужна, чтобы не трогать стенд: скрипт печатает всё, что передал в
+    `docker compose`, и ничего не выполняет.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        stub_dir = pathlib.Path(tmp) / "stub"
+        stub_dir.mkdir()
+        stub = stub_dir / "docker"
+        # Метка включает слово `compose`: скрипт сначала зовёт `docker info` для проверки
+        # демона, и без фильтра первым «увиденным» оказался бы именно он.
+        stub.write_text('#!/bin/sh\necho "SEEN-COMPOSE: ${*}"\n', encoding="utf-8")
+        stub.chmod(0o755)
+        env = {**os.environ, "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}"}
+        completed = subprocess.run(
+            ["sh", str(script), *arguments],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+            check=False,
+        )
+    seen = [
+        line for line in completed.stdout.splitlines() if line.startswith("SEEN-COMPOSE: compose")
+    ]
+    if not seen:
+        pytest.fail(
+            f"{script.name} не вызвал docker compose при {arguments}. "
+            f"Вывод: {completed.stdout!r} / {completed.stderr!r}"
+        )
+    return seen[0][len("SEEN-COMPOSE:"):].split()
+
+
+@pytest.mark.skipif(not _sh_is_runnable(SH), reason="нет POSIX-оболочки")
+@pytest.mark.parametrize("script", (SH, SH_CPU, SH_INGEST, SH_INGEST_CPU))
+def test_sh_passes_the_up_subcommand_to_compose(script: Path) -> None:
+    """Подкоманда `up` с её флагами обязана дойти до compose.
+
+    Найдено 2026-10-18: внутри функции `set --` заменяет позиционные параметры, поэтому
+    `compose_cmd up -d --wait` терял `up` целиком. compose получал только список файлов,
+    выдавал usage, а скрипт печатал «поднят» — то есть неудача выглядела как успех.
+
+    Проверка СРАВНЕНИЕМ ТЕКСТА этот дефект пропускала и пропустит снова: оба варианта
+    были одинаково сломаны, а значит одинаковы. Поэтому проверка поведенческая.
+
+    Позиции названы явно, а не «последние токены»: за флагами стоит значение таймаута,
+    и сравнение хвоста сдвигалось бы на него.
+    """
+    seen = _compose_arguments_seen_by_stub(script, ["up", "--set", "empty"])
+    assert seen[-5] == "up", (
+        f"{script.name} up: compose получил {seen}, а флагом перед таймаутом должен идти `up`. "
+        "Подкоманда потеряна — скрипт напечатает успех при неработающем compose."
+    )
+    assert seen[-4:-1] == ["-d", "--wait", "--wait-timeout"], (
+        f"{script.name} up: после `up` ожидались флаги запуска, а получено {seen[-4:-1]}"
+    )
+
+
+@pytest.mark.skipif(not _sh_is_runnable(SH), reason="нет POSIX-оболочки")
+@pytest.mark.parametrize("script", (SH, SH_CPU, SH_INGEST, SH_INGEST_CPU))
+def test_sh_passes_the_down_subcommand_to_compose(script: Path) -> None:
+    """Подкоманда `down` обязана быть последним аргументом compose."""
+    seen = _compose_arguments_seen_by_stub(script, ["down", "--set", "empty"])
+    assert seen[-1] == "down", (
+        f"{script.name} down: compose получил {seen}, последним должен идти `down`"
+    )
+
+
+def test_ingest_cpu_variant_is_unix_only_and_says_where_windows_is_described() -> None:
+    """Варианта ингеста на процессоре для Windows нет намеренно, и это записано.
+
+    Решение владельца 2026-10-18: скрипт только для Unix и macOS, а для Windows в системные
+    требования. Гард сторожит именно границу: появившийся `ingest-cpu.ps1` сделал бы
+    требования неправдой, и человек пошёл бы искать описание того, что уже есть в коде.
+    """
+    if not SH_INGEST_CPU.is_file():
+        pytest.fail(f"нет файла {SH_INGEST_CPU.name}: вариант ингеста на процессоре обязателен")
+    text = _read(SH_INGEST_CPU)
+    assert "Linux" in text and "macOS" in text, (
+        f"{SH_INGEST_CPU.name} не называет, где он работает"
+    )
+    assert "prototype_requirements" in text, (
+        f"{SH_INGEST_CPU.name} не ссылается на документ с требованиями для Windows"
+    )
+    assert not PS1_INGEST_CPU.exists(), (
+        f"{PS1_INGEST_CPU.name} существует, но Windows-вариант описан в требованиях. "
+        "Либо удалите скрипт, либо перепишите требования - держать оба нельзя."
+    )
+
+
+def test_ingest_cpu_variant_does_not_grant_a_gpu() -> None:
+    """Вариант на процессоре не должен подкладывать оверлей видеокарты.
+
+    Иначе на машине без NVIDIA он не поднимется, а ошибка будет выглядеть как проблема
+    драйвера, а не как неверный скрипт.
+    """
+    assert GPU_OVERLAY not in _compose_files_in(SH_INGEST_CPU), (
+        f"{SH_INGEST_CPU.name} подкладывает {GPU_OVERLAY}: вариант на процессоре обходится "
+        "базовым файлом."
+    )
+    assert "compose.ingest.yaml" in _compose_files_in(SH_INGEST_CPU), (
+        f"{SH_INGEST_CPU.name} обязан подкладывать оверлей ингеста"
+    )
+
+
+def test_ingest_variants_do_not_reach_the_same_result_two_ways() -> None:
+    """Флаг переключения вида счита запрещён: два способа дают два разных скрипта.
+
+    `--cpu` в `ingest.sh` и отдельный `ingest-cpu.sh` описывали бы одно и то же, и со
+    временем разошлись бы. Различие обязано быть именем файла.
+    """
+    for path in (SH_INGEST, SH_CPU, SH):
+        code = "\n".join(_code_lines(path))
+        assert "--cpu" not in code and "-Cpu" not in code, (
+            f"{path.name} переключает вид вычислений флагом. Отдельный скрипт понятнее: "
+            "две точки выбора означают два места, которые надо держать одинаковыми."
+        )
+
+
+@pytest.mark.skipif(not _sh_is_runnable(SH), reason="нет POSIX-оболочки")
+def test_ingest_overlay_is_absent_from_stand_and_present_in_ingest() -> None:
+    """Оверлей ингеста есть в одном скрипте и отсутствует в другом (ADR-065).
+
+    Проверяется тем же прогоном с подменой `docker`, что и выше, потому что оверлей —
+    это тоже поведение, а не текст.
+    """
+    stand = _compose_arguments_seen_by_stub(SH, ["up", "--set", "empty"])
+    assert not any("compose.ingest.yaml" in token for token in stand), (
+        f"стенд подкладывает оверлей ингеста: {stand}"
+    )
+    ingest = _compose_arguments_seen_by_stub(SH_INGEST, ["up", "--set", "empty"])
+    assert any("compose.ingest.yaml" in token for token in ingest), (
+        f"скрипт ингеста не подкладывает оверлей: {ingest}"
+    )
+    assert "ingest" in ingest, f"скрипт ингеста не включил профиль ingest: {ingest}"
     """Различие между вариантами обязано быть ровно одно: оверлей GPU.
 
     Если оверлей появится у CPU-варианта, тот начнёт требовать драйвер NVIDIA и не
@@ -428,13 +591,78 @@ def test_containers_and_volumes_match(sh: Path, ps1: Path, expected_compose: set
         f"скрипты обращаются к разным контейнерам: {sh.name}={sorted(sh_containers)}, "
         f"{ps1.name}={sorted(ps_containers)}. Один из них обратится не туда."
     )
-    # Контейнеры, к которым скрипты обязаны обращаться: без них сценарий не работает.
-    for required in ("ohw-runtime-neo4j", "ohw-runtime-ingestion"):
-        assert required in sh_containers, f"ни один из скриптов не обращается к {required}"
+# Контейнер, о котором стенд обязан знать по имени. ingestion-api в него не входит
+    # (ADR-058), и упоминать его в стенде после разделения (ADR-065) нечего.
+    assert "ohw-runtime-neo4j" in sh_containers, "ни один из скриптов не обращается к neo4j"
+    assert "ohw-runtime-ingestion" not in sh_containers, (
+        f"{sh.name} знает контейнер ингеста. Ингест вынесен в отдельный скрипт (ADR-065), "
+        "и упоминание здесь означало бы, что разделение снова срослось."
+    )
 
     for suffix in NAMED_VOLUME_SUFFIXES:
         for path in (sh, ps1):
             assert suffix in _read(path), f"{path.name} не упоминает том с суффиксом {suffix}"
+
+
+INGEST_PAIR = pytest.param(
+    SH_INGEST, PS1_INGEST,
+    {
+        "compose.runtime.yaml",
+        "compose.ingest.yaml",
+        "compose.runtime-gpu.yaml",
+    },
+    id="ingest",
+)
+
+
+@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), (INGEST_PAIR,))
+def test_ingest_scripts_expose_only_ingest_commands(
+    sh: Path, ps1: Path, expected_compose: set[str]
+) -> None:
+    """Скрипт ингеста не умеет ни выгружать, ни восстанавливать том.
+
+    Набор проверяется поштучно, а не сравнением с набором соседних скриптов: иначе
+    можно добавить команду в оба варианта и сохранить равенство.
+    """
+    for path in (sh, ps1):
+        commands = _commands(_read(path))
+        assert commands == INGEST_COMMANDS, (
+            f"{path.name}: команды {sorted(commands)}, ожидалось {sorted(INGEST_COMMANDS)}"
+        )
+
+
+@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), (INGEST_PAIR,))
+def test_ingest_scripts_always_carry_the_ingest_overlay(
+    sh: Path, ps1: Path, expected_compose: set[str]
+) -> None:
+    """Оверлей ингеста подключается ВСЕГДА, а не по флагу.
+
+    Без него `ingestion-api` не существует и грузить нечем, то есть скрипт молча
+    ничего бы не сделал.
+    """
+    for path in (sh, ps1):
+        assert "compose.ingest.yaml" in _compose_files_in(path), (
+            f"{path.name} не подкладывает compose.ingest.yaml"
+        )
+        assert "--profile" in _read(path), (
+            f"{path.name} подкладывает оверлей, но не включает профиль `ingest`: "
+            "сервис останется выключенным."
+        )
+
+
+@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), (INGEST_PAIR,))
+def test_ingest_scripts_name_the_container_they_upload_into(
+    sh: Path, ps1: Path, expected_compose: set[str]
+) -> None:
+    """Контейнер, в который идёт загрузка, назван в обоих вариантах.
+
+    Загрузка идёт через `docker cp` в контейнер ингеста, и имя контейнера обязано быть
+    в коде обоих вариантов: иначе один из них загрузит «куда-то».
+    """
+    for path in (sh, ps1):
+        assert "ohw-runtime-ingestion" in _read(path), (
+            f"{path.name} не знает контейнер ингеста, а грузить ему нужно именно туда"
+        )
 
 
 @pytest.mark.parametrize(("sh", "ps1", "expected_compose"), PAIRS)

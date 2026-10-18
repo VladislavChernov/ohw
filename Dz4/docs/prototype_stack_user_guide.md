@@ -1,11 +1,17 @@
-# Демо GraphRAG: руководство пользователя
+# Полный стек прототипа GraphRAG: руководство пользователя
 
-Браузерное демо графовой RAG-платформы: за < 10 минут загрузить документ
+Браузерный прогон графовой RAG-платформы: за < 10 минут загрузить документ
 (txt/md), задать вопрос на русском и получить ответ со ссылками на источники —
 без написания кода и знания REST-контрактов.
 
 Уровень: пользователь/оценщик. Для эксплуатации (перезапуск, отладка, e2e-прогон)
-есть отдельный [runbook](./demo_runbook.md).
+есть отдельный [runbook](./prototype_stack_runbook.md).
+
+**Не путать с демо-стендом.** Это руководство про **базовый compose**
+(`prototype/infra/compose.yaml`), то есть про весь стек прототипа вместе с
+`ingestion-api`. Демо-стенд поднимается отдельно, своими скриптами и без
+`ingestion-api`; там загрузка идёт отдельным скриптом, а не этим интерфейсом —
+см. `Demo/README.md` (ADR-065).
 
 ---
 
@@ -98,7 +104,7 @@ docker build -f Dockerfile.llm -t ohw/llm:prototype `
 его в Topology Configurator через `GET/PUT /api/v1/config/projection`; отдельного
 CLI-флага нет. После изменения сохраняется override, а следующий rebuild
 использует новую политику. Точный запуск offline rebuild и работа с
-`--stale-source-url` описаны в [runbook](./demo_runbook.md#offline-projection-lease-в-конфигураторе).
+`--stale-source-url` описаны в [runbook](./prototype_stack_runbook.md#offline-projection-lease-в-конфигураторе).
 
 ### Режим без LLM (заглушка FakeLLM)
 
@@ -283,6 +289,6 @@ O(log n)?»*.
 
 ## 9. Куда дальше
 
-- [demo_runbook.md](./demo_runbook.md) — эксплуатация: подъём, порты, флаги, e2e.
+- [prototype_stack_runbook.md](./prototype_stack_runbook.md) — эксплуатация: подъём, порты, флаги, e2e.
 - [api_reference.md](./api_reference.md) — REST-контракты Query/Config/Ingestion/Glossary.
 - [README.md](../README.md) — архитектура платформы и документация проекта.

@@ -79,7 +79,7 @@ _AI_PROFILE: dict[str, Any] = {
         "max_depth": 2,
         "max_fanout": 4,
         "max_graph_nodes": 8,
-        "graph_boost": 0.2,
+        "filter_demote_scale": 0.2,
     },
     "context_assembly": {"max_tokens": 512},
 }
@@ -2152,12 +2152,21 @@ def test_vector_results_seed_bounded_expansion_before_graph() -> None:
         for s in done["sources"]
         if s["source_url"] == "src://vector" and s["axis"] == "graph"
     )
+    # У источника есть кандидат `chk:vector`, поэтому relevance равна его оценке и обе
+    # оси показывают одно число (ADR-064). Раньше запись оси графа показывала константу
+    # 1.0, и рядом с оценкой кандидата это читалось как сравнение, которого не делали.
     assert graph_hit["relevance"] == 1.0
-    assert graph_hit["graph_knowledge"] == "contributed"
+    assert graph_hit["relevance_basis"] == "score"
+    # Обход до этого документа не дошёл, хотя про него в графе знают, поэтому метка
+    # `reachable_unused`, а не `contributed`. Раньше запись оси графа получала `contributed`
+    # всегда, и именно это расхождение скрывала (ADR-064).
+    assert graph_hit["graph_knowledge"] == "reachable_unused"
     vector_hit = next(
         s for s in done["sources"] if s["source_url"] == "src://vector" and s["axis"] == "vector"
     )
     assert vector_hit["relevance"] == 1.0
+    # Обе записи одного источника несут одну метку: раньше они могли противоречить друг другу.
+    assert vector_hit["graph_knowledge"] == graph_hit["graph_knowledge"]
 
 
 def test_vector_only_baseline_does_not_call_graph(

@@ -257,7 +257,8 @@ projection с актуальной revision может быть graph-success. C
 `revision` может быть `null`, и тогда его отсутствие в паре уже означает «парность не доказана»
 (`compare_run_manifests` → `revision отсутствует`). Это правильно: пара без зафиксированного
 среза непарная. За одно чтение это не ломает — на демо-стенде ingestion-api поднимается
-(`up --with-ingest`), иначе target-рукав уйдёт в vector-only с `projection_status=revision_unknown`.
+(`ingest.sh up`, затем `ingest.sh load`, ADR-065), иначе target-рукав уйдёт в vector-only
+с `projection_status=revision_unknown`.
 
 **Правило парности:** если два манифеста отличаются больше чем в одном поле —
 прогоны непарные, и разность метрик между ними **не** является вкладом компонента.

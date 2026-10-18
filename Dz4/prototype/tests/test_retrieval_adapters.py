@@ -295,22 +295,56 @@ def test_expansion_depth_is_capped_and_shared_across_adapters() -> None:
     assert "1..99" not in session.query
 
 
-def test_build_sources_graph_relevance_is_overridable() -> None:
-    """Relevance графовой оси — параметр, а не зашитое 1.0 (docs/04, разделение домов)."""
-    from graphrag_proto.retrieval.pipeline import GRAPH_SOURCE_RELEVANCE, build_sources
+def test_relevance_of_source_without_candidate_is_absent_not_constant() -> None:
+    """У источника без кандидата relevance нет, и это сказано явно (ADR-064).
+
+    Раньше здесь стояла константа `1.0`, и рядом с оценкой кандидата она читалась как
+    «вдвое релевантнее». Ни одна метрика это поле не читает — `retrieval_metrics` считает по
+    порядку источников, — то есть сравнение, которое читатель себе воображал, не делал никто.
+
+    `None`, а не `0.0`: ноль — это «оценили и признали неважным». Здесь не оценено ничего.
+    """
+    from graphrag_proto.retrieval.pipeline import build_sources
 
     chunks = [{"source_url": "s://a.txt", "chunk_id": "chk:1", "score": 0.9}]
     skeleton = [{"n": {"node_id": "tag:it:x", "source_ids": ["s://b.txt"]}}]
 
-    default = build_sources(chunks, skeleton)
-    tuned = build_sources(chunks, skeleton, graph_relevance=0.25)
+    rows = {row["source_url"]: row for row in build_sources(chunks, skeleton)}
 
-    assert GRAPH_SOURCE_RELEVANCE == 1.0
-    assert {row["source_url"]: row["relevance"] for row in default}["s://b.txt"] == 1.0
-    assert {row["source_url"]: row["relevance"] for row in tuned}["s://b.txt"] == 0.25
-    assert {row["source_url"] for row in tuned} == {"s://a.txt", "s://b.txt"}
+    # Источник с кандидатом: оценка кандидата, основание `score`.
+    assert rows["s://a.txt"]["relevance"] == pytest.approx(0.9)
+    assert rows["s://a.txt"]["relevance_basis"] == "score"
+    # Источник без кандидата: оценки нет, и основание это объявляет.
+    assert rows["s://b.txt"]["relevance"] is None
+    assert rows["s://b.txt"]["relevance_basis"] == "none"
+    assert rows["s://b.txt"]["relevance"] != 0.0, (
+        "ноль читается как измеренная величина, а её не измеряли"
+    )
 
 
+def test_both_axes_of_one_source_share_the_same_relevance() -> None:
+    """Relevance принадлежит источнику, а не паре «источник + ось» (ADR-064).
+
+    Ось отвечает на вопрос «кто принёс», а не «насколько релевантно». Когда у источника есть
+    кандидат, обе его оси показывают одно и то же число, иначе в выдаче снова появляется
+    сравнение, которого никто не делал.
+    """
+    from graphrag_proto.retrieval.pipeline import build_sources
+
+    chunks = [{"source_url": "s://a.txt", "chunk_id": "chk:1", "score": 0.7}]
+    skeleton = [{"n": {"node_id": "tag:it:x", "source_ids": ["s://a.txt"]}}]
+
+    rows = [row for row in build_sources(chunks, skeleton) if row["source_url"] == "s://a.txt"]
+
+    axes = {row["axis"] for row in rows}
+    assert axes == {"vector", "graph"}, "источник принесён обеими осями"
+    scores = [row["relevance"] for row in rows]
+    assert all(score == pytest.approx(0.7) for score in scores), (
+        f"оси показали разные числа: {scores}"
+    )
+    assert {row["relevance_basis"] for row in rows} == {"score"}
+    # Метка одна и та же: ось отвечает «кто принёс», метка — «что с документом».
+    assert len({row["graph_knowledge"] for row in rows}) == 1
 def test_expansion_depth_cap_is_identical_in_both_adapters() -> None:
     """Предел глубины обязан действовать одинаково: иначе стенд и тесты дают разный граф.
 

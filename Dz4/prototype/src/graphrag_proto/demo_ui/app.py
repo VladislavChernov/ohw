@@ -98,8 +98,72 @@ def _watch_ingest(client: DemoClient, job_id: str, max_attempts: int = 60) -> di
     return job
 
 
-def _render_documents(client: DemoClient, domains: list[str]) -> None:
+#: Инструкция, которую видит человек, когда ингест вынесен в отдельный скрипт
+#: (ADR-065). Команда приведена ДОБРОВОЛЬНО в одном месте и используется и в слое, и в
+#: подсказке заголовка вкладки: две формулировки разъедутся, и одна из них будет врать.
+INGEST_SEPARATE_NOTICE = (
+    "Ингест вынесен в отдельный скрипт: стенд поднимается без него, и это штатно "
+    "(ADR-065). Запросы и поиск работают — не работает только загрузка документов."
+)
+
+#: Команды запуска ингеста отдельно. Windows и POSIX названы отдельно намеренно: одна
+#: строка на оба варианта была бы враньём на половине машин.
+INGEST_STANDALONE_COMMANDS = (
+    ("Windows", r"Demo\ingest.ps1 up -Set ready"),
+    ("Linux/macOS", "sh Demo/ingest.sh up --set ready"),
+)
+
+
+def ingest_separated_lines() -> list[tuple[str, str]]:
+    """Строки слоя «ингест вынесен отдельно». Чистая функция, без Streamlit.
+
+    Вынесена отдельно по образцу `maintenance_preview`: разметку `app.py` не импортирует
+    ни один тест, поэтому проверяемо то, что можно вызвать без неё. Слой, который
+    молчал бы, читался бы как поломка — а это ровно тот исход, которого здесь быть не
+    должно.
+    """
+    lines: list[tuple[str, str]] = [("notice", INGEST_SEPARATE_NOTICE)]
+    lines += [("caption", "Как загрузить документы:")]
+    lines += [("command", command) for _platform, command in INGEST_STANDALONE_COMMANDS]
+    lines.append(
+        (
+            "caption",
+            (
+                "После загрузки выполните `down` тем же скриптом: наполненный том остаётся, "
+                "а вопросы продолжают работать."
+            ),
+        )
+    )
+    lines.append(
+        (
+            "caption",
+            (
+                "Быстрый путь для демонстрации: готовый набор выгружается архивом и "
+                "восстанавливается без ингеста — `demo.ps1 restore` / `demo.sh restore`."
+            ),
+        )
+    )
+    return lines
+
+
+def _render_ingest_separated_notice() -> None:
+    """Слой поверх вкладки: почему она серая и что сделать, чтобы она ожила."""
+    for kind, text in ingest_separated_lines():
+        if kind == "notice":
+            st.info(text)
+        elif kind == "command":
+            st.code(text, language="powershell" if text.endswith(".ps1 up -Set ready") else "shell")
+        else:
+            st.caption(text)
+
+
+def _render_documents(client: DemoClient, domains: list[str], *, ingest_up: bool) -> None:
     st.subheader("Документы")
+    if not ingest_up:
+        # Проба сделана ДО отрисовки элементов: иначе человек узнал бы о недоступности
+        # ингеста только после того, как выбрал файл и нажал кнопку.
+        _render_ingest_separated_notice()
+        return
     domain = st.selectbox("Домен", options=domains, key="upload_domain")
     upload = st.file_uploader(
         "txt/md файл",
@@ -448,11 +512,19 @@ def main() -> None:
     if not domains:
         st.error("Нет доменов в Config Service: проверьте GET /api/v1/config/domain/profiles.")
 
+    # Проба ОДИН раз на загрузку страницы: и заголовок вкладки, и её содержимое обязаны
+    # говорить об одном состоянии. Две пробы дали бы два разных ответа при нестабильной
+    # сети, и вкладка выглядела бы сама по себе серой при живом сервисе.
+    ingest_up = client.ingestion_is_up()
     tab_documents, tab_queries, tab_maintenance = st.tabs(
-        ["Документы", "Запросы", "Обслуживание"]
+        [
+            "Документы" if ingest_up else "Документы (нужен отдельный скрипт ингеста)",
+            "Запросы",
+            "Обслуживание",
+        ]
     )
     with tab_documents:
-        _render_documents(client, domains)
+        _render_documents(client, domains, ingest_up=ingest_up)
     with tab_queries:
         _render_queries(client, domains)
     with tab_maintenance:

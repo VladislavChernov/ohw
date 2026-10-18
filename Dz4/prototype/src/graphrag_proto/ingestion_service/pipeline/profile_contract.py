@@ -98,7 +98,6 @@ READ_BY_RETRIEVAL_KEYS: frozenset[str] = frozenset(
         "expansion_direction",
         "max_fanout",
             "max_graph_nodes",
-            "graph_source_relevance",
             "filter_demote_scale",
             "ordering",
             "rrf_k",

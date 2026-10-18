@@ -15,7 +15,6 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # репозиторий рядом не лежит. При `set -e` жёсткое вычисление убивало бы справку.
 INFRA_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../prototype/infra" 2>/dev/null && pwd || echo "")
 COMPOSE_RUNTIME="$INFRA_DIR/compose.runtime.yaml"
-COMPOSE_INGEST="$INFRA_DIR/compose.ingest.yaml"
 # Оверлей реранкера: подключается только по флагу --with-reranker.
 COMPOSE_RERANKER="$INFRA_DIR/compose.runtime-reranker.yaml"
 # Подкладывается ВСЕГДА: именно этот файл выдаёт контейнерам видеокарту. Без него LLM
@@ -27,17 +26,16 @@ NEO4J_CONTAINER='ohw-runtime-neo4j'
 
 usage() {
     cat <<'USAGE'
-Демо-стенд GraphRAG.
-
-    demo.sh up       [--set empty|ready] [--with-ingest]
-    demo.sh down     [--set empty|ready] [--with-ingest]
+demo.sh up       [--set empty|ready]
+    demo.sh down     [--set empty|ready]
     demo.sh status   [--set empty|ready]
-    demo.sh load     --path ФАЙЛ [--domain it] [--set empty|ready]
     demo.sh restore  [--set empty|ready] [--archive ФАЙЛ]
     demo.sh export   [--set ready] [--out ФАЙЛ]
 
-`up --with-ingest` дополнительно поднимает ingestion-api - он нужен, чтобы грузить
-документы в пустую базу. Без него работает только просмотр того, что уже налито.
+ИНГЕСТА ЗДЕСЬ НЕТ, и это не ограничение, а решение (ADR-065): он в отдельном скрипте.
+Наполнение базы - `ingest.sh` (Linux, macOS) и `ingest.ps1` (Windows). Тома наборов
+общие, поэтому наполненная база остаётся после `ingest.sh down`, а готовый набор
+выгружается архивом и восстанавливается без ингеста: `demo.sh export` / `restore`.
 
 Наборы:
   empty - пустая система, тома создаются заново.
@@ -56,24 +54,23 @@ need_docker() {
     docker info >/dev/null 2>&1 || die "демон docker не отвечает - запустите Docker Desktop или dockerd"
 }
 
-compose_files() {
-    printf '%s\n' "$COMPOSE_RUNTIME"
-    if [ "${WITH_INGEST:-0}" = "1" ]; then
-        printf '%s\n' "$COMPOSE_INGEST"
-    fi
-}
-
 compose_cmd() {
+    # Аргументы вызова сохраняются ДО `set --`. Внутри функции `set --` заменяет
+    # позиционные параметры, и подкоманда (`up`, `down`, `export`, `restore`) вместе с
+    # флагами пропадала бы МОЛЧА: compose получал только список файлов, выдавал usage и
+    # возвращал ненулевой код, а скрипт печатал «поднят». Тест паритета это не видел -
+    # он сравнивает текст скриптов, а не поведение.
+    # Раскрытие `$_compose_tail` без кавычек здесь безопасно: токены compose (подкоманда,
+    # `-d`, `--wait`, `--wait-timeout`, число) пробелов не содержат.
+    _compose_tail=$*
     # Порядок важен: оверлей GPU идёт сразу за базовым, иначе его `deploy` перепишется.
     set -- --project-directory "$INFRA_DIR" --file "$COMPOSE_RUNTIME" --file "$COMPOSE_GPU"
-    if [ "${WITH_INGEST:-0}" = "1" ]; then
-        set -- "$@" --file "$COMPOSE_INGEST" --profile ingest
-    fi
     # Оверлей реранкера идёт после остальных: он переопределяет слот `RERANKER`.
     if [ "${WITH_RERANKER:-0}" = "1" ]; then
         set -- "$@" --file "$COMPOSE_RERANKER"
     fi
-    docker compose "$@"
+    # shellcheck disable=SC2086
+    docker compose "$@" $_compose_tail
 }
 
 set_common_env() {
@@ -97,10 +94,6 @@ cmd_up() {
 
 cmd_down() {
     set_common_env
-    # Оверлей ингеста подключается ВСЕГДА, а не по флагу: если стенд поднимали с
-    # --with-ingest, то без него ingestion-api остался бы работать после остановки.
-    # Лишний оверлей при остановке безобиден.
-    WITH_INGEST=1
     compose_cmd down
     echo "Набор '$SET' остановлен. Тома сохранены."
 }
@@ -153,99 +146,6 @@ cmd_status() {
             echo "  ВНИМАНИЕ: Chunk есть, а ContextNode нет - это vector-only загрузка."
             echo "  Джоба при этом завершается succeeded, то есть выглядит как успех."
         fi
-    fi
-}
-
-cmd_load() {
-    [ -n "${LOAD_PATH:-}" ] || die "нужен --path ФАЙЛ"
-    [ -f "$LOAD_PATH" ] || die "файл не найден: $LOAD_PATH"
-    docker ps --filter "name=^/${NEO4J_CONTAINER}$" --format '{{.Names}}' | grep -q . \
-        || die "стенд не поднят. Сначала: demo.sh up --with-ingest"
-    docker ps --filter 'name=ohw-runtime-ingestion' --format '{{.Names}}' | grep -q . \
-        || die "ingestion-api не запущен. Нужен: demo.sh up --with-ingest"
-
-    src=$(CDPATH= cd -- "$(dirname -- "$LOAD_PATH")" && pwd)/$(basename -- "$LOAD_PATH")
-    name=$(basename -- "$src")
-    echo "Загружаю $src как docs/$name"
-    docker cp "$src" ohw-runtime-ingestion:/tmp/demo_doc.md
-
-    # Запросы идут изнутри контейнера: его Python уже есть, и это снимает зависимость
-    # от Python на хосте и от экранирования кавычек в оболочке.
-    docker exec -i ohw-runtime-ingestion python - "$LOAD_DOMAIN" "$name" <<'PY'
-import json
-import sys
-import time
-import urllib.request
-
-domain, name = sys.argv[1], sys.argv[2]
-API = "demo-key-2026"
-BASE = "http://localhost:8002"
-SOURCE_URL = "docs/" + name
-
-
-def call(method, url, body=None, timeout=120):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"Content-Type": "application/json", "X-API-Key": API},
-    )
-    return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
-
-
-text = open("/tmp/demo_doc.md", encoding="utf-8").read()
-
-try:
-    st = call("POST", f"{BASE}/api/v1/ingestion/documents/status",
-              {"source_url": SOURCE_URL, "domain": domain,
-               "doc_type": "md", "content": text})
-    if st.get("unchanged"):
-        print(f"  уже загружен в текущем виде (версия {st.get('version')}). Пропуск.")
-        sys.exit(0)
-    print(f"  загружен ранее: {st.get('known')}")
-except Exception as exc:  # причина уходит в текст ошибки
-    print(f"  спросить статус не удалось ({exc}). Продолжаю без проверки.")
-
-job = call("POST", f"{BASE}/api/v1/ingestion/documents",
-           {"source_url": SOURCE_URL, "domain": domain,
-            "doc_type": "md", "content": text})
-job_id = job["job_id"]
-print(f"  джоба {job_id}, жду...")
-
-final = None
-for _ in range(3600):
-    time.sleep(5)
-    final = call("GET", f"{BASE}/api/v1/ingestion/jobs/{job_id}")
-    if final.get("status") in ("succeeded", "failed", "cancelled"):
-        break
-else:
-    raise SystemExit(f"  джоба {job_id} не завершилась за 3 часа")
-
-print(f"  статус: {final['status']}")
-if final.get("total_duration_ms"):
-    print(f"  всего {final['total_duration_ms']} мс")
-    print(f"  по стадиям {json.dumps(final.get('stage_durations_ms'), ensure_ascii=False)}")
-if final["status"] != "succeeded":
-    raise SystemExit(f"  джоба завершилась статусом {final['status']}")
-print("  загрузка завершилась")
-PY
-
-    # Проверка графа - НА ХОСТЕ. Внутри контейнера `docker` нет, и вызов оттуда падал бы
-    # FileNotFoundError уже после успешной загрузки, то есть выглядел бы как сбой загрузки.
-    echo "  проверяю, что граф вырос"
-    pw=$(container_password)
-    if [ -z "$pw" ]; then
-        echo "  ВНИМАНИЕ: количество нод НЕ измерено - не удалось получить пароль" >&2
-        return 0
-    fi
-    ctx=$(docker exec "$NEO4J_CONTAINER" cypher-shell -u neo4j -p "$pw" --format plain \
-        'MATCH (n:ContextNode) RETURN count(*) AS c;' 2>/dev/null | tail -n +2 | tr -cd '0-9')
-    if [ -z "$ctx" ]; then
-        echo "  ВНИМАНИЕ: количество нод НЕ измерено - запрос к базе не дал числа" >&2
-        return 0
-    fi
-    echo "  ContextNode в базе: $ctx"
-    if [ "$ctx" = "0" ]; then
-        die "граф пуст, а джоба succeeded - это vector-only загрузка"
     fi
 }
 
@@ -316,10 +216,7 @@ cmd_restore() {
 }
 
 SET='empty'
-WITH_INGEST=0
 WAIT_TIMEOUT=300
-LOAD_PATH=''
-LOAD_DOMAIN='it'
 EXPORT_OUT=''
 RESTORE_ARCHIVE=''
 
@@ -334,11 +231,8 @@ shift
 while [ $# -gt 0 ]; do
     case "$1" in
         --set) SET="$2"; shift 2 ;;
-        --with-ingest) WITH_INGEST=1; shift ;;
     --with-reranker) WITH_RERANKER=1; shift ;;
         --wait-timeout) WAIT_TIMEOUT="$2"; shift 2 ;;
-        --path) LOAD_PATH="$2"; shift 2 ;;
-        --domain) LOAD_DOMAIN="$2"; shift 2 ;;
         --out) EXPORT_OUT="$2"; shift 2 ;;
         --archive) RESTORE_ARCHIVE="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -356,7 +250,7 @@ case "$COMMAND" in
         usage
         exit 0
         ;;
-    up|down|status|load|export|restore)
+    up|down|status|export|restore)
         need_docker
         ;;
     *)
@@ -369,7 +263,6 @@ case "$COMMAND" in
     up) cmd_up ;;
     down) cmd_down ;;
     status) cmd_status ;;
-    load) cmd_load ;;
     export) cmd_export ;;
     restore) cmd_restore ;;
     help) usage ;;

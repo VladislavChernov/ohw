@@ -612,10 +612,13 @@ def test_pipeline_vector_results_seed_bounded_expansion() -> None:
         "chk:second",
     ]
     graph_source = next(s for s in done["sources"] if s["source_url"] == "src://graph")
-    assert (graph_source["relevance"], graph_source["axis"]) == (1.0, "graph")
-    # Метка «что ось знает» обязана быть на источнике: без неё «граф не помог» и «граф про этот
-    # документ ничего не знает» дают один и тот же ответ по вектору.
-    assert graph_source["graph_knowledge"] == "contributed"
+    # Обход дошёл до источника, но кандидата из него не получил: `relevance` есть, у него нет,
+    # а метка говорит именно об этом (ADR-064). Раньше здесь стояло `1.0` и `contributed`,
+    # то есть источник выглядел принесённым и высокорелевантным, хотя читать было нечего.
+    assert (graph_source["relevance"], graph_source["relevance_basis"]) == (None, "none")
+    assert graph_source["axis"] == "graph"
+    assert graph_source["graph_knowledge"] == "reachable_unused"
+    assert graph_source["graph_knowledge_reason"] == "no_candidate"
     assert done["graph_degraded"] is False
 
 
@@ -1046,6 +1049,40 @@ def test_filter_rejects_scale_that_would_turn_demotion_into_a_boost() -> None:
     done = pipe.run("расскажи про другой вопрос", generate=False)
 
     assert done["effective_retrieval"]["filter_demote_scale"] == FILTER_DEMOTE_SCALE
+
+
+def test_filter_scale_reports_whether_it_was_ever_calibrated() -> None:
+    """Величина понижения едет в артефакте вместе со своим статусом.
+
+    Без статуса число в артефакте читается как решение, а оно решением не является: его нечем
+    было откалибровать без набора с известным порядком. Через полгода это место перечитают и
+    примут 0.5 за измеренную величину — именно так и появляются числа без владельца.
+    """
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:first")),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    effective = pipe.run("расскажи про First", generate=False)["effective_retrieval"]
+    # В фикстуре профиль задаёт своё значение - оно помечено как заданное профилем, а не как
+    # откалиброванное.
+    assert effective["filter_demote_scale_status"] == "profile"
+
+    default_pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:first")),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader({**PROFILE, "retrieval": {"graph_search_enabled": True}}),
+    )
+    default_effective = default_pipe.run("расскажи про First", generate=False)["effective_retrieval"]
+    assert default_effective["filter_demote_scale"] == FILTER_DEMOTE_SCALE
+    assert default_effective["filter_demote_scale_status"] == "uncalibrated_placeholder"
 
 
 def test_evidence_limit_drops_block_but_keeps_source_attribution(

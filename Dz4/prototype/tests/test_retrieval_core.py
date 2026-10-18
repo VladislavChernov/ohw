@@ -33,7 +33,7 @@ GRAPH_PROFILE: dict[str, Any] = {
         "max_depth": 1,
         "max_fanout": 2,
         "max_graph_nodes": 3,
-        "graph_boost": 0.0,
+        "filter_demote_scale": 0.5,
     },
     "context_assembly": {"max_tokens": 4096},
 }
@@ -347,18 +347,27 @@ def test_build_sources_keeps_axes_and_deduplicates_by_pair() -> None:
     by_pair = {(source["source_url"], source["axis"]): source for source in sources}
 
     assert by_pair[("src://shared", "vector")]["relevance"] == 0.95
-    assert by_pair[("src://shared", "graph")]["relevance"] == 1.0
+    assert by_pair[("src://shared", "graph")]["relevance"] == 0.95
+    # Источник, которого достиг обход, но который не дал кандидата (ADR-064). Раньше он
+    # получал `relevance = 1.0` и метку `contributed`, то есть выглядел принесённым и
+    # высокорелевантным, хотя читать из него было нечего.
     assert by_pair[("src://graph-only", "graph")] == {
         "source_url": "src://graph-only",
-        "relevance": 1.0,
+        "relevance": None,
+        "relevance_basis": "none",
         "axis": "graph",
-        "graph_knowledge": "contributed",
-        "graph_knowledge_reason": None,
+        "graph_knowledge": "reachable_unused",
+        "graph_knowledge_reason": "no_candidate",
         "graph_linked_chunks": 0,
     }
     assert ("src://vector-only", "vector") in by_pair
     assert len(sources) == 4
-    assert sources[0]["axis"] == "graph"
+    # Порядок - по кандидатам, а не по оси (ADR-061): первым идёт источник с оценкой.
+    # Прежняя проверка ждала, что первой будет запись оси графа, то есть проверяла приоритет
+    # оси, который снят.
+    assert sources[0]["relevance_basis"] == "score", (
+        f"первым должен идти источник с оценкой, а не с константой: {sources[0]}"
+    )
 
 
 def test_source_says_what_the_graph_knew_about_it() -> None:
@@ -577,13 +586,17 @@ def test_query_pipeline_runs_bounded_context_expansion_after_vector_search() -> 
     assert expansion_trace["context_ids"] == ["tag:it:database", "tag:it:storage"]
     assert expansion_trace["paths"] == [["tag:it:database", "tag:it:storage"]]
     assert expansion_trace["depths"] == [1]
-    # Порядок источников - по кандидатам, а не по оси (ADR-061, ADR-063). `src://it`
-    # принёс кандидата `chk:it`, и его оценка получена переранжированием. `src://graph`
-    # обходом достигнут, но кандидата не дал: оценивать его нечем, поэтому он стоит
-    # после. Прежний ключ сортировки ставил его первым по признаку «ось = graph».
+    # Порядок источников - по кандидатам, а не по оси (ADR-061, ADR-064). `src://it`
+    # принёс кандидата `chk:it`, и его relevance равна оценке кандидата. `src://graph`
+    # обходом достигнут, но кандидата не дал: оценивать его нечем, поэтому relevance
+    # равна `None` с basis `none`, и он стоит после.
     assert [
-        (s["source_url"], s["relevance"], s["axis"]) for s in result["sources"]
-    ] == [("src://it", 1.0, "vector"), ("src://graph", 1.0, "graph")]
+        (s["source_url"], s["relevance"], s["relevance_basis"], s["axis"])
+        for s in result["sources"]
+    ] == [
+        ("src://it", 1.0, "score", "vector"),
+        ("src://graph", None, "none", "graph"),
+    ]
     assert result["graph_degraded"] is False
 
 

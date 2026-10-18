@@ -235,7 +235,6 @@ def test_fingerprint_is_stable_and_sensitive() -> None:
         ("max_depth", "глубоко", 2),
         ("max_fanout", [1], 8),
         ("max_graph_nodes", None, 5),
-        ("graph_source_relevance", "высоко", 1.0),
     ],
 )
 def test_unreadable_value_becomes_named_fallback_and_graph_still_works(

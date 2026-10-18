@@ -61,10 +61,6 @@ from graphrag_proto.retrieval.semantic_cache import CachedAnswer, SemanticCache
 
 Emit = Callable[[str, dict[str, Any]], None]
 
-# Relevance, приписываемая источникам графовой оси в ответе. Влияет только на порядок
-# и значение `relevance`; переопределяется профилем (`retrieval.graph_source_relevance`).
-GRAPH_SOURCE_RELEVANCE = 1.0
-
 # Множитель оценки кандидата, которого фильтр НЕ подтвердил пересечением с запросом.
 #
 # ВАЖНО: это ЗАГЛУШКА, а не измеренная величина. Число зафиксировано ДО того, как оно
@@ -90,6 +86,9 @@ GRAPH_KNOWLEDGE_UNKNOWN = "unknown"
 GRAPH_REASON_NO_CONTEXT_IDS = "no_context_ids"
 GRAPH_REASON_NO_OUTGOING_EDGES = "no_outgoing_edges"
 GRAPH_REASON_TRUNCATED_BY_LIMITS = "truncated_by_limits"
+# Источник достигнут обходом, но кандидата не дал: обход принёс сущности, а читать
+# нечего. Раньше такое состояние выражалось как `contributed`, то есть «принёс».
+GRAPH_REASON_NO_CANDIDATE = "no_candidate"
 
 #: Переключатель измерения: сколько строк графового свидетельства уходит в промпт.
 #: ``None`` / пусто - без ограничения; ``0`` - свидетельство не показывается вовсе.
@@ -308,7 +307,6 @@ def build_sources(
     body_chunks: list[dict[str, Any]],
     skeleton_rows: list[dict[str, Any]] | None = None,
     *,
-    graph_relevance: float = GRAPH_SOURCE_RELEVANCE,
     graph_knowledge: Mapping[str, str] | None = None,
     graph_knowledge_reasons: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -324,12 +322,15 @@ def build_sources(
     результаты. Причина для `reachable_unused` приходит отдельной картой: три её состояния
     легитимны, но различать их надо, иначе они снова станут одним нулём.
 
-    `graph_relevance` — relevance, приписываемый источникам графовой оси. Число
-    влияет только на порядок и `relevance` в ответе; по умолчанию графовые источники
-    идут раньше векторных, что и обеспечивает сортировка по оси.
+`relevance` — свойство источника (ADR-064). Если у источника есть кандидат, значение равно
+    оценке этого кандидата и одинаково для обеих его осей; если кандидата нет, значение `None` с
+    basis `none`, потому что оценивать нечего. Раньше здесь стояла константа `1.0` для каждой
+    оси графа, и рядом с оценкой кандидата она читалась как сравнение, которого никто не делал.
+    Ни одна метрика это поле не читает: `retrieval_metrics` считает по порядку источников.
     """
     best: dict[tuple[str, str], float] = {}
     linked: dict[str, int] = {}
+    scored: dict[str, float] = {}
     for chunk in body_chunks:
         source = str(chunk.get("source_url") or "")
         if not source:
@@ -337,25 +338,26 @@ def build_sources(
         score = float(chunk.get("score") or 0.0)
         key = (source, "vector")
         best[key] = max(best.get(key, 0.0), score)
+        scored[source] = max(scored.get(source, 0.0), score)
         if chunk.get("context_ids") or chunk.get("tag_ids"):
             linked[source] = linked.get(source, 0) + 1
     for row in skeleton_rows or []:
         for url in _skeleton_source_urls(row):
-            best[(url, "graph")] = max(best.get((url, "graph"), 0.0), graph_relevance)
+            # Ключ по-прежнему различает ось (источник может быть принесён обеими), но
+            # значение больше не константа: ниже оно берётся из `scored` либо остаётся None.
+            best.setdefault((url, "graph"), 0.0)
     knowledge = graph_knowledge if graph_knowledge is not None else {}
     reasons = graph_knowledge_reasons or {}
     # Порядок источников - по лучшей оценке кандидата, а не по оси. Прежний ключ
     # `(0 если ось graph, ...)` был вторым правилом порядка рядом с оценкой: он ставил
     # всё, что нашёл обход, выше векторных ДО того, как оценки вообще были посчитаны.
-    # Теперь источник с кандидатом стоит там, куда его поставила реализация порядка,
-    # а источник без кандидата - после: у него нет оценки, и объявлять его высоким
+    # Источник без кандидата идёт после: у него нет оценки, и ставить его по константе
     # значит выдумать оценку.
-    ranked_sources = {source for source, _ in best if (source, "vector") in best}
     ordered = sorted(
         best.items(),
         key=lambda pair: (
-            0 if pair[0][0] in ranked_sources else 1,
-            -pair[1],
+            0 if pair[0][0] in scored else 1,
+            -scored.get(pair[0][0], 0.0),
             pair[0][0],
         ),
     )
@@ -365,21 +367,46 @@ def build_sources(
     default_knowledge = (
         GRAPH_KNOWLEDGE_BLIND if graph_knowledge is not None else GRAPH_KNOWLEDGE_UNKNOWN
     )
-    return [
-        {
-            "source_url": source,
-            "relevance": round(score, 4),
-            "axis": axis,
-            "graph_knowledge": (
-                GRAPH_KNOWLEDGE_CONTRIBUTED
-                if axis == "graph"
-                else knowledge.get(source, default_knowledge)
-            ),
-            "graph_knowledge_reason": None if axis == "graph" else reasons.get(source),
-            "graph_linked_chunks": int(linked.get(source, 0)) if axis == "vector" else 0,
-        }
-        for (source, axis), score in ordered
-    ]
+    # Метка принадлежит ИСТОЧНИКУ, а не оси (ADR-064). Раньше запись оси графа всегда
+    # получала `contributed`, из-за чего один и тот же источник мог нести в двух записях
+    # противоречащие друг другу метки: «граф принёс» и «граф не донёс».
+    #
+    # Источник, которого достиг обход, но который не дал кандидата, — это ровно
+    # `reachable_unused`, и раньше это состояние нельзя было выразить вовсе. Выводится
+    # здесь, а не из карты знания: «обход дошёл» видно по строкам свидетельства, и для
+    # этого карта не нужна. Карта нужна только чтобы отличить `blind` от `unknown`.
+    reached_by_walk = {
+        url
+        for row in skeleton_rows or []
+        for url in _skeleton_source_urls(row)
+    }
+    rows: list[dict[str, Any]] = []
+    for (source, axis), _score in ordered:
+        if source in knowledge:
+            label = knowledge[source]
+        elif source in reached_by_walk:
+            label = GRAPH_KNOWLEDGE_REACHABLE
+        else:
+            label = default_knowledge
+        rows.append(
+            {
+                "source_url": source,
+                # `None`, а не 0.0: кандидата не было, оценку не считали. Ноль читался бы как
+                # «оценили и признали неважным».
+                "relevance": round(scored[source], 4) if source in scored else None,
+                "relevance_basis": "score" if source in scored else "none",
+                "axis": axis,
+                "graph_knowledge": label,
+                "graph_knowledge_reason": reasons.get(source)
+                or (
+                    GRAPH_REASON_NO_CANDIDATE
+                    if source in reached_by_walk and source not in scored
+                    else None
+                ),
+                "graph_linked_chunks": int(linked.get(source, 0)) if axis == "vector" else 0,
+            }
+        )
+    return rows
 
 
 def _graph_knowledge_for_sources(
@@ -701,13 +728,6 @@ class QueryPipeline:
         cfg_rrf_k = int(
             _config_number(retrieval_cfg, "rrf_k", RRF_K_DEFAULT, config_fallbacks, path="retrieval")
         )
-        cfg_source_relevance = _config_number(
-            retrieval_cfg,
-            "graph_source_relevance",
-            GRAPH_SOURCE_RELEVANCE,
-            config_fallbacks,
-            path="retrieval",
-        )
         expansion_kinds_raw = retrieval_cfg.get("expansion_kinds")
         cfg_expansion_kinds = (
             [str(item) for item in expansion_kinds_raw] if isinstance(expansion_kinds_raw, list) else None
@@ -735,7 +755,6 @@ class QueryPipeline:
             "depth_clamped": effective_depth != requested_depth,
             "max_fanout": cfg_max_fanout,
             "max_graph_nodes": cfg_max_graph_nodes,
-            "graph_source_relevance": cfg_source_relevance,
             "expansion_kinds": cfg_expansion_kinds,
             "expansion_direction": cfg_direction,
             "graph_search_enabled": graph_requested,
@@ -1124,6 +1143,12 @@ class QueryPipeline:
 
         effective_retrieval["filter_status"] = filter_status
         effective_retrieval["filter_demote_scale"] = cfg_filter_scale
+        # Статус величины едет вместе с числом. Пока откалибровать нечем, а число в артефакте
+        # читалось бы как решение; со статусом оно читается как то, чем является.
+        # Отличать заглушку от измеренного значения обязано само значение, а не этот комментарий.
+        effective_retrieval["filter_demote_scale_status"] = (
+            "profile" if cfg_filter_scale != FILTER_DEMOTE_SCALE else "uncalibrated_placeholder"
+        )
         effective_retrieval["filter_demoted"] = len(filter_demoted)
         effective_retrieval["filter_demoted_candidates"] = filter_demoted
         # Отдельно от `filter_demoted`: это счётчик качества данных, а не отбор.
@@ -1260,7 +1285,6 @@ class QueryPipeline:
             text = ""
             generation_s = 0.0
 
-        graph_relevance = cfg_source_relevance
         # Метка «что ось знает» строится здесь, а не внутри `build_sources`, потому что
         # причину `reachable_unused` знает только пайплайн: она читается из того, отработал ли
         # обход и были ли семена. `None` означает «карту не считали» (ось не открыта) и обязан
@@ -1278,7 +1302,6 @@ class QueryPipeline:
         sources = build_sources(
             body_chunks,
             skeleton_rows,
-            graph_relevance=graph_relevance,
             graph_knowledge=graph_knowledge,
             graph_knowledge_reasons=graph_knowledge_reasons,
         )

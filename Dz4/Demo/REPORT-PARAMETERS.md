@@ -134,10 +134,18 @@
 
 ```json
 {"max_depth":3,"max_depth_requested":3,"max_depth_effective":3,"depth_clamped":false,
- "max_fanout":8,"max_graph_nodes":5,"graph_boost":0.0,"graph_source_relevance":1.0,
+ "max_fanout":8,"max_graph_nodes":5,
  "expansion_kinds":null,"expansion_direction":"both","graph_search_enabled":false,
+ "ordering_requested":"rerank_bge","ordering_applied":"rerank_bge","ordering_params":{…},
+ "ordering_fallback":false,
+ "bridge_status":"ok","bridged_chunks":3,
+ "filter_status":"applied","filter_demoted":1,"filter_demote_scale":0.5,
+ "filter_demote_scale_status":"uncalibrated_placeholder",
  "context_limit":4096,"max_depth_allowed":3,"hops_traversed":0}
 ```
+
+Полей `graph_boost` и `graph_source_relevance` здесь больше нет: оба сняты (ADR-063, ADR-064).
+Если они встретились в старом отчёте, отчёт сделан до этих решений.
 
 `max_depth_requested` и `max_depth_effective` разведены намеренно, а `depth_clamped` говорит,
 было ли значение зажато ограничением. Иначе «применилось как просили» и «применилось с
@@ -347,7 +355,9 @@
 | `mode` | режим прогона |
 | `graph_enabled`, `graph_degraded` | состояла ли ось и деградировала ли |
 | `projection_status`, `projection_revision` | проекция на момент вопроса |
-| `graph_boost` | **применённый** подъём оценки, взятый из `done`, а не из трейса |
+| `ordering_requested`, `ordering_applied`, `ordering_params`, `ordering_fallback` | какая реализация порядка просилась и какая применилась, с параметрами. `fallback: true` означает, что имя не разрешилось и применён зарегистрированный откат (ADR-062) |
+| `bridge_status`, `bridged_chunks` | состояние моста и сколько кандидатов он принёс. `unsupported` и «прочитано, но пусто» — разные вещи (ADR-063) |
+| `filter_status`, `filter_demoted`, `filter_demote_scale`, `filter_demote_scale_status` | состояние фильтра, число пониженных кандидатов и величина понижения **вместе со статусом**: `uncalibrated_placeholder` означает заглушку, а не измеренную величину |
 | `effective_retrieval` | применённые параметры этого вопроса |
 | `seed_chunk_ids` | чанки, из которых взяты семена обхода |
 | `graph_paths`, `graph_depths` | пути и глубины обхода |

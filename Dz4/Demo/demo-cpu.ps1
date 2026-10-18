@@ -19,18 +19,15 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'down', 'status', 'load', 'export', 'restore', 'help')]
+    [ValidateSet('up', 'down', 'status', 'export', 'restore', 'help')]
     [string]$Command = 'help',
 
     [ValidateSet('empty', 'ready')]
     [string]$Set = 'empty',
 
-    [switch]$WithIngest,
     # Отдельный запуск С реранкером bge; по умолчанию выключен, как и в GPU-варианте.
     [switch]$WithReranker,
     [int]$WaitTimeoutSec = 300,
-    [string]$Path,
-    [string]$Domain = 'it',
     [string]$Out,
     [string]$Archive
 )
@@ -43,7 +40,6 @@ $DEMO_API_KEY = 'demo-key-2026'
 $scriptDir = $PSScriptRoot
 $infraDir = Resolve-Path (Join-Path $scriptDir '..\prototype\infra')
 $composeRuntime = Join-Path $infraDir 'compose.runtime.yaml'
-$composeIngest = Join-Path $infraDir 'compose.ingest.yaml'
 $composeReranker = Join-Path $infraDir 'compose.runtime-reranker.yaml'
 # Оверлея GPU здесь нет и он не подкладывается: бронь видеокарты выдаёт compose сам, и
 # без неё модель считает на процессоре. Базового файла достаточно.
@@ -53,20 +49,15 @@ $neo4jContainer = 'ohw-runtime-neo4j'
 
 function Write-Usage {
     @'
-Демо-стенд GraphRAG. ВАРИАНТ НА CPU (без видеокарты).
-
-    demo-cpu.ps1 up       -Set empty|ready [-WithIngest]
-    demo-cpu.ps1 down     -Set empty|ready [-WithIngest]
+demo-cpu.ps1 up       -Set empty|ready
+    demo-cpu.ps1 down     -Set empty|ready
     demo-cpu.ps1 status   -Set empty|ready
-    demo-cpu.ps1 load     -Path ФАЙЛ [-Domain it]
-    demo-cpu.ps1 restore  -Set empty|ready
+    demo-cpu.ps1 restore  -Set empty|ready [-Archive ФАЙЛ]
     demo-cpu.ps1 export   -Set ready [-Out ФАЙЛ]
 
-`-WithIngest` дополнительно поднимает ingestion-api - он нужен, чтобы грузить документы в
-пустую базу. Без него работает только просмотр того, что уже налито.
-
-Модель целиком считает на процессоре: это медленно. Ответ на вопрос может идти десятки
-минут. Если нужна скорость - используйте demo.ps1, он запускает LLM на видеокарте.
+ИНГЕСТА ЗДЕСЬ НЕТ, и это не ограничение, а решение (ADR-065): он в отдельном скрипте
+`Demo/ingest.ps1`. Наполненный том - общий, поэтому после `ingest.ps1 down` база
+остаётся на месте, а готовый набор восстанавливается без ингеста: `demo-cpu.ps1 restore`.
 
 Наборы:
   empty - пустая система, тома создаются заново.
@@ -85,9 +76,6 @@ function Invoke-Native {
 
 function Get-ComposeArguments {
     $args = @('--project-directory', $infraDir, '--file', $composeRuntime)
-    if ($WithIngest) {
-        $args += @('--file', $composeIngest, '--profile', 'ingest')
-    }
     # Оверлей реранкера подключается только по флагу: слот RERANKER без него
     # остаётся 
 oop, а сервис не поднимается.
@@ -143,105 +131,6 @@ function Get-ContainerPassword {
     return ''
 }
 
-function Invoke-Upload {
-    param([string]$Source, [string]$Domain)
-
-    $name = Split-Path -Leaf $Source
-    Write-Host "Загружаю $Source как docs/$name"
-    Invoke-Native -Exe 'docker' -Arguments @('cp', $Source, 'ohw-runtime-ingestion:/tmp/demo_doc.md')
-
-    # Запросы идут изнутри контейнера: его Python уже есть, и это снимает зависимость
-    # от Python на хосте и от вложенных кавычек в PowerShell.
-    $script = @'
-import json
-import sys
-import time
-import urllib.request
-
-domain, name = sys.argv[1], sys.argv[2]
-API = "demo-key-2026"
-BASE = "http://localhost:8002"
-SOURCE_URL = "docs/" + name
-
-
-def call(method, url, body=None, timeout=120):
-    data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(
-        url, data=data, method=method,
-        headers={"Content-Type": "application/json", "X-API-Key": API},
-    )
-    return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
-
-
-text = open("/tmp/demo_doc.md", encoding="utf-8").read()
-
-try:
-    st = call("POST", f"{BASE}/api/v1/ingestion/documents/status",
-              {"source_url": SOURCE_URL, "domain": domain,
-               "doc_type": "md", "content": text})
-    if st.get("unchanged"):
-        print(f"  уже загружен в текущем виде (версия {st.get('version')}). Пропуск.")
-        sys.exit(0)
-    print(f"  загружен ранее: {st.get('known')}")
-except Exception as exc:
-    print(f"  спросить статус не удалось ({exc}). Продолжаю без проверки.")
-
-job = call("POST", f"{BASE}/api/v1/ingestion/documents",
-           {"source_url": SOURCE_URL, "domain": domain,
-            "doc_type": "md", "content": text})
-job_id = job["job_id"]
-print(f"  джоба {job_id}, жду...")
-
-final = None
-for _ in range(3600):
-    time.sleep(5)
-    final = call("GET", f"{BASE}/api/v1/ingestion/jobs/{job_id}")
-    if final.get("status") in ("succeeded", "failed", "cancelled"):
-        break
-else:
-    raise SystemExit(f"  джоба {job_id} не завершилась за 3 часа")
-
-print(f"  статус: {final['status']}")
-if final.get("total_duration_ms"):
-    print(f"  всего {final['total_duration_ms']} мс")
-    print(f"  по стадиям {json.dumps(final.get('stage_durations_ms'), ensure_ascii=False)}")
-if final["status"] != "succeeded":
-    raise SystemExit(f"  джоба завершилась статусом {final['status']}")
-print("  загрузка завершилась")
-'@
-
-    $script | docker exec -i ohw-runtime-ingestion python - $Domain $name
-    if ($LASTEXITCODE -ne 0) {
-        throw "загрузка не удалась"
-    }
-
-    # Проверка графа - НА ХОСТЕ. Внутри контейнера `docker` нет, и вызов оттуда падал бы
-    # FileNotFoundError уже после успешной загрузки, то есть выглядел бы как сбой загрузки.
-    Write-Host '  проверяю, что граф вырос'
-    $pw = Get-ContainerPassword
-    if (-not $pw) {
-        Write-Warning '  количество нод НЕ измерено: не удалось получить пароль из контейнера'
-        return
-    }
-    $out = docker exec $neo4jContainer cypher-shell -u neo4j -p $pw --format plain `
-        'MATCH (n:ContextNode) RETURN count(*) AS c;'
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning '  количество нод НЕ измерено: запрос к базе не прошёл'
-        return
-    }
-    $count = -join ($out | Select-Object -Skip 1 | ForEach-Object { $_ } | ForEach-Object {
-        ($_ -replace '[^0-9]', '')
-    })
-    if (-not $count) {
-        Write-Warning '  количество нод НЕ измерено: ответ не содержит числа'
-        return
-    }
-    Write-Host "  ContextNode в базе: $count"
-    if ([int]$count -eq 0) {
-        throw 'граф пуст, а джоба succeeded - это vector-only загрузка'
-    }
-}
-
 switch ($Command) {
 
     'up' {
@@ -260,10 +149,6 @@ switch ($Command) {
 
     'down' {
         Set-CommonEnv
-        # Оверлей ингеста подключается ВСЕГДА, а не по флагу: если стенд поднимали с
-        # -WithIngest, то без него ingestion-api остался бы работать после остановки.
-        # Лишний оверлей при остановке безобиден.
-        $WithIngest = $true
         Invoke-Compose @('down')
         Write-Host "Набор '$Set' остановлен. Тома сохранены."
     }
@@ -315,18 +200,6 @@ switch ($Command) {
         }
     }
 
-    'load' {
-        if (-not $Path) { throw 'нужен -Path ФАЙЛ' }
-        $resolved = (Resolve-Path -LiteralPath $Path).Path
-        if (-not (Test-ContainerRunning $neo4jContainer)) {
-            throw 'стенд не поднят. Сначала: demo.ps1 up -WithIngest'
-        }
-        if (-not (Test-ContainerRunning 'ohw-runtime-ingestion')) {
-            throw 'ingestion-api не запущен. Нужен: demo.ps1 up -WithIngest'
-        }
-        Invoke-Upload -Source $resolved -Domain $Domain
-        Write-Host 'Загружено.'
-    }
 
     'export' {
         # Тома набора. `query` намеренно не входит: в нём только журнал задач запросов, он
