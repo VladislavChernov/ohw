@@ -405,6 +405,70 @@ def _powershell_is_runnable() -> bool:
 
 POWERSHELL_SCRIPTS = (PS1, PS1_CPU, PS1_INGEST)
 
+INGEST_SCRIPTS = (SH_INGEST, SH_INGEST_CPU, PS1_INGEST)
+
+
+def test_ingest_scripts_fail_on_lost_llm_layer() -> None:
+    """Скрипт ингеста обязан падать, когда LLM-слой потерян, даже при `succeeded`.
+
+    Найдено 2026-10-18: из 24 завершившихся джоб набора 8 потеряли часть или весь LLM-слой
+    и ВСЕ отчитались `succeeded`. Причина в конвейере (ADR-032): негодный слой уничтожается,
+    а задача продолжается. Статус джобы потерю не показывает, и общее число узлей в базе
+    тоже - оно велико от других документов.
+
+    Проверка живёт в скрипте загрузки, а не в коде сервиса: сервис уже отдаёт `enrichment`
+    в ответе джобы, и читать его обязан тот, кто загружает.
+    """
+    for path in INGEST_SCRIPTS:
+        code = _read(path)
+        assert "lost_entities" in code and "lost_edges" in code, (
+            f"{path.name} не читает потери LLM-слоя из ответа джобы"
+        )
+        assert "enrichment" in code, f"{path.name} не смотрит блок enrichment"
+        assert "ПОТЕРЯ LLM-СЛОЯ" in code, (
+            f"{path.name} не называет потерю внятно в выводе"
+        )
+
+
+def test_ingest_scripts_turn_loss_into_a_nonzero_exit() -> None:
+    """Потеря обязана давать ненулевой код возврата, а не только текст в выводе.
+
+    Проверка `== 0` молча прошла бы при ОТСУТСТВИИ поля, то есть при самом молчаливом
+    варианте отказа. Поэтому сравнение «больше нуля», иначе потеря станет предупреждением,
+    которым можно пренебречь.
+    """
+    for path in INGEST_SCRIPTS:
+        code = _read(path)
+        assert "if lost_entities or lost_edges:" in code or (
+            "$lostEntities -or $lostEdges" in code
+        ), f"{path.name} не превращает потерю в отказ"
+
+
+def test_ingest_scripts_say_reload_of_the_same_hash_will_not_help() -> None:
+    """Сообщение обязано предупреждать, что повторная загрузка того же файла не поможет.
+
+    Повторная загрузка того же `content_hash` — no-op, экстракция не перезапустится
+    (ADR-032). Без этой оговорки человек перезапустит загрузку, получит «уже загружен» и
+    решит, что починил.
+    """
+    for path in INGEST_SCRIPTS:
+        assert "no-op" in _read(path), (
+            f"{path.name} не предупреждает, что повторная загрузка того же content_hash - no-op"
+        )
+
+
+def test_ingest_scripts_keep_the_total_node_check() -> None:
+    """Прежняя проверка «узлы не ноль» остаётся: потеря слоя и пустой граф — разные отказы.
+
+    Проверка потерь ловит вырожденную экстракцию, проверка узлов ловит vector-only загрузку,
+    где LLM не сбой, а выключен. Убрать вторую, добавив первую, значит вернуть молчащий
+    vector-only.
+    """
+    for path in INGEST_SCRIPTS:
+        assert "ContextNode" in _read(path), (
+            f"{path.name} перестал проверять, что граф вообще наполнен"
+        )
+
 
 @pytest.mark.parametrize("script", POWERSHELL_SCRIPTS)
 def test_powershell_scripts_keep_their_bom(script: Path) -> None:

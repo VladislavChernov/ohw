@@ -195,10 +195,37 @@ if final.get("total_duration_ms"):
     print(f"  по стадиям {json.dumps(final.get('stage_durations_ms'), ensure_ascii=False)}")
 if final["status"] != "succeeded":
     raise SystemExit(f"  джоба завершилась статусом {final['status']}")
-print("  загрузка завершилась")
+
+# ПОТЕРЯ СЛОЯ LLM - ГЛАВНАЯ ПРОВЕРКА ЗДЕСЬ. Джоба завершается `succeeded` и при полной
+# потере: конвейер уничтожает негодный LLM-слой и идёт дальше (ADR-032). Статус джобы
+# этого не показывает, общее число узлей в базе - тоже (оно велико от других документов).
+# Единственный канал, где потеря видна, - `enrichment` в ответе джобы.
+enrichment = final.get("enrichment") or {}
+lost_entities = int(enrichment.get("lost_entities") or 0)
+lost_edges = int(enrichment.get("lost_edges") or 0)
+cause = enrichment.get("cause")
+if cause:
+    declared = enrichment.get("llm_relations_declared")
+    unique = enrichment.get("llm_relations_unique")
+    lines = enrichment.get("llm_answer_lines")
+    unique_lines = enrichment.get("llm_answer_lines_unique")
+    print(f"  ДЕГРАДАЦИЯ: причина {cause}, потеряно сущностей {lost_entities}, связей {lost_edges}")
+    print(f"    объявлено связей {declared}, уникальных {unique}"
+          f" | строк ответа {lines}, уникальных {unique_lines}")
+if lost_entities or lost_edges:
+    raise SystemExit(
+        f"  ПОТЕРЯ LLM-СЛОЯ: {lost_entities} сущностей и {lost_edges} связей уничтожены, "
+        f"причина {cause}. Документ записан в базу БЕЗ этого слоя, а джоба числится "
+        f"успешной. Повторная загрузка того же content_hash - no-op, экстракция не "
+        f"перезапустится."
+    )
+print("  загрузка завершилась, потерь нет")
 '@
 
     $script | docker exec -i $ingestContainer python - $Domain $name
+    if ($LASTEXITCODE -eq 3) {
+        throw 'загрузка прошла, но LLM-слой потерян. См. вывод выше.'
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "загрузка не удалась"
     }

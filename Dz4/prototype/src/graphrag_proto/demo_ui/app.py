@@ -24,6 +24,7 @@ from graphrag_proto.demo_ui.client import (
     DemoClient,
     Settings,
 )
+from graphrag_proto.retrieval.adapters.llm import RESPONSE_EXCERPT_MARKER
 
 TERMINAL_INGEST = {"succeeded", "failed", "cancelled"}
 
@@ -157,6 +158,103 @@ def _render_ingest_separated_notice() -> None:
             st.caption(text)
 
 
+#: Что показывать, когда LLM-слой потерян. Формулировки заданы здесь, а не в разметке,
+#: потому что этот же текст уходит в отчёт и в гард.
+ENRICHMENT_LOST_HEADER = "Слой сущностей потерян"
+
+#: Причина, при которой потеря считается отдельным исходом: джоба при этом завершается
+#: `succeeded`, и без отдельной строки человек видит успех (ADR-066).
+ENRICHMENT_LOST_CAUSE_NOTE = (
+    "джоба при этом числится успешной, а перезагрузка того же файла не поможет: "
+    "повтор того же content_hash — no-op"
+)
+
+
+def enrichment_loss_lines(job: dict[str, Any]) -> list[str]:
+    """Что потеряно при экстракции. Чистая функция, без Streamlit.
+
+    Ответ джобы отдаёт потерю в `enrichment`: `cause`, `lost_entities`, `lost_edges`.
+    Читать их обязан тот, кто показывает результат: статус джобы одинаков при полной
+    потере и при полном успехе, а общее число узлей в базе её не отражает (ADR-066).
+
+    Пустой список означает «потери нет». Отсутствие блока `enrichment` - тоже «нет»:
+    его не приходит у джоб, которые шли без LLM-слоя, и выдумывать потерю там нельзя.
+    """
+    enrichment = job.get("enrichment")
+    if not isinstance(enrichment, dict):
+        return []
+    lost_entities = int(enrichment.get("lost_entities") or 0)
+    lost_edges = int(enrichment.get("lost_edges") or 0)
+    if not lost_entities and not lost_edges:
+        return []
+    cause = str(enrichment.get("cause") or "причина не названа")
+    lines = [
+        f"{ENRICHMENT_LOST_HEADER}: потеряно сущностей {lost_entities}, связей {lost_edges}.",
+        f"Причина: {cause}.",
+        ENRICHMENT_LOST_CAUSE_NOTE,
+    ]
+    declared = enrichment.get("llm_relations_declared")
+    unique = enrichment.get("llm_relations_unique")
+    if declared is not None and unique is not None and declared != unique:
+        lines.append(
+            f"Модель объявила связей {declared}, уникальных {unique}: повторение ответа, "
+            "обрыв по лимиту токенов."
+        )
+    answer_lines = enrichment.get("llm_answer_lines")
+    answer_unique = enrichment.get("llm_answer_lines_unique")
+    if answer_lines is not None and answer_unique is not None and answer_lines != answer_unique:
+        lines.append(f"Строк ответа {answer_lines}, уникальных {answer_unique}.")
+    return lines
+
+
+def model_response_fragment(job: dict[str, Any]) -> str:
+    """Что модель успела вернуть до обрыва. Чистая функция, без Streamlit.
+
+    Ответ не лежит в отдельном поле джобы: адаптер встраивает его в текст ошибки, а
+    оркестратор кладёт текст в `message` стадии. Искать его в `enrichment` - значит не найти
+    никогда: там только числа.
+
+    Разбор потери без самого ответа упирается в «нужно ещё раз прогнать», а прогон стоит
+    минут тринадцать. Поэтому ответ показывается вместе с потерей, а не прячется в записи
+    стадии, где его никто не открывает.
+    """
+    stages = job.get("stages")
+    if not isinstance(stages, list):
+        return ""
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        message = str(stage.get("message") or "")
+        if RESPONSE_EXCERPT_MARKER not in message:
+            continue
+        return message.split(RESPONSE_EXCERPT_MARKER, 1)[1].strip()
+    return ""
+
+
+def _render_response_log(job: dict[str, Any]) -> None:
+    """Показать ответ модели при потере слоя."""
+    fragment = model_response_fragment(job)
+    if not fragment:
+        return
+    with st.expander("Ответ модели: что она успела вернуть (фрагмент)", expanded=False):
+        st.caption(
+            "Начало и конец ответа, который адаптер приложил к ошибке. "
+            "Повторяющиеся объекты здесь и есть причина обрыва."
+        )
+        st.code(fragment, language="json")
+
+
+def _render_enrichment_loss(job: dict[str, Any]) -> bool:
+    """Показать потерю, если она есть. Возвращает `True`, когда потеря показана."""
+    lines = enrichment_loss_lines(job)
+    if not lines:
+        return False
+    for line in lines:
+        st.error(line)
+    _render_response_log(job)
+    return True
+
+
 def _render_documents(client: DemoClient, domains: list[str], *, ingest_up: bool) -> None:
     st.subheader("Документы")
     if not ingest_up:
@@ -197,10 +295,21 @@ def _render_documents(client: DemoClient, domains: list[str], *, ingest_up: bool
                 )
                 job = _watch_ingest(client, job_id)
                 st.session_state["demo_jobs"][-1]["status"] = job.get("status", "unknown")
+                loss_lines = enrichment_loss_lines(job)
+                st.session_state["demo_jobs"][-1]["loss"] = (
+                    loss_lines[0] if loss_lines else ""
+                )
                 st.write("Стадии:")
                 _render_stages(job)
+                lost = _render_enrichment_loss(job)
                 if job.get("status") == "succeeded":
-                    st.success(f"Загрузка завершена: {source_url}")
+                    # Успех без оговорки показывается только когда потери нет. Иначе
+                    # зелёная плашка противоречит красной строкой прямо под ней.
+                    st.success(
+                        "Загрузка завершена без потерь"
+                        if not lost
+                        else "Загрузка завершилась, НО часть извлечённого потеряна — см. выше"
+                    )
                 elif job.get("status") == "failed":
                     st.error(f"Загрузка упала: {job.get('error', '')}")
                 else:
@@ -218,9 +327,19 @@ def _render_documents(client: DemoClient, domains: list[str], *, ingest_up: bool
                     "source_url": str(item.get("source_url", "")),
                     "domain": str(item.get("domain", "")),
                     "status": str(item.get("status", "")),
+                    "потеря слоя": str(item.get("loss", "") or ""),
                 }
             )
         st.dataframe(rows, hide_index=True)
+        # Потеря переживает перезагрузку страницы: без отдельной строки человек закрыл вкладку
+        # и потерял признак, что часть документа в базу не попала.
+        lost_rows = [row for row in rows if row["потеря слоя"]]
+        if lost_rows:
+            st.error(
+                f"Загружено источников: {len(rows)}, из них с потерей слоя: {len(lost_rows)}."
+            )
+            for row in lost_rows:
+                st.write(f"{row['source_url']}: {row['потеря слоя']}")
         source_url = st.selectbox("Источник для soft-delete", options=[r["source_url"] for r in rows])
         # Soft-delete необратим: чанки снимаются с поиска сразу, а `source_ids` у
         # сущностей вычищаются. Поэтому кнопка без шага подтверждения опаснее её

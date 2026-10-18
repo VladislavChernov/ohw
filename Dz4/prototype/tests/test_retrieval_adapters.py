@@ -973,3 +973,47 @@ def test_neo4j_expand_survives_string_properties_on_live_nodes() -> None:
 
     assert [row["node_id"] for row in found] == ["tag:it:n1"]
     assert found[0]["properties"] == {}, "непрочитанное свойство даёт пустое отображение"
+
+
+def test_neo4j_expand_query_excludes_chunk_nodes() -> None:
+    """Развёртка не должна возвращать текстовые узлы (ADR-068).
+
+    Гард стоит на тексте запроса, а не на результате, и это не слабость гарда, а следствие
+    самого дефекта: `LIMIT` стоит ВНУТРИ запроса, поэтому python-фильтр после выборки уже
+    не вернёт потраченный бюджет. Поведенческая проверка здесь невозможна по построению —
+    строка, съевшая лимит, исчезает до того, как её увидит вызывающий код.
+
+    Что именно ломается без этого условия: ребро `MENTIONS` идёт чанк -> сущность, и обход
+    с направлением `both` проходит по нему назад, попадая в узлы чанков. У чанка нет ни
+    `source_ids`, ни `chunk_ids`, поэтому `_has_active_provenance` режет такие строки, а
+    лимит к этому моменту уже израсходован. При `max_nodes=5` на месте выживает ноль строк.
+    """
+
+    captured: dict[str, str] = {}
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return []
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            captured["query"] = query
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    store.expand(["tag:it:seed"], max_depth=1, max_nodes=4)
+
+    query = captured["query"]
+    assert "NOT node:Chunk" in query, (
+        "развёртка обязана исключать узлы чанков: текст даёт векторная ось и мост по chunk_ids"
+    )
+    # Ограничение остаётся внутри запроса - иначе правка потеряла бы смысл.
+    assert "LIMIT $max_nodes" in query

@@ -79,6 +79,11 @@ class LLMResponseError(LLMAdapterError):
 #: вывода, где модель ещё пишет осмысленно, и хвост, где она уже зациклилась.
 RAW_EXCERPT_LIMIT = 2000
 
+#: Граница между текстом ошибки и приложенным сырым ответом. Живёт здесь, а не в
+#: читателях сообщения: Demo-UI показывает ответ по этому маркеру, и второе определение
+#: строки означало бы, что показывать начнёт не то.
+RESPONSE_EXCERPT_MARKER = "--- начало/конец ответа модели ---"
+
 
 def _excerpt(raw: str | None) -> str | None:
     if raw is None:
@@ -508,7 +513,7 @@ def _reject_truncation(finish_reason: object, raw: str | None = None) -> None:
         f"Иначе JSON не распарсится и извлечение молча деградирует."
     )
     if excerpt:
-        message = f"{message}\n--- начало/конец ответа модели ---\n{excerpt}"
+        message = f"{message}\n{RESPONSE_EXCERPT_MARKER}\n{excerpt}"
     raise LLMResponseError(message, raw=raw)
 
 

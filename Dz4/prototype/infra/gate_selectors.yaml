@@ -33,9 +33,12 @@ areas:
       - "tests/test_as_built_references.py"
 
   adapters:
-    # Каталог реализаций, YAML-namespaces и протокол адаптеров.
+    # Каталог реализаций, YAML-namespaces и протокол адаптеров. Тестовый файл назван
+    # здесь же, как в `eval_runner`: правка гарда обязана запускать гейт, иначе ослабленный
+    # гард проходит незамеченным.
     match:
       - "Dz4/prototype/src/graphrag_proto/retrieval/adapters/*"
+      - "Dz4/prototype/tests/test_retrieval_adapters.py"
       - "Dz4/prototype/infra/config/namespaces.yaml"
     tests:
       - "tests/test_factory_adapters.py"
@@ -79,6 +82,18 @@ areas:
       - "tests/test_run_eval_artifacts.py"
       - "tests/test_run_eval_observability.py"
       - "tests/test_run_eval_preflight.py"
+
+  demo_ui:
+    # Streamlit-слой демо и его гарды. Область появилась вместе с ADR-066: правка `app.py`
+    # обязана гонять гард потери LLM-слоя, иначе видимость потери в UI можно снять тихо.
+    # `test_demo_ui_maintenance.py` здесь же: он сторожит ту же разметку, что и новый гард.
+    match:
+      - "Dz4/prototype/src/graphrag_proto/demo_ui/*"
+      - "Dz4/prototype/tests/test_demo_ui_ingest_loss.py"
+      - "Dz4/prototype/tests/test_demo_ui_maintenance.py"
+    tests:
+      - "tests/test_demo_ui_ingest_loss.py"
+      - "tests/test_demo_ui_maintenance.py"
 
   gate_tooling:
     # Гейт и его селектор. Правка здесь меняет то, что считается проверенным,

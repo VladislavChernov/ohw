@@ -158,7 +158,29 @@ if final.get("total_duration_ms"):
     print(f"  по стадиям {json.dumps(final.get('stage_durations_ms'), ensure_ascii=False)}")
 if final["status"] != "succeeded":
     raise SystemExit(f"  джоба завершилась статусом {final['status']}")
-print("  загрузка завершилась")
+
+# ПОТЕРЯ СЛОЯ LLM - ГЛАВНАЯ ПРОВЕРКА ЗДЕСЬ. Джоба завершается `succeeded` и при полной
+# потере: конвейер уничтожает негодный LLM-слой и идёт дальше (ADR-032). Статус джобы
+# этого не показывает, общее число узлей в базе - тоже (оно велико от других документов).
+# Единственный канал, где потеря видна, - `enrichment` в ответе джобы.
+enrichment = final.get("enrichment") or {}
+lost_entities = int(enrichment.get("lost_entities") or 0)
+lost_edges = int(enrichment.get("lost_edges") or 0)
+cause = enrichment.get("cause")
+if cause:
+    print(f"  ДЕГРАДАЦИЯ: причина {cause}, потеряно сущностей {lost_entities}, связей {lost_edges}")
+    print(f"    объявлено связей {enrichment.get('llm_relations_declared')}, "
+          f"уникальных {enrichment.get('llm_relations_unique')}"
+          f" | строк ответа {enrichment.get('llm_answer_lines')}, "
+          f"уникальных {enrichment.get('llm_answer_lines_unique')}")
+if lost_entities or lost_edges:
+    raise SystemExit(
+        f"  ПОТЕРЯ LLM-СЛОЯ: {lost_entities} сущностей и {lost_edges} связей уничтожены, "
+        f"причина {cause}. Документ записан в базу БЕЗ этого слоя, а джоба числится "
+        f"успешной. Повторная загрузка того же content_hash - no-op, экстракция не "
+        f"перезапустится."
+    )
+print("  загрузка завершилась, потерь нет")
 PY
 }
 

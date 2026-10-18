@@ -308,18 +308,26 @@ class Neo4jGraphStore(GraphStoreProvider):
             if domain
             else ""
         )
-        path_domain_clause = (
-            " WHERE all(item IN nodes(path) WHERE item.domain = $domain "
-            "OR item.node_id STARTS WITH $domain_prefix)"
-            if domain
-            else ""
-        )
+        path_conditions: list[str] = []
+        if domain:
+            path_conditions.append(
+                "all(item IN nodes(path) WHERE item.domain = $domain "
+                "OR item.node_id STARTS WITH $domain_prefix)"
+            )
+        # ADR-068: развёртка отдаёт сущности, а не текст. `MENTIONS` идёт чанк ->
+        # сущность, поэтому при направлении `both` обход проходит по нему назад и попадает
+        # в узлы чанков. У чанка нет ни `source_ids`, ни `chunk_ids`, значит
+        # `_has_active_provenance` режет такую строку, а `LIMIT` к этому моменту уже
+        # израсходован: при малом лимите на выходе пусто. Исключение задано узлом, а не
+        # типом связи, чтобы новый тип связи не приносил текст молча.
+        path_conditions.append(f"NOT node:{CHUNK_LABEL}")
+        path_where = " WHERE " + " AND ".join(path_conditions)
         query = (
             "MATCH (seed) "
             "WHERE (seed.node_id IN $context_ids OR seed.tag_id IN $context_ids)"
             f"{domain_clause} "
             f"MATCH path=(seed){pattern}(node)"
-            f"{path_domain_clause} "
+            f"{path_where} "
             "RETURN node, [item IN nodes(path) | coalesce(item.node_id, item.tag_id)] AS path, "
             "length(path) AS depth, type(last(relationships(path))) AS kind "
             "LIMIT $max_nodes"
