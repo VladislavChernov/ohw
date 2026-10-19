@@ -38,6 +38,13 @@ _LABEL_COND_RE = re.compile(r"m:(\w+)")
 _PROVENANCE_KEYS = ("source_ids", "chunk_ids", "variants", "aliases")
 
 
+def _as_str_list(value: Any) -> list[str]:
+    """Список строк из metadata: не список — пустой список, а не итерация по строке."""
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item]
+    return []
+
+
 
 class _Journal:
     """Буфер операций для атомарной записи (L2-04): применяется на выходе успеха."""
@@ -630,6 +637,11 @@ class InMemoryVectorStore(VectorStoreProvider):
                     "source_url": str(metadata.get("source_url") or ""),
                     "domain": metadata.get("domain"),
                     "index": metadata.get("index"),
+                    # Отбор по сущностям вопроса считается по свойству самого
+                    # кандидата (ADR-072); без этих полей мостовой чанк нечем
+                    # подтвердить, и проверка свелась бы к строкам обхода.
+                    "context_ids": _as_str_list(metadata.get("context_ids")),
+                    "tag_ids": _as_str_list(metadata.get("tag_ids")),
                 }
             )
         return rows

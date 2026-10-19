@@ -80,8 +80,10 @@
 | файл | о чём |
 |---|---|
 | [REPORT-PARAMETERS.md](./REPORT-PARAMETERS.md) | Все параметры прогонов и что означает каждое число в отчёте. Читать **до** любого отчёта: без него цифры не читаемы |
-| [eval-questions.md](./eval-questions.md) | Список вопросов-кандидатов для замера на наборе `ready`, пять групп |
-| [eval-slice.jsonl](./eval-slice.jsonl) | Машинная форма того же списка для `run_eval` |
+| [eval-questions.md](./eval-questions.md) | Список вопросов-кандидатов для замера на наборе `ready`, пять групп (v1, заморожена 2026-10-15) |
+| [eval-slice.jsonl](./eval-slice.jsonl) | Машинная форма списка v1 для `run_eval` |
+| [eval-questions-v2.md](./eval-questions-v2.md) | **Текущая версия** списка: v1 плюс группа G — вопрос с цепочкой решений по ADR-логу (ADR-072) |
+| [eval-slice-v2.jsonl](./eval-slice-v2.jsonl) | Машинная форма списка v2 для `run_eval` |
 | [experimental-cross-doc-questions.jsonl](./experimental-cross-doc-questions.jsonl) | Экспериментальные вопросы про междокументные связи. Не входят ни в один золотой набор: это проверка гипотез, а не приёмка |
 | [measured-load-time.md](./measured-load-time.md) | Измеренное время загрузки документа и прогноз на остальные |
 
@@ -389,6 +391,11 @@ docs/defense_notes_simplifications.md
   в папку `--out` целиком: `qa_review.md` и `PASSPORT.md` — для чтения глазами,
   `run_manifest.json`, `qa_log.jsonl`, `lift_report.json`, `failures.jsonl` и `run_state.json` —
   машинно.
+- [eval-questions-v2.md](./eval-questions-v2.md) и [eval-slice-v2.jsonl](./eval-slice-v2.jsonl) —
+  **текущая версия** списка и её машинная форма (v1 плюс группа G, вопрос с цепочкой решений
+  по ADR-логу). Выпущена по ADR-072: критерий замера вклада графа переведён на единицу-чанк,
+  а v1 заморожена и не правится. Прогон — `--dataset Demo/eval-slice-v2.jsonl --retrieval-only`.
+  Строка G1 перенесена из полного набора (`it_graph_23`), провенанс — в поле `notes`.
 - [measured-load-time.md](./measured-load-time.md) — **измеренное время загрузки** документа в
   набор: постадийный замер пилота (330 с на 10 чанков, `EXTRACT` 20,3 с/чанк,
   `EMBED` 11,4 с/чанк) и прогноз на остальные документы, включая `05_adr_log.md` (191 чанк,

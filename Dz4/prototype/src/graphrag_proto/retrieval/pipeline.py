@@ -970,6 +970,16 @@ class QueryPipeline:
         retrieval_started = time.monotonic()
         emit("status", {"stage": "vector"})
         body_chunks = vector_retriever.retrieve(embedding)
+        # Чанки векторной оси ДО моста: это вычитаемое для чанк-критерия ADR-072.
+        # Мост дописывает свои чанки в `body_chunks`, и без снимка «до» разность
+        # `graph_chunks - vector_chunks` потеряла бы смысл.
+        vector_chunk_ids = list(
+            dict.fromkeys(
+                str(chunk.get("chunk_id"))
+                for chunk in body_chunks
+                if chunk.get("chunk_id")
+            )
+        )
         vector_scores = {
             str(chunk.get("chunk_id")): float(chunk.get("score") or 0.0)
             for chunk in body_chunks
@@ -1133,6 +1143,11 @@ class QueryPipeline:
                                     "domain": row.get("domain"),
                                     "index": row.get("index"),
                                     "bridged": True,
+                                    # Собственные сущности чанка нужны отбору (ADR-072):
+                                    # без них мостовой кандидат нечем подтвердить, и
+                                    # проверка снова свелась бы к строкам обхода.
+                                    "context_ids": list(row.get("context_ids") or []),
+                                    "tag_ids": list(row.get("tag_ids") or []),
                                 }
                             )
                         body_chunks = body_chunks + bridged_chunks
@@ -1143,12 +1158,52 @@ class QueryPipeline:
         effective_retrieval["bridge_status"] = bridge_status
         effective_retrieval["bridged_chunks"] = len(bridged_chunks)
 
+        # ЧАНК-МНОЖЕСТВА ПО ОСЯМ (ADR-072). `done.sources` — по документу, и по нему
+        # критерий «граф принёс чанк, которого вектор не принёс» невычислим. Множества
+        # объявляются здесь; если ось не запускалась — `None`, а не пустой список, иначе
+        # «не измерено» снова выглядело бы как измеренный ноль.
+        materialized_chunk_ids = list(
+            dict.fromkeys(str(chunk.get("chunk_id")) for chunk in bridged_chunks)
+        )
+        effective_retrieval["vector_chunk_ids"] = vector_chunk_ids
+        if enabled:
+            graph_chunk_ids = list(
+                dict.fromkeys(
+                    str(chunk_id)
+                    for row in expanded_rows
+                    for chunk_id in (row.get("chunk_ids") or [])
+                    if chunk_id
+                )
+            )
+            vector_chunk_id_set = set(vector_chunk_ids)
+            graph_only_chunk_ids = [
+                chunk_id
+                for chunk_id in graph_chunk_ids
+                if chunk_id not in vector_chunk_id_set
+            ]
+            graph_only_set = set(graph_only_chunk_ids)
+            effective_retrieval["graph_chunk_ids"] = graph_chunk_ids
+            effective_retrieval["graph_materialized_chunk_ids"] = materialized_chunk_ids
+            effective_retrieval["graph_only_chunk_ids"] = graph_only_chunk_ids
+            effective_retrieval["graph_only_chunk_sources"] = {
+                str(chunk.get("chunk_id")): chunk.get("source_url")
+                for chunk in bridged_chunks
+                if str(chunk.get("chunk_id")) in graph_only_set and chunk.get("source_url")
+            }
+        else:
+            effective_retrieval["graph_chunk_ids"] = None
+            effective_retrieval["graph_materialized_chunk_ids"] = None
+            effective_retrieval["graph_only_chunk_ids"] = None
+            effective_retrieval["graph_only_chunk_sources"] = None
+
         # ФИЛЬТР: мягкий, по пересечению с запросом. Понижает оценку, не выбрасывает.
         #
-        # Пересечение считается по тем же строкам обхода, которые построил обход: имя
-        # достигнутой сущности ищется в тексте запроса, и чанки подтверждённых сущностей
-        # пересекаются с запросом. Отдельный порт хранилища не нужен и в Neo4j, и в
-        # InMemory - один и тот же вход для обоих, а значит и один смысл.
+        # Пересечение считается ДВУМЯ сигналами (ADR-072). Первый — свойство самого
+        # кандидата (`context_ids`/`tag_ids`): имя сущности ищется в тексте запроса, и
+        # срез `max_graph_nodes` в этой проверке не участвует. Второй, сохраняемый, —
+        # имя достигнутой обходом сущности: для мостовых чанков без собственных
+        # `context_ids` это единственный сигнал. Оба сигнала смотрят на один и тот же
+        # запрос, поэтому смысл у них один и тот же в Neo4j и в InMemory.
         #
         # Пустой набор подтверждённых сущностей - это НЕ «всё не подтверждено»: это
         # отсутствие данных, и в этом состоянии фильтр не трогает ничего. Иначе при
@@ -1158,8 +1213,32 @@ class QueryPipeline:
         filter_demoted: list[dict[str, Any]] = []
         filter_phrase_names = 0
         corroborated_chunk_ids: set[str] = set()
+        corroboration_candidates: int | None = None
+        corroboration_confirmed: int | None = None
         if enabled and expanded_rows and body_chunks:
             query_text = str(query or "").lower()
+            # (1) Пересечение по САМОМУ кандидату (ADR-072). Свойство лежит на чанке
+            # (`context_ids`/`tag_ids`), а не на строке обхода, поэтому срез
+            # `max_graph_nodes` больше не решает, кого судить. Обход в этой проверке
+            # не участвует.
+            for chunk in body_chunks:
+                chunk_id = str(chunk.get("chunk_id") or "")
+                for key in ("context_ids", "tag_ids"):
+                    matched = False
+                    for raw_name in chunk.get(key) or []:
+                        variants = {
+                            variant
+                            for variant in _name_variants(str(raw_name))
+                            if _looks_like_name(variant)
+                        }
+                        if any(variant in query_text for variant in variants):
+                            corroborated_chunk_ids.add(chunk_id)
+                            matched = True
+                            break
+                    if matched:
+                        break
+            # (2) Подтверждение именем достигнутой сущности сохраняется: для мостовых
+            # чанков без собственных `context_ids` это единственный сигнал.
             for row in expanded_rows:
                 raw_name = str(row.get("canonical_name") or "")
                 if not _looks_like_name(raw_name):
@@ -1171,9 +1250,16 @@ class QueryPipeline:
                 corroborated_chunk_ids.update(
                     str(value) for value in (row.get("chunk_ids") or []) if value
                 )
+            corroborated_chunk_ids.discard("")
+            corroboration_candidates = len(body_chunks)
+            corroboration_confirmed = sum(
+                1
+                for chunk in body_chunks
+                if str(chunk.get("chunk_id") or "") in corroborated_chunk_ids
+            )
             if not corroborated_chunk_ids:
-                # Ни одна достигнутая сущность не подтверждена запросом: данных для
-                # отбора нет, и отбор не производится.
+                # Ни один кандидат не подтверждён запросом: данных для отбора нет, и
+                # отбор не производится.
                 filter_status = "no_corroborated_entities"
             else:
                 filter_status = "applied"
@@ -1196,6 +1282,10 @@ class QueryPipeline:
         elif enabled and body_chunks:
             filter_status = "no_expansion_rows"
 
+        # Счётчики отбора (ADR-072): сколько кандидатов рассмотрено и сколько
+        # подтверждено. `None` — отбор не запускался; это не ноль.
+        effective_retrieval["corroboration_candidates"] = corroboration_candidates
+        effective_retrieval["corroboration_confirmed"] = corroboration_confirmed
         effective_retrieval["filter_status"] = filter_status
         effective_retrieval["filter_demote_scale"] = cfg_filter_scale
         # Статус величины едет вместе с числом. Пока откалибровать нечем, а число в артефакте
@@ -1441,6 +1531,10 @@ class QueryPipeline:
                 # "сколько строк было", но не на "что в них было", а вопрос "помогает ли
                 # граф" без второго не имеет ответа.
                 "skeleton_lines": list(context.skeleton_lines),
+                # Чанки, чей текст реально вошёл в промпт. Критерий ADR-072 читается по
+                # этому списку: «чанк есть в выдаче» и «текст чанка доехал в контекст» —
+                # разные утверждения, и `body_count` их не различает.
+                "body_chunk_ids": list(context.body_chunk_ids),
             },
         }
         if self._semantic_cache is not None and cache_allowed:

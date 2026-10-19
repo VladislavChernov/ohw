@@ -1719,6 +1719,26 @@ def eval_question(
         "bridged_chunks": (done.get("effective_retrieval") or {}).get("bridged_chunks"),
         "filter_status": (done.get("effective_retrieval") or {}).get("filter_status"),
         "filter_demoted": (done.get("effective_retrieval") or {}).get("filter_demoted"),
+        # Множества чанков по осям и счётчики отбора (ADR-072). Верхнеуровневая копия:
+        # критерий читается по строке отчёта, не ныряя в `effective_retrieval`. Когда ось
+        # не запускалась, значение `None` — «не измерено», а не пустой список.
+        "vector_chunk_ids": (done.get("effective_retrieval") or {}).get("vector_chunk_ids"),
+        "graph_chunk_ids": (done.get("effective_retrieval") or {}).get("graph_chunk_ids"),
+        "graph_materialized_chunk_ids": (done.get("effective_retrieval") or {}).get(
+            "graph_materialized_chunk_ids"
+        ),
+        "graph_only_chunk_ids": (done.get("effective_retrieval") or {}).get(
+            "graph_only_chunk_ids"
+        ),
+        "graph_only_chunk_sources": (done.get("effective_retrieval") or {}).get(
+            "graph_only_chunk_sources"
+        ),
+        "corroboration_candidates": (done.get("effective_retrieval") or {}).get(
+            "corroboration_candidates"
+        ),
+        "corroboration_confirmed": (done.get("effective_retrieval") or {}).get(
+            "corroboration_confirmed"
+        ),
         "profile_fingerprint": done.get("profile_fingerprint"),
         "profile_pinned_at": done.get("profile_pinned_at"),
         "config_fallbacks": done.get("config_fallbacks") or [],

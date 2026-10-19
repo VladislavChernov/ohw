@@ -266,6 +266,38 @@ def test_skeleton_lines_are_persisted_for_reuse_in_artifacts() -> None:
     assert sum(len(part.split()) for part in result.skeleton_lines) == result.skeleton_tokens
 
 
+def test_body_chunk_ids_report_which_chunks_reached_the_prompt() -> None:
+    """`body_count` говорит сколько, `body_chunk_ids` — какие.
+
+    Критерий ADR-072 читается по идентификаторам: чанк, вытесненный лимитом, обязан
+    отсутствовать, а вошедший — присутствовать. Без этого «текст доехал в контекст»
+    неотличимо от «чанк был в выдаче, но не попал в промпт».
+    """
+    skeleton = _skeleton_rows_like_pipeline({"canonical_name": "X"})
+    huge = " ".join(["слово"] * 3000)
+    chunks = [
+        {"chunk_id": "chk:huge", "text": huge, "source_url": "src://huge", "score": 0.1},
+        {
+            "chunk_id": "chk:keep",
+            "text": "короткая выжившая",
+            "source_url": "src://keep",
+            "score": 0.9,
+        },
+    ]
+
+    result = ContextAssembly(max_tokens=64).assemble(skeleton, chunks)
+
+    assert result.body_count == 1
+    assert result.body_chunk_ids == ["chk:keep"]
+    # Чанк без идентификатора считается в тело, но в список не попадает: отсутствие
+    # данных не подменяется выдуманной строкой-идентификатором.
+    anonymous = ContextAssembly(max_tokens=256).assemble(
+        skeleton, [{"text": "текст", "source_url": "src://anon", "score": 1.0}]
+    )
+    assert anonymous.body_count == 1
+    assert anonymous.body_chunk_ids == []
+
+
 def test_context_assembly_evicts_lowest_score_first() -> None:
     skeleton = [{"n": {"canonical_name": "X"}}]
     chunks = [

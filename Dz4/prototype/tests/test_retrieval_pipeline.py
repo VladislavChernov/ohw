@@ -1154,6 +1154,113 @@ def test_filter_scale_reports_whether_it_was_ever_calibrated() -> None:
     assert default_effective["filter_demote_scale_status"] == "uncalibrated_placeholder"
 
 
+def test_filter_corroborates_candidate_by_its_own_context_ids_not_by_the_walk() -> None:
+    """Подтверждение считается по свойству САМОГО кандидата, а не по строке обхода (ADR-072).
+
+    Обход здесь достигает лишь чужую сущность (`Omega`) и ни одна его строка не называет
+    `First`. При подтверждении через обход векторный чанк `chk:first`, названный своим
+    `context_ids`, был бы понижен по причине, которой нет. Проверка сторожит именно это:
+    имя из запроса взято из карточки кандидата, и срез обхода в решении не участвует.
+    """
+    rows = _expansion_rows_reaching("chk:graph")
+    rows[0]["canonical_name"] = "Omega"
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=rows),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    effective = pipe.run("расскажи про First", generate=False)["effective_retrieval"]
+
+    assert effective["filter_status"] == "applied"
+    demoted_ids = {entry["chunk_id"] for entry in effective["filter_demoted_candidates"]}
+    assert "chk:first" not in demoted_ids, "кандидат подтверждён своим context_ids"
+    assert "chk:second" in demoted_ids, "неподтверждённый кандидат обязан быть понижен"
+    assert effective["corroboration_candidates"] == len(_vector_rows())
+    assert effective["corroboration_confirmed"] == 1
+
+
+def test_filter_corroborates_bridged_chunk_and_reports_chunk_sets_by_axis() -> None:
+    """Мостовой чанк подтверждается своими `context_ids`, и множества чанков объявлены.
+
+    Текст берётся из настоящего хранилища через `upsert_vectors`, а не из подставного
+    метода: подстановка проверила бы, что пайплайн вызвал то, что мы и так написали.
+    Свойства чанка (`context_ids`) живут в metadata, и мост обязан донести их до отбора.
+    """
+    vector = _RecordingVectorStore(_vector_rows())
+    vector.upsert_vectors(
+        [
+            {
+                "chunk_id": "chk:graph",
+                "embedding": [0.1],
+                "text": "текст чанка, которого векторный поиск не вернул",
+                "metadata": {
+                    "source_url": "src://first",
+                    "domain": "it",
+                    "context_ids": ["tag:it:first"],
+                },
+            }
+        ]
+    )
+    rows = _expansion_rows_reaching("chk:graph")
+    rows[0]["canonical_name"] = "Omega"
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=rows),
+        vector_store=vector,
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(PROFILE),
+    )
+
+    effective = pipe.run("расскажи про First", generate=False)["effective_retrieval"]
+
+    assert effective["bridge_status"] == "ok"
+    assert effective["bridged_chunks"] == 1
+    demoted_ids = {entry["chunk_id"] for entry in effective["filter_demoted_candidates"]}
+    assert "chk:graph" not in demoted_ids, "мостовой чанк подтверждён своими context_ids"
+    assert "chk:first" not in demoted_ids
+    assert "chk:second" in demoted_ids
+    # Множества по осям: критерий ADR-072 читается по ним, а не по документному `sources`.
+    assert set(effective["vector_chunk_ids"]) == {"chk:first", "chk:second"}
+    assert effective["graph_only_chunk_ids"] == ["chk:graph"]
+    assert effective["graph_materialized_chunk_ids"] == ["chk:graph"]
+    assert effective["graph_only_chunk_sources"] == {"chk:graph": "src://first"}
+
+
+def test_chunk_sets_are_none_when_graph_axis_is_off() -> None:
+    """При выключенной оси множества чанков и счётчики отбора — `None`, а не пустой список.
+
+    Пустой список читался бы как измеренный ноль и снова спрятал бы слепоту прибора:
+    «граф не дал ни одного чанка» и «граф не запускался» обязаны различаться. Векторная
+    ось при этом измерена всё равно.
+    """
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(expansion_rows=_expansion_rows_reaching("chk:first")),
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="да"),
+        profile_loader=_StubLoader(
+            {**PROFILE, "retrieval": {**PROFILE["retrieval"], "graph_search_enabled": False}}
+        ),
+    )
+
+    effective = pipe.run("расскажи про First", generate=False)["effective_retrieval"]
+
+    assert effective["filter_status"] == "not_requested"
+    assert effective["graph_chunk_ids"] is None
+    assert effective["graph_materialized_chunk_ids"] is None
+    assert effective["graph_only_chunk_ids"] is None
+    assert effective["graph_only_chunk_sources"] is None
+    assert effective["corroboration_candidates"] is None
+    assert effective["corroboration_confirmed"] is None
+    assert set(effective["vector_chunk_ids"]) == {"chk:first", "chk:second"}
+
+
 def test_evidence_limit_drops_block_but_keeps_source_attribution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

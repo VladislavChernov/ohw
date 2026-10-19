@@ -922,7 +922,8 @@ class Neo4jVectorStore(VectorStoreProvider):
                 f"MATCH (c:{CHUNK_LABEL}) WHERE (c.node_id IN $node_ids OR c.tag_id IN $tag_ids)"
                 f"{domain_clause} "
                 "RETURN c.node_id AS chunk_id, c.text AS text, c.source_url AS source_url, "
-                "c.domain AS domain, c.index AS index",
+                "c.domain AS domain, c.index AS index, "
+                "c.context_ids AS context_ids, c.tag_ids AS tag_ids",
                 parameters=parameters,
             ).data()
         found = {
@@ -932,6 +933,10 @@ class Neo4jVectorStore(VectorStoreProvider):
                 "source_url": str(row.get("source_url") or ""),
                 "domain": row.get("domain"),
                 "index": row.get("index"),
+                # Свойства самого кандидата: по ним считается пересечение с
+                # вопросом (ADR-072), без них мостовой чанк нечем подтвердить.
+                "context_ids": [str(value) for value in (row.get("context_ids") or [])],
+                "tag_ids": [str(value) for value in (row.get("tag_ids") or [])],
             }
             for row in rows
             if row.get("chunk_id")
