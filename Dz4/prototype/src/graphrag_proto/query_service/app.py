@@ -67,6 +67,22 @@ def create_app(
                 )
             metadata["max_depth"] = max_depth
 
+        # Лимит узлов обхода - такой же параметр запроса (ADR-069). Проверки те же: тип и
+        # знак на входе, верхняя граница - забота конвейера. Отдельная проверка, а не
+        # переиспользование ветки глубины: одно не следует из другого, и обход по числу
+        # узлов не имеет отношения к глубине обхода.
+        max_graph_nodes = payload.get("max_graph_nodes")
+        if max_graph_nodes is not None:
+            if isinstance(max_graph_nodes, bool) or not isinstance(max_graph_nodes, int):
+                raise HTTPException(
+                    status_code=422, detail="max_graph_nodes должен быть целым числом"
+                )
+            if max_graph_nodes < 1:
+                raise HTTPException(
+                    status_code=422, detail="max_graph_nodes должен быть не меньше 1"
+                )
+            metadata["max_graph_nodes"] = max_graph_nodes
+
         task_id = new_task_id()
         store.create(task_id, domain or "", query)
         try:

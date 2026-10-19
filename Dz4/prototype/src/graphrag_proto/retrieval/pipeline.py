@@ -90,6 +90,18 @@ GRAPH_REASON_TRUNCATED_BY_LIMITS = "truncated_by_limits"
 # нечего. Раньше такое состояние выражалось как `contributed`, то есть «принёс».
 GRAPH_REASON_NO_CANDIDATE = "no_candidate"
 
+#: Потолок лимита строк обхода (ADR-069). Не отвергается на входе запроса, а зажимается
+#: здесь, и урезание объявляется в ответе. Значение взято с запасом относительно типичных
+#: профилей: цель - не запретить большой обход, а не дать ему съесть память процесса.
+MAX_GRAPH_NODES_CAP = 500
+
+#: Во сколько раз обход материализует больше строк, чем попадёт в срез (ADR-071). Отбор по
+#: сущностям вопроса обязан идти до среза, а для этого нужно, чтобы было из чего выбирать.
+#: Величина ЗАЯВЛЕНА ДО ЗАМЕРА и не выведена из данных: её смысл - «во сколько раз материал
+#: должен превосходить срез». Подгонка под результат здесь была бы тем же, чем был
+#: `graph_boost`: константа, выбранная после того, как стало ясно, чего мы хотим.
+EXPANSION_CANDIDATE_MULTIPLIER = 4
+
 #: Переключатель измерения: сколько строк графового свидетельства уходит в промпт.
 #: ``None`` / пусто - без ограничения; ``0`` - свидетельство не показывается вовсе.
 EVIDENCE_MAX_LINES_ENV = "RETRIEVAL_EVIDENCE_MAX_LINES"
@@ -644,6 +656,7 @@ class QueryPipeline:
         generate: bool = True,
         trace: bool = False,
         max_depth: int | None = None,
+        max_graph_nodes: int | None = None,
     ) -> dict[str, Any]:
         """Полный retrieval-цикл; `revision` — ревизия данных домена (ADR-026).
 
@@ -652,6 +665,11 @@ class QueryPipeline:
         знаком; всё, что выше `MAX_EXPANSION_DEPTH`, зажимается и объявляется в ответе
         (`max_depth_effective`, `depth_clamped`), чтобы урезание не было молчаливым.
         `None` оставляет цепочку конфигурации нетронутой.
+
+        `max_graph_nodes` — лимит числа строк обхода, тоже из запроса (ADR-069). Цепочка
+        та же: запрос выше профиля, `None` оставляет конфигурацию. Зажимается сверху, потому
+        что неограниченный лимит на глубине 6 отдаёт десятки тысяч строк и молча съедает
+        память; урезание объявляется в ответе, а не прячется.
 
         Ревизия участвует в epoch-bump кэша и попадает в `done.revision` как
         fingerprint среза для Eval (ADR-015). Hit эпохи `revision` означает, что
@@ -748,6 +766,12 @@ class QueryPipeline:
         # об одном и том же числе, иначе «что показал отчёт» и «что сделал обход» разъедутся.
         requested_depth = cfg_max_depth if request_depth is None else request_depth
         effective_depth = _expand_depth(requested_depth)
+        # Лимит узлов: запрос выше профиля, как и глубина (ADR-069). Потолок задаётся здесь,
+        # а не в запросе: заявление о намерении принимается, а урезание объявляется.
+        requested_graph_nodes = (
+            cfg_max_graph_nodes if max_graph_nodes is None else max_graph_nodes
+        )
+        effective_graph_nodes = max(1, min(int(requested_graph_nodes), MAX_GRAPH_NODES_CAP))
         effective_retrieval: dict[str, Any] = {
             "max_depth": cfg_max_depth,
             "max_depth_requested": requested_depth,
@@ -755,6 +779,9 @@ class QueryPipeline:
             "depth_clamped": effective_depth != requested_depth,
             "max_fanout": cfg_max_fanout,
             "max_graph_nodes": cfg_max_graph_nodes,
+            "max_graph_nodes_requested": requested_graph_nodes,
+            "max_graph_nodes_effective": effective_graph_nodes,
+            "graph_nodes_clamped": effective_graph_nodes != requested_graph_nodes,
             "expansion_kinds": cfg_expansion_kinds,
             "expansion_direction": cfg_direction,
             "graph_search_enabled": graph_requested,
@@ -949,6 +976,8 @@ class QueryPipeline:
         }
         skeleton_rows: list[dict[str, Any]] = []
         expanded_rows: list[dict[str, Any]] = []
+        candidate_rows: list[dict[str, Any]] = []
+        corroborated_rows: list[dict[str, Any]] = []
         # Мост объявляется здесь, а заполняется ниже: `effective_retrieval` собирается
         # раньше обхода, и итог моста дописывается в него после.
         bridge_status = "not_requested"
@@ -971,14 +1000,40 @@ class QueryPipeline:
                     # Здесь только работа с графом: отказы рантайма деградируют, дефекты
                     # конфигузации разобраны выше и сюда не доходят.
                     expansion_kinds = cfg_expansion_kinds
-                    expanded_rows = graph_retriever.expand(
+                    # ADR-071: обход материализует НАДМНОЖЕСТВО строк, потому что отбор по
+                    # сущностям вопроса обязан идти ДО среза. Сначала срез, потом отбор -
+                    # это та же инверсия, только на шаг глубже: судить пришлось бы о тех
+                    # нескольких строках, что случайно уцелели, а не о доступном материале.
+                    candidate_budget = effective_graph_nodes * EXPANSION_CANDIDATE_MULTIPLIER
+                    candidate_rows = graph_retriever.expand(
                         unique_seed_ids,
                         direction=cfg_direction,
                         kinds=expansion_kinds,
                         max_depth=requested_depth,
                         max_fanout=cfg_max_fanout,
-                        max_nodes=cfg_max_graph_nodes,
+                        max_nodes=candidate_budget,
                     )
+                    # Подтверждение вопросом считается здесь, до среза: имя сущности должно
+                    # встречаться в вопросе, а не где-то в уже отобранном наборе.
+                    query_text = str(query or "").lower()
+                    corroborated: list[dict[str, Any]] = []
+                    for row in candidate_rows:
+                        raw_name = str(row.get("canonical_name") or "")
+                        if not _looks_like_name(raw_name):
+                            continue
+                        if any(
+                            variant in query_text for variant in _name_variants(raw_name)
+                        ):
+                            corroborated.append(row)
+                    corroborated_rows = corroborated
+                    if corroborated:
+                        chosen_ids = {id(row) for row in corroborated}
+                        expanded_rows = corroborated + [
+                            row for row in candidate_rows if id(row) not in chosen_ids
+                        ]
+                    else:
+                        expanded_rows = candidate_rows
+                    expanded_rows = expanded_rows[:effective_graph_nodes]
                     if not expanded_rows:
                         graph_degraded = True
                         _trace(
@@ -1153,6 +1208,14 @@ class QueryPipeline:
         effective_retrieval["filter_demoted_candidates"] = filter_demoted
         # Отдельно от `filter_demoted`: это счётчик качества данных, а не отбор.
         effective_retrieval["filter_phrase_names"] = filter_phrase_names
+        # ADR-071: объём отбора объявляется вместе с результатом. Без этого отбор выглядел
+        # бы как обычный срез, и по отчёту нельзя было бы отличить «отбор не нашёл
+        # подтверждений» от «подтверждения были и ушли в срез».
+        effective_retrieval["expansion_candidate_budget"] = (
+            effective_graph_nodes * EXPANSION_CANDIDATE_MULTIPLIER
+        )
+        effective_retrieval["expansion_candidates"] = len(candidate_rows)
+        effective_retrieval["expansion_corroborated"] = len(corroborated_rows)
 
         if self._semantic_cache is not None and cache_allowed:
             _trace({"stage": "cache", "hit": False})

@@ -40,6 +40,16 @@ DEPTH_MAX = MAX_EXPANSION_DEPTH
 #: Расхождение с профилями ловит тест `test_slider_default_matches_profiles`.
 DEFAULT_SLIDER_DEPTH = 3
 
+#: Границы ползунка лимита строк обхода (ADR-069). Верхняя граница повторяет потолок
+#: конвейера, а не вводит свой: два разных потолка означали бы, что ползунок обещает
+#: проход туда, куда запрос не дойдёт.
+GRAPH_NODES_MIN = 1
+GRAPH_NODES_MAX = 500
+
+#: Начальное положение ползунка лимита узлов. Ровно то, что стоит в профилях по умолчанию,
+#: чтобы экран и профиль не расходились до первого движения ползунка.
+DEFAULT_SLIDER_GRAPH_NODES = 5
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -189,7 +199,13 @@ class DemoClient:
         _raise_for_status(response)
         return _json_dict(response)
 
-    def submit_query(self, query: str, domain: str, max_depth: int | None = None) -> str:
+    def submit_query(
+        self,
+        query: str,
+        domain: str,
+        max_depth: int | None = None,
+        max_graph_nodes: int | None = None,
+    ) -> str:
         """Отправить вопрос. `max_depth` — глубина обхода (ADR-036).
 
         `None` означает «не задавать»: поле не уходит в запрос, и глубину решает конфигурация
@@ -200,6 +216,9 @@ class DemoClient:
         payload: dict[str, Any] = {"query": query, "metadata": {"domain": domain}}
         if max_depth is not None:
             payload["max_depth"] = int(max_depth)
+        # Лимит узлов обхода едет тем же правилом: None - поле не уходит (ADR-069).
+        if max_graph_nodes is not None:
+            payload["max_graph_nodes"] = int(max_graph_nodes)
         response = requests.post(
             f"{self._settings.query_url}/query",
             headers=self._headers,

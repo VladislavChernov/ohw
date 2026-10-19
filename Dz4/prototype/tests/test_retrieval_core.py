@@ -574,7 +574,7 @@ def test_query_pipeline_runs_bounded_context_expansion_after_vector_search() -> 
     assert graph.expansion_calls == [
         (
             ["tag:it:database", "tag:it:storage"],
-            {"direction": "parent", "max_depth": 1, "max_fanout": 2, "max_nodes": 3},
+            {"direction": "parent", "max_depth": 1, "max_fanout": 2, "max_nodes": 12},
         )
     ]
     assert graph.query_called is False

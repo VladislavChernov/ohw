@@ -256,6 +256,7 @@ def test_worker_survives_unreachable_ingestion(
             emit,
             revision: str | None = None,
             max_depth: int | None = None,
+            max_graph_nodes: int | None = None,
         ):
             seen["revision"] = revision
             return {"text": "ok", "revision": revision}
@@ -294,6 +295,7 @@ def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
             emit,
             revision: str | None = None,
             max_depth: int | None = None,
+            max_graph_nodes: int | None = None,
         ):
             seen["revision"] = revision
             seen["max_depth"] = max_depth
@@ -330,10 +332,12 @@ def test_worker_resolves_active_domain_before_revision_lookup(tmp_path: Path) ->
             emit,
             revision: str | None = None,
             max_depth: int | None = None,
+            max_graph_nodes: int | None = None,
         ):
             seen["domain"] = domain
             seen["revision"] = revision
             seen["max_depth"] = max_depth
+            seen["max_graph_nodes"] = max_graph_nodes
             return {"text": "ok", "revision": revision}
 
     store.create("q_active", "", "вопрос")
@@ -345,8 +349,12 @@ def test_worker_resolves_active_domain_before_revision_lookup(tmp_path: Path) ->
         revisions=_StubRevisions(),
     )
     assert worker.process_one() is True
-    assert seen == {"domain": "it", "revision": "revA", "max_depth": None}
-
+    assert seen == {
+        "domain": "it",
+        "revision": "revA",
+        "max_depth": None,
+        "max_graph_nodes": None,
+    }
 
 def test_worker_metrics_snapshot_includes_revisions(tmp_path: Path, caplog) -> None:
     queue = InMemoryTaskQueue()
@@ -416,3 +424,45 @@ def test_submit_accepts_depth_above_cap_without_refusing(tmp_path: Path) -> None
     task = queue.claim(worker_id="test", timeout_s=0.1)
     assert task is not None
     assert task.metadata["max_depth"] == 99
+
+
+def test_submit_accepts_max_graph_nodes_and_rides_to_the_task(tmp_path: Path) -> None:
+    """Лимит узлов обхода из тела запроса доезжает до задачи (ADR-069).
+
+    Без этого человек двигает ползунок глубины и не может понять, почему при лимите 5
+    увеличение глубины ничего не меняет: лимит не настраивался ниоткуда, кроме профиля.
+    """
+    client, queue, _ = make_app(tmp_path)
+
+    resp = client.post(
+        "/query", headers=headers(), json={"query": "вопрос", "max_graph_nodes": 40}
+    )
+
+    assert resp.status_code == 202, resp.text
+    task = queue.claim(worker_id="test", timeout_s=0.1)
+    assert task is not None
+    assert task.metadata["max_graph_nodes"] == 40
+
+
+def test_submit_refuses_malformed_max_graph_nodes(tmp_path: Path) -> None:
+    """Негодный лимит отвергается на входе, не создавая задачу — как и для глубины."""
+    client, queue, _ = make_app(tmp_path)
+
+    for bad in (0, -1, 2.5, "7", True):
+        resp = client.post(
+            "/query", headers=headers(), json={"query": "вопрос", "max_graph_nodes": bad}
+        )
+        assert resp.status_code == 422, f"{bad!r} -> {resp.status_code}"
+
+    assert queue.claim(worker_id="test", timeout_s=0.1) is None
+
+
+def test_submit_without_max_graph_nodes_leaves_metadata_clean(tmp_path: Path) -> None:
+    """Нет параметра - нет и записи: профиль остаётся единственным источником умолчания."""
+    client, queue, _ = make_app(tmp_path)
+
+    client.post("/query", headers=headers(), json={"query": "вопрос"})
+
+    task = queue.claim(worker_id="test", timeout_s=0.1)
+    assert task is not None
+    assert "max_graph_nodes" not in task.metadata

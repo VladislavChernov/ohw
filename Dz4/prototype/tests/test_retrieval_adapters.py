@@ -1017,3 +1017,47 @@ def test_neo4j_expand_query_excludes_chunk_nodes() -> None:
     )
     # Ограничение остаётся внутри запроса - иначе правка потеряла бы смысл.
     assert "LIMIT $max_nodes" in query
+
+
+def test_neo4j_expand_query_orders_before_limiting() -> None:
+    """Срез должен идти по порядку, а не по тому, что Cypher вернул первой (ADR-070).
+
+    Порядок строк в Cypher контрактом не задан, поэтому без сортировки один и тот же запрос
+    дважды даёт разный набор, а замер становится неповторяемым. `ORDER BY` обязан стоять
+    ДО `LIMIT`: после него сортировка не имела бы смысла, строки режутся раньше, чем
+    упорядочиваются.
+
+    Ближние пути идут первыми: сид получен из найденного чанка, и ближе к нему - ближе к
+    вопросу. Равенство по расстоянию снимается по `node_id`, иначе порядок снова зависит от
+    плана запроса.
+    """
+    captured: dict[str, str] = {}
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return []
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            captured["query"] = query
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    store.expand(["tag:it:seed"], max_depth=3, max_nodes=5)
+
+    query = captured["query"]
+    order_at = query.find("ORDER BY")
+    limit_at = query.find("LIMIT $max_nodes")
+    assert order_at != -1, "развёртка обязана упорядочивать выборку до среза"
+    assert limit_at != -1, "ограничение выборки обязано остаться"
+    assert order_at < limit_at, "ORDER BY после LIMIT не влияет на то, что попало в срез"
+    assert "depth" in query[order_at:], "сортировка обязана идти по длине пути"
+    assert "node_id" in query[order_at:], "равные расстояния снимаются по node_id"

@@ -2130,7 +2130,7 @@ def test_vector_results_seed_bounded_expansion_before_graph() -> None:
     assert graph.expansion_calls == [
         (
             ["tag:it:quicksort"],
-            {"direction": "parent", "max_depth": 2, "max_fanout": 4, "max_nodes": 8},
+            {"direction": "parent", "max_depth": 2, "max_fanout": 4, "max_nodes": 32},
         )
     ]
     expansion_trace = next(

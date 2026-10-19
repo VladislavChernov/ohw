@@ -95,6 +95,20 @@ areas:
       - "tests/test_demo_ui_ingest_loss.py"
       - "tests/test_demo_ui_maintenance.py"
 
+  query_service:
+    # Контракт запроса `/query`, воркер и конвейер, который его исполняет. Отдельная область
+    # потому, что изменение контракта обязано гонять тесты API: поле, принятое в теле,
+    # должно доехать до задачи, а негодное - быть отвергнуто до постановки в очередь.
+    # Раньше для этих файлов области не было, то есть любая правка молча уходила в `full`.
+    match:
+      - "Dz4/prototype/src/graphrag_proto/query_service/*"
+      - "Dz4/prototype/src/graphrag_proto/retrieval/pipeline.py"
+      - "Dz4/prototype/tests/test_query_api.py"
+      - "Dz4/prototype/tests/test_retrieval_pipeline.py"
+    tests:
+      - "tests/test_query_api.py"
+      - "tests/test_retrieval_pipeline.py"
+
   gate_tooling:
     # Гейт и его селектор. Правка здесь меняет то, что считается проверенным,
     # поэтому площадка не должна проходить проверку сама собой.

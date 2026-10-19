@@ -285,11 +285,79 @@ def test_strict_pipeline_accepts_bounded_expansion_config() -> None:
                 "kinds": None,
                 "max_depth": 1,
                 "max_fanout": 2,
-                "max_nodes": 3,
+                # ADR-071: до адаптера доходит бюджет НАДМНОЖЕСТВА, а не сам срез.
+                # Отбор по сущностям вопроса обязан идти до среза, и для этого нужно, чтобы
+                # было из чего выбирать: при max_graph_nodes=3 это 3 * 4 = 12.
+                "max_nodes": 12,
             },
         )
     ]
     assert done["graph_degraded"] is False
+
+
+def _row(name: str, chunk_id: str, source: str) -> dict[str, Any]:
+    return {
+        "node_id": f"tag:it:{name}",
+        "canonical_name": name,
+        "path": ["tag:it:seed", f"tag:it:{name}"],
+        "depth": 1,
+        "kind": "REFERENCES",
+        "origin": "user",
+        "confidence": 0.9,
+        "source_ids": [source],
+        "chunk_ids": [chunk_id],
+        "domain": "it",
+    }
+
+
+def test_corroborated_nodes_survive_the_cut_and_are_reported() -> None:
+    """Отбор по сущностям вопроса идёт ДО среза (ADR-071).
+
+    Набор подставлен так, что подтверждённая сущность стоит последней: при отборе после
+    среза она была бы уже отброшена, и ось графа не принесла бы ничего. Здесь она обязана
+    выжить, а её имя должно совпасть с текстом вопроса.
+    """
+    rows = [
+        _row("alpha", "chk:a", "src://one"),
+        _row("beta", "chk:b", "src://two"),
+        _row("gamma", "chk:c", "src://three"),
+        _row("omega", "chk:w", "src://four"),
+    ]
+    graph = _CountingGraphStore(expansion_rows=rows)
+    pipe = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=graph,
+        vector_store=_RecordingVectorStore(_vector_rows()),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_StubLoader(
+            {
+                "profile": {"name": "it"},
+                "retrieval": {
+                    "graph_search_enabled": True,
+                    "expansion_direction": "both",
+                    "max_depth": 1,
+                    "max_fanout": 4,
+                    "max_graph_nodes": 1,
+                },
+            }
+        ),
+        strict_profile=True,
+    )
+
+    done = pipe.run("про omega и прочее", domain="it", generate=False)
+
+    effective = done["effective_retrieval"]
+    assert effective["expansion_candidates"] == 4, "обход обязан отдать всё надмножество"
+    assert effective["expansion_corroborated"] == 1, "подтвердиться должно одно имя"
+    assert effective["expansion_candidate_budget"] == 4, "бюджет = срез × 4"
+    # Срез в 1 строку, и выживает именно подтверждённая сущность, а не первая по счёту.
+    effective_retrieval_sources = {
+        str(item.get("source_url")) for item in done.get("sources", []) if item
+    }
+    assert "src://four" in effective_retrieval_sources, (
+        "подтверждённая сущность обязана дойти до источников"
+    )
 
 
 def test_expansion_kinds_reach_the_adapter_and_narrowing_reason_is_reported() -> None:
@@ -594,7 +662,8 @@ def test_pipeline_vector_results_seed_bounded_expansion() -> None:
                 "kinds": None,
                 "max_depth": 2,
                 "max_fanout": 4,
-                "max_nodes": 8,
+                # ADR-071: до адаптера доходит бюджет надмножества (8 * 4), а не сам срез.
+                "max_nodes": 32,
             },
         )
     ]

@@ -330,6 +330,12 @@ class Neo4jGraphStore(GraphStoreProvider):
             f"{path_where} "
             "RETURN node, [item IN nodes(path) | coalesce(item.node_id, item.tag_id)] AS path, "
             "length(path) AS depth, type(last(relationships(path))) AS kind "
+            # ADR-070: порядок строк в Cypher не задан, поэтому без сортировки один и тот
+            # же запрос дважды даёт разный набор, а замер становится неповторяемым.
+            # Ближние пути идут первыми: сид получен из найденного чанка, и ближе к нему -
+            # ближе к вопросу. Равенство по расстоянию снимается по `node_id`, иначе порядок
+            # снова зависит от плана запроса. Сортировка обязана стоять ДО `LIMIT`.
+            "ORDER BY depth, node.node_id "
             "LIMIT $max_nodes"
         )
         parameters: dict[str, Any] = {

@@ -16,8 +16,11 @@ import streamlit as st
 from graphrag_proto.demo_ui.client import (
     CONFIG_URL,
     DEFAULT_SLIDER_DEPTH,
+    DEFAULT_SLIDER_GRAPH_NODES,
     DEPTH_MAX,
     DEPTH_MIN,
+    GRAPH_NODES_MAX,
+    GRAPH_NODES_MIN,
     INGESTION_URL,
     QUERY_URL,
     X_API_KEY,
@@ -41,6 +44,22 @@ DEPTH_HELP = (
 
 def _depth_from_state() -> int:
     return int(st.session_state.get("query_max_depth", DEFAULT_SLIDER_DEPTH))
+
+
+#: Описание лимита узлов. Оно обязано говорить, ЧТО считается: строки обхода, а не
+#: документы и не найденные чанки, - иначе человек ждёт от ползунка «больше источников»,
+#: а получает больше промежуточных вершин (ADR-069).
+GRAPH_NODES_HELP = (
+    "Сколько строк обхода графа взять. Считаются строки пути, а не документы и не "
+    "найденные чанки: один и тот же узел, достигнутый разными путями, занимает несколько "
+    "строк. Меньше - быстрее и предметнее; больше - больше материала, но без ранжирования "
+    f"выбор произволен. Дальше {GRAPH_NODES_MAX} не пройти: значение обрежется, и об этом "
+    "будет сказано под ответом."
+)
+
+
+def _graph_nodes_from_state() -> int:
+    return int(st.session_state.get("query_max_graph_nodes", DEFAULT_SLIDER_GRAPH_NODES))
 
 
 def _event_body(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -377,6 +396,28 @@ def _render_depth_control() -> int:
     return int(depth)
 
 
+def _render_graph_nodes_control() -> int:
+    """Ползунок лимита строк обхода (ADR-069).
+
+    Стоит рядом с глубиной, а не под ней: оба ограничивают один и тот же обход, и по
+    отдельности любой из них вводит в заблуждение. Глубина без лимита выглядит
+    управляемой, хотя упирается в него; лимит без глубины непонятно, зачем он.
+    """
+    left, right = st.columns([3, 1])
+    with left:
+        nodes = st.slider(
+            "Лимит узлов графа",
+            min_value=GRAPH_NODES_MIN,
+            max_value=GRAPH_NODES_MAX,
+            value=_graph_nodes_from_state(),
+            key="query_max_graph_nodes",
+            help=GRAPH_NODES_HELP,
+        )
+    with right:
+        st.caption(f"строк обхода, {GRAPH_NODES_MIN} = только прямые")
+    return int(nodes)
+
+
 def _render_effective_depth(done: dict[str, Any]) -> None:
     """Показать, какая глубина реально применилась, и объявить зажим.
 
@@ -408,6 +449,17 @@ def _render_effective_depth(done: dict[str, Any]) -> None:
             f"Запрошенная глубина {requested} выше предела {DEPTH_MAX}: разрешено {allowed}. "
             f"Дальше {DEPTH_MAX} обход не идёт.",
         )
+    # Лимит узлов объявляется рядом с глубиной: он режет тот же обход, и его зажим тоже
+    # должен быть виден, иначе человек увидит «применено 500» и получит 50 (ADR-069).
+    nodes_requested = effective.get("max_graph_nodes_requested")
+    nodes_effective = effective.get("max_graph_nodes_effective")
+    if isinstance(nodes_requested, int) and isinstance(nodes_effective, int):
+        parts.append(f" | Лимит узлов: запрошено {nodes_requested}, применено {nodes_effective}")
+    if effective.get("graph_nodes_clamped"):
+        st.warning(
+            f"Запрошенный лимит узлов {nodes_requested} выше предела {GRAPH_NODES_MAX}: "
+            f"применено {nodes_effective}."
+        )
 
 
 def _render_queries(client: DemoClient, domains: list[str]) -> None:
@@ -415,13 +467,19 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
     domain = st.selectbox("Домен вопроса", options=domains, key="query_domain")
     query = st.text_input("Вопрос", key="query_text", placeholder="Например: что регулирует HSTPA?")
     depth = _render_depth_control()
-    if st.button("Отправить запрос", type="primary"):
+    graph_nodes = _render_graph_nodes_control()
+    if st.button("Спросить", type="primary"):
         if not query.strip():
             st.info("Введите текст вопроса.")
         else:
             started = time.monotonic()
             try:
-                task_id = client.submit_query(query.strip(), domain, max_depth=depth)
+                task_id = client.submit_query(
+                    query.strip(),
+                    domain,
+                    max_depth=depth,
+                    max_graph_nodes=graph_nodes,
+                )
             except RuntimeError as exc:
                 st.error(str(exc))
             else:
