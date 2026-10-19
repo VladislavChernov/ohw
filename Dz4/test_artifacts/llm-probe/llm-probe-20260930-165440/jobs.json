@@ -1,0 +1,32 @@
+[
+  {
+    "source_url": "docs/01_ontology_and_domain_profile.md",
+    "chars": 10582,
+    "job_id": "0e7b7e75-7c9d-409b-80c6-ab34c846671b",
+    "status": "succeeded",
+    "error": null,
+    "enrichment": {
+      "cause": "model_error",
+      "lost_entities": 0,
+      "lost_edges": 0,
+      "llm_records": 0,
+      "llm_edges": 0
+    },
+    "degraded": true
+  },
+  {
+    "source_url": "docs/plans/cosine-dedup.md",
+    "chars": 2762,
+    "job_id": "46857847-e0a3-4a98-bd9b-f4a0d141d3c0",
+    "status": "succeeded",
+    "error": null,
+    "enrichment": {
+      "cause": null,
+      "lost_entities": 0,
+      "lost_edges": 0,
+      "llm_records": 12,
+      "llm_edges": 4
+    },
+    "degraded": false
+  }
+]

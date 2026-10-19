@@ -1,0 +1,127 @@
+# Оверлей eval-прогона поверх runtime: `compose.runtime.yaml` + этот файл.
+#
+# Зачем отдельным файлом. Готовый eval-стенд — `compose.eval-minimal.yaml`, отдельный
+# проект со своим набором томов и своим зеркалом базы. Но демо-набор (`VOL=ready`) живёт в
+# runtime-контуре, и прогон против него требует, чтобы eval видел ровно то, что видит
+# запрос: тот же Neo4j, тот же профиль, ту же проекцию. Второй стенд с копией базы здесь
+# означал бы измерение не того, что поставлено владельцу.
+#
+# Один сервис, профиль `eval`, one-shot: поднимается на время прогона и гаснет. Постоянной
+# частью контура он не является, поэтому и профильный.
+#
+# ГЛАВНОЕ В ЭТОМ ФАЙЛЕ — ТОМ `projection`. Runner и `query-worker` обязаны смотреть в
+# ОДНО И ТО ЖЕ состояние проекции (тот же том и тот же `PROJECTION_CONFIG_FINGERPRINT`).
+# При отдельном пути состояния readiness-gate возвращает `missing`, графическая ось
+# выключается, и прогон честно меряет vector-only — оставаясь «графовым» по названию режима
+# (`--mode both` печатает recall, а `graph_axis_active=false`). Именно поэтому том объявлен
+# явно и обсуждён: деградация тут выглядит как успех.
+#
+# Использование (демо-набор, ревизия домена обязательна для графовой оси):
+#   $env:VOL = "ready"
+#   $env:RUN_CODE_COMMIT = (git -C <репозиторий> rev-parse --short HEAD)
+#   docker compose -f compose.runtime.yaml -f compose.ingest.yaml -f compose.eval-runtime.yaml `
+#     --profile ingest --profile eval up -d --wait
+#   docker compose ... run --rm eval-runner python /app/infra/eval/run_eval.py `
+#     --domain it --mode both --no-judge --dataset /repo/Demo/eval-slice.jsonl `
+#     --out /reports/slice
+#   # после прогона
+#   docker compose ... --profile ingest --profile eval down
+#
+# `RUN_CODE_COMMIT` приходит с хоста: контейнер не вызывает git и не угадывает ревизию
+# (source control принадлежит хосту). Без переменной прогон падает на сборе манифеста.
+
+name: ohw-runtime
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  # ---------------------------------------------------------------- eval-runner
+  # Одноразовый прибор: сам контур запросов не обслуживает, а измеряет его тем же кодом.
+  # Поэтому env повторяет `query-worker` построчно, а не «похоже»: расхождение в
+  # адаптере или в модели делает числа не про тот контур, который владелец предъявляет.
+  eval-runner:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/eval-service:prototype
+    profiles: ["eval"]
+    working_dir: /app
+    networks: [runtime_net]
+    command: ["python", "/app/infra/eval/run_eval.py", "--help"]
+    environment:
+      # --- контур запросов (как у query-worker) ---
+      CONFIG_URL: http://config-service:8001
+      DOMAIN_PROFILES_DIR: /profiles
+      GRAPH_STORE: ${GRAPH_STORE:-neo4j}
+      VECTOR_STORE: ${VECTOR_STORE:-neo4j}
+      EMBEDDER: ${EMBEDDER:-bge_m3_service}
+      EMBEDDINGS_URL: http://embeddings-service:8004
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSIONS: "1024"
+      # Тот же таймаут, что у query-worker: дефолт клиента bge (5 с) на bge-m3 в CPU не
+      # хватает, и запрос падает на стадии embedding — после успешного старта и до LLM.
+      EMBEDDINGS_TIMEOUT_S: ${RUNTIME_EMBEDDINGS_TIMEOUT_S:-300}
+      RERANKER: ${RERANKER:-noop}
+      LLM_ADAPTER: openai
+      LLM_BASE_URL: http://llm:8080
+      LLM_MODEL: ${RUNTIME_LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}
+      LLM_MAX_TOKENS: ${RUNTIME_LLM_MAX_TOKENS:-2048}
+      LLM_CTX_SIZE: ${RUNTIME_LLM_CTX_SIZE:-16384}
+      LLM_TEMPERATURE: ${RUNTIME_LLM_TEMPERATURE:-0}
+      LLM_TIMEOUT_S: ${RUNTIME_LLM_TIMEOUT_S:-600}
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-graphrag}
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+      # ОБЯЗАТЕЛЬНО и вторым именем. Сервисы контура проверяют `AUTH_API_KEY`, а прибор
+      # `run_eval.py` читает `X_API_KEY` или `GRAPH_AUTH_API_KEY` — ни то, ни другое в
+      # контейнер не попадает, если их здесь не объявить. Проверено на прогоне 2026-10-16:
+      # с одним только `AUTH_API_KEY` запрос уходил с ключом `changeme`, ingestion-api
+      # отвечал 401, и прогон честно рапортовал `revision_source=unavailable` +
+      # `projection_status=revision_unknown` — то есть молча измерял vector вместо графа.
+      X_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+      # --- состояние проекции: том и отпечаток обязаны совпасть с query-worker ---
+      PROJECTION_STATE_DB_PATH: /var/lib/graphrag/projection/projection.db
+      PROJECTION_CONFIG_FINGERPRINT: ${PROJECTION_CONFIG_FINGERPRINT:-default}
+      # --- ревизия домена ---
+      # Не предусловие старта, но и не деталь: без неё гард проекции отвечает
+      # `revision_unknown` и графическая ось не измеряется. Контур без ingestion-api даёт
+      # `revision_source=unavailable`, и это видно в манифесте (ADR-029, поправка 2026-10-16).
+      INGESTION_URL: ${INGESTION_URL:-http://ingestion-api:8002}
+      # --- прибор ---
+      EVAL_LLM_ADAPTER: ${EVAL_LLM_ADAPTER:-openai}
+      RUN_CODE_COMMIT: "${RUN_CODE_COMMIT:?RUN_CODE_COMMIT must be provided by the host}"
+      HTTP_CLIENT_TIMEOUT_S: "${HTTP_CLIENT_TIMEOUT_S:-600}"
+      GRAPH_LOG_LEVEL: ${GRAPH_LOG_LEVEL:-INFO}
+    volumes:
+      # Пакет ставится в образ editable и указывает на /app/src, поэтому монтирование
+      # рабочей копии на этот путь действительно перекрывает запечённый код: без него
+      # прогон молча измерял бы снимок из образа.
+      - ../src:/app/src:ro
+      - ./eval:/app/infra/eval:ro
+      - ../domain_profiles:/profiles:ro
+      - ./config:/config:ro
+      # Корень репозитория: датасет (`Demo/eval-slice.jsonl`) и всё, что прибор читает
+      # снаружи контура.
+      - ../..:/repo:ro
+      # Артефакты прогона на хост: манифест, qa_log, паспорт, отчёт — иначе они живут
+      # только в контейнере, который сейчас будет удалён.
+      - ../reports:/reports
+      - type: volume
+        source: projection
+        target: /var/lib/graphrag/projection
+    depends_on:
+      config-service:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      embeddings-service:
+        condition: service_healthy
+      llm:
+        condition: service_healthy
+    <<: *logging

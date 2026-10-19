@@ -1,0 +1,30 @@
+{
+  "run_valid": true,
+  "checks": {
+    "T9": {
+      "verdict": "pass",
+      "reason": "один хоп: якорь и первое звено"
+    },
+    "T10": {
+      "verdict": "pass",
+      "reason": "два хопа: якорь и два звена"
+    },
+    "T11": {
+      "verdict": "pass",
+      "reason": "просьба дальше потолка: зажим обязателен и обязан быть объявлен"
+    },
+    "T12": {
+      "verdict": "pass",
+      "reason": "та же полная глубина без зажима: тот же результат, но depth_clamped нет"
+    }
+  },
+  "cache_note": "На попадании в семантический кэш глубина запроса не применяется, и effective_retrieval в ответе отсутствует вовсе (pipeline.py отдаёт cached_done без него). Поэтому вопросы различаются текстом, и каждый замер обязан увидеть cache_hit=false, иначе вердикт inconclusive, а не pass",
+  "chain": [
+    "chain_a",
+    "chain_b",
+    "chain_c",
+    "chain_d"
+  ],
+  "anchor_question": "Zvonkyi Hvorist Ukladu",
+  "finished_at": "2026-09-29T23:22:14+00:00"
+}

@@ -20,14 +20,39 @@ Baseline не вызывает graph adapter и не зависит от нал�
 ### Graph experiment
 
 Если projection построена inline или offline job и её revision готова, после vector search
-выполняется bounded expansion по `context_ids`/`tag_ids` из metadata. Default policy может
-подниматься по parent/context direction; related edges опциональны. Expansion имеет depth,
+выполняется bounded expansion по `context_ids`/`tag_ids` из metadata. Expansion имеет depth,
 fanout, total-node и time budget, возвращает path/depth/confidence и получает ограниченный boost.
 
+`expand()` не ограничивает обход видом ребра: по умолчанию идёт в обе стороны по любому типу и
+возвращает фактический вид последнего прыжка в поле `kind`. Направление задаётся
+`retrieval.expansion_direction` и принимает `both` (по умолчанию), `out` или `in`; прежние значения
+`parent` и `related` сохраняются как синонимы `out` и `in`. Необязательное сужение
+`retrieval.expansion_kinds` ограничивает обход явным списком видов; пустое значение и `any`
+означают отсутствие сужения. Глубина, fanout и общее число узлов ограничены независимо от видов.
+Пустой результат помечается `degraded` с причиной `empty_projection` (рёбер нет) либо
+`no_matching_edge_kinds` (сужение ничего не нашло), и запрос silently уходит в vector-only.
+Контракт обхода и история дефекта — `data_model.md` §3.1.
+
 Graph experiment не является prerequisite для baseline. Перед expansion QueryPipeline проверяет
-`ProjectionState`: `ready` и актуальная `data_revision` разрешают graph; `pending`, `degraded`,
-`stale`, `failed` или отсутствие state дают vector-only fallback. При `graph_enabled=false`,
-отсутствии adapter, неполной или stale projection retrieval возвращает vector-only fallback.
+готовность **пораздельной** проверкой (ADR-046 п. 3 и п. 8, поправка владельца 2026-10-16): журнал
+`projection_state_sources` должен сойтись с ревизиями чанков в графе (`sources_tracked > 0`,
+`revision_mismatches = 0`, `chunks_without_owner = 0`) и `config_fingerprint` — совпадать.
+**Частичная проекция обслуживается:** документ, нод которого в графе нет, не выключает ось — она
+отвечает по нему по вектору, и такой источник помечается `graph_knowledge: blind` («ноды нет»).
+Доменная `data_revision` в готовности **не участвует**: отпечаток состава домена не может ответить
+на вопрос «изменились ли данные этого источника», поэтому он остаётся атрибуцией, а не условием
+(ADR-046 п. 8). `pending`, `degraded`, `stale`, `failed`, отсутствие state, несовпадение
+конфигурации, расхождение ревизий и непроверяемая проекция (`projection_not_measurable`) дают
+vector-only fallback. При `graph_enabled=false` и отсутствии adapter — тоже.
+
+**Что графовая ось добавляет к источникам.** Атрибуция строится по `source_ids` найденных
+узлов, а не по их тексту. Поскольку `tag_id` выводится из canonical name, один узел накапливает
+provenance нескольких документов, и обход может выйти за пределы документа-сея: путь
+`Chunk → ContextNode -[kind]-> ContextNode` приводит к источнику, который векторный поиск по
+тексту запроса не ранжировал. Именно такие источники и образуют `necessity` — долю golden,
+покрытую только графовой осью. Само наличие графа этого не даёт: если сущность встречается в
+одном документе, путь не выходит за его пределы и выигрыш обхода сводится к контексту того же
+документа. Механизм идентичности узла — `data_model.md` §2.1.
 
 ## 2. Fallback и атрибуция
 

@@ -170,7 +170,16 @@ def test_it_dataset_is_v2() -> None:
         for key in ("reasoning_type", "answerability", "as_of", "evidence_sections", "evidence_policy", "rubric"):
             assert key in q, f"it/{q.get('id')} без v2-поля {key}"
         assert all(f.strip() for f in q["golden_facts"]), f"пустой факт в it/{q.get('id')}"
-    assert len(_load_jsonl(jsonl)) == 50
+    # Не хардкод размера, а якорные идентичности. Размер набора меняется легитимно,
+    # и проверка `== N` заставляет править число при каждом росте — после чего число
+    # перестаёт что-либо значить (так и появилось «9 из 66»). Якоря ловят то, что
+    # действительно ломает эталон: усечение, подмену файла, потерю графической
+    # половины после слияния. Добавление вопросов проходит молча, и это правильно.
+    ids = {q["id"] for q in _load_jsonl(jsonl)}
+    missing = {"it_001", "it_050", "it_graph_01", "it_graph_24"} - ids
+    assert not missing, f"it: нет якорных вопросов {sorted(missing)} - набор усечён или подменён"
+    # Нижняя граница задана ADR-015 и не привязана к текущему размеру.
+    assert len(ids) >= 50, f"it: n={len(ids)}, ADR-015 требует минимум 50"
 
 
 def test_repo_docs_are_mounted(repo_root: Path) -> None:
@@ -185,8 +194,7 @@ def test_repo_docs_are_mounted(repo_root: Path) -> None:
 
 
 def test_it_graph_goldens_match_runtime_contract(repo_root: Path) -> None:
-    jsonl = EVAL_ROOT / "it" / "questions_graph.jsonl"
-    questions = _load_jsonl(jsonl)
+    questions = _load_jsonl(EVAL_ROOT / "it" / "questions.jsonl")
     for question in questions:
         assert "HAS_ENTITY" not in " ".join(question["golden_facts"])
         assert "unique_key id" not in " ".join(question["golden_facts"])
@@ -218,6 +226,25 @@ def test_runtime_docs_exclude_mandatory_ddl(repo_root: Path) -> None:
     assert "не создаёт constraints" in data_model, "docs/data_model.md потерял формулировку ADR-031"
 
 
+def test_cosine_dedup_stays_out_of_runtime(repo_root: Path) -> None:
+    """L3-02a: косинусная дедупликация не реализована и не должна вернуться в код молча.
+
+    Константы `DEDUP_AUTO`/`DEDUP_LLM`/`SIMILAR_TO` были объявлены и не использовались,
+    а инвариант L3-02 при этом обещал косинусную политику. Тест закрывает оба конца:
+    в коде порогов нет, а в документах политика помечена как нереализованная.
+    """
+    orchestrator = (
+        repo_root
+        / "prototype/src/graphrag_proto/ingestion_service/pipeline/orchestrator.py"
+    ).read_text(encoding="utf-8")
+    for dead in ("DEDUP_AUTO", "DEDUP_LLM", "SIMILAR_TO"):
+        assert dead not in orchestrator, f"{dead} вернулся в код, но политика не реализована"
+    invariants = (repo_root / "docs/invariants.md").read_text(encoding="utf-8")
+    assert "L3-02a" in invariants, "docs/invariants.md потерял пометку о нереализованной политике"
+    plan = repo_root / "docs/plans/cosine-dedup.md"
+    assert plan.is_file(), "план косинусной дедупликации должен существовать"
+
+
 def test_it_042_matches_structure_aware_chunker_contract() -> None:
     questions = {q["id"]: q for q in _load_jsonl(EVAL_ROOT / "it" / "questions.jsonl")}
     facts = " ".join(questions["it_042"]["golden_facts"])
@@ -225,17 +252,36 @@ def test_it_042_matches_structure_aware_chunker_contract() -> None:
     assert "объединяются" not in facts
 
 
-def test_it_questions_graph_dataset() -> None:
-    jsonl = EVAL_ROOT / "it" / "questions_graph.jsonl"
-    if not jsonl.exists():
-        pytest.skip()
+def test_it_questions_dataset() -> None:
+    """ADR-040: золотой набор `it` один, и границы файла не задают срез.
+
+    Раньше срез проверялся по отдельному файлу `questions_graph.jsonl`, хотя
+    `golden_graph_evidence: true` стоял только у 8 его 24 строк: граница файла и
+    смысловая граница не совпадали. Теперь набор один, а срез читается по полю,
+    и проверка обязана ловить именно его, а не наличие отдельного файла.
+    """
+    jsonl = EVAL_ROOT / "it" / "questions.jsonl"
     questions = _load_jsonl(jsonl)
     _run_eval.load_dataset(jsonl)
-    assert len(questions) >= 15, f"questions_graph: n={len(questions)}, требуется ≥ 15"
+    ids = [q["id"] for q in questions]
+    assert len(set(ids)) == len(ids), "в объединённом наборе есть повторяющиеся id"
+
+    # Поле не должно отсутствовать ни у одной строки: «поля нет» и «поля false»
+    # в одном файле означали бы одно и то же, но читались бы по-разному.
+    for q in questions:
+        assert isinstance(q.get("golden_graph_evidence"), bool), (
+            f"{q['id']}: golden_graph_evidence должен быть явным bool"
+        )
+
     required = [q for q in questions if q.get("evidence_policy") == "graph_required"]
-    assert len(required) >= 8, (
-        f"questions_graph: graph_required={len(required)}, требуется ≥ 8"
-    )
+    assert len(required) >= 8, f"questions: graph_required={len(required)}, требуется ≥ 8"
     for q in required:
         assert q.get("golden_graph_evidence") is True
         assert q.get("reasoning_type") in {"multi-hop", "cross-document", "contradiction"}
+
+
+def test_it_graph_dataset_file_is_gone() -> None:
+    """Второй набор удалён: возврат второго файла означал бы возврат границы файла."""
+    assert not (EVAL_ROOT / "it" / "questions_graph.jsonl").exists(), (
+        "questions_graph.jsonl не должен существовать: набор `it` один (ADR-040)"
+    )

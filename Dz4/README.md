@@ -6,6 +6,8 @@
 Предметная область задаётся YAML-профилем и глоссарием (`it`, `library`, `cinema`).
 Технологии изолированы адаптерами; это валидационный контур, не production-система.
 Архитектурная концепция описывает также возможности, ещё не реализованные в прототипе.
+Рабочая установка проекта: «как в продакшене, но без оверинжиниринга» — точки роста
+фиксируются как **названные швы с триггером** (ADR-014, ADR-015), а не как заготовки в коде.
 
 Реализованы Config/Glossary, primitive Ingestion с optional graph enrichment,
 асинхронный Query (Valkey → worker → SSE), vector-first hybrid retrieval,
@@ -46,6 +48,7 @@ Topology UI и конфигуратор — задел; monitoring в Compose з
 
 | Документ | Описание |
 |----------|----------|
+| [README-acceptance.md](./README-acceptance.md) | **Приёмка: что измеряется и почему.** Короткая карта для новичка — прочитать первым |
 | [CONCEPT.md](./CONCEPT.md) | Главный архитектурный документ (концепция-база v5) |
 | [docs/00_hi_level_architecture.md](./docs/00_hi_level_architecture.md) | Высокоуровневая архитектура (Mermaid, v6) + [PNG](./docs/assets/hi_level_architecture_v6.png) |
 | [docs/01_ontology_and_domain_profile.md](./docs/01_ontology_and_domain_profile.md) | Онтология и спецификация Domain Profile |
@@ -68,8 +71,8 @@ Topology UI и конфигуратор — задел; monitoring в Compose з
 | [docs/prototype_requirements.md](./docs/prototype_requirements.md) | Требования к прототипу: цель, границы, стек, вехи, eval-гейт |
 | [docs/test_plan.md](./docs/test_plan.md) | План испытаний прототипа: уровни метрик, артефакты прогона, режимы, границы измерения |
 | [docs/web_layer_replacement.md](./docs/web_layer_replacement.md) | Как менять веб-слой (Query API Gateway) без переделки ядра |
-| [docs/demo_runbook.md](./docs/demo_runbook.md) | Runbook демо-контура: подъём стека, UI `:8503`, сценарии в браузере, прогон e2e |
-| [docs/demo_user_guide.md](./docs/demo_user_guide.md) | Руководство пользователя демо: требования, скачивание, запуск, сценарий, устройство |
+| [docs/prototype_stack_runbook.md](./docs/prototype_stack_runbook.md) | Runbook демо-контура: подъём стека, UI `:8503`, сценарии в браузере, прогон e2e |
+| [docs/prototype_stack_user_guide.md](./docs/prototype_stack_user_guide.md) | Руководство пользователя демо: требования, скачивание, запуск, сценарий, устройство |
 
 **Архитектурная концепция (6 документов):**
 1. [01. Онтология и Спецификация Domain Profile](./docs/01_ontology_and_domain_profile.md) — описание узлов, связей и YAML-конфигуратора.
@@ -126,7 +129,7 @@ docker compose --file /mnt/d/Otus/ohw/Dz4/prototype/infra/compose.yaml --profile
 
 Сквозной контур на уровне API работает с M2; браузерная точка входа — Streamlit-демо
 `:8503` (профиль `llm`): загрузка txt/md → стадии INGEST → запрос со стримингом
-ответа и `sources` → soft-delete документа. Инструкция — [docs/demo_runbook.md](./docs/demo_runbook.md).
+ответа и `sources` → soft-delete документа. Инструкция — [docs/prototype_stack_runbook.md](./docs/prototype_stack_runbook.md).
 
 ```bash
 # У ingestion-api нет build-секции в Compose: подготовьте образ отдельно

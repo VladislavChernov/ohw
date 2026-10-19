@@ -1,0 +1,17 @@
+[
+  {
+    "source_url": "docs/plans/cosine-dedup.md",
+    "chars": 2762,
+    "job_id": "b130bb65-6935-425d-9ba6-e3906e0844ab",
+    "status": "succeeded",
+    "error": null,
+    "enrichment": {
+      "cause": null,
+      "lost_entities": 0,
+      "lost_edges": 0,
+      "llm_records": 17,
+      "llm_edges": 7
+    },
+    "degraded": false
+  }
+]

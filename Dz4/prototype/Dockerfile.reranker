@@ -13,8 +13,16 @@ COPY src ./src
 RUN uv sync --no-dev --frozen
 
 # библиотеки ML ставятся pip'ом в .venv сервисного образа (не требуют правки uv.lock)
+#
+# torch ставится ОТДЕЛЬНО и с CPU-индекса. Обычный `pip install torch` на машине с
+# драйвером NVIDIA тянет CUDA-сборку вместе с nvidia-cuDNN, cuBLAS, NCCL и triton —
+# это около 3 ГБ, которые реранкеру не нужны: он по конфигурации работает на CPU
+# (compose.yaml, блок reranker: «bge-reranker-base на CPU»), а видеокарта занята LLM.
+# sentence-transformers ставится вторым шагом с обычного индекса: на индексе pytorch
+# его нет, и одной командой с --index-url он бы не поставился.
 RUN uv pip install --python /app/.venv/bin/python --no-cache-dir \
-    torch sentence-transformers
+        --index-url https://download.pytorch.org/whl/cpu torch \
+ && uv pip install --python /app/.venv/bin/python --no-cache-dir sentence-transformers
 
 ENV DOMAIN_PROFILES_DIR=/app/domain_profiles \
     CONFIG_DB_PATH=/app/runtime/config.db

@@ -160,6 +160,15 @@ def test_revision_sends_domain_param(monkeypatch: pytest.MonkeyPatch) -> None:
         ({}, "http://ingestion-api:8002", 5.0),
         ({"INGESTION_URL": "http://ing:9000"}, "http://ing:9000", 5.0),
         ({"INGESTION_URL": "http://ing:9000", "REVISION_POLL_INTERVAL_S": "0"}, "http://ing:9000", 0.0),
+        # Бандл `data-revision-query-context` требует: пустое и `false` тоже выключают поллер.
+        # До правки `_env_float` возвращал на них дефолт 5.0, и объявленное «выключено»
+        # означало включённый поллер — то есть проверка проходила на любом составе.
+        ({"REVISION_POLL_INTERVAL_S": ""}, "http://ingestion-api:8002", 0.0),
+        ({"REVISION_POLL_INTERVAL_S": "false"}, "http://ingestion-api:8002", 0.0),
+        ({"REVISION_POLL_INTERVAL_S": "FALSE"}, "http://ingestion-api:8002", 0.0),
+        ({"REVISION_POLL_INTERVAL_S": " off "}, "http://ingestion-api:8002", 0.0),
+        # Нечитаемое значение — ошибка конфигурации, а не команда выключить: дефолт.
+        ({"REVISION_POLL_INTERVAL_S": "часто"}, "http://ingestion-api:8002", 5.0),
     ],
 )
 def test_from_env(monkeypatch: pytest.MonkeyPatch, env: dict, expected_url: str, expected_interval: float) -> None:

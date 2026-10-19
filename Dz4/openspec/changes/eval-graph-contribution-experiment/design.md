@@ -1,4 +1,11 @@
 # Design: эксперимент «вклад графа»
+> **Актуальный состав набора (2026-10-03).** Цифры «50 вопросов» ниже верны как
+> описание состояния на дату и не переписаны. Действующий набор — ADR-040:
+> `prototype/infra/eval/it/questions.jsonl`, **74 вопроса**, из них **8** с
+> `golden_graph_evidence: true` и **24** с префиксом `it_graph_`.
+> Состав и методика приёмки: `prototype/infra/eval/README-dataset.md`.
+> Корпус ингеста — **30 документов**: `docs/archive/` и `docs/plans/` исключены
+> маркером `.ingest-ignore` (было 37).
 
 > **Corrective notice:** sections describing mandatory typed ontology, fixed labels,
 > `ensure_schema` and parallel graph/vector retrieval are superseded by

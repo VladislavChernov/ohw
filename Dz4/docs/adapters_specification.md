@@ -84,21 +84,27 @@ projection может быть построена inline после ingest ил�
 ```python
 from abc import ABC, abstractmethod
 from contextlib import nullcontext
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 class GraphStoreProvider(ABC):
-    @abstractmethod
     def expand(
         self,
-        context_ids: List[str],
+        context_ids: list[str],
         *,
-        direction: str = "parent",
+        direction: str = "both",
+        kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
-    ) -> List[Dict[str, Any]]:
-        """Bounded expansion от chunk context IDs; возвращает узлы, paths и provenance."""
-        ...
+    ) -> list[dict[str, Any]]:
+        """Bounded expansion от chunk context IDs; возвращает узлы, paths и provenance.
+
+        `direction` — `both` (по умолчанию), `out` или `in`; прежние `parent`/`related`
+        работают как синонимы `out`/`in`. Обход не ограничен видом ребра, фактический
+        вид возвращается в поле `kind`; `kinds` сужает обход до явного набора видов.
+        Метод не абстрактный: адаптер без обхода возвращает пустой список.
+        """
+        return []
 
     @abstractmethod
     def upsert_nodes(self, nodes: List[Dict[str, Any]]) -> None:
@@ -121,8 +127,10 @@ class GraphStoreProvider(ABC):
         ...
 
     @abstractmethod
-    def list_chunk_ids_of_source(self, source_id: str) -> List[str]:
-        """(M2) Чанки источника по связи CONTAINS — для soft-delete (L2-05)."""
+    def list_chunk_ids_of_source(self, source_url: str, domain: str) -> list[str]:
+        """(M2) Чанки источника по полю владельца `source_url` на самом чанке — для
+        soft-delete (L2-05; ADR-046 п. 9 — якорь `Source` удалён, перечисление идёт по
+        самому чанку)."""
         ...
 
     def transaction(self) -> "GraphTx":
@@ -246,7 +254,7 @@ class VectorStoreProvider(ABC):
 - `consistency_capability() -> "atomic" | "best_effort"` — возможность оси участвовать в атомарной записи пары при общем с партнёром `engine_key()` (дефолт — `best_effort`);
 - `engine_key() -> str | None` — ключ движка/инстанса БД (сравнивается только в паре; `None` — уникальный/неизвестный движок);
 - **атомарная пара**: обе оси `"atomic"` И `engine_key()` совпадают → пишет обе оси **в одной транзакции движка**. Для пары с общим движком, предоставляющей `atomic_batch()` (Neo4j-пара — один `session.begin_transaction()`), — через единый batch; для пары с одним процессом (InMemory) — вложенные `transaction()`-контексты, общий откат при исключении;
-- **все прочие пары — best_effort**: commit графа, затем вектора; при сбое второй оси CommitStage компенсирует граф (`delete_node` записанных чанков, Source/Entity сохраняются) и завершает джобу `failed` с пометкой «компенсировано»; повтор — идемпотентен (L2-06). 2PC не вводится (ADR-024).
+- **все прочие пары — best_effort**: commit графа, затем вектора; при сбое второй оси CommitStage компенсирует граф (`delete_node` записанных чанков вместе с инцидентными рёбрами; context nodes не удаляются, ноды источника в схеме нет — ADR-046 п. 9) и завершает джобу `failed` с пометкой «компенсировано»; повтор — идемпотентен (L2-06). 2PC не вводится (ADR-024).
 
 ```python
 if g.consistency_capability() == v.consistency_capability() == "atomic" and g.engine_key() == v.engine_key():
@@ -265,13 +273,14 @@ else:
 | `vector_search` | hit | `chunk_id`, `score`, `embedding`, `metadata` |
 
 MERGE-семантика по `node_id`/`chunk_id` (идемпотентность). Context node использует стабильный
-`tag_id`/`node_id`; `canonical_name` и aliases являются properties. `Source` и `Chunk` —
-технические anchors. `Chunk` получает `MENTIONS` от связанных ContextNode; текст хранится
-только в Chunk/vector. Произвольные properties и edge kinds сохраняются без whitelist.
+`tag_id`/`node_id`; `canonical_name` и aliases являются properties. `Chunk` — единственный
+технический anchor, владелец задаётся полем `source_url` на нём самом (ADR-046 п. 9). `Chunk`
+получает `MENTIONS` от связанных ContextNode; текст хранится только в Chunk/vector. Произвольные
+properties и edge kinds сохраняются без whitelist.
 
 #### 2.6.3. Soft-delete (L2-05)
 
-`GraphStoreProvider.list_chunk_ids_of_source(source_id)` — чанки по ребру CONTAINS; `delete_node(chunk_id)` удаляет узел и инцидентные рёбра (в том числе CONTAINS); `VectorStoreProvider.delete_vectors(chunk_ids)` снимает те же чанки с поиска. Узлы Entity и Source при soft-delete **сохраняются**, но `source_ids`/`chunk_ids` удалённого источника очищаются, поэтому его evidence не попадает в graph-контекст; эмиссия `SIMILAR_TO` при этом не затрагивается.
+`GraphStoreProvider.list_chunk_ids_of_source(source_url, domain)` — чанки документа по полю владельца на самом чанке (ADR-046 п. 9; раньше — по ребру `CONTAINS` от ноды-якоря `Source`). Перечисление обязано идти союзом на обеих осях: ось, чьи записи уже пропали при частичном сбое, не перечислит остаток в другой; `delete_node(chunk_id)` удаляет узел и инцидентные рёбра (в том числе `MENTIONS`); `VectorStoreProvider.delete_vectors(chunk_ids)` снимает те же чанки с поиска. Узлы ContextNode при soft-delete **сохраняются** (отдельной ноды источника в схеме нет, ADR-046 п. 9), но `source_ids`/`chunk_ids` удалённого источника очищаются, поэтому его evidence не попадает в graph-контекст. Связи между контекстными узлами при этом не удаляются — снимается только provenance источника, а `upsert_edges` затем объединяет `source_ids` (см. `docs/data_model.md` §2.1). Эмиссии `SIMILAR_TO` по порогу в коде нет: этот вид приходит только из ответа модели.
 
 ### 2.7. Projection state и offline backfill
 

@@ -26,10 +26,30 @@ def load_profile_yaml(path: Path) -> dict[str, Any]:
         data = yaml.safe_load(fh)
     if not isinstance(data, dict):
         raise DomainProfileError(f"{path.name}: профиль должен быть YAML-маппингом")
+    data = _empty_optional_sections_to_mappings(data)
     errors = validate_profile(data)
     if errors:
         raise DomainProfileError(f"{path.name}: {'; '.join(errors)}")
     return data
+
+
+def _empty_optional_sections_to_mappings(data: dict[str, Any]) -> dict[str, Any]:
+    """Пустая секция YAML — это `None`, а «должен быть маппинг» на неё ругается.
+
+    Ключ с одним только комментарием под ним разбирается как `None`, и опциональная секция,
+    объявленная пустой, отклонялась целиком: профиль не грузился, а вместе с ним и
+    query-контур, которому профиль домена нужен для каждого запроса. Пустая секция — это
+    место под будущие правила, а не ошибка формата, поэтому она нормализуется в `{}`.
+
+    Нормализация живёт здесь, а не в `validate_profile`: такая функция честно отвечает на
+    вопрос «валиден ли этот профиль» и не имеет права молча переписывать проверяемое.
+    Обязательные секции (`profile`) не нормализуются — пустая обязательная секция остаётся
+    ошибкой, потому что профиль без неё не профиль.
+    """
+    return {
+        key: ({} if value is None and key in OPTIONAL_MAPPING_SECTIONS else value)
+        for key, value in data.items()
+    }
 
 
 def validate_profile(data: dict[str, Any]) -> list[str]:
@@ -37,6 +57,10 @@ def validate_profile(data: dict[str, Any]) -> list[str]:
     for section in MANDATORY_SECTIONS:
         if section not in data:
             errors.append(f"отсутствует секция '{section}'")
+        elif not isinstance(data[section], dict):
+            # Проверки на тип не было: обязательная секция, объявленная с пустым телом,
+            # проходила как есть, хотя профиль без содержимого `profile` не профиль.
+            errors.append(f"{section}: должен быть маппинг")
     for section in OPTIONAL_MAPPING_SECTIONS:
         if section in data and not isinstance(data[section], dict):
             errors.append(f"{section}: должен быть маппинг")

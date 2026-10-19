@@ -1,0 +1,36 @@
+# Стадия pre-ingest (ADR-053). Отдельный образ по одной причине: стадия одноразовая и
+# короткая, ей не нужен ни Neo4j, ни Redis, ни эмбеддинги, ни LLM на GPU.
+#
+# НАТАША ЖИВЁТ ЗДЕСЬ, НО ЗАВИСИМОСТЬ ОБЩАЯ. `natasha` лежит в `[project.dependencies]`
+# (`pyproject.toml`), а не в dev-группе, поэтому ЛЮБОЙ образ, собранный из этого
+# `pyproject.toml` командой `uv sync --no-dev`, содержит и пакет, и модель (~37 МБ):
+# проверено и на этом образе, и на пересобранном `ohw/ingestion-service:prototype`.
+# Отдельный образ нужен не ради natasha, а ради короткой одноразовой стадии.
+# Поэтому «natasha не нужен ingestion-пайплайну» больше неверно, и правило, которое
+# действует теперь: сервис, которому нужна natasha, просто пересобирает свой образ.
+#
+# Последствие: образы тяжелеют на ~37 МБ каждый. Это цена общей зависимости, а не
+# ошибка сборки; вынос в отдельный пакет с extras задача на будущее, здесь не решена.
+FROM python:3.13-slim-bookworm
+
+RUN pip install --no-cache-dir uv
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PYTHONUNBUFFERED=1 \
+    HF_HUB_OFFLINE=1
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md ./
+COPY src ./src
+RUN uv sync --no-dev --frozen
+
+# Модель slovnet NER и вектор navec лежат ВНУТРИ пакета natasha (`natasha/data/model`),
+# и `NewsEmbedding` берёт путь из константы пакета, а не из окружения. Ничего скачивать
+# не нужно: `HF_HUB_OFFLINE=1` выше не даёт стадии дотянуться до сети в рантайме и
+# превратить это в явную ошибку вместо молчаливого отличия от прогона с сетью.
+
+# Точка входа указывается путём, а не именем: `uv sync` кладёт её в .venv/bin, а .venv/bin
+# не в PATH. По имени её не найти, и контейнер падал бы с "executable file not found".
+ENTRYPOINT ["/app/.venv/bin/graphrag-pre-ingest"]

@@ -1,0 +1,16 @@
+{
+  "from_id": "tag:it:cleanupprobeatag",
+  "to_id": "tag:it:cleanupprobetagb",
+  "rel_type": "SUPPORTS",
+  "kind": "SUPPORTS",
+  "chunk_ids": [
+    "chk:b23dbe2d1b7d",
+    "chk:bf72929b829a",
+    "chk:daa34cdf7ee7",
+    "chk:e47c6f97e4aa"
+  ],
+  "source_urls": [
+    "docs/01_ontology_and_domain_profile.md",
+    "docs/plans/cosine-dedup.md"
+  ]
+}

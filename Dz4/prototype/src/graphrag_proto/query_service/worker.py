@@ -103,7 +103,19 @@ class QueryWorker:
                 if self._revisions is not None
                 else None
             )
-            self._pipeline.run(task.query, active_domain, emit, revision=revision)
+            # Глубина из запроса доезжает в конвейер как есть, вместе с проверкой и
+            # зажимом: воркер не решает за пользователя, что ему «хватит и двух».
+            request_depth = (task.metadata or {}).get("max_depth")
+            # Лимит узлов обхода едет тем же путём и по тем же правилам (ADR-069).
+            request_max_graph_nodes = (task.metadata or {}).get("max_graph_nodes")
+            self._pipeline.run(
+                task.query,
+                active_domain,
+                emit,
+                revision=revision,
+                max_depth=request_depth,
+                max_graph_nodes=request_max_graph_nodes,
+            )
         except Exception as exc:  # noqa: BLE001 - разнородные сбои пайплайна
             emit("error", {"code": "pipeline_error", "message": str(exc)})
             self._store.mark_failed(task.task_id, str(exc))

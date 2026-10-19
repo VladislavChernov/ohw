@@ -13,14 +13,24 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any
 
 from graphrag_proto.retrieval.adapters.base import (
-    VECTOR_METADATA_BACKFILL_KEYS,
+    OWNED_ENTITY_FIELDS as _OWNED_ENTITY_FIELDS,
+)
+from graphrag_proto.retrieval.adapters.base import (
+        OWNERLESS_SOURCE,
+        VECTOR_METADATA_BACKFILL_KEYS,
     Consistency,
     GraphStoreProvider,
     VectorStoreProvider,
+    _expand_depth,
+    _expand_direction,
+    _expand_kinds,
+    _node_properties,
+    source_priority,
 )
 from graphrag_proto.retrieval.adapters.schemas import (
     normalize_graph_row,
@@ -30,7 +40,6 @@ from graphrag_proto.retrieval.adapters.schemas import (
 _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 CHUNK_LABEL = "Chunk"
-SOURCE_LABEL = "Source"
 ENTITY_LABEL = "Entity"
 _PROVENANCE_KEYS = ("source_ids", "chunk_ids", "variants", "aliases")
 
@@ -72,6 +81,34 @@ def _is_transient_exc(exc: BaseException) -> bool:
 
 class Neo4jGraphStore(GraphStoreProvider):
     """Графовая ось поверх Neo4j (ADR-013)."""
+
+    def chunk_revisions_by_source(self, domain: str) -> dict[str, dict[str, int]] | None:
+        """Ревизии чанков по владельцу одним запросом на домен (ADR-046 п. 3).
+
+        Живёт именно на графовом хранилище: гейт спрашивает его у графа, и если метод
+        остался бы на векторном, тот унаследовал бы заглушку `None` и объявил проекцию
+        непроверяемой. На стенде это и произошло — `projection_not_measurable` вместо
+        `ready`, то есть защита сработала, но код был не туда.
+
+        Группировка делается на стороне Neo4j, чтобы по сети шёл один ответ, а не N строк
+        на каждый чанк. Ветка без `source_url` схлопывается в `OWNERLESS_SOURCE`: такие
+        чанки нарушают L2-03 и обязаны попасть в счётчик, а не потеряться при группировке.
+        """
+        with self._session() as session:
+            rows = session.run(
+                f"MATCH (c:{CHUNK_LABEL}) WHERE c.domain = $domain "
+                "RETURN coalesce(c.source_url, $ownerless) AS source_url, "
+                "coalesce(c.projection_revision, '') AS revision, count(*) AS chunks",
+                parameters={"domain": domain, "ownerless": OWNERLESS_SOURCE},
+            ).data()
+        grouped: dict[str, dict[str, int]] = {}
+        for row in rows:
+            owner = str(row["source_url"])
+            revision = str(row["revision"])
+            grouped.setdefault(owner, {})[revision] = grouped.setdefault(owner, {}).get(
+                revision, 0
+            ) + int(row["chunks"] or 0)
+        return grouped
 
     def __init__(self, uri: str, user: str, password: str, database: str | None = None) -> None:
         self._uri = uri
@@ -146,19 +183,84 @@ class Neo4jGraphStore(GraphStoreProvider):
                 {"domain": domain, "source_url": source_url, "chunk_ids": chunk_ids},
             )
 
-    def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
+    def list_chunk_ids_of_source(self, source_url: str, domain: str) -> list[str]:
+        """Чанки документа по его `source_url` (ADR-046 п. 9: якорь `Source` удалён,
+        перечисление идёт по полю владельца на самом чанке)."""
         with self._session() as session:
             rows = session.run(
-                "MATCH (s {node_id: $source_id})-[:CONTAINS]->(c) RETURN c.node_id AS chunk_id",
-                parameters={"source_id": source_id},
+                "MATCH (c {source_url: $source_url, domain: $domain}) "
+                "WHERE c:Chunk RETURN c.node_id AS chunk_id",
+                parameters={"source_url": source_url, "domain": domain},
             ).data()
         return [str(row["chunk_id"]) for row in rows]
+
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> tuple[int, int]:
+        """Осиротевшие доменные связи и узлы (ADR-014, `docs/02` §4.5).
+
+        Реализация обязана соблюдать три правила из контракта в `base.py`, иначе ошибка
+        проявится не как «не туда удалил», а как «сломался поиск»:
+
+        - **`r.chunk_ids IS NOT NULL` обязателен.** У `MENTIONS` этого свойства нет вовсе,
+          поэтому `size(coalesce(r.chunk_ids, [])) = 0` для него истинно.
+        - **Порядок: связи, затем узлы.** Обратный ломает счёт: `DETACH DELETE` узла унёс бы
+          связь, которую мы посчитали удалённой, не удаляя её.
+        - **`dry_run` ничего не удаляет.** Подсчёт обязателен: цена ошибки предиката —
+          молчаливая потеря данных, которую не откатит ни одна транзакция.
+
+        Узлы отбираются по отсутствию инцидентных связей, что в Neo4j требует
+        `DETACH DELETE`; узел `Chunk` исключён явно, иначе уборка снесла бы
+        путям записи.
+        """
+        values = {"domain": domain}
+        orphan_edges_cypher = (
+            "MATCH ()-[r]->() "
+            "WHERE r.domain = $domain AND r.chunk_ids IS NOT NULL "
+            "AND size(coalesce(r.chunk_ids, [])) = 0 "
+            "RETURN count(r) AS c"
+        )
+        orphan_nodes_cypher = (
+            "MATCH (n) "
+            "WHERE n.domain = $domain AND n.chunk_ids IS NOT NULL "
+            "AND size(coalesce(n.chunk_ids, [])) = 0 "
+            "AND NOT n:" + CHUNK_LABEL + " "
+            "AND NOT (n)--() "
+            "RETURN count(n) AS c"
+        )
+        with self._session() as session:
+            edge_count = int(session.run(orphan_edges_cypher, parameters=values).single()["c"])
+            node_count = int(session.run(orphan_nodes_cypher, parameters=values).single()["c"])
+        if dry_run:
+            return (edge_count, node_count)
+
+        # Удаление в одной транзакции: полуснятая осиротевшая связь — это и есть тот самый
+        # «правдоподобный ноль», которого мы избегаем.
+        with self._session() as session, session.begin_transaction() as tx:
+            tx.run(
+                "MATCH ()-[r]->() "
+                "WHERE r.domain = $domain AND r.chunk_ids IS NOT NULL "
+                "AND size(coalesce(r.chunk_ids, [])) = 0 "
+                "DELETE r",
+                parameters=values,
+            ).consume()
+            tx.run(
+                "MATCH (n) "
+                "WHERE n.domain = $domain AND n.chunk_ids IS NOT NULL "
+                "AND size(coalesce(n.chunk_ids, [])) = 0 "
+                "AND NOT n:" + CHUNK_LABEL + " "
+                "AND NOT (n)--() "
+                "DETACH DELETE n",
+                parameters=values,
+            ).consume()
+            del tx
+        # ADR-047: раздельные счётчики. Сумма попадала в поле связей, из-за чего
+        # удалённые узлы отчётом назывались связями.
+        return (edge_count, node_count)
 
     def ensure_schema(self, node_types: list[dict[str, Any]]) -> None:
         """Schema-провижининг (стадия 1, design.md §0): `CREATE CONSTRAINT ... IS
         UNIQUE` по паре `(domain, unique_key)` каждого типа онтологии. Идемпотентно
-        по имени constraint; fallback-типы `Source`/`Entity`/`Chunk` пропускаются. """
-        skipped = {SOURCE_LABEL, CHUNK_LABEL, ENTITY_LABEL}
+        по имени constraint; fallback-типы `Entity`/`Chunk` пропускаются. """
+        skipped = {CHUNK_LABEL, ENTITY_LABEL}
         with self._session() as session:
             for node_type in node_types:
                 if not isinstance(node_type, dict):
@@ -181,14 +283,18 @@ class Neo4jGraphStore(GraphStoreProvider):
         self,
         context_ids: list[str],
         *,
-        direction: str = "parent",
+        direction: str = "both",
+        kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
     ) -> list[dict[str, Any]]:
-        depth = min(max(int(max_depth), 1), 3)
-        edge_types = "PARENT" if direction == "parent" else "RELATED"
-        pattern = f"-[:{edge_types}*1..{depth}]->" if direction == "parent" else f"<-[:{edge_types}*1..{depth}]-"
+        depth = _expand_depth(max_depth)
+        walk = _expand_direction(direction)
+        allowed = _expand_kinds(kinds)
+        edge_types = f":{'|'.join(sorted(allowed))}" if allowed else ""
+        span = f"{edge_types}*1..{depth}"
+        pattern = f"-[{span}]->" if walk == "out" else f"<-[{span}]-" if walk == "in" else f"-[{span}]-"
         domain = ""
         for value in context_ids:
             if not isinstance(value, str) or not value.startswith("tag:"):
@@ -202,20 +308,34 @@ class Neo4jGraphStore(GraphStoreProvider):
             if domain
             else ""
         )
-        path_domain_clause = (
-            " WHERE all(item IN nodes(path) WHERE item.domain = $domain "
-            "OR item.node_id STARTS WITH $domain_prefix)"
-            if domain
-            else ""
-        )
+        path_conditions: list[str] = []
+        if domain:
+            path_conditions.append(
+                "all(item IN nodes(path) WHERE item.domain = $domain "
+                "OR item.node_id STARTS WITH $domain_prefix)"
+            )
+        # ADR-068: развёртка отдаёт сущности, а не текст. `MENTIONS` идёт чанк ->
+        # сущность, поэтому при направлении `both` обход проходит по нему назад и попадает
+        # в узлы чанков. У чанка нет ни `source_ids`, ни `chunk_ids`, значит
+        # `_has_active_provenance` режет такую строку, а `LIMIT` к этому моменту уже
+        # израсходован: при малом лимите на выходе пусто. Исключение задано узлом, а не
+        # типом связи, чтобы новый тип связи не приносил текст молча.
+        path_conditions.append(f"NOT node:{CHUNK_LABEL}")
+        path_where = " WHERE " + " AND ".join(path_conditions)
         query = (
             "MATCH (seed) "
             "WHERE (seed.node_id IN $context_ids OR seed.tag_id IN $context_ids)"
             f"{domain_clause} "
             f"MATCH path=(seed){pattern}(node)"
-            f"{path_domain_clause} "
+            f"{path_where} "
             "RETURN node, [item IN nodes(path) | coalesce(item.node_id, item.tag_id)] AS path, "
             "length(path) AS depth, type(last(relationships(path))) AS kind "
+            # ADR-070: порядок строк в Cypher не задан, поэтому без сортировки один и тот
+            # же запрос дважды даёт разный набор, а замер становится неповторяемым.
+            # Ближние пути идут первыми: сид получен из найденного чанка, и ближе к нему -
+            # ближе к вопросу. Равенство по расстоянию снимается по `node_id`, иначе порядок
+            # снова зависит от плана запроса. Сортировка обязана стоять ДО `LIMIT`.
+            "ORDER BY depth, node.node_id "
             "LIMIT $max_nodes"
         )
         parameters: dict[str, Any] = {
@@ -229,11 +349,19 @@ class Neo4jGraphStore(GraphStoreProvider):
         with self._session() as session:
             rows = session.run(query, parameters=parameters).data()
         result: list[dict[str, Any]] = []
+        # Ограничение ветвления считается ПО УЗЛУ, из которого пошли ребра, - так же, как
+        # в InMemoryGraphStore, где счётчик сбрасывается на каждом текущем узле. Раньше
+        # здесь счётчик жил по ключу `seed`, то есть ограничивал суммарное число строк на
+        # одну стартовую точку; при глубине больше 1 это делало параметр почти бессмысленным
+        # (промежуточные узлы разветвлялись как угодно), и один и тот же параметр значил
+        # разные вещи в двух адаптерах. Ключ - предшественник в пути, а не seed.
         fanout_counts: dict[str, int] = {}
         for row in rows:
             path = list(row.get("path") or [])
-            seed = str(path[0]) if path else ""
-            if fanout_counts.get(seed, 0) >= max_fanout:
+            # `*1..depth` даёт путь из двух и более узлов, поэтому предшественник есть
+            # всегда; fallback на seed - страховка на неожиданную форму пути.
+            branch_point = str(path[-2]) if len(path) >= 2 else (str(path[0]) if path else "")
+            if fanout_counts.get(branch_point, 0) >= max_fanout:
                 continue
             node = row.get("node")
             props = dict(node) if node is not None else {}
@@ -249,10 +377,10 @@ class Neo4jGraphStore(GraphStoreProvider):
                     "domain": props.get("domain"),
                     "origin": props.get("origin"),
                     "confidence": props.get("confidence"),
-                    "properties": dict(props.get("properties") or {}),
+                    "properties": _node_properties(props.get("properties")),
                 }
             )
-            fanout_counts[seed] = fanout_counts.get(seed, 0) + 1
+            fanout_counts[branch_point] = fanout_counts.get(branch_point, 0) + 1
             if len(result) >= max_nodes:
                 break
         return result
@@ -371,31 +499,49 @@ class _TxGraph(GraphStoreProvider):
             {"domain": domain, "source_url": source_url, "chunk_ids": list(chunk_ids)},
         )
 
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> tuple[int, int]:
+        """В буфере отложено не может быть: подсчёт обязан увидеть состояние на момент вызова.
+
+        Попытка забуферизовать удаление дала бы «правдоподобный ноль» в отчёте: буфер
+        применяется в `commit()`, а `dry_run` считал бы по состоянию до него. Поэтому внутри
+        открытой транзакции уборка считается и применяется немедленно, и в буфер попадает
+        **факт удаления**, а не команда.
+        """
+        del dry_run
+        removed_edges, removed_nodes = self._outer.delete_orphans(domain, dry_run=False)
+        # ADR-047: в буфер идёт пара, а не сумма. Сумма в отчёте читалась как «связи».
+        self._buffered("orphans_removed", (removed_edges, removed_nodes))
+        return (removed_edges, removed_nodes)
+
     def query(self, cypher: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         raise NotImplementedError("чтение в транзакции записи не поддерживается")
 
     def get_node(self, node_id: str) -> dict[str, Any] | None:
         raise NotImplementedError("чтение в транзакции записи не поддерживается")
 
-    def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
+    def list_chunk_ids_of_source(self, source_url: str, domain: str) -> list[str]:
         raise NotImplementedError("чтение в транзакции записи не поддерживается")
 
     def commit(self) -> None:
         if not self._ops:
             return
         with self._outer._session() as session, session.begin_transaction() as tx:
-            for kind, arg in self._ops:
-                if kind == "upsert_nodes":
-                    _upsert_nodes(tx, arg)
-                elif kind == "upsert_edges":
-                    _upsert_edges(tx, arg)
-                elif kind == "delete_node":
-                    _delete_node(tx, arg)
-                elif kind == "remove_source":
-                    _remove_source(tx, arg)
-            # commit в implicit begin_transaction по выходу из with
-            _rollback_guard = tx
-            del _rollback_guard
+                for kind, arg in self._ops:
+                    if kind == "upsert_nodes":
+                        _upsert_nodes(tx, arg)
+                    elif kind == "upsert_edges":
+                        _upsert_edges(tx, arg)
+                    elif kind == "delete_node":
+                        _delete_node(tx, arg)
+                    elif kind == "remove_source":
+                        _remove_source(tx, arg)
+                    elif kind == "orphans_removed":
+                        # Уже применено в delete_orphans: в буфер попал ФАКТ удаления,
+                        # а не команда. Подробнее в docstring метода.
+                        pass
+                # commit в implicit begin_transaction по выходу из with
+                _rollback_guard = tx
+                del _rollback_guard
 
     def discard(self) -> None:
         self._ops = []
@@ -413,9 +559,16 @@ def _remove_source(runner: Any, values: dict[str, Any]) -> None:
     # ("Cannot subtract `List` from `List`"), поэтому membership через ANY.
     runner.run(
         "MATCH (n) WHERE n.domain = $domain AND $source_url IN coalesce(n.source_ids, []) "
-        "SET n.source_ids = [value IN coalesce(n.source_ids, []) WHERE value <> $source_url], "
-        "n.chunk_ids = [value IN coalesce(n.chunk_ids, []) "
-        "WHERE NOT any(c IN $chunk_ids WHERE c = value)]",
+        "SET n.source_ids = [value IN coalesce(n.source_ids, []) WHERE value <> $source_url] "
+        # `chunk_ids` переписывается ТОЛЬКО если свойство уже есть. Безусловный `SET`
+        # создавал его, и это ломало дискриминатор уборки: сущность, у которой опоры не
+        # было вовсе (пользовательское утверждение), после обновления получала
+        # `chunk_ids = []`, а пустой непустой-список - это ровно признак кандидата на
+        # удаление. То есть обновление документа превращало нетронутую связь в мусор и
+        # уборка затем её съедала. `FOREACH` с пустым списком условия ничего не делает.
+        "FOREACH (_ IN CASE WHEN n.chunk_ids IS NULL THEN [] ELSE [1] END | "
+        "SET n.chunk_ids = [value IN coalesce(n.chunk_ids, []) "
+        "WHERE NOT any(c IN $chunk_ids WHERE c = value)])",
         parameters=values,
     ).consume()
     runner.run(
@@ -424,9 +577,10 @@ def _remove_source(runner: Any, values: dict[str, Any]) -> None:
         "$source_url IN coalesce(r.source_ids, []) "
         "OR any(value IN coalesce(r.chunk_ids, []) "
         "WHERE any(c IN $chunk_ids WHERE c = value))) "
-        "SET r.source_ids = [value IN coalesce(r.source_ids, []) WHERE value <> $source_url], "
-        "r.chunk_ids = [value IN coalesce(r.chunk_ids, []) "
-        "WHERE NOT any(c IN $chunk_ids WHERE c = value)]",
+        "SET r.source_ids = [value IN coalesce(r.source_ids, []) WHERE value <> $source_url] "
+        "FOREACH (_ IN CASE WHEN r.chunk_ids IS NULL THEN [] ELSE [1] END | "
+        "SET r.chunk_ids = [value IN coalesce(r.chunk_ids, []) "
+        "WHERE NOT any(c IN $chunk_ids WHERE c = value)])",
         parameters=values,
     ).consume()
 
@@ -487,12 +641,70 @@ def _upsert_nodes(runner: Any, nodes: list[dict[str, Any]]) -> None:
             for key, value in properties.items()
             if key not in _PROVENANCE_KEYS and key != "properties"
         }
+        # ADR-044: содержимое (id/description/category) перезаписывается не всегда, а по
+        # объявленному порядку владельцев. Остальные скалярные — как раньше, и защита
+        # `origin = 'user'` сохраняется для обеих групп.
+        owned_properties = {
+            key: value for key, value in scalar_properties.items() if key in _OWNED_ENTITY_FIELDS
+        }
+        plain_properties = {
+            key: value for key, value in scalar_properties.items() if key not in _OWNED_ENTITY_FIELDS
+        }
         set_clauses = [
             (
                 "SET n += CASE WHEN n.origin = 'user' AND $incoming_origin <> 'user' "
-                "THEN {} ELSE $scalar_properties END"
+                "THEN {} ELSE $plain_properties END"
             )
         ]
+        for field in _OWNED_ENTITY_FIELDS:
+            if field not in owned_properties:
+                continue
+            source_key = f"{field}_source_url"
+            version_key = f"{field}_version"
+            # ADR-044 (правка 2026-10-02): порядок полный, и версии сравниваются ТОЛЬКО
+            # внутри одного источника. Между источниками версии несравнимы, поэтому там
+            # сравнивается приоритет источника; при равенстве приоритетов — `source_url`,
+            # чтобы результат не зависел от порядка загрузки. Условие одно и то же для
+            # значения и для обоих полей владельца: иначе владелец мог бы смениться у
+            # значения, которое не переписано.
+            wins = (
+                f"(coalesce(n.{source_key}, '') = ''"
+                f" OR ($incoming_{source_key} = n.{source_key}"
+                f" AND $incoming_{version_key} > coalesce(n.{version_key}, -1))"
+                f" OR ($incoming_{source_key} <> n.{source_key}"
+                f" AND $incoming_{source_key}_priority > coalesce(n.{source_key}_priority, 0))"
+                f" OR ($incoming_{source_key} <> n.{source_key}"
+                f" AND $incoming_{source_key}_priority = coalesce(n.{source_key}_priority, 0)"
+                f" AND $incoming_{source_key} > n.{source_key}))"
+            )
+            guarded = "(n.origin = 'user' AND $incoming_origin <> 'user')"
+            set_clauses.append(
+                f"SET n.{field} = CASE"
+                f" WHEN {guarded} THEN n.{field}"
+                f" WHEN {wins} THEN ${field}_incoming"
+                f" ELSE n.{field} END"
+            )
+            set_clauses.append(
+                f"SET n.{source_key} = CASE"
+                f" WHEN {guarded} THEN n.{source_key}"
+                f" WHEN {wins} THEN $incoming_{source_key}"
+                f" ELSE n.{source_key} END"
+            )
+            set_clauses.append(
+                f"SET n.{version_key} = CASE"
+                f" WHEN {guarded} THEN n.{version_key}"
+                f" WHEN {wins} THEN $incoming_{version_key}"
+                f" ELSE n.{version_key} END"
+            )
+            # Приоритет хранится рядом с владельцем: иначе он был бы производным от
+            # окружения при каждой записи, и его нельзя было бы прочитать обратно —
+            # а без этого сравнение между источниками при следующей записи не восстановить.
+            set_clauses.append(
+                f"SET n.{source_key}_priority = CASE"
+                f" WHEN {guarded} THEN n.{source_key}_priority"
+                f" WHEN {wins} THEN $incoming_{source_key}_priority"
+                f" ELSE n.{source_key}_priority END"
+            )
         if "properties" in properties or existing_nested:
             set_clauses.append("SET n.properties = $properties_value")
         for key in _PROVENANCE_KEYS:
@@ -507,9 +719,17 @@ def _upsert_nodes(runner: Any, nodes: list[dict[str, Any]]) -> None:
         parameters: dict[str, Any] = {
             "node_id": node_id,
             "props": properties,
-            "scalar_properties": scalar_properties,
+            "plain_properties": plain_properties,
             "incoming_origin": incoming_origin,
         }
+        for field in _OWNED_ENTITY_FIELDS:
+            if field not in owned_properties:
+                continue
+            parameters[f"{field}_incoming"] = owned_properties[field]
+            incoming_source = str(properties.get(f"{field}_source_url") or "")
+            parameters[f"incoming_{field}_source_url"] = incoming_source
+            parameters[f"incoming_{field}_version"] = int(properties.get(f"{field}_version") or -1)
+            parameters[f"incoming_{field}_source_url_priority"] = source_priority(incoming_source)
         if "properties" in properties or existing_nested:
             parameters["properties_value"] = _encode_properties(nested)
         runner.run(
@@ -675,6 +895,57 @@ class Neo4jVectorStore(VectorStoreProvider):
                 parameters={"domain": domain, "projection_revision": projection_revision},
             ).single()
         return not row or int(row["mismatches"] or 0) == 0
+
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: Sequence[str],
+        domain: str | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """Тексты чанков по идентификаторам: мост «обход → читаемый кандидат».
+
+        Идентификаторы из обхода — это `node_id`/`tag_id` строк расширения, а хранилище
+        адресует чанк по `node_id`. Поэтому значения разбиваются на два множества ДО
+        запроса: подстановка значения в поле не является поиском, и смешивать их в одном
+        списке значило бы сравнивать `node_id` с `tag_id` в одном столбце.
+        """
+        wanted = {str(value) for value in chunk_ids if value}
+        if not wanted:
+            return []
+        tag_ids = {value for value in wanted if value.startswith("tag:")}
+        node_ids = wanted - tag_ids
+        domain_clause = " AND c.domain = $domain" if domain is not None else ""
+        parameters: dict[str, Any] = {"node_ids": sorted(node_ids), "tag_ids": sorted(tag_ids)}
+        if domain is not None:
+            parameters["domain"] = domain
+        with self._session() as session:
+            rows = session.run(
+                f"MATCH (c:{CHUNK_LABEL}) WHERE (c.node_id IN $node_ids OR c.tag_id IN $tag_ids)"
+                f"{domain_clause} "
+                "RETURN c.node_id AS chunk_id, c.text AS text, c.source_url AS source_url, "
+                "c.domain AS domain, c.index AS index, "
+                "c.context_ids AS context_ids, c.tag_ids AS tag_ids",
+                parameters=parameters,
+            ).data()
+        found = {
+            str(row["chunk_id"]): {
+                "chunk_id": str(row["chunk_id"]),
+                "text": str(row.get("text") or ""),
+                "source_url": str(row.get("source_url") or ""),
+                "domain": row.get("domain"),
+                "index": row.get("index"),
+                # Свойства самого кандидата: по ним считается пересечение с
+                # вопросом (ADR-072), без них мостовой чанк нечем подтвердить.
+                "context_ids": [str(value) for value in (row.get("context_ids") or [])],
+                "tag_ids": [str(value) for value in (row.get("tag_ids") or [])],
+            }
+            for row in rows
+            if row.get("chunk_id")
+        }
+        # Порядок запрошенных идентификаторов сохраняется: он несёт смысл обхода (ближняя
+        # вершина раньше дальней), и переупорядочивание здесь потеряло бы его безвозвратно.
+        # Сортировка по ключу, как было, теряла этот порядок молча — комментарий говорил
+        # об обратном.
+        return [found[key] for key in dict.fromkeys(str(value) for value in chunk_ids if value) if key in found]
 
     def list_chunk_ids_of_source(
         self,

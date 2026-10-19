@@ -14,7 +14,12 @@ Fail-fast (не тратим время на упавший стек):
     Перед прогоном раннер health-пробами проверяет доступность контуров,
     необходимых для сконфигурированных адаптеров; при падении обязательного —
     отчёт в ``<out>/preflight.log`` и выход с кодом 1.
-    Все ожидания ограничены ``--wait-timeout`` (по умолчанию 300 с = 5 минут).
+    Ожидание джоб ограничено разделёнными окнами (B3), а не одним общим дедлайном:
+    ``--unreachable-timeout`` (опросы не отвечают ⇒ стенд недоступен),
+    ``--job-timeout`` (опросы идут, но джоба не двигается) и ``--wait-ceiling``
+    (жёсткий кап на пачку). Условия взаимоисключающие, поэтому соотношение констант
+    ничего не решает. Фаза подачи ограничена отдельно: ``--slot-timeout`` на документ
+    и ``--submit-budget`` на весь корпус.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -39,16 +44,87 @@ from graphrag_proto.eval.metrics import (
     lift_report,
     retrieval_metrics,
 )
+from graphrag_proto.retrieval.adapters.factory import llm_setting
 
 INGESTION_URL = os.environ.get("INGESTION_URL", "http://localhost:8002")
 QUERY_URL = os.environ.get("QUERY_URL", "http://localhost:8000")
 X_API_KEY = os.environ.get("X_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
 
-DEFAULT_WAIT_TIMEOUT_S = 300.0
+# Политика ожидания (B3). Пять величин, и каждая ограничивает своё: смешивать их
+# нельзя, потому что «бюджет» одного этапа под именем другого — это ловушка, а не
+# настройка.
+#
+# Окна разделены РАЗДЕЛИТЕЛЕМ, а не порядком срабатывания: два независимых таймаута плюс
+# «первым сработает меньший» дают конструкцию, в которой при неверном соотношении
+# констант одно окно становится мёртвым кодом — ровно тот баг, который чинится.
+DEFAULT_UNREACHABLE_TIMEOUT_S = 300.0  # опросы не отвечают ⇒ стенд недоступен
+DEFAULT_JOB_TIMEOUT_S = 900.0          # опросы идут, но эта джоба не двигается
+DEFAULT_WAIT_CEILING_S = 7200.0        # жёсткий кап ожидания джоб (backstop)
+# Бюджеты фазы ПОДАЧИ (POST /documents), отдельной от ожидания джоб: 429 означает «слот
+# занят», и очередь на полном корпусе законна, поэтому слот ждём терпеливо, а всю фазу
+# ограничиваем отдельно — иначе N документов умножают лимит на себя.
+DEFAULT_SLOT_TIMEOUT_S = 300.0         # свободный слот исполнителя для одного документа
+DEFAULT_SUBMIT_BUDGET_S = 7200.0       # вся фаза подачи корпуса
+# Нарастающая пауза при 429 (ADR-050). Раньше стояла константа 5 с на все повторы: при
+# `slot_timeout_s=300` это около 60 попыток на документ, то есть прибор давил на тот самый
+# лимит, в который упёрся. Три числа — минимальная пауза, шаг наращивания и потолок; сколько
+# шагов получится и сколько всего ожидания, выводится в `run_manifest` (см.
+# `backoff_summary`), то есть настраивается любая из трёх величин, а результат виден сразу.
+DEFAULT_429_RETRY_INITIAL_S = 1.0
+DEFAULT_429_RETRY_STEP_S = 2.0
+DEFAULT_429_RETRY_MAX_S = 30.0
+# Таймаут одного HTTP-вызова LLM (не окно ожидания джоб): та же величина, что была
+# до B3, но с собственным именем — иначе «300 с» означал бы сразу три разных вещи.
+DEFAULT_LLM_TIMEOUT_S = 300.0
+
+# Wire-контракт с ingestion-сервисом, а не общий модуль: раннер общается с пайплайном
+# по HTTP. Владелец префикса — ingestion-сервис (`app.ENRICHMENT_DEGRADED_PREFIX`).
+# Согласованность сторон закреплена тестами job API и build_ingest_report.
+ENRICHMENT_DEGRADED_PREFIX = "enrichment_degraded"
+# Имена структурных сигналов в ответе джобы (владелец — ingestion-service,
+# `app.ENRICHMENT_DEGRADED_SIGNAL` / `app.LLM_LAYER_DROPPED_SIGNAL`). Оба факта
+# приходят одним каналом — полем `signals`. Пока не существовало структурного
+# канала, деградация читалась из текста сообщения по префиксу; это значило, что одна
+# рефакторинга формата тихо обнулила бы метрику потерь, а «мы никогда не теряем
+# слой» выглядело бы как хорошая новость. Тихий ноль в метрике потерь — худший вид
+# поломки, он не выглядит как поломка.
+ENRICHMENT_DEGRADED_SIGNAL = "enrichment_degraded"
+LLM_LAYER_DROPPED_SIGNAL = "llm_layer_dropped"
+# ADR-049: ещё два сигнала, и оба закрывают один класс поломки — «признак выведен из
+# журнала стадий, а журнал не различает отработавшую и пропущенную стадию». Владелец —
+# ingestion-сервис (`app.INGEST_NOOP_SIGNAL`, `app.EXTRACTION_SIGNAL_PREFIX`).
+INGEST_NOOP_SIGNAL = "ingest_noop"
+EXTRACTION_SIGNAL_PREFIX = "extraction:"
 DEFAULT_CONTOUR_TIMEOUT_S = 5.0
 
 EVAL_K = 5
 _REVISION_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+# Откуда взята ревизия в манифесте. Три значения, и различие между ними не украшение:
+# «прочитана у контура», «контур не ответил» и «не просили» — три разных результата, из
+# которых третий выбирают руками, а второй означает, что графическая ось не измерялась.
+REVISION_SOURCE_REPORTED = "reported"
+REVISION_SOURCE_UNAVAILABLE = "unavailable"
+REVISION_SOURCE_SKIPPED = "skipped"
+
+# Режим покрытия эталонных источников. `measured` — состав известен, и ноль в нём означает
+# факт о корпусе. `unknown` — состава взять негде: прибор молчит, и подставлять вместо
+# молчания `0.0` нельзя, потому что это читается как «эталонных источников в корпусе нет».
+COVERAGE_MODE_MEASURED = "measured"
+COVERAGE_MODE_UNKNOWN = "unknown"
+COVERAGE_UNKNOWN_REASON = "corpus_composition_unavailable"
+
+# Гард среза. `unavailable` — не синоним `stable`: первый означает «проверить не удалось»,
+# второй — «проверено и не менялось», и смешивать их значит выдавать отсутствие данных за
+# подтверждение.
+PARITY_STABLE = "stable"
+PARITY_CHANGED = "changed"
+PARITY_UNAVAILABLE = "unavailable"
+
+# Метки «что ось знает о документе» (ADR-046, поправка 2026-10-16). Имёнства берутся у пайплайна,
+# здесь только значения для чтения в отчёте: одно место правды — `retrieval.pipeline`.
+GRAPH_KNOWLEDGE_BLIND = "blind"
+GRAPH_KNOWLEDGE_REACHABLE = "reachable_unused"
 
 # generation.mode (design.md §5.2): judge / n/a / skipped / empty
 GENERATION_MODE_SKIPPED = "skipped"
@@ -141,15 +217,20 @@ def required_contours(
 ) -> list[dict[str, Any]]:
     """Контуры, нужные для сконфигурированных адаптеров (env): ingestion + backend'ы.
 
-    Всегда требуется Ingestion API (revision fetch). Neo4j/embeddings/reranker/llm
-    проверяются, только если соответствующий адаптер выбран env-переменными.
+    Ingestion API обязателен **только когда прогон сам загружает корпус**
+    (`include_ingestion=True`). Он не является предусловием старта: без него ревизия
+    домена не измеряется, и графовая ось уходит в vector-only с именованной причиной
+    `revision_unknown`, а сам замер продолжает быть корректным — просто не про граф
+    (ADR-029, поправка 2026-10-16; тот же отказ объявлен в ADR-058 для runtime-контура).
+    Neo4j/embeddings/reranker/llm проверяются, только если соответствующий адаптер выбран
+    env-переменными.
     `include_generation=False` (--retrieval-only) исключает LLM генерации;
     `include_ingestion=True` сохраняет LLM-контур, если ingestion использует
     `EXTRACT_LLM=true`.
     """
-    contours: list[dict[str, Any]] = [
-        {"name": "ingestion-api", "kind": "http", "target": INGESTION_URL},
-    ]
+    contours: list[dict[str, Any]] = []
+    if include_ingestion:
+        contours.append({"name": "ingestion-api", "kind": "http", "target": INGESTION_URL})
     config_url = os.environ.get("CONFIG_URL", "").strip()
     if config_url:
         contours.append({"name": "config-service", "kind": "http", "target": config_url})
@@ -219,6 +300,30 @@ def preflight(
 # Corpus ingestion (through Ingestion API :8002)
 # ---------------------------------------------------------------------------
 
+INGEST_IGNORE_MARKER = ".ingest-ignore"
+
+
+def _is_ingest_excluded(path: Path, corpus_dir: Path) -> bool:
+    """Помечен ли каталог документа маркером `.ingest-ignore` в любой точке пути.
+
+    Объявление едет вместе с содержимым, поэтому код не знает имён каталогов заранее: архив
+    и планы исключаются сами, и новый каталог потребует маркера, а не правки кода.
+
+    Проверяются все сегменты относительного пути, а не только первый: вложенный исключённый
+    каталог внутри живого тоже не должен попадать в корпус.
+    """
+    try:
+        relative = path.relative_to(corpus_dir)
+    except ValueError:  # документ вне корпуса — договорённость проверяет вызывающий код
+        return False
+    current = corpus_dir
+    for segment in relative.parts[:-1]:
+        current = current / segment
+        if (current / INGEST_IGNORE_MARKER).is_file():
+            return True
+    return False
+
+
 def select_corpus_files(
     corpus_dir: Path,
     *,
@@ -246,7 +351,11 @@ def select_corpus_files(
                 raise FileNotFoundError(f"документ не найден в корпусе: {rel!r}")
             selected.append(candidate)
     else:
-        selected = sorted(corpus_dir.rglob("*.md"))
+        selected = [
+            path
+            for path in sorted(corpus_dir.rglob("*.md"))
+            if not _is_ingest_excluded(path, corpus_dir)
+        ]
     if limit is not None:
         if limit <= 0:
             raise ValueError(f"--limit-docs должен быть положительным, получено {limit}")
@@ -256,14 +365,70 @@ def select_corpus_files(
     ]
 
 
+def retry_backoff_delays(initial_s: float, step_s: float, max_s: float) -> list[float]:
+    """Последовательность пауз между попытками при перегрузке: `initial, +step, ...` до `max`.
+
+    Три параметра, а не один, потому что у вопроса три разных ответа: сколько ждать перед
+    первой повторной попыткой (это задаёт тон всей фазе подачи), насколько быстро
+    наращивать (слишком полого - прибор продолжает давить на занятый лимит) и чем
+    ограничить (иначе при длинном ожидании пауза съест бюджет фазы целиком).
+
+    Ограничение шагом числом попыток - то же самое, что ограничение максимумом: шагов
+    ровно столько, сколько нужно, чтобы дойти до потолка. Обе величины печатаются в
+    `run_manifest.timeouts.ingest_429_backoff.derived`, чтобы тот, кто настраивает,
+    видел результат, а не пересчитывал его.
+    """
+    if step_s < 0:
+        raise ValueError(f"шаг увеличения паузы не может быть отрицательным: {step_s}")
+    if max_s < initial_s:
+        raise ValueError(
+            f"максимальная пауза {max_s} меньше начальной {initial_s}: последовательность "
+            "не будет нарастать"
+        )
+    delays: list[float] = []
+    current = float(initial_s)
+    while current < max_s:
+        delays.append(round(current, 3))
+        if step_s == 0.0:
+            break
+        current += step_s
+    delays.append(float(max_s))
+    return delays
+
+
+def backoff_summary(initial_s: float, step_s: float, max_s: float) -> dict[str, Any]:
+    """Настроенные значения плюс производные: сколько шагов и сколько всего ожидания.
+
+    «Сколько шагов» и «максимальный таймаут» - одно и то же, выраженное с разных сторон,
+    поэтому обе величины здесь же: настроить можно любую, а проверить результат нужно по
+    обеим. ``integral_s`` - сумма пауз до достижения потолка, то есть сколько прибор
+    готов ждать, прежде чем повторные попытки станут бесполезными.
+    """
+    delays = retry_backoff_delays(initial_s, step_s, max_s)
+    return {
+        "initial_s": float(initial_s),
+        "step_s": float(step_s),
+        "max_s": float(max_s),
+        "derived": {
+            "attempts_before_cap": len(delays),
+            "integral_s": round(sum(delays), 3),
+            "delays_s": delays,
+        },
+    }
+
+
 def ingest_corpus(
     corpus_dir: Path,
     domain: str,
     source_prefix: str = "",
-    max_wait_s: float = DEFAULT_WAIT_TIMEOUT_S,
+    slot_timeout_s: float = DEFAULT_SLOT_TIMEOUT_S,
     *,
+    submit_budget_s: float = DEFAULT_SUBMIT_BUDGET_S,
     documents: list[str] | None = None,
     limit: int | None = None,
+    backoff_initial_s: float = DEFAULT_429_RETRY_INITIAL_S,
+    backoff_step_s: float = DEFAULT_429_RETRY_STEP_S,
+    backoff_max_s: float = DEFAULT_429_RETRY_MAX_S,
 ) -> list[dict[str, Any]]:
     """Загрузить выбранные .md в Ingestion API (async). Возвращает записи джобов.
 
@@ -271,13 +436,19 @@ def ingest_corpus(
     этого хватает ``ingest_report.json`` для попер-документной экстраполяции
     времени (стоимость ingest зависит от размера документа, а не от их числа).
 
-    Цикл 429 ограничен дедлайном max_wait_s: если слоты не освобождаются —
-    RuntimeError вместо бесконечного ожидания упавшего стека.
+    **Два разных бюджета, потому что очередь законна.** ``slot_timeout_s`` ждёт свободного
+    слота исполнителя для одного документа: 429 означает «сервис жив и занят», и на полном
+    корпусе с двумя слотами это норма, а не авария — поэтому попытка повторяется, пока не
+    выйдет этот бюджет. ``submit_budget_s`` ограничивает **всю** фазу подачи целиком: без
+    него ``N`` документов умножили бы ``slot_timeout_s`` на себя, и «бюджет» в
+    ``run_manifest.timeouts`` не был бы бюджетом. Раньше дедлайн считался на документ, а поле
+    называлось «жёсткий кап на всю пачку», то есть имя не соответствовало поведению.
     """
     job_ids: list[dict[str, Any]] = []
-    for md_file, rel in select_corpus_files(
-        corpus_dir, documents=documents, limit=limit
-    ):
+    selected = select_corpus_files(corpus_dir, documents=documents, limit=limit)
+    submit_deadline = time.monotonic() + submit_budget_s
+    backoff = retry_backoff_delays(backoff_initial_s, backoff_step_s, backoff_max_s)
+    for md_file, rel in selected:
         source_url = f"{source_prefix}/{rel}" if source_prefix else rel
         content = md_file.read_text(encoding="utf-8")
         body = {
@@ -286,7 +457,8 @@ def ingest_corpus(
             "doc_type": "md",
             "content": content,
         }
-        deadline = time.monotonic() + max_wait_s
+        deadline = min(time.monotonic() + slot_timeout_s, submit_deadline)
+        attempt = 0
         while True:
             try:
                 resp = _post_json(
@@ -298,11 +470,26 @@ def ingest_corpus(
                 # 429: все слоты исполнения заняты — ждём и повторяем (async-пайплайн).
                 if "429" not in str(exc):
                     raise
-                if time.monotonic() >= deadline:
+                now = time.monotonic()
+                if now >= deadline:
+                    # Различаем, что кончилось: слот для этого документа или бюджет всей
+                    # фазы подачи. Сообщение обязано называть, потому что лечится это
+                    # по-разному: слот — подождать или снизить параллелизм, бюджет — снять
+                    # лимит с корпуса либо поднять `submit_budget_s`.
+                    budget = (
+                        f"бюджет фазы подачи {submit_budget_s:.0f}с исчерпан"
+                        if now >= submit_deadline
+                        else f"слот исполнителя не освободился за {slot_timeout_s:.0f}с"
+                    )
                     raise RuntimeError(
-                        f"лимит ожидания слотов ingest ({max_wait_s:.0f}с) исчерпан для {source_url}"
+                        f"{budget} для {source_url} (попыток при 429: {attempt})"
                     ) from exc
-                time.sleep(5.0)
+                # Пауза нарастает и обрезается остатком до дедлайна. Без обрезки прибор
+                # выходил за `slot_timeout_s` на величину последней паузы, то есть
+                # объявленный в манифесте таймаут не был пределом.
+                delay = backoff[min(attempt, len(backoff) - 1)]
+                time.sleep(max(0.0, min(delay, deadline - now)))
+                attempt += 1
         job_id = resp.get("job_id")
         if not job_id:
             raise RuntimeError(f"ingestion не вернул job_id для {source_url}")
@@ -323,10 +510,49 @@ def ingest_corpus(
 TERMINAL_JOB_STATUSES = {"succeeded", "failed", "cancelled"}
 
 
+def _progress_signature(job: dict[str, Any]) -> tuple[Any, ...]:
+    """Отпечаток прогресса джобы: чем он отличается от молчания.
+
+    Учитываются статус, текущая стадия и ``(stage, status, ts)`` всех стадий —
+    ровно те поля, которые пайплайн меняет по мере движения. ``message`` намеренно
+    НЕ учитывается: ``note_stage`` пишет туда ``enrichment_degraded`` (B1) и не
+    двигает стадию, поэтому такой «прогресс» держал бы прогон живым молча.
+    """
+    stages = job.get("stages") or []
+    return (
+        str(job.get("status") or ""),
+        str(job.get("stage") or ""),
+        tuple(
+            (str(entry.get("stage") or ""), str(entry.get("status") or ""), str(entry.get("ts") or ""))
+            for entry in stages
+            if isinstance(entry, dict)
+        ),
+    )
+
+
+def _pending_detail(
+    pending: list[str],
+    last_seen: dict[str, dict[str, Any]],
+) -> str:
+    """Диагностика висящих джоб: стадия каждой, а не голый список id.
+
+    По последней известной стадии видно, где именно прогон встал (INGEST / EXTRACT /
+    ...), иначе таймаут неотличим от «сеть отвалилась» и упирается в перебор логов вслепую.
+    """
+    return ", ".join(
+        f"{job_id}@{(last_seen.get(job_id) or {}).get('stage') or '?'}" for job_id in pending
+    )
+
+
 def wait_jobs(
     job_ids: list[str],
     poll_s: float = 5.0,
-    timeout_s: float = DEFAULT_WAIT_TIMEOUT_S,
+    *,
+    unreachable_timeout_s: float = DEFAULT_UNREACHABLE_TIMEOUT_S,
+    job_timeout_s: float = DEFAULT_JOB_TIMEOUT_S,
+    ceiling_s: float = DEFAULT_WAIT_CEILING_S,
+    clock: Callable[[], float] | None = None,
+    sleeper: Callable[[float], None] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Дождаться завершения async-джобов ingestion (200 → task complete).
 
@@ -334,29 +560,267 @@ def wait_jobs(
     только статус: ``stage == "INGEST"`` при ``succeeded`` — признак no-op
     (документ не изменился, пайплайн встал после INGEST и не дошёл до EXTRACT).
 
-    Дедлайн по умолчанию — 5 минут (не 30): упавший стек не должен «выжигать» время.
+    **Окна разделены разделителем, а не соотношены порядком.** Два независимых
+    таймаута плюс «первым срабатывает меньший» — это конструкция, которая ломается
+    конфигурацией: если одно окно меньше другого, второе становится мёртвым кодом, и
+    ровно тот баг, который чинится, возвращается молча. Поэтому условия тут
+    взаимоисключающие, и ни одна конфигурация ничего не решает:
+
+    * ``unreachable_timeout_s`` — **опросы не отвечают** всё это время ⇒ стенд
+      недоступен. Считается по неудачным опросам, а не по отсутствию прогресса:
+      «мы не видим джоб» и «джобы не двигаются» — разные факты.
+    * ``job_timeout_s`` — **опросы отвечают, но конкретная джоба не двигается**
+      ⇒ виновата названная джоба и её стадия. Это общий случай живого стенда,
+      включая хвост батча, где не завершена одна джоба.
+    * ``ceiling_s`` — жёсткий кап на всю пачку: страховка от «медленно, но живо».
+
+    «Прогресс» — не эвристика по таймеру, а изменение отпечатка ``_progress_signature``
+    между опросами.
+
+    ``clock``/``sleeper`` — внедряемый источник времени: тесты идут секундами
+    модельного времени, без стенда.
     """
-    deadline = time.monotonic() + timeout_s
+    now = clock or time.monotonic
+    sleep = sleeper or time.sleep
+    started = now()
     statuses: dict[str, dict[str, Any]] = {}
-    while time.monotonic() < deadline and len(statuses) < len(job_ids):
+    last_seen: dict[str, dict[str, Any]] = {}
+    signatures: dict[str, tuple[Any, ...]] = {}
+    last_progress: dict[str, float] = {}
+    unreachable_since: float | None = None
+
+    while len(statuses) < len(job_ids):
+        current = now()
+        if current - started > ceiling_s:
+            pending = [job_id for job_id in job_ids if job_id not in statuses]
+            raise TimeoutError(
+                f"исчерпан жёсткий кап ожидания {ceiling_s:.0f}s: не завершены джобы "
+                f"{pending} (стадия на момент таймаута: {_pending_detail(pending, last_seen)})"
+            )
+        polled = failed = 0
         for job_id in job_ids:
             if job_id in statuses:
                 continue
             try:
                 resp = _get_json(f"{INGESTION_URL}/api/v1/ingestion/jobs/{job_id}")
-            except RuntimeError:
+            except (RuntimeError, OSError):
+                # RuntimeError — приведённая ошибка HTTP-контура, OSError (включая
+                # URLError) — недоступность стенда. Уже��о другое не ловим: дефект нашего
+                # кода обязан упасть громко, а не выглядеть как «стенд молчит».
+                failed += 1
                 continue
+            polled += 1
+            last_seen[job_id] = resp
+            signature = _progress_signature(resp)
+            if signatures.get(job_id) != signature:
+                signatures[job_id] = signature
+                last_progress[job_id] = current
             status = str(resp.get("status", ""))
             if status in TERMINAL_JOB_STATUSES:
                 statuses[job_id] = resp
             if status in {"failed", "cancelled"}:
                 raise RuntimeError(f"джоба {job_id} завершилась статусом {status}: {resp.get('error')}")
-        if len(statuses) < len(job_ids):
-            time.sleep(poll_s)
-    if len(statuses) < len(job_ids):
         pending = [job_id for job_id in job_ids if job_id not in statuses]
-        raise TimeoutError(f"не дождались завершения джобов: {pending}")
+        if not pending:
+            break
+        # --- разделитель: стенд отвечает или нет
+        if polled == 0 and failed:
+            if unreachable_since is None:
+                unreachable_since = current
+            for job_id in pending:
+                # джобы, до которых не достучались, не получают отметку времени: их
+                # состояние неизвестно, а не «зависло N секунд»
+                last_progress.pop(job_id, None)
+            silent_for = current - unreachable_since
+            if silent_for > unreachable_timeout_s:
+                raise TimeoutError(
+                    f"стенд не отвечает {silent_for:.0f}s (окно {unreachable_timeout_s:.0f}s): "
+                    f"не удалось опросить джобы {pending} "
+                    f"(последняя известная стадия: {_pending_detail(pending, last_seen)})"
+                )
+        else:
+            unreachable_since = None
+            stuck = [
+                job_id
+                for job_id in pending
+                if current - last_progress.get(job_id, started) > job_timeout_s
+            ]
+            if stuck:
+                worst = max(current - last_progress.get(job_id, started) for job_id in stuck)
+                raise TimeoutError(
+                    f"джобы {stuck} не продвинулись {worst:.0f}s "
+                    f"(окно {job_timeout_s:.0f}s) при живом стенде; ещё движется "
+                    f"{len(pending) - len(stuck)} из {len(pending)} "
+                    f"(стадия на момент таймаута: {_pending_detail(stuck, last_seen)})"
+                )
+        sleep(poll_s)
     return statuses
+
+
+def _int_field(source: dict[str, Any], name: str) -> int:
+    """Целое из структурного поля; отсутствие/мусор — ноль, а не исключение.
+
+    Отчёт о прогоне не должен падать из-за одного нечитаемого значения: тогда вместо
+    данных о потере получается стоп-слово «ошибка чтения отчёта», а потеря как раз
+    требовала внимания.
+    """
+    try:
+        return int(source.get(name) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extraction_stage_reached(job: dict[str, Any]) -> bool:
+    """Лежит ли в журнале джобы строка стадии EXTRACT.
+
+    Это факт ЖУРНАЛА, а не факт работы: `update_stage` вызывается перед каждой стадией, и у
+    no-op-джобы, где пайплайн остановился на INGEST, в журнале лежат все девять строк.
+    Поэтому как знаменатель объёма извлечения этот признак не годится — для этого есть
+    `_llm_extraction_ran`. Имя изменено, чтобы «этап достигнут» и «извлечение шло» не
+    читались как одно и то же поле.
+    """
+    for entry in job.get("stages") or []:
+        if isinstance(entry, dict) and entry.get("stage") == "EXTRACT":
+            return True
+    return False
+
+
+def _llm_extraction_ran(job: dict[str, Any]) -> bool:
+    """Отвечала ли модель на этой джобе.
+
+    Положительный свидетель работы, а не вывод из журнала: сигнал `extraction:<identity>`
+    ставится только тогда, когда `_extract_llm` была вызвана, то есть когда записан паспорт
+    извлечения. Стадия EXTRACT может быть пройдена, не вызвав модель ни разу, — при
+    деградации по конфигурации, — и тогда этот признак `false`, что и требуется: объём
+    извлечения у такой джобы ноль не потому, что модель ничего не нашла.
+
+    Причина, по которой в отчёт не смотрели, названа в ADR-049: на прогоне 2026-10-04
+    `llm_records_extracted: 0` стоял рядом с `enrichment_degraded: false` тремя документами
+    подряд, и по журналу стадий это выглядело как «модель отработала и ничего не нашла».
+    """
+    signals = job.get("signals")
+    if not isinstance(signals, dict):
+        return False
+    return any(
+        isinstance(name, str) and name.startswith(EXTRACTION_SIGNAL_PREFIX) for name in signals
+    )
+
+
+def _ingest_noop(job: dict[str, Any]) -> bool:
+    """Признал ли INGEST содержимое неизменным и не пошёл дальше.
+
+    Читается из сигнала `ingest_noop`, а не выводится из журнала: журнал содержит все
+    стадии и у no-op-джобы в том числе, поэтому вывод «стадия INGEST — последняя» работал
+    только до появления `Executor`, который пишет стадию перед запуском. На прогоне
+    2026-10-04 три no-op-джобы были отчитаны как холодная перезагрузка: `noop: false`,
+    `last_stage: COMMIT`, `extraction_stage_ran: true`.
+    """
+    signals = job.get("signals")
+    if not isinstance(signals, dict):
+        return False
+    return INGEST_NOOP_SIGNAL in signals
+
+
+def _parse_enrichment_degradation(
+    job: dict[str, Any],
+) -> tuple[bool, str | None, bool, dict[str, Any]]:
+    """Достать признаки деградации, потери LLM-слоя и количественные факты.
+
+    Возвращает `(деградация, причина, слой_потерян, факты)`.
+
+    **Флаги читаются из поля `signals`, а числа — из поля `enrichment`.** Оба канала
+    структурные: если деградация приходит текстом, а потеря полем, у потребителя два
+    механизма, а объяснение «почему так» становится историческим вместо замысла.
+    Причина деградации остаётся свободным текстом, и это текст, но не источник
+    счётчиков.
+
+    **Зачем два флага.** `enrichment_degraded` ставится в двух местах с противоположным
+    смыслом: профиль домена не загрузился (ничего не потеряно — LLM-слой и не пытались
+    построить) и исключение внутри экстракции (потерян весь слой сущностей и связей).
+    Сумма этих двух в одном счётчике неинтерпретируема: высокое число может означать
+    нулевую потерю.
+
+    **`llm_layer_dropped` теперь означает ровно «факты исчезли», а не «сработал путь
+    сброса».** Сброс до первого ответа модели терять нечего, и раньше такой документ
+    попадал в счётчик потерь, завышая его. Размер потери приходит отдельными числами
+    (`lost_entities`/`lost_edges`), потому что флаг отвечает на вопрос «было ли что
+    терять», а для решения «сколько» нужен размер.
+    """
+    signals = job.get("signals")
+    flags = signals if isinstance(signals, dict) else {}
+    enrichment = job.get("enrichment")
+    facts = enrichment if isinstance(enrichment, dict) else {}
+    reason: str | None = None
+    for entry in job.get("stages") or []:
+        if not isinstance(entry, dict) or entry.get("stage") != "EXTRACT":
+            continue
+        message = str(entry.get("message") or "")
+        if message.startswith(f"{ENRICHMENT_DEGRADED_PREFIX}:"):
+            reason = message[len(ENRICHMENT_DEGRADED_PREFIX) + 1 :].strip() or None
+            break
+    return (
+        bool(flags.get(ENRICHMENT_DEGRADED_SIGNAL)),
+        reason,
+        bool(flags.get(LLM_LAYER_DROPPED_SIGNAL)),
+        {
+            "cause": str(facts["cause"]) if facts.get("cause") else None,
+            "lost_entities": _int_field(facts, "lost_entities"),
+            "lost_edges": _int_field(facts, "lost_edges"),
+            "llm_records": _int_field(facts, "llm_records"),
+            "llm_edges": _int_field(facts, "llm_edges"),
+            # ADR-052. Пока эти два поля не попали в этот список, прибор их молча
+            # отбрасывал: `facts` — белый список, а не прочитанный dict. На прогоне это
+            # выглядело как «модель не выдала ни одного имени», хотя `llm_records` был 19.
+            # То есть метрика молчала ровно на тех прогонах, ради которых добавлена.
+"llm_names_total": _int_field(facts, "llm_names_total"),
+            "llm_names_grounded": _int_field(facts, "llm_names_grounded"),
+            # ADR-053: «документ ушёл только в вектор» и «список был, но имена вне
+            # него» - разные события с разными последствиями. Без этих полей в отчёте
+            # ограничение выглядит работающим, пока тихо перестаёт работать.
+            "candidates_absent": bool(facts.get("candidates_absent")),
+            "candidates_total": _int_field(facts, "candidates_total"),
+            "llm_names_off_list": _int_field(facts, "llm_names_off_list"),
+            "chunks_without_candidates": _int_field(facts, "chunks_without_candidates"),
+            "chunks_total": _int_field(facts, "chunks_total"),
+        },
+    )
+
+
+def _parse_nodes_by_extractor(job: dict[str, Any]) -> tuple[dict[str, int], str | None, bool]:
+    """Разобрать `nodes_by_extractor` — кто создал ноды, записанные джобой (ADR-049 п. 4).
+
+    Возвращает `(распределение, статус проекции, запись была)`.
+
+    **Третья часть — не формальность.** Пустое распределение означает три разные вещи:
+    джоба не дошла до записи в граф (no-op, отказ, джоба без COMMIT) — тогда это
+    `не измерено`; запись состоялась, но сущностей не было; запись в граф не состоялась
+    (`degraded`). Отчёт обязан различать их, иначе «нод ноль» и «мы не смотрели»
+    снова сольются — а это ровно тот молчащий ноль, из-за которого дефект и прожил
+    два отчёта.
+
+    **Распределение не суммируется как «ноды в графе».** Оно отвечает на вопрос «кто
+    создал ноды этой сборки», а не «сколько нод в графе»: `extractor_version`
+    перезаписывается на том же MERGE, что и содержимое ноды, поэтому история извлечений
+    в графе не сохраняется (ADR-049, раздел про требование M0).
+    """
+    raw = job.get("nodes_by_extractor")
+    if not isinstance(raw, dict):
+        return {}, None, False
+    counts = raw.get("by_extractor_version")
+    status = raw.get("graph_projection_status")
+    if not isinstance(counts, dict):
+        # Поле есть, а распределения в нём нет - это не «нод ноль», а «записи не было».
+        # Сервис отдаёт `nodes_by_extractor` для каждой джобы, а строку в реестре заводит
+        # только COMMIT; упавшая и no-op-джоба приходят сюда с `None`. Форма `{}` тоже
+        # означает «не измерено»: она неотличима от отсутствия строки, и читать её как
+        # состоявшуюся запись нельзя (ADR-049 п. 4).
+        return {}, str(status) if status else None, False
+    parsed = {
+        str(key): _int_field(counts, str(key))
+        for key in counts
+        if isinstance(key, str) and key
+    }
+    return parsed, str(status) if status else None, True
 
 
 def build_ingest_report(
@@ -374,7 +838,11 @@ def build_ingest_report(
         job = statuses.get(record["job_id"], {})
         status = str(job.get("status", "unknown"))
         stage = job.get("stage")
-        is_noop = status == "succeeded" and stage == "INGEST"
+        is_noop = status == "succeeded" and _ingest_noop(job)
+        degraded, degradation_error, layer_dropped, facts = _parse_enrichment_degradation(job)
+        stage_reached = _extraction_stage_reached(job)
+        llm_ran = _llm_extraction_ran(job)
+        nodes_by_version, projection_status, nodes_recorded = _parse_nodes_by_extractor(job)
         documents.append(
             {
                 "source_url": record["source_url"],
@@ -385,6 +853,48 @@ def build_ingest_report(
                 "last_stage": stage,
                 "noop": is_noop,
                 "error": job.get("error"),
+                "enrichment_degraded": degraded,
+                "enrichment_error": degradation_error,
+                "enrichment_cause": facts["cause"],
+                "llm_layer_dropped": layer_dropped,
+                # Свидетель ЖУРНАЛА: строка стадии EXTRACT существует. Это не значит, что
+                # модель отвечала, — у no-op-джобы лежат все девять строк. Как знаменатель
+                # объёма не годится, поэтому ниже есть отдельный `llm_extraction_ran`.
+                "extraction_stage_reached": stage_reached,
+                # Свидетель РАБОТЫ: модель отвечала, паспорт извлечения записан. Знаменатель
+                # «записей на документ» считается по этому признаку, иначе в него попадают
+                # документы, где извлечения не было (ADR-049).
+                "llm_extraction_ran": llm_ran,
+                "llm_records_extracted": facts["llm_records"],
+                # ADR-052: доля имён, которые реально есть в тексте чанка. Знаменатель
+                # рядом с числителем и всегда: 0 при 0 имён - это «нечего проверять», а
+                # не «все имена настоящие».
+                "llm_names_total": _int_field(facts, "llm_names_total"),
+                "llm_names_grounded": _int_field(facts, "llm_names_grounded"),
+                # ADR-053. `candidates_absent` - документ разбирался ТОЛЬКО вектором,
+                # потому что списка кандидатов не было. Это режим по решению владельца,
+                # а не дефект, но без него в сводке не отличить «графа нет» от
+                # «граф есть и пуст».
+                "candidates_absent": bool(facts.get("candidates_absent")),
+                "candidates_total": _int_field(facts, "candidates_total"),
+                "llm_names_off_list": _int_field(facts, "llm_names_off_list"),
+                "chunks_without_candidates": _int_field(facts, "chunks_without_candidates"),
+                "chunks_total": _int_field(facts, "chunks_total"),
+                "llm_edges_extracted": facts["llm_edges"],
+                "llm_layer_lost_entities": facts["lost_entities"],
+                "llm_layer_lost_edges": facts["lost_edges"],
+                # ADR-049 п. 4: кто создал ноды этой джобы, и состоялась ли запись. Чтение
+                # отчёта не должно требовать обхода графа, чтобы понять, откуда взялись
+                # ноды: до этого изменения вопрос «это сущности модели или слова текста»
+                # решался только осмотром базы.
+                "nodes_by_extractor_version": nodes_by_version,
+                "llm_nodes": sum(
+                    count
+                    for key, count in nodes_by_version.items()
+                    if key.startswith("llm:")
+                ),
+                "nodes_recorded": nodes_recorded,
+                "graph_projection_status": projection_status,
                 "wall_time_s": round(float(record.get("waited_s") or 0.0), 2),
                 "seconds_per_kb": (
                     round(float(record["waited_s"]) / max(record["bytes"] / 1024.0, 0.001), 2)
@@ -395,10 +905,112 @@ def build_ingest_report(
         )
     cold = [d["wall_time_s"] for d in documents if not d["noop"]]
     noop = [d["wall_time_s"] for d in documents if d["noop"]]
+    # Знаменатель объёма извлечения — документы, где модель ОТВЕЧАЛА, а не те, где
+    # стадия EXTRACT стоит в журнале. Разница не косметическая: у no-op-джобы журнал
+    # содержит все девять стадий, и на прогоне 2026-10-04 три таких документа попали в
+    # знаменатель с нулём записей — то есть «записей на документ» считалось по документам,
+    # где извлечения не было (ADR-049).
+    llm_docs = [d for d in documents if d["llm_extraction_ran"]]
+    extraction_docs = [d for d in documents if d["extraction_stage_reached"]]
+    llm_records_total = sum(d["llm_records_extracted"] for d in llm_docs)
+    names_total = sum(d["llm_names_total"] for d in llm_docs)
+    names_grounded = sum(d["llm_names_grounded"] for d in llm_docs)
+    # ADR-053: кандидаты. Знаменатель здесь - ВСЕ документы, а не только те, где
+    # дошла LLM: `candidates_absent` и есть ответ на вопрос «сколько документов
+    # разбиралось вообще без списка». Считать по `llm_docs` нельзя - там их нет по
+    # определению, и доля вышла бы нулём, то есть выглядела бы как «нарушений нет».
+    candidates_absent_docs = sum(1 for d in documents if d["candidates_absent"])
+    off_list_names = sum(d["llm_names_off_list"] for d in llm_docs)
+    chunks_without_candidates = sum(d["chunks_without_candidates"] for d in llm_docs)
+    chunks_total = sum(d["chunks_total"] for d in llm_docs)
+    candidates_total_all = sum(d["candidates_total"] for d in documents)
+    causes: dict[str, int] = {}
+    for doc in documents:
+        cause = doc["enrichment_cause"]
+        if cause:
+            causes[cause] = causes.get(cause, 0) + 1
+    # ADR-049 п. 4: сколько нод прогон записал и кто их создал. Считается по джобам, где
+    # запись состоялась, — джобы без записи в знаменатель не входят, иначе «нод ноль»
+    # слилось бы с «мы не смотрели». Производители, встретившиеся хоть раз, попадают в
+    # отчёт целиком, включая нулевые значения: отсутствие ключа и нулевое значение —
+    # разные утверждения, и по отчёту их надо различать.
+    nodes_by_version: dict[str, int] = {}
+    for doc in documents:
+        for key, value in doc["nodes_by_extractor_version"].items():
+            nodes_by_version[key] = nodes_by_version.get(key, 0) + value
+    documents_with_nodes_recorded = sum(1 for d in documents if d["nodes_recorded"])
     return {
         "documents_total": len(documents),
         "noop_documents": len(noop),
         "cold_documents": len(cold),
+        "enrichment_degraded_documents": sum(
+            1 for d in documents if d["enrichment_degraded"]
+        ),
+        # Отдельно от umbrella-счётчика: сколько именно документов потеряло LLM-слой
+        # целиком. Без этого числа деградацию нельзя читать как потерю — см.
+        # `_parse_enrichment_degradation`.
+        "llm_layer_dropped_documents": sum(1 for d in documents if d["llm_layer_dropped"]),
+        # Сколько ФАКТОВ исчезло, а не сколько документов пострадало. Первое — величина
+        # потери для планирования, второе — частота. Одно без другого неинтерпретируемо:
+        # «2 документа» ничего не говорит о том, потеряны две записи или две тысячи.
+        "llm_layer_lost_entities": sum(d["llm_layer_lost_entities"] for d in documents),
+        "llm_layer_lost_edges": sum(d["llm_layer_lost_edges"] for d in documents),
+        # Причины разведены поимённо: чинить профиль, промпт и модель — разные работы.
+        "enrichment_causes": causes,
+        # Два знаменателя, и они разные вопросы. `documents_with_llm_extraction` —
+        # где модель отвечала; это знаменатель объёма. `documents_with_extraction_stage` —
+        # где стадия EXTRACT стоит в журнале; у no-op-джобы она тоже стоит, поэтому как
+        # знаменатель объёма этот счётчик вводил бы в заблуждение (ADR-049).
+        "documents_with_llm_extraction": len(llm_docs),
+        "documents_with_extraction_stage": len(extraction_docs),
+        "llm_records_extracted": llm_records_total,
+        # ADR-052. `None`, а не 0, когда имён не было ни одного: ноль здесь читался бы как
+        # «все имена настоящие», а это противоположный смысл (ADR-049, запрет тихого нуля).
+        "llm_names_total": names_total,
+        "llm_names_grounded": names_grounded,
+        "llm_names_grounded_ratio": (
+            round(names_grounded / names_total, 4) if names_total else None
+        ),
+        # ADR-053. Знаменатель каждой доли стоит рядом с числом.
+        # `documents_with_candidates_absent` — документы, ушедшие ТОЛЬКО в вектор:
+        # режим по решению владельца, а не дефект, но если таких все 30, то стенд
+        # «работает», не построив ни одного графа.
+        "documents_with_candidates_absent": candidates_absent_docs,
+        "candidates_total": candidates_total_all,
+# Знаменатели рядом с числами: доля «нарушений» без числа имён рядом читается как
+    # «нарушений нет, потому что имён не было».
+        "llm_names_off_list": off_list_names,
+        "llm_names_off_list_ratio": (
+            round(off_list_names / names_total, 4) if names_total else None
+        ),
+        # Знаменатель рядом: из числа не видно, много это или мало. Сколько чанков
+        # ушло в модель, считается на стороне ингеста и приезжает полем -
+        # иначе доля «пропущено / все чанки документа» была бы недоступна вовсе.
+        "chunks_without_candidates": chunks_without_candidates,
+        "chunks_total": chunks_total,
+        "chunks_without_candidates_ratio": (
+            round(chunks_without_candidates / chunks_total, 4) if chunks_total else None
+        ),
+        # ADR-049 п. 4. Знаменатель рядом с числом, иначе «нод ноль» не отличить от
+        # «запись нигде не считалась». `llm_nodes` — доля нод, записанных моделью; она
+        # имеет смысл, только когда в прогоне вообще была нода.
+        "nodes_by_extractor_version": dict(sorted(nodes_by_version.items())),
+        "llm_nodes": sum(
+            count for key, count in nodes_by_version.items() if key.startswith("llm:")
+        ),
+        "nodes_written": sum(nodes_by_version.values()),
+        "documents_with_nodes_recorded": documents_with_nodes_recorded,
+        # Место, где счётчик может сломаться: модель отвечала, а записей ноль. Само по
+        # себе не приговор — модель действительно могла ничего не найти, — но такой
+        # документ обязателен для ручной проверки и потому назван числом.
+        "documents_with_llm_extraction_without_records": sum(
+            1 for d in llm_docs if not d["llm_records_extracted"]
+        ),
+        # Доля НЕ выводится при нулевом знаменателе: `0%` на пустой базе читается как
+        # «модель не работает», хотя правильный смысл — «нечего было измерять».
+        "llm_records_per_extraction_document": (
+            round(llm_records_total / len(llm_docs), 2) if llm_docs else None
+        ),
         "total_wall_time_s": round(sum(d["wall_time_s"] for d in documents), 2),
         "cold_wall_time_sum_s": round(sum(cold), 2),
         "noop_wall_time_sum_s": round(sum(noop), 2),
@@ -407,26 +1019,147 @@ def build_ingest_report(
     }
 
 
+def build_ingest_quality(ingest: dict[str, Any] | None) -> dict[str, Any]:
+    """Плохие условия измерения, принесённые ингестом, в форме для вердикта.
+
+    Живёт в отчёте рядом с метриками, а не только в `ingest_report.json`: вердикт
+    вычисляется раньше, чем отчёт ingest дописывается, и потребитель вердикта не
+    обязан читать второй файл, чтобы понять, можно ли этому вердикту верить.
+
+    Считаются ТОЛЬКО те условия, которые делают измерение смещённым:
+
+    * потеря LLM-слоя смещает `recall_graph`/`necessity`/`delta_recall` вниз —
+      отсутствующие факты нельзя «вспомнить», поэтому недооценка тут односторонняя;
+    * потеря LLM-слоя смещает и groundedness/coverage: эталонные факты, которые модель
+      не извлекла, не попадут ни в один ответ.
+
+    Деградация БЕЗ потери слоя (профиль не загрузился, экстракция не запускалась) сюда
+    не попадает намеренно: слой не строился, терять было нечего, и векторная ось не
+    затронута. Считать это смещением — значит заблокировать вердикт прогона, у
+    которого деградация ничего не испортила.
+
+    **Правило: потеря инвалидирует прогон, а не предупреждает о нём.** Для
+    смещённой величины «прогон прошёл» не является утверждением о системе, а суждением
+    о прогоне, который этого не доказывает. Раньше та же мысль выражалась словами в
+    паспорте прог��на, то есть была нечитаема для автоматики.
+    """
+    if not ingest:
+        return {
+            "llm_layer_dropped_documents": 0,
+            "llm_layer_lost_entities": 0,
+            "llm_layer_lost_edges": 0,
+            "enrichment_degraded_documents": 0,
+            "loss": False,
+        }
+    dropped = int(ingest.get("llm_layer_dropped_documents") or 0)
+    lost_entities = int(ingest.get("llm_layer_lost_entities") or 0)
+    lost_edges = int(ingest.get("llm_layer_lost_edges") or 0)
+    return {
+        "llm_layer_dropped_documents": dropped,
+        "llm_layer_lost_entities": lost_entities,
+        "llm_layer_lost_edges": lost_edges,
+        "enrichment_degraded_documents": int(ingest.get("enrichment_degraded_documents") or 0),
+        "enrichment_causes": ingest.get("enrichment_causes") or {},
+        "documents_with_llm_extraction": int(
+            ingest.get("documents_with_llm_extraction") or 0
+        ),
+        "documents_with_extraction_stage": int(
+            ingest.get("documents_with_extraction_stage") or 0
+        ),
+        "llm_records_extracted": int(ingest.get("llm_records_extracted") or 0),
+        "llm_records_per_extraction_document": ingest.get(
+            "llm_records_per_extraction_document"
+        ),
+        # Слой потерян, если исчезли факты, а не если сработал путь сброса. Ноль
+        # потерь при ненулевой деградации — законное состояние.
+        "loss": dropped > 0 or lost_entities > 0 or lost_edges > 0,
+    }
+
+
 # ---------------------------------------------------------------------------
-# Revision fetch
+# Revision: чтение best-effort + гард среза (ADR-029, поправка 2026-10-16)
 # ---------------------------------------------------------------------------
 
-def _invalid_revision(domain: str) -> RuntimeError:
-    return RuntimeError(f"revision для домена {domain!r} некорректна")
+def observe_domain_revision(domain: str) -> tuple[str | None, str]:
+    """Прочитать ревизию домена, не роняя прогон: `(ревизия, откуда она)`.
 
+    Fail-open здесь — решение, а не мягкость: контур может быть не поднят (runtime-стенд
+    без ingestion-api, ADR-058), и прогон против заранее наполненной базы всё равно
+    корректен — просто не про граф. Строгая функция, падавшая на том же месте, была
+    предусловием старта и роняла замер, который можно сделать.
 
-def fetch_revision(domain: str) -> str:
-    """GET /api/v1/ingestion/revision?domain= → non-empty revision string."""
+    Нечитаемый ответ и недоступный контур дают один и тот же `unavailable`: различить их
+    по этому каналу нельзя, а выдавать неразличимое за два разных факта — значит выдумать
+    один из них.
+    """
     try:
         resp = _get_json(f"{INGESTION_URL}/api/v1/ingestion/revision?domain={domain}")
-    except RuntimeError as exc:
-        raise RuntimeError(f"не удалось получить revision для домена {domain!r}") from exc
+    except RuntimeError:
+        return None, REVISION_SOURCE_UNAVAILABLE
     if not isinstance(resp, dict):
-        raise _invalid_revision(domain)
-    rev = resp.get("revision")
-    if not isinstance(rev, str) or not _REVISION_RE.fullmatch(rev):
-        raise _invalid_revision(domain)
-    return rev
+        return None, REVISION_SOURCE_UNAVAILABLE
+    revision = resp.get("revision")
+    if not isinstance(revision, str) or not _REVISION_RE.fullmatch(revision):
+        return None, REVISION_SOURCE_UNAVAILABLE
+    return revision, REVISION_SOURCE_REPORTED
+
+
+def guard_projection_revision(records: list[dict[str, Any]], mode: str) -> None:
+    """Остановить прогон, если проекция перестроилась посреди измерения.
+
+    Сигнал независим от того, что eval передал в пайплайн: `projection_revision` приходит
+    из `ProjectionStateStore` при каждом запросе. Первое наблюдение — база; другое значение
+    ниже по прогону означает, что вопросы собраны по разным срезам, и разность метрик
+    между рукавами перестаёт быть вкладом компонента.
+
+    Прежняя проверка сравнивала `done["revision"]` с переданным значением, но это эхо
+    аргумента (`retrieval/pipeline.py:842`): eval собирает пайплайн в процессе и вызывает
+    его напрямую, минуя query-worker с его `RevisionClient`. Сравнение совпадало всегда,
+    то есть прибор парности не измерял ничего.
+    """
+    observed = sorted(
+        {
+            str(record["projection_revision"])
+            for record in records
+            if record.get("projection_revision")
+        }
+    )
+    if len(observed) > 1:
+        raise RuntimeError(
+            f"projection revision changed during {mode}: {', '.join(observed)} — "
+            "проекция перестроилась посреди прогона, дальше измеряется другой срез"
+        )
+
+
+def run_revision_parity(revision_before: str | None, revision_after: str | None) -> dict[str, Any]:
+    """Итог гарда доменной ревизии: что удалось проверить, а что осталось неизвестным.
+
+    Три исхода, и третий не равен первому: `unavailable` — это «проверить не удалось»,
+    а не «проверено и не менялось». Раньше эти два случая попадали в одну ячейку, и
+    прогон без ревизии выглядел прошедшим проверку.
+    """
+    if revision_before is None or revision_after is None:
+        return {
+            "revision": PARITY_UNAVAILABLE,
+            "reason": "ревизия домена не была прочитана — гард не исполнился",
+            "revision_before": revision_before,
+            "revision_after": revision_after,
+        }
+    if revision_before != revision_after:
+        return {
+            "revision": PARITY_CHANGED,
+            "reason": (
+                f"ревизия домена разошлась внутри прогона: {revision_before} → {revision_after}"
+            ),
+            "revision_before": revision_before,
+            "revision_after": revision_after,
+        }
+    return {
+        "revision": PARITY_STABLE,
+        "reason": None,
+        "revision_before": revision_before,
+        "revision_after": revision_after,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -583,9 +1316,10 @@ def build_judge() -> Any | None:
         return None
     if adapter_kind == "openai":
         from graphrag_proto.retrieval.adapters.llm import OpenAICompatibleAdapter
+
         return OpenAICompatibleAdapter(
-            base_url=os.environ.get("LLM_BASE_URL", "http://llm:8080"),
-            model=os.environ.get("LLM_MODEL", "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"),
+            base_url=llm_setting("base_url"),
+            model=llm_setting("model"),
             timeout_s=float(os.environ.get("LLM_TIMEOUT_S", "600")),
         )
     raise ValueError(f"EVAL_LLM_ADAPTER={adapter_kind!r}: допустимо fake|none|openai")
@@ -620,6 +1354,7 @@ def _embedding_dimensions() -> int:
     return 1024 if os.environ.get("EMBEDDER", "deterministic") == "bge_m3_service" else 8
 
 
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -638,6 +1373,17 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
+
+
+def _generation_model(adapter_kind: str) -> str | None:
+    """Модель, которой отвечал генератор, - по тому же правилу, что и адаптер.
+
+    При не-openai адаптере LLM не вызывается, и имя модели не объявляется: тогда в
+    манифесте честное `null`, а не зашитое имя от другого стенда.
+    """
+    if adapter_kind.strip().lower() != "openai":
+        return None
+    return llm_setting("model")
 
 
 def mode_graph_enabled(mode_arg: str) -> list[bool]:
@@ -687,7 +1433,8 @@ def build_run_manifest(
     run_id: str,
     started_at: str,
     domain: str,
-    revision: str,
+    revision: str | None,
+    revision_source: str,
     datasets: list[str],
     mode_arg: str,
     corpus: str | None = None,
@@ -698,13 +1445,29 @@ def build_run_manifest(
     corpus_documents: list[str] | None = None,
     corpus_limit: int | None = None,
     golden: dict[str, Any] | None = None,
+    timeouts: dict[str, Any] | None = None,
+    config: dict[str, Any] | None = None,
     note: str = "",
 ) -> dict[str, Any]:
     """Манифест условий прогона (design.md §5.1) — «что именно сравнивалось».
 
+    ``revision`` может быть ``None``, и рядом лежит ``revision_source``: без него `null`
+    читался бы как «ревизии не было», хотя различаются «контур не ответил» и «не просили»
+    (ADR-029, поправка 2026-10-16).
+
     ``corpus_documents``/``corpus_limit``/``golden`` — обязательны для усечённых
     прогонов: без них прогон на 3 документах неотличим от прогона на 36 и
-   recall неинтерпретируем (эталонных источников в корпусе может не быть вовсе).
+    recall неинтерпретируем (эталонных источников в корпусе может не быть вовсе).
+
+    ``timeouts`` — фактически применённые пороги: три окна ожидания джоб и два бюджета
+    фазы подачи. В пару с ``ingest_report.json`` это то, чем калибруются будущие
+    прогоны: без них «долго» и «зависло» неразличимы, потому что оба кончаются ошибкой
+    прогона.
+
+    ``config`` — идентичность, момент применения и право на устаревание конфигурации
+    запроса. Без неё артефакт неполон по построению: версия кода конфигурацию не
+    определяет, а профиль меняется на лету, так что восстановить применённые настройки
+    из коммита нельзя.
     """
     return {
         "run_id": run_id,
@@ -714,8 +1477,11 @@ def build_run_manifest(
         "domain": domain,
         "revision": revision,
         "revision_fingerprint": revision,
+        "revision_source": revision_source,
         "datasets": datasets,
         "corpus": corpus,
+        "config": config or {},
+        "timeouts": timeouts or {},
         "corpus_documents": sorted(corpus_documents or []),
         "corpus_documents_count": len(corpus_documents or []),
         "corpus_limit": corpus_limit,
@@ -738,9 +1504,11 @@ def build_run_manifest(
         },
         "generation": {
             "llm_adapter": os.environ.get("LLM_ADAPTER", "openai"),
-            "model": os.environ.get(
-                "LLM_MODEL", "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"
-            ),
+            # Фактическое значение, а не зашитое: манифест - запись о прогоне, и
+            # подставлять сюда имя модели значило бы записать в артефакт модель, которая
+            # не участвовала. `null` бывает только при не-openai адаптере, где LLM не
+            # вызывается и имя модели не объявляется.
+            "model": _generation_model(os.environ.get("LLM_ADAPTER", "openai")),
             "temperature": _env_float("LLM_TEMPERATURE", 0.3),
             "judge_adapter": "none" if judge is None else os.environ.get("EVAL_LLM_ADAPTER", "openai"),
         },
@@ -852,6 +1620,12 @@ def eval_question(
     graph_contribution по срезу `golden_graph_evidence`, answer, generation
     (mode: judge / n/a / skipped) и timings. При `trace_enabled` кладёт
     `trace_events` из `done["trace"]` (слой 4; из qa_log-строки удаляются).
+
+    `revision` — замороженная величина, по которой собраны оба рукава (ADR-029 п.1); она
+    пишется в строку пары как атрибуция. Сверять её с `done["revision"]` здесь нельзя и
+    раньше было бессмысленно: это эхо того же аргумента, а не чтение контура. Гард среза
+    живёт в `guard_projection_revision` (сигнал из `ProjectionStateStore`) и в
+    `run_revision_parity` (повторное чтение ревизии).
     """
     golden_sources = set(question.get("golden_sources", []))
     golden_facts = question.get("golden_facts", [])
@@ -867,11 +1641,6 @@ def eval_question(
         trace=trace_enabled or graph_enabled,
     )
 
-    observed_revision = done.get("revision")
-    if observed_revision != revision:
-        raise RuntimeError(
-            f"revision mismatch: expected {revision!r}, got {observed_revision!r}"
-        )
     sources = done.get("sources") or []
     raw_urls = [
         src.get("source_url")
@@ -885,6 +1654,26 @@ def eval_question(
 
     graph_urls = [src["source_url"] for src in sources if isinstance(src, dict) and src.get("axis") == "graph"]
     vector_urls = [src["source_url"] for src in sources if isinstance(src, dict) and src.get("axis") == "vector"]
+    # Что ось знала о золотых источниках этого вопроса (ADR-046, поправка 2026-10-16).
+    # Без этих двух чисел `necessity = 0` неоднозначен: на частично наполненном корпусе ноль
+    # означает либо «ось не помогла», либо «оси не было видно этих документов» — разные выводы
+    # при одном числе.
+    golden_set = set(golden_sources)
+    knowledge_by_source = {
+        str(src.get("source_url")): src.get("graph_knowledge")
+        for src in sources
+        if isinstance(src, dict) and src.get("source_url")
+    }
+    blind_golden = sorted(
+        source
+        for source in golden_set
+        if knowledge_by_source.get(source) == GRAPH_KNOWLEDGE_BLIND
+    )
+    linked_golden = sorted(
+        source
+        for source in golden_set
+        if knowledge_by_source.get(source) == GRAPH_KNOWLEDGE_REACHABLE
+    )
     graph_degraded = bool(done.get("graph_degraded"))
     trace_events = done.get("trace") or []
     graph_trace = next(
@@ -918,10 +1707,50 @@ def eval_question(
         "graph_degraded": graph_degraded,
         "projection_status": done.get("projection_status"),
         "projection_revision": done.get("projection_revision"),
+        # Применённая реализация порядка берётся из `done`, а не из trace-события: при
+        # выключенном trace событий нет, и поле было бы всегда `None` — то есть запись о
+        # применённой политике зависела бы от отладочного флага. Записаны оба имени:
+        # запрошенное и применённое.
+        "ordering_requested": (done.get("effective_retrieval") or {}).get("ordering_requested"),
+        "ordering_applied": (done.get("effective_retrieval") or {}).get("ordering_applied"),
+        "ordering_params": (done.get("effective_retrieval") or {}).get("ordering_params"),
+        "ordering_fallback": (done.get("effective_retrieval") or {}).get("ordering_fallback"),
+        "bridge_status": (done.get("effective_retrieval") or {}).get("bridge_status"),
+        "bridged_chunks": (done.get("effective_retrieval") or {}).get("bridged_chunks"),
+        "filter_status": (done.get("effective_retrieval") or {}).get("filter_status"),
+        "filter_demoted": (done.get("effective_retrieval") or {}).get("filter_demoted"),
+        # Множества чанков по осям и счётчики отбора (ADR-072). Верхнеуровневая копия:
+        # критерий читается по строке отчёта, не ныряя в `effective_retrieval`. Когда ось
+        # не запускалась, значение `None` — «не измерено», а не пустой список.
+        "vector_chunk_ids": (done.get("effective_retrieval") or {}).get("vector_chunk_ids"),
+        "graph_chunk_ids": (done.get("effective_retrieval") or {}).get("graph_chunk_ids"),
+        "graph_materialized_chunk_ids": (done.get("effective_retrieval") or {}).get(
+            "graph_materialized_chunk_ids"
+        ),
+        "graph_only_chunk_ids": (done.get("effective_retrieval") or {}).get(
+            "graph_only_chunk_ids"
+        ),
+        "graph_only_chunk_sources": (done.get("effective_retrieval") or {}).get(
+            "graph_only_chunk_sources"
+        ),
+        "corroboration_candidates": (done.get("effective_retrieval") or {}).get(
+            "corroboration_candidates"
+        ),
+        "corroboration_confirmed": (done.get("effective_retrieval") or {}).get(
+            "corroboration_confirmed"
+        ),
+        "profile_fingerprint": done.get("profile_fingerprint"),
+        "profile_pinned_at": done.get("profile_pinned_at"),
+        "config_fallbacks": done.get("config_fallbacks") or [],
+        "effective_retrieval": done.get("effective_retrieval") or {},
+        # Что заняло бюджет контекста. Скелет входит первым и не вытесняется, тело получает
+        # остаток, поэтому `skeleton_token_share` - это цена, которую платит текст документа.
+        # На кэш-попадании здесь `None`: сборка не выполнялась, и это отсутствие данных,
+        # а не нулевой расход.
+        "context": done.get("context"),
         "seed_chunk_ids": graph_trace.get("seed_chunk_ids", []),
         "graph_paths": graph_trace.get("paths", []),
         "graph_depths": graph_trace.get("depths", []),
-        "graph_boost": graph_trace.get("boost"),
         "query": question.get("query", ""),
         "revision": revision,
         "retrieved": [
@@ -929,6 +1758,11 @@ def eval_question(
                 "source_url": src.get("source_url"),
                 "axis": src.get("axis"),
                 "score": src.get("relevance"),
+                # Метка обязательна вместе с осью: без неё «граф не помог» и «граф про этот
+                # документ ничего не знает» в отчёте неразличимы.
+                "graph_knowledge": src.get("graph_knowledge"),
+                "graph_knowledge_reason": src.get("graph_knowledge_reason"),
+                "graph_linked_chunks": src.get("graph_linked_chunks"),
             }
             for src in sources
             if isinstance(src, dict) and src.get("source_url")
@@ -938,6 +1772,11 @@ def eval_question(
         "golden_graph_evidence": graph_evidence,
         "retrieval": ret,
         "graph_contribution": gc,
+        # Поимённые счётчики слепоты: без них `necessity` на частичном корпусе неоднозначна.
+        "blind_golden": blind_golden,
+        "linked_golden": linked_golden,
+        "blind_golden_count": len(blind_golden),
+        "linked_golden_count": len(linked_golden),
         "answer": answer,
         "generation": gen,
         "timings": {
@@ -948,6 +1787,65 @@ def eval_question(
         "trace_events": done.get("trace") if trace_enabled else [],
     }
     return record
+
+
+def _aggregate_context_assembly(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Разбиение бюджета контекста по прогону.
+
+    Скелет входит первым и не вытесняется, тело получает остаток, поэтому доля
+    скелета - это цена, которую платит текст документа. Без этих чисел два разных
+    вреда неразличимы: "граф занял место текста" и "граф занял своё место".
+
+    `mode` различает три случая, и они НЕ сводятся к нулю:
+    - `measured` - сборка выполнялась хотя бы раз;
+    - `cache_only` - ни разу: все ответы из кэша, расход неизвестен;
+    - `not_assembled` - блока нет ни у одного ответа.
+    Пустой результат и отсутствие блока не должны выглядеть одинаково.
+    """
+    blocks = [
+        r["context"]
+        for r in results
+        if isinstance(r.get("context"), dict)
+    ]
+    # Именно `is None` при НАЛИЧСТВИИ ключа: отсутствующий ключ и явный `None` - разные
+    # вещи. Ответ без блока означает, что блок не собирался вовсе, и приравнивать его
+    # к кэш-попаданию - значит стереть различие между двумя причинами отсутствия данных.
+    cache_only = sum(
+        1 for r in results if "context" in r and r["context"] is None
+    )
+    if not blocks:
+        return {
+            "mode": "cache_only" if cache_only else "not_assembled",
+            "questions_measured": 0,
+            "questions_unknown": cache_only,
+            "avg_skeleton_tokens": None,
+            "avg_body_tokens": None,
+            "avg_skeleton_token_share": None,
+"total_dropped_chunks": None,
+        "questions_with_dropped_chunks": None,
+        "questions_with_evidence_lines": None,
+    }
+
+    def _avg_int(key: str) -> float | None:
+        vals = [int(b[key]) for b in blocks if b.get(key) is not None]
+        return round(sum(vals) / len(vals), 4) if vals else None
+
+    shares = [b["skeleton_token_share"] for b in blocks if b.get("skeleton_token_share") is not None]
+    return {
+        "mode": "measured",
+        "questions_measured": len(blocks),
+        "questions_unknown": cache_only,
+        "avg_skeleton_tokens": _avg_int("skeleton_tokens"),
+        "avg_body_tokens": _avg_int("body_tokens"),
+        "avg_skeleton_token_share": round(sum(shares) / len(shares), 4) if shares else None,
+        "total_dropped_chunks": sum(int(b.get("dropped_chunks") or 0) for b in blocks),
+        "questions_with_dropped_chunks": sum(
+            1 for b in blocks if int(b.get("dropped_chunks") or 0) > 0
+        ),
+        # В скольких вопросах блок свидетельства содержал хоть что-то. Ноль при непустой
+        # выдаче означал бы, что ось отработала, а свидетельства не дала.
+        "questions_with_evidence_lines": sum(1 for b in blocks if b.get("skeleton_lines")),
+    }
 
 
 def _aggregate_graph_contribution(results: list[dict[str, Any]]) -> dict[str, Any]:
@@ -975,6 +1873,17 @@ def _aggregate_graph_contribution(results: list[dict[str, Any]]) -> dict[str, An
             "mode": "not_measured",
             "questions": len([r for r in results if isinstance(r.get("graph_contribution"), dict)]),
             "degraded_questions": degraded_questions,
+            # ADR-045: причина попадает в артефакт. До этого она жила только в
+            # `qa_log.jsonl`, и при `degraded_questions = 0` отчёт не предупреждал ни о
+            # чём, хотя число `necessity = 0.0` печаталось в таблице. Ноль остаётся
+            # нулём — конвенция «ноль плюс флаг» (ADR-039) здесь не отменяется.
+            "projection_statuses": sorted(
+                {
+                    str(status)
+                    for r in results
+                    if (status := r.get("projection_status"))
+                }
+            ),
             "necessity": 0.0,
             "delta_recall": 0.0,
             "recall_graph": None,
@@ -986,6 +1895,27 @@ def _aggregate_graph_contribution(results: list[dict[str, Any]]) -> dict[str, An
     def _avg(key: str) -> float:
         return round(sum(float(m[key]) for m in metric_slice) / n, 4)
 
+    # Поимённая строка вклада: срез из двух-трёх вопросов не читается средним, и без
+    # счётчиков слепоты ноль на строке неоднозначен (ADR-046, поправка 2026-10-16).
+    per_question = [
+        {
+            "id": r.get("id", ""),
+            "necessity": (r.get("graph_contribution") or {}).get("necessity"),
+            "delta_recall": (r.get("graph_contribution") or {}).get("delta_recall"),
+            "recall_graph": (r.get("graph_contribution") or {}).get("recall_graph"),
+            "recall_vector": (r.get("graph_contribution") or {}).get("recall_vector"),
+            "blind_golden": r.get("blind_golden") or [],
+            "linked_golden": r.get("linked_golden") or [],
+            "graph_axis_active": any(
+                isinstance(source, dict) and source.get("axis") == "graph"
+                for source in (r.get("retrieved") or [])
+            ),
+            "projection_status": r.get("projection_status"),
+        }
+        for r in results
+        if isinstance(r.get("graph_contribution"), dict)
+    ]
+    blind_questions = [row["id"] for row in per_question if row["blind_golden"]]
     return {
         "mode": "measured",
         "questions": n,
@@ -995,6 +1925,12 @@ def _aggregate_graph_contribution(results: list[dict[str, Any]]) -> dict[str, An
         "recall_graph": _avg("recall_graph"),
         "recall_vector": _avg("recall_vector"),
         "evidence_recall_graph": _avg("evidence_recall_graph"),
+        # Агрегат по слепоте и поимённый список: ноль с `blind_golden` — это «вклад не измерен»,
+        # а ноль без слепых — измеренный результат. Среднего по слепоте здесь нет намеренно:
+        # знаменатель «вопросов» не тот же, что у `necessity`, и смешивать их нельзя.
+        "questions_with_blind_golden": len(blind_questions),
+        "questions_with_blind_golden_ids": blind_questions,
+        "per_question": per_question,
     }
 
 
@@ -1030,6 +1966,11 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
             "mode": results[0]["generation"].get("mode", "unknown") if results else "unknown",
         },
         "graph_contribution": _aggregate_graph_contribution(results),
+        # Разбиение бюджета контекста. Сводка - среднее по вопросам, у которых сборка
+        # вообще выполнялась (на кэш-попадании блок равен None и в среднее не идёт), плюс
+        # число таких попаданий отдельным полем: без него молчаливый ноль выглядит так же,
+        # как «граф ни разу не занял место».
+        "context_assembly": _aggregate_context_assembly(results),
         # Графовая ось фактически сработала? Без этого флага прогон, где граф
         # «готов», но ничего не дал, неотличим от чистого (verdict без судьи = n/a).
         "graph_axis_active": any(
@@ -1056,17 +1997,40 @@ def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
 
 def golden_coverage(
     questions: list[dict[str, Any]],
-    ingested_urls: set[str],
+    ingested_urls: set[str] | None,
 ) -> dict[str, Any]:
-    """Доля вопросов, чьи ``golden_sources`` реально лежат в загруженном корпусе.
+    """Доля вопросов, чьи ``golden_sources`` реально лежат в корпусе — или «не измерено».
 
-    Обязательно для усечённых прогонов: если корпус — 3 документа, то у
-    большинства вопросов эталонных источников в базе нет, и recall низкий не
-    из-за качества системы, а из-за усечения. Без этой цифры любой вывод по
-    smoke-прогону ложен.
+    ``ingested_urls`` — состав корпуса **как его знает прибор**: множество означает, что
+    состав известен (пустое множество — тоже известный факт: загруженных документов не было),
+    ``None`` — что взять состав негде, и тогда любое число было бы выдумкой.
+
+    Флаг «известен ли состав» рядом с данными не берётся намеренно: он может разойтись с
+    самими данными, и прибор объявит ноль по корпусу, которого он не видел.
+
+    Обязательно для усечённых прогонов: если корпус — 3 документа, то у большинства
+    вопросов эталонных источников в базе нет, и recall низкий не из-за качества системы,
+    а из-за усечения. Но прогон против заранее наполненной базы (демо-набор) загрузок не
+    содержит, и прежний `0.0` в этом случае утверждал, что эталонных источников в корпусе
+    нет, — то есть ложно утверждал о базе, в которой они есть.
     """
+    questions_total = len(questions)
+    if ingested_urls is None:
+        # Счётчики — `null`, а не `0` и не отсутствующие ключи: пустой результат и
+        # ненайденный прибор не должны выглядеть одинаково. `questions_total` при этом
+        # измерим — размер датасета известен всегда.
+        return {
+            "mode": COVERAGE_MODE_UNKNOWN,
+            "reason": COVERAGE_UNKNOWN_REASON,
+            "questions_total": questions_total,
+            "fully_covered": None,
+            "partially_covered": None,
+            "uncovered": None,
+            "fully_covered_ratio": None,
+        }
     if not questions:
         return {
+            "mode": COVERAGE_MODE_MEASURED,
             "questions_total": 0,
             "fully_covered": 0,
             "partially_covered": 0,
@@ -1084,13 +2048,13 @@ def golden_coverage(
             fully += 1
         elif hits:
             partially += 1
-    total = len(questions)
     return {
-        "questions_total": total,
+        "mode": COVERAGE_MODE_MEASURED,
+        "questions_total": questions_total,
         "fully_covered": fully,
         "partially_covered": partially,
-        "uncovered": total - fully - partially,
-        "fully_covered_ratio": round(fully / total, 4),
+        "uncovered": questions_total - fully - partially,
+        "fully_covered_ratio": round(fully / questions_total, 4),
     }
 
 
@@ -1153,6 +2117,90 @@ def write_qa_review(results: list[dict[str, Any]], out_dir: Path) -> Path:
     return path
 
 
+def build_config_state(
+    reports: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Идентичность, момент применения, право на устаревание и фактически применённое.
+
+    Собирается из ответов, а не из предположения о конфиге: отпечаток и момент закрепления
+    ставит `QueryPipeline` при первом запросе, а отсюда берутся только имена.
+
+    **Дрейф между режимами — разрушающий для пары.** Baseline и target обязаны быть измерены
+    одним конфигом: иначе delta измеряет не «вклад графа», а «вклад графа плюс разницу между
+    двумя настройками». Проверка по образцу расхождения среза — не тихо, а Invalid.
+    Конфигурация закрепляется на первый запрос каждого режима, поэтому дрейф возможен, если
+    файл изменили между режимами, — и это видно, а не предполагается.
+    """
+    fingerprints: dict[str, str] = {}
+    pinned_at: dict[str, str] = {}
+    fallbacks: dict[str, int] = {}
+    effective: dict[str, Any] = {}
+    for record in records:
+        fp = record.get("profile_fingerprint")
+        if isinstance(fp, str) and fp:
+            fingerprints.setdefault(str(record.get("mode", "?")), fp)
+        when = record.get("profile_pinned_at")
+        if isinstance(when, str) and when:
+            pinned_at.setdefault(str(record.get("mode", "?")), when)
+        for name in record.get("config_fallbacks") or []:
+            fallbacks[str(name)] = fallbacks.get(str(name), 0) + 1
+        applied = record.get("effective_retrieval")
+        if isinstance(applied, dict) and not effective:
+            effective = applied
+    distinct = sorted(set(fingerprints.values()))
+    drift = len(distinct) > 1
+    return {
+        "profile_fingerprints": fingerprints,
+        "profile_fingerprint": distinct[0] if distinct else None,
+        "profile_pinned_at": min(pinned_at.values()) if pinned_at else None,
+        # Право на устаревание объявлено явно, а не подразумевается: пока сессия идёт,
+        # конфигурация неизменна, и «устаревшая» конфигурация в артефакте означает, что
+        # правило нарушено, а не что кто-то не обновился.
+        "profile_staleness": "immutable_for_session",
+        "config_drift": drift,
+        "config_fallbacks": fallbacks,
+        "effective_retrieval": effective,
+        "modes": len(reports),
+    }
+
+
+def _format_histogram(values: dict[str, int]) -> str:
+    """Гистограмма «имя=счёт» по убыванию счёта; пустая — «нет».
+
+    Порядок по частоте, а не по алфавиту: первым читается то, что крупнее, а не то,
+    что первым попалось в словаре.
+    """
+    if not values:
+        return "нет"
+    return ", ".join(
+        f"{name}={count}" for name, count in sorted(values.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+
+
+def _format_causes(causes: dict[str, int]) -> str:
+    """Гистограмма причин поимённо. Обёртка над `_format_histogram`: тот же порядок
+    по частоте, чтобы причина, которую чинят первой, читалась первой.
+    """
+    return _format_histogram(causes)
+
+
+def _format_parity(parity: dict[str, Any]) -> str:
+    """Гард среза одной строкой: состояние + причина, если она есть.
+
+    Отдельная функция, а не f-строка на месте: причина обязана быть видна рядом с
+    состоянием, а «состояние есть, а причина потерялась» — это ровно тот молчащий отказ,
+    который тут и чиним.
+    """
+    state = parity.get("revision") or PARITY_UNAVAILABLE
+    projection = parity.get("projection")
+    text = f"ревизия={state}"
+    if projection:
+        text += f", проекция={projection}"
+    reason = parity.get("reason")
+    return f"{text} — {reason}" if reason else text
+
+
 def write_passport(
     manifest: dict[str, Any],
     report: dict[str, Any] | None,
@@ -1168,16 +2216,26 @@ def write_passport(
     projection = manifest.get("projection") or {}
     target = (report or {}).get("target") or {}
     gc = target.get("graph_contribution") or {}
+    degraded = int((ingest or {}).get("enrichment_degraded_documents") or 0)
+    dropped = int((ingest or {}).get("llm_layer_dropped_documents") or 0)
+    lost_entities = int((ingest or {}).get("llm_layer_lost_entities") or 0)
+    lost_edges = int((ingest or {}).get("llm_layer_lost_edges") or 0)
+    causes = (ingest or {}).get("enrichment_causes") or {}
 
     lines = [
         "# Паспорт прогона",
         "",
         f"- **run_id**: `{manifest.get('run_id', 'n/a')}`  ",
         f"- **started_at**: {manifest.get('started_at', 'n/a')}  ",
+        f"- **finished_at**: {manifest.get('finished_at') or 'н/д (прогон не завершён)'}  ",
         f"- **code_commit**: `{manifest.get('code_commit', 'n/a')}`  ",
         f"- **code_tree**: `{manifest.get('code_tree', 'unknown')}`  ",
         f"- **домен**: {manifest.get('domain', 'n/a')}  ",
-        f"- **revision**: `{manifest.get('revision', 'n/a')}`  ",
+        (
+            f"- **revision**: `{manifest.get('revision') or 'null'}` "
+            f"(источник: {manifest.get('revision_source', 'n/a')})  "
+        ),
+        f"- **гард среза**: {_format_parity(manifest.get('parity') or {})}  ",
         f"- **корпус**: {manifest.get('corpus', 'n/a')}  ",
         f"- **документов загружено**: {manifest.get('corpus_documents_count', 0)}  ",
         f"- **лимит документов**: {manifest.get('corpus_limit') or 'нет'}  ",
@@ -1211,7 +2269,14 @@ def write_passport(
         "",
     ]
     ratio = golden.get("fully_covered_ratio")
-    if ratio is not None and ratio < 0.5:
+    if golden.get("mode") == COVERAGE_MODE_UNKNOWN:
+        lines.append(
+            f"- ⚠️ **`golden_coverage` не измерено** (`{golden.get('reason')}`): в прогоне не "
+            f"было загрузок, поэтому состав корпуса прибор не знает. Это **не** «покрытие 0» — "
+            f"вопросов в наборе {golden.get('questions_total')}, а доля полного покрытия "
+            "неизвестна."
+        )
+    elif ratio is not None and ratio < 0.5:
         lines.append(
             f"- ⚠️ **`golden_coverage` = {ratio}** ({golden.get('fully_covered')} из "
             f"{golden.get('questions_total')} вопросов имеют все эталонные источники "
@@ -1237,6 +2302,80 @@ def write_passport(
             f"- ⚠️ **degraded_questions = {gc.get('degraded_questions')}**: "
             "readiness-gate не открыл граф (см. `projection_status` в `qa_log.jsonl`)."
         )
+    # ADR-045: условие не зависит от счётчика. Раньше предупреждение появлялось только при
+    # `degraded_questions > 0`, и случай «вклад не считался, потому что нет графового среза»
+    # оставался без предупреждения при напечатанном `necessity = 0.0` — при том, что
+    # `docs/test_plan.md` §4 называет такой вывод ложноотрицательным.
+    if gc.get("mode") != "measured":
+        statuses = ", ".join(f"`{s}`" for s in (gc.get("projection_statuses") or [])) or "нет данных"
+        lines.append(
+            f"- ⚠️ **вклад графа не измерен** (`mode = {gc.get('mode')}`, "
+            f"вопросов с вырожденной осью: {gc.get('degraded_questions')}, "
+            f"статусы проекции: {statuses}). Число `necessity = 0.0` здесь означает "
+            "'не считали', а не 'граф ничего не дал'."
+        )
+    # Слепота золотых источников — то, что делает `necessity = 0` на частичном корпусе
+    # неоднозначным. Интерпретация зафиксирована заранее (ADR-046, поправка 2026-10-16):
+    # `blind_golden > 0` — вклад не измерен, ноль без слепых — измеренный результат.
+    blind_ids = gc.get("questions_with_blind_golden_ids") or []
+    if blind_ids:
+        lines.append(
+            f"- ⚠️ **вопросов со слепым золотым источником: {len(blind_ids)}** "
+            f"({', '.join(blind_ids)}): у них `necessity` считается по неполной части "
+            "эталонов, и ноль на них — это «ось не видела этих документов», а не «граф не помог»."
+        )
+    per_question = gc.get("per_question") or []
+    if per_question:
+        lines += [
+            "",
+            "## Вклад графа по вопросам",
+            "",
+            (
+                "Среднее по срезу не читается, когда вопросов единицы: ниже строки, "
+                "из которых среднее и складывается."
+            ),
+            "",
+            (
+                "| id | necessity | delta_recall | recall_graph | recall_vector | "
+                "слепых золотых | знала, не привела | ось |"
+            ),
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for row in per_question:
+            blind = ", ".join(row.get("blind_golden") or []) or "—"
+            linked = ", ".join(row.get("linked_golden") or []) or "—"
+            lines.append(
+                f"| `{row.get('id')}` | {row.get('necessity')} | {row.get('delta_recall')} | "
+                f"{row.get('recall_graph')} | {row.get('recall_vector')} | {blind} | {linked} | "
+                f"{'да' if row.get('graph_axis_active') else 'нет'} |"
+            )
+    # Причина вердикта печатается здесь же: вердикт без причины в артефакте не
+    # отличим от сбоя раннера, и следующий читатель примет прогон за измерение.
+    for reason in (report or {}).get("verdict_reasons") or []:
+        lines.append(f"- ⚠️ **вердикт непригоден**: {reason}")
+    # Конфигурация — третье измерение прогона, и без неё отчёт неполон: версия кода
+    # настройки запроса не определяет.
+    cfg = (report or {}).get("config") or {}
+    if cfg:
+        lines.append(
+            f"- **конфигурация**: `{cfg.get('profile_fingerprint') or 'n/a'}` "
+            f"(закреплена {cfg.get('profile_pinned_at') or 'n/a'}, "
+            f"устаревание: {cfg.get('profile_staleness') or 'n/a'})"
+        )
+        if cfg.get("config_drift"):
+            lines.append(
+                "- ⚠️ **`config_drift = true`**: режимы измерены разными настройками, "
+                f"отпечатки: {cfg.get('profile_fingerprints')}"
+            )
+        if cfg.get("config_fallbacks"):
+            applied = ", ".join(
+                f"{name}×{count}" for name, count in sorted(cfg["config_fallbacks"].items())
+            )
+            lines.append(
+                f"- **параметры, применённые с дефолтом** (значение нечитаемо): {applied}"
+            )
+        if cfg.get("effective_retrieval"):
+            lines.append(f"- **применённые настройки**: `{cfg['effective_retrieval']}`")
 
     if ingest:
         lines += [
@@ -1250,10 +2389,86 @@ def write_passport(
             ),
             f"- суммарно: {ingest.get('total_wall_time_s')} с  ",
             f"- cold mean: {ingest.get('cold_wall_time_mean_s')} с  ",
+            (
+                f"- документов с деградацией optional-ингеста: {degraded}  "
+                if degraded
+                else "- документов с деградацией optional-ингеста: 0  "
+            ),
+            (
+                f"- документов, потерявших LLM-слой целиком: {dropped}  "
+                if dropped
+                else "- документов, потерявших LLM-слой целиком: 0  "
+            ),
+            (
+                f"- записей сущностей потеряно: {lost_entities} (рёбер: {lost_edges})  "
+                if dropped
+                else "- записей сущностей потеряно: 0 (рёбер: 0)  "
+            ),
+            # ADR-049 п. 4. Счётчики записи нод — здесь, а не только в
+            # `ingest_report.json`: «нод ноль» обязан быть отличим от «запись не
+            # состоялась», а вклад модели — назван числом со знаменателем рядом. Доля
+            # не печатается при нулевом знаменателе: ноль на пустой базе читался бы
+            # как «модель не работает», тогда как верный смысл — «нечего измерять».
+            (
+                f"- записано нод: {int(ingest.get('nodes_written') or 0)} "
+                f"(из них моделью: {int(ingest.get('llm_nodes') or 0)}); "
+                f"документов с записью нод: "
+                f"{int(ingest.get('documents_with_nodes_recorded') or 0)} "
+                f"из {int(ingest.get('documents_total') or 0)}  "
+            ),
+            (
+                f"- кто записал ноды: "
+                f"{_format_histogram(ingest.get('nodes_by_extractor_version') or {})}  "
+            ),
+            (
+                f"- документов с LLM-экстракцией: "
+                f"{int(ingest.get('documents_with_llm_extraction') or 0)} "
+                f"(стадия EXTRACT достигнута в "
+                f"{int(ingest.get('documents_with_extraction_stage') or 0)}); "
+                f"потеря LLM-слоя целиком: {dropped}  "
+            ),
+            (
+                f"- документов с LLM-экстракцией без записанных нод: "
+                f"{int(ingest.get('documents_with_llm_extraction_without_records') or 0)}  "
+            ),
             "",
             (
                 "Попер-документные времена — в `ingest_report.json`; по ним оценивается "
                 "стоимость полного корпуса (она зависит от размера документа, а не от числа)."
+            ),
+        ]
+    if degraded:
+        # Причины разведены поимённо: чинить профиль, промпт и модель — разные работы,
+        # и «деградация 40» как одно число не говорит ни о какой из них.
+        lines += [
+            "",
+            (
+                f"- причины деградации: {_format_causes(causes)}  "
+                if causes
+                else "- причины деградации: не классифицированы  "
+            ),
+        ]
+    if dropped:
+        # Счётчик деградации — umbrella: он складывает «профиль не загрузился» (ничего
+        # не потеряно) и «исключение в экстракции» (потерян весь слой). Читать его как
+        # потерю нельзя, поэтому потеря считается отдельно. Слой роняется целиком при
+        # негодной конфигурации и при сбое модели (два именованных типа; дефект нашего
+        # кода падает, а не деградирует) вместе с `entity_edges`, то есть теряются и
+        # узлы-якоря, и сами гипотезы связей.
+        lines += [
+            "",
+            (
+                f"> ⚠️ **{dropped} документов потеряли LLM-слой целиком** "
+                f"({lost_entities} записей сущностей и {lost_edges} рёбер исчезли; "
+                f"счётчик деградации: {degraded}). **Вердикт прогона при этом "
+                "`invalid`** — смещение одностороннее, пропавшие факты нельзя ни найти, "
+                "ни вспомнить, поэтому недооценка оси гарантирована (см. `docs/06` §2.2). "
+                "Причины — в `ingest_report.json` "
+                "(`enrichment_cause`, `enrichment_error`), в логах ingestion-service "
+                "(сообщение стадии `EXTRACT`). "
+                "Гранулярность сброса слоя — открытый вопрос, см. ADR-032; для "
+                "проектирования реального ingest поведение неприемлемо, потеря необратима "
+                "(повторная загрузка того же `content_hash` — no-op)."
             ),
         ]
 
@@ -1264,11 +2479,12 @@ def write_passport(
         "| Артефакт | Содержимое |",
         "|---|---|",
         "| `run_manifest.json` | условия прогона (машиночитаемо) |",
-        "| `ingest_report.json` | по каждому документу: время, статус, no-op |",
+        "| `ingest_report.json` | по каждому документу: время, статус, no-op, факты обогащения (деградация, причина, размер потери, объём LLM-слоя) |",
         "| `qa_log.jsonl` | по каждому вопросу: источники, метрики, тайминги |",
         "| `qa_review.md` | тот же разбор для чтения глазами |",
         "| `lift_report.json` / `.md` | агрегат и вердикт |",
         "| `failures.jsonl` | вопросы с ошибками |",
+        "| `run_state.json` | **терминальный признак завершённости**: есть — прогон дошёл до конца, нет — обрыв |",
         "| `trace.jsonl` | события pipeline (только с `--trace`) |",
         "| `preflight.log` | доступность контуров |",
         "| `logs/*.log` | логи сервисов (снимает хостовый wrapper) |",
@@ -1294,18 +2510,25 @@ def write_lift_report(report: dict[str, Any], out_dir: Path, manifest: dict[str,
         f"**Run ID:** {report.get('run_id', 'n/a')}  ",
         f"**Created:** {report.get('created_at', 'n/a')}  ",
         f"**Verdict:** `{report.get('verdict', 'n/a')}`  ",
-        f"**Revision:** `{report.get('revision', 'n/a')}`\n",
+        f"**Revision:** `{report.get('revision') or 'null'}`\n",
     ]
+    # Причина вердикта идёт сразу под ним, а не в конце отчёта: вердикт без причины
+    # выглядит как результат, и его читают как результат.
+    for reason in report.get("verdict_reasons") or []:
+        lines.append(f"> ⚠️ Вердикт `{report.get('verdict', 'n/a')}` непригоден: {reason}  ")
 
     # Блок «Условия прогона» (design.md §5.1/5.9) — из манифеста.
     if manifest:
         lines.append("\n## Условия прогона\n")
         lines.append(f"- **run_id**: {manifest.get('run_id', 'n/a')}  ")
         lines.append(f"- **started_at**: {manifest.get('started_at', 'n/a')}  ")
+        lines.append(f"- **finished_at**: {manifest.get('finished_at') or 'н/д'}  ")
         lines.append(f"- **code_commit**: {manifest.get('code_commit', 'n/a')}  ")
         lines.append(f"- **domain**: {manifest.get('domain', 'n/a')}  ")
-        lines.append(f"- **revision**: {manifest.get('revision', 'n/a')}  ")
-        lines.append(f"- **revision_fingerprint**: {manifest.get('revision_fingerprint', 'n/a')}  ")
+        lines.append(f"- **revision**: {manifest.get('revision') or 'null'}  ")
+        lines.append(f"- **revision_source**: {manifest.get('revision_source', 'n/a')}  ")
+        lines.append(f"- **revision_fingerprint**: {manifest.get('revision_fingerprint') or 'null'}  ")
+        lines.append(f"- **гард среза**: {_format_parity(manifest.get('parity') or {})}  ")
         lines.append(f"- **datasets**: {', '.join(manifest.get('datasets', []))}  ")
         lines.append(f"- **k**: {manifest.get('k', 'n/a')}  ")
         lines.append(f"- **mode**: {manifest.get('mode', 'n/a')}  ")
@@ -1338,6 +2561,17 @@ def write_lift_report(report: dict[str, Any], out_dir: Path, manifest: dict[str,
             lines.append("### Graph Contribution\n")
             for k, v in gc.items():
                 lines.append(f"- **{k}**: {v}\n")
+            # ADR-045: числа выше печатаются без оговорки, а при `mode != measured`
+            # означают «не считали». Оговорка ставится рядом с ними, а не только в паспорте.
+            if mode_name == "target" and gc.get("mode") != "measured":
+                statuses = (
+                    ", ".join(f"`{s}`" for s in (gc.get("projection_statuses") or []))
+                    or "нет данных"
+                )
+                lines.append(
+                    f"- ⚠️ **`mode` = `{gc.get('mode')}`, не `measured`**: числа выше — "
+                    f"это «не считали», а не результат. Статусы проекции: {statuses}.\n"
+                )
 
     lines.append("\n## Delta\n")
     for k, v in report.get("delta", {}).items():
@@ -1394,10 +2628,70 @@ def main() -> None:
     parser.add_argument("--out", default="reports/", help="Output directory")
     parser.add_argument("--source-prefix", default="", help="Optional prefix for source_url (e.g. docs)")
     parser.add_argument(
-        "--wait-timeout",
+        "--unreachable-timeout",
         type=float,
-        default=DEFAULT_WAIT_TIMEOUT_S,
-        help="Максимум ожидания джобов/слотов ingest, сек (по умолч. 300 = 5 мин)",
+        default=DEFAULT_UNREACHABLE_TIMEOUT_S,
+        help="Сколько секунд опросы могут не отвечать, сек (по умолч. 300): после этого "
+        "стенд считается недоступным. Считается по неудачным опросам, а не по "
+        "отсутствию прогресса: «мы не видим джоб» и «джобы не двигаются» — разные факты "
+        "с разными причинами",
+    )
+    parser.add_argument(
+        "--job-timeout",
+        type=float,
+        default=DEFAULT_JOB_TIMEOUT_S,
+        help="Сколько секунд конкретная джоба может не двигаться при живом стенде, сек "
+        "(по умолч. 900). Ловит и зависшую среди живых, и единственную не завершённую в "
+        "хвосте батча. Независим от --unreachable-timeout: условия взаимоисключающие, "
+        "поэтому ни одна конфигурация не делает одно из окон мёртвым",
+    )
+    parser.add_argument(
+        "--wait-ceiling",
+        type=float,
+        default=DEFAULT_WAIT_CEILING_S,
+        help="Жёсткий кап ожидания всей пачки джоб, сек (по умолч. 7200). Страховка для "
+        "«медленно, но живо». Не путать с бюджетами подачи: --slot-timeout и "
+        "--submit-budget ограничивают фазу POST /documents",
+    )
+    parser.add_argument(
+        "--slot-timeout",
+        type=float,
+        default=DEFAULT_SLOT_TIMEOUT_S,
+        help="Сколько ждать свободного слота исполнителя для одного документа при 429, "
+        "сек (по умолч. 300). 429 = «жив и занят», поэтому это норма на полном корпусе, а "
+        "не авария; отличать надо от --submit-budget, который ограничивает всю фазу",
+    )
+    parser.add_argument(
+        "--submit-budget",
+        type=float,
+        default=DEFAULT_SUBMIT_BUDGET_S,
+        help="бюджет фазы подачи целиком, с (по умолчанию. 7200). Не умножается на "
+        "--slot-timeout, а ограничивает всю пачку, иначе N документов съели бы бюджет",
+    )
+    parser.add_argument(
+        "--retry429-initial",
+        type=float,
+        default=DEFAULT_429_RETRY_INITIAL_S,
+        help="пауза перед первой повторной попыткой при 429, с (по умолчанию. 1). Задаёт "
+        "тон всей фазе подачи: меньше - прибор не даёт занятому лиоту занятся",
+    )
+    parser.add_argument(
+        "--retry429-step",
+        type=float,
+        default=DEFAULT_429_RETRY_STEP_S,
+help="насколько наращивать паузу после каждого 429, с (по умолчанию 2). Ноль "
+        "фиксирует постоянную паузу, единица даёт линейный рост. При значении больше "
+        "единицы после первого повтора пауза перескакивает к потолку `max`; это "
+        "закреплено тестом как осознанное поведение, а не как рост по шагу",
+    )
+    parser.add_argument(
+        "--retry429-max",
+        type=float,
+        default=DEFAULT_429_RETRY_MAX_S,
+        help="потолок паузы при 429, с (по умолчанию. 30). Равен максимальному числу шагов "
+        "по величине: настраивается любая из двух, а сколько шагов вышло и сколько это "
+        "всего ожидания, печатается в манифест (run_manifest.timeouts."
+        "ingest_429_backoff.derived)",
     )
     parser.add_argument(
         "--no-preflight",
@@ -1430,10 +2724,21 @@ def main() -> None:
         "Различие больше чем в одном поле фактора (mode/graph_enabled) → "
         "'прогоны не парные' и вердикт invalid",
     )
+    parser.add_argument(
+        "--revision",
+        choices=("auto", "none"),
+        default="auto",
+        help="Откуда берётся доменная ревизия для среза (ADR-029, поправка 2026-10-16). "
+        "auto (по умолчанию) читает GET /api/v1/ingestion/revision один раз до прогона и "
+        "передаёт её обоим рукавам замороженной; отказ контура не роняет прогон, но пишет "
+        "revision_source=unavailable, и тогда графическая ось не измеряется "
+        "(projection_status=revision_unknown). none не читает ревизию вовсе и меряет "
+        "только vector: это осознанный режим, а не аварийный",
+    )
     args = parser.parse_args()
 
     # Единый лимит ожидания сети: если LLM_TIMEOUT_S не задан явно — 5 минут, не 600с.
-    os.environ.setdefault("LLM_TIMEOUT_S", str(DEFAULT_WAIT_TIMEOUT_S))
+    os.environ.setdefault("LLM_TIMEOUT_S", str(DEFAULT_LLM_TIMEOUT_S))
 
     dataset_path = Path(args.dataset)
     datasets = [load_dataset(dataset_path)]
@@ -1461,6 +2766,21 @@ def main() -> None:
 
     # 1. Ingest корпуса (async) и ждём завершения — ревизия знаний до прогона.
     submitted: list[dict[str, Any]] = []
+    resolved_timeouts = {
+        "unreachable_timeout_s": args.unreachable_timeout,
+        "job_timeout_s": args.job_timeout,
+        "wait_ceiling_s": args.wait_ceiling,
+        "slot_timeout_s": args.slot_timeout,
+        "submit_budget_s": args.submit_budget,
+        # Три настроенных числа и производные от них. Производные положены рядом с
+        # настройками намеренно: «сколько шагов получится» и «сколько это всего ожидания»
+        # должны читаться из манифеста, а не вычисляться тем, кто читает его потом.
+        "ingest_429_backoff": backoff_summary(
+            args.retry429_initial,
+            args.retry429_step,
+            args.retry429_max,
+        ),
+    }
     if args.corpus:
         corpus_dir = Path(args.corpus)
         documents = [str(item) for item in (args.documents or [])]
@@ -1468,13 +2788,20 @@ def main() -> None:
             corpus_dir,
             args.domain,
             args.source_prefix,
-            max_wait_s=args.wait_timeout,
+            slot_timeout_s=args.slot_timeout,
+            submit_budget_s=args.submit_budget,
             documents=documents or None,
             limit=args.limit_docs,
+            backoff_initial_s=args.retry429_initial,
+            backoff_step_s=args.retry429_step,
+            backoff_max_s=args.retry429_max,
         )
         print(f"ingest: {len(submitted)} документов поставлено, ждём завершения ...")
         statuses = wait_jobs(
-            [record["job_id"] for record in submitted], timeout_s=args.wait_timeout
+            [record["job_id"] for record in submitted],
+            unreachable_timeout_s=args.unreachable_timeout,
+            job_timeout_s=args.job_timeout,
+            ceiling_s=args.wait_ceiling,
         )
         # Попер-документное wall-time: ждём завершения пачкой, поэтому время
         # считаем от подачи заявки до последнего опроса — это включает очередь.
@@ -1483,8 +2810,17 @@ def main() -> None:
             record["waited_s"] = finished_at - record["submitted_at"]
         print(f"ingest: завершено ({len(statuses)}/{len(submitted)})")
     ingested_urls = {record["source_url"] for record in submitted}
-    revision = fetch_revision(args.domain)
-    print(f"revision: {revision}")
+
+    # Ревизия читается один раз и уходит в оба рукава замороженной (ADR-029 п.1).
+    # Отказ контура — не причина отменять замер: на демо-стенде ingestion-api поднимается
+    # для этого отдельно (`up --with-ingest`), а без него граф не измеряется вовсе.
+    if args.revision == "none":
+        revision: str | None = None
+        revision_source = REVISION_SOURCE_SKIPPED
+        print("revision: не запрашивается (--revision none), графическая ось не измеряется")
+    else:
+        revision, revision_source = observe_domain_revision(args.domain)
+        print(f"revision: {revision or 'null'} ({revision_source})")
 
     # 2. Один run_id на прогон; манифест условий (design.md §5.1) пишется один раз.
     run_id = f"eval_{int(time.time())}"
@@ -1492,6 +2828,10 @@ def main() -> None:
     flags = ["--retrieval-only"] if args.retrieval_only else (["--no-judge"] if args.no_judge else [])
     if args.trace:
         flags.append("--trace")
+    if args.revision == "none":
+        # Флаг попадает в манифест: два прогона, из которых один мерил только вектор, не
+        # должны выглядеть в артефакте одинаково.
+        flags.append("--revision=none")
     if args.compare_with:
         flags.append(f"--compare-with={args.compare_with}")
     manifest = build_run_manifest(
@@ -1499,6 +2839,7 @@ def main() -> None:
         started_at=started_at,
         domain=args.domain,
         revision=revision,
+        revision_source=revision_source,
         datasets=[args.dataset] + args.extra_dataset,
         mode_arg=args.mode,
         corpus=args.corpus,
@@ -1508,7 +2849,10 @@ def main() -> None:
         flags=flags,
         corpus_documents=[record["source_url"] for record in submitted],
         corpus_limit=args.limit_docs,
-        golden=golden_coverage(questions, ingested_urls),
+        # `None` вместо пустого множества: без загрузок в прогоне состав корпуса неизвестен,
+        # и это должно попасть в отчёт как «не измерено», а не как «покрытие 0».
+        golden=golden_coverage(questions, ingested_urls or None),
+        timeouts=resolved_timeouts,
         note=args.note,
     )
     manifest_path = out_dir / "run_manifest.json"
@@ -1516,6 +2860,15 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 3. qa_log переживает прерывание (append по вопросу); trace — только с флагом.
+    # `run_state.json` — терминальный признак завершённости. Без него папка прогона после
+    # обрыва неотличима от успешной: `failures.jsonl` пуст по определению (он про вопросы,
+    # а не про прогон), а `lift_report.json` и `qa_log.jsonl` остаются от предыдущих вопросов.
+    # Именно это случилось 2026-10-04: прогон умер на первом вопросе, и узнали об этом только
+    # по выводу — попало в stdout, а не в артефакт. При обрыве на десятом вопросе папка
+    # выглядела бы завершённой. Поэтому честность артефакта обеспечивается здесь: файл
+    # появляется только при нормальном выходе из main().
+    run_state_path = out_dir / "run_state.json"
+    run_state_path.unlink(missing_ok=True)
     qa_log_path = out_dir / "qa_log.jsonl"
     qa_log_path.write_text("", encoding="utf-8")
     failures_path = out_dir / "failures.jsonl"
@@ -1554,12 +2907,10 @@ def main() -> None:
                         trace_enabled=args.trace,
                     )
                 except RuntimeError as exc:
-                    # Расхождение revision несовместимо с корректным измерением
-                    # (данные меняются под ногами) — это валит прогон целиком.
-                    if "revision mismatch" in str(exc):
-                        raise
-                    # Остальное (таймаут LLM, сбой адаптера) уходит в failures.jsonl:
-                    # усечённый прогон не должен теряться из-за одного вопроса.
+                    # Ошибка вопроса (таймаут LLM, сбой адаптера) уходит в failures.jsonl:
+                    # усечённый прогон не должен теряться из-за одного вопроса. Расхождение
+                    # среза сюда не попадает намеренно — оно ловится гардом проекции после
+                    # каждого вопроса, вне этого except.
                     _append_jsonl(
                         failures_path,
                         {
@@ -1581,6 +2932,10 @@ def main() -> None:
                 records.append(record)
                 if sink is not None:
                     sink.append(record)
+                # Гард среза срабатывает сразу после вопроса, а не в конце прогона:
+                # дальше измеряется другой срез, и ждать ради заведомо испорченной
+                # разности метрик незачем.
+                guard_projection_revision(records, mode)
         aggregate_r = aggregate(records)
         print(f"run: {mode} → retrieval.recall@5={aggregate_r['retrieval'].get('recall_at_k')}")
         return aggregate_r
@@ -1593,16 +2948,73 @@ def main() -> None:
         print(f"run: {key} ({len(questions)} вопросов) ...")
         reports[key] = _run_mode(mode, all_records)
 
+    # Гард доменной ревизии: перечитываем её после измерения. Это независимое чтение того же
+    # источника, поэтому оно способно увидеть изменение, которого не видит эхо в ответе.
+    if args.revision == "none":
+        revision_after: str | None = None
+    else:
+        revision_after, _ = observe_domain_revision(args.domain)
+    revision_parity = run_revision_parity(revision, revision_after)
+    observed_projection_revisions = sorted(
+        {
+            str(record.get("projection_revision"))
+            for record in all_records
+            if record.get("projection_revision")
+        }
+    )
+    parity = {
+        "revision": revision_parity["revision"],
+        "reason": revision_parity["reason"],
+        "revision_before": revision_parity["revision_before"],
+        "revision_after": revision_parity["revision_after"],
+        # `projection` здесь — итог гарда проекции: он останавливает прогон на первом же
+        # расхождении, поэтому ненулевой список после завершения означает, что гард не
+        # стоял на месте (например, отключён флагом теста).
+        "projection": (
+            observed_projection_revisions[0]
+            if len(observed_projection_revisions) == 1
+            else None
+        ),
+        "projection_revisions": observed_projection_revisions,
+    }
+    print(
+        f"parity: ревизия={parity['revision']}"
+        + (f" — {parity['reason']}" if parity.get("reason") else "")
+    )
+
+    config_state = build_config_state(reports, all_records)
+    for mode_report in reports.values():
+        mode_report["config"] = config_state
+
     judge_active = judge is not None and generate
+    # Отчёт ingest строится ДО подсчёта вердикта: потеря LLM-слоя инвалидирует
+    # прогон, и вердикт обязан знать о ней, а не узнавать о ней постфактум в паспорте.
+    ingest_summary = build_ingest_report(submitted, statuses) if submitted else None
+    ingest_quality = build_ingest_quality(ingest_summary)
+    for mode_report in reports.values():
+        mode_report["ingest_quality"] = ingest_quality
     report = lift_report(
         baseline=reports.get("baseline", {}),
         target=reports.get("target", {}),
         revision=revision,
         judge_active=judge_active,
     )
+    report["ingest_quality"] = ingest_quality
+    report["config"] = config_state
     report["run_id"] = run_id
+    report["parity"] = parity
     report["created_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     report["manifest"] = manifest
+    # Расхождение среза внутри прогона — факт о том, на чём считались числа, а не о
+    # качестве ответов. Оно делает результат непригодным для вывода о вкладе графа, поэтому
+    # вердикт становится `invalid`, а причина обязана быть названа: молчаливый `invalid`
+    # читается как «что-то сломалось в системе».
+    if parity["revision"] == PARITY_CHANGED:
+        report["verdict"] = "invalid"
+        report["verdict_reasons"] = [
+            *(report.get("verdict_reasons") or []),
+            str(parity["reason"]),
+        ]
     manifest["projection_observed"] = {
         mode: {
             "statuses": sorted(
@@ -1617,6 +3029,12 @@ def main() -> None:
         }
         for mode, aggregate_report in reports.items()
     }
+    # Конфигурация дописывается после прогона: она известна только из ответов, а манифест
+    # перезаписывается тут же — тот же приём, что с наблюдённой проекцией. Сюда же ложатся
+    # границы прогона и итог гарда: `finished_at` иначе известны только из `run_state.json`.
+    manifest["config"] = config_state
+    manifest["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    manifest["parity"] = parity
     write_run_manifest(manifest, out_dir)
 
     # 4. Сравнение с парным прогоном (design.md §5.1): расхождение факторов → invalid.
@@ -1647,9 +3065,7 @@ def main() -> None:
     # 5. Сопутствующие артефакты прогона: паспорт, разбор пар, отчёт ingest.
     argv = ["python", "/app/infra/eval/run_eval.py", *sys.argv[1:]]
     write_command_file(out_dir, argv)
-    ingest_summary = None
-    if submitted:
-        ingest_summary = build_ingest_report(submitted, statuses)
+    if ingest_summary is not None:
         write_ingest_report(ingest_summary, out_dir)
     write_qa_review(all_records, out_dir)
     write_passport(
@@ -1660,7 +3076,31 @@ def main() -> None:
         failures=len(failures),
         argv=argv,
     )
+    # Терминальный признак: пишется последним, уже после всех артефактов. Его отсутствие и
+    # означает «прогон не завершён» — обрыв, исключение, KeyboardInterrupt, убитый контейнер.
+    run_state_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "run_id": run_id,
+                "questions": len(questions),
+                "failed_questions": len(failures),
+                "verdict": report.get("verdict"),
+                # Метка времени из манифеста, а не новая: два «конца прогона» в двух файлах,
+                # разошедшиеся на секунду, выглядят как два разных прогона.
+                "finished_at": manifest.get("finished_at"),
+                "parity": parity.get("revision"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    print(f"run_state: {run_state_path} (completed)")
     print(json.dumps(report, ensure_ascii=False, indent=2))
+    # Ловушка для следующего вызова: `raise SystemExit(main())` поймал бы любой return без
+    # кода и ушёл бы с 0, то есть обрыв стал бы зелёвым на уровне процесса. Исключение
+    # специально остаётся необработанным, чтобы код возврата был ненулевым.
 
 
 if __name__ == "__main__":

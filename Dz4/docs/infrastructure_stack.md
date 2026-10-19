@@ -38,9 +38,9 @@
 | Ingestion API | Приём файлов/URL, управление джобами индексации | Python | 8002 | ingestion | docs/04 §1, docs/02 §1 |
 | Ingestion Pipeline Workers | primitive-этапы: chunk, embed, vector commit; graph projection опционально | Python | — | ingestion | docs/02 §1, docs/06 §3 (профиль ingestion) |
 | Glossary Service | Словари доменов, трансляция тегов → канонический ряд | Python | 8003 | config | docs/04 §4, docs/00 |
-| Embeddings Service | Расчёт векторов bge-m3 (GPU) | Python | 8004 | embeddings | docs/04 §1, docs/02 §1 (EMBED) |
+| Embeddings Service | Расчёт векторов bge-m3; **в Demo и eval — CPU**, в отладочном стенде — CUDA, `EMBEDDINGS_DEVICE` переключает | Python | 8004 | embeddings | docs/04 §1, docs/02 §1 (EMBED) |
 | Neo4j Community | Граф + нативный векторный индекс (ADR-001) | Java (сторонний) | 7687 (Bolt) / 7474 (HTTP) | graph | docs/04 §1, docs/06 §3 |
-| llama.cpp Server | Инференс Qwen 2.5 Coder 7B Abliterate q4_K_M (GPU, GGUF) | C++ (сторонний) | 8080 (/v1) | llm | docs/04 §1, ADR-022 |
+| llama.cpp Server | Инференс Qwen 2.5 Coder 7B Abliterate q4_K_M (GGUF; GPU - вариант Demo, см. §4) | C++ (сторонний) | 8080 (/v1) | llm | docs/04 §1, ADR-022 |
 | bge-m3 (LocalSentenceTransformerAdapter) | Встроенный эмбеддер без отдельного контейнера | Python | — | — | docs/02 §1, adapters_specification.md |
 | bge-reranker-base | Реранкер (CPU); NoOpRerankerAdapter — отключить | Python | — | reranker | docs/03 §1, docs/06 §3 |
 | Prometheus / Grafana / Loki (+Promtail) | Наблюдаемость, метрики `/metrics`, JSON-логи | сторонние | — | monitoring (задел, отключён) | docs/06 §2, docs/06 §3 |
@@ -56,7 +56,7 @@
 | Глоссарий | YAML + SQLite | Postgres | Postgres | Glossary Service |
 | Кэш / очередь задач | — | Valkey (Redis) | Valkey (кластер) | Runtime Query Queue |
 | Очередь ingestion | синхронно | Redis / RabbitMQ | Kafka | Ingestion |
-| LLM | Qwen 2.5 Coder 7B Abliterate (1 GPU, dev/demo; любая `/v1`-совместимая — через конфиг, ADR-022) | Qwen 14B (1 GPU) | Qwen 72B (multi-GPU) | `LLMInference` |
+| LLM | Qwen 2.5 Coder 7B Abliterate (dev/demo; GPU либо CPU, см. §4; любая `/v1`-совместимая — через конфиг, ADR-022) | — | — | `LLMInference` |
 | Embeddings | bge-m3 (1 GPU) | bge-m3 (1 GPU) | bge-m3 (отдельный) | `Embedder` |
 | Reranker | bge-reranker-base (CPU) | — | — | `Reranker` |
 | Оркестрация | Docker Compose | K3s | Managed K8s | — |
@@ -79,6 +79,51 @@
 
 Профиль Docker ≠ Domain Profile: домен — конфигурация (YAML), его смена не требует перезапуска
 контейнеров (`docs/06` §3).
+
+## 4.1. Видеокарта или процессор (демонстрационный стенд)
+
+Видеокарта в демо — **вариант, а не требование**. Стенд поднимается на машине без
+драйвера NVIDIA; модель тогда считает на процессоре.
+
+| | GPU-вариант | CPU-вариант |
+|---|---|---|
+| скрипты | `Demo/demo.sh`, `Demo/demo.ps1` | `Demo/demo-cpu.sh`, `Demo/demo-cpu.ps1` |
+| compose-файлы | `compose.runtime.yaml` + `compose.runtime-gpu.yaml` | только `compose.runtime.yaml` |
+| требуется | видеокарта NVIDIA | ничего, кроме Docker |
+| `LLM_NGPU_LAYERS` | 99 (вся модель) | 0 |
+| скорость ответа | минуты | десятки минут |
+
+**Бронь устройства выдаёт compose, поэтому она живёт в отдельном файле.** В
+`compose.runtime.yaml` её нет ни у одного сервиса: иначе на машине без NVIDIA Docker
+не удовлетворит запрос устройства и стенд не поднимется вообще. Перекрыть бронь сверху
+нельзя — проверено, что ни `devices: []`, ни `devices: null` её не снимают.
+
+Тот же приём в общем слое репозитория: `infra/compose.yaml` без брони плюс
+`infra/compose.gpu.yaml`, который выбирает `infra/up.sh --gpu`.
+
+Имя параметра слоёв единое для всех стендов — `LLM_NGPU_LAYERS`.
+
+**Отладочный стенд `compose.yaml` по-прежнему требует GPU:** он в состав Demo не входит и
+раздельных вариантов для него не заводилось. Это осознанная граница, а не упущение.
+
+Модель в обоих вариантах одна: Qwen 2.5 Coder 7B Abliterate q4_K_M, ~5,35 ГБ VRAM при
+полной выгрузке. **Это выбор, а не запрет: смена реализации через runtime config работает
+и ядро не трогает** (`prototype_requirements.md`, L1-02/L1-03). Механизм такой:
+`LLMInference` абстрагирован, `OpenAICompatibleAdapter` говорит по
+OpenAI-совместимому `/v1/chat/completions`, адаптер выбирается в конфиге (`adapters.llm`),
+там же задаются `base_url` и имя модели.
+
+**Чего пока нет: набора подключений.** У `embeddings`, `reranker` и `llm` в
+`ADAPTER_CATALOG` по одной настоящей реализации плюс тестовая заглушка (`deterministic`
+— SHA-256 на 8 измерений, `noop` — возвращает `score` как есть, `fake` — для тестов).
+У `graph_store` и `vector_store` реализаций две, и `inmemory` там рабочий путь, а не
+заглушка: он стоит в `_DEFAULT_ADAPTERS`.
+
+Отдельных адаптеров под Ollama, vLLM или LM Studio нет; они подключаются тем же `/v1`,
+но класса-адаптера в коде нет. Набор подключений входит в **финальный** вариант и отложен
+на более поздние стадии решением владельца от 2026-10-15; он же указан одной из причин
+появления конфигуратора (`openspec/changes/configurator-ui`). Обязательства «перейти на
+14B» при этом нет — и это не то же самое, что запрет на замену.
 
 ## 5. Модели и лицензии
 

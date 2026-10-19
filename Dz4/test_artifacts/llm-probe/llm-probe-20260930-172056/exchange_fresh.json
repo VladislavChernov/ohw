@@ -1,0 +1,122 @@
+[
+  {
+    "ts": "2026-09-30T14:21:06+00:00",
+    "model": "qwen2.5-3b-instruct-q4_k_m",
+    "stage": "extract",
+    "stream": false,
+    "finish_reason": null,
+    "usage": {
+      "prompt_tokens": 1623,
+      "completion_tokens": 742,
+      "total_tokens": 2365
+    },
+    "prompt_chars": 4925,
+    "response_chars": 2729,
+    "error": null,
+    "duration_ms": 6211,
+    "response": "{\n  \"requirements\": [\n    {\n      \"canonical_name\": \"chunking.*\",\n      \"id\": \"chunking.*\"\n    },\n    {\n      \"canonical_name\": \"extraction.*\",\n      \"id\": \"extraction.*\"\n    },\n    {\n      \"canonical_name\": \"ontology.node_types[].type\",\n      \"id\": \"ontology.node_types[].type\"\n    },\n    {\n      \"canonical_name\": \"retrieval.graph_search_enabled\",\n      \"id\": \"retrieval.graph_search_enabled\"\n    },\n    {\n      \"canonical_name\": \"glossary\",\n      \"id\": \"glossary\"\n    },\n    {\n      \"canonical_name\": \"canonicalization\",\n      \"id\": \"canonicalization\"\n    }\n  ],\n  \"concepts\": [\n    {\n      \"canonical_name\": \"chunking.*\",\n      \"aliases\": [\n        \"strategy\",\n        \"chunk_size\",\n        \"overlap\",\n        \"*_splitter\",\n        \"*_parser\"\n      ],\n      \"description\": \"параметры чанкера\"\n    },\n    {\n      \"canonical_name\": \"extraction.*\",\n      \"aliases\": [\n        \"llm_enabled\",\n        \"prompt_template\",\n        \"temperature\",\n        \"max_tokens\",\n        \"template\"\n      ],\n      \"description\": \"экстракция сущностей и связей\"\n    },\n    {\n      \"canonical_name\": \"ontology.node_types[].type\",\n      \"description\": \"белый список типов сущностей: какие типы нормализуются в context nodes. Всё материализуется под одной меткой `ContextNode`\"\n    },\n    {\n      \"canonical_name\": \"retrieval.graph_search_enabled\",\n      \"description\": \"тумблер графовой оси: выключен по умолчанию\"\n    },\n    {\n      \"canonical_name\": \"glossary\",\n      \"description\": \"разрешение вариантов и aliases\"\n    },\n    {\n      \"canonical_name\": \"canonicalization\",\n      \"description\": \"синонимы\"\n    }\n  ],\n  \"contracts\": [\n    {\n      \"canonical_name\": \"chunking.*\",\n      \"name\": \"chunking.*\",\n      \"id\": \"chunking.*\"\n    },\n    {\n      \"canonical_name\": \"extraction.*\",\n      \"name\": \"extraction.*\",\n      \"id\": \"extraction.*\"\n    },\n    {\n      \"canonical_name\": \"ontology.node_types[].type\",\n      \"name\": \"ontology.node_types[].type\",\n      \"id\": \"ontology.node_types[].type\"\n    },\n    {\n      \"canonical_name\": \"retrieval.graph_search_enabled\",\n      \"name\": \"retrieval.graph_search_enabled\",\n      \"id\": \"retrieval.graph_search_enabled\"\n    },\n    {\n      \"canonical_name\": \"glossary\",\n      \"name\": \"glossary\",\n      \"id\": \"glossary\"\n    },\n    {\n      \"canonical_name\": \"canonicalization\",\n      \"name\": \"canonicalization\",\n      \"id\": \"canonicalization\"\n    }\n  ],\n  \"relationships\": [\n    {\n      \"from\": \"chunking.*\",\n      \"to\": \"ontology.node_types[].type\"\n    },\n    {\n      \"from\": \"extraction.*\",\n      \"to\": \"ontology.node_types[].type\"\n    },\n    {\n      \"from\": \"ontology.node_types[].type\",\n      \"to\": \"glossary\"\n    },\n    {\n      \"from\": \"ontology.node_types[].type\",\n      \"to\": \"canonicalization\"\n    }\n  ]\n}",
+    "truncated": {
+      "response": false
+    },
+    "labels": {
+      "source_url": "docs/01_ontology_and_domain_profile.md",
+      "chunk_id": "chk:bf72929b829a"
+    }
+  },
+  {
+    "ts": "2026-09-30T14:21:08+00:00",
+    "model": "qwen2.5-3b-instruct-q4_k_m",
+    "stage": "extract",
+    "stream": false,
+    "finish_reason": null,
+    "usage": {
+      "prompt_tokens": 933,
+      "completion_tokens": 24,
+      "total_tokens": 957
+    },
+    "prompt_chars": 2746,
+    "response_chars": 84,
+    "error": null,
+    "duration_ms": 1152,
+    "response": "{\n  \"requirements\": [],\n  \"concepts\": [],\n  \"contracts\": [],\n  \"relationships\": []\n}",
+    "truncated": {
+      "response": false
+    },
+    "labels": {
+      "source_url": "docs/01_ontology_and_domain_profile.md",
+      "chunk_id": "chk:e47c6f97e4aa"
+    }
+  },
+  {
+    "ts": "2026-09-30T14:21:14+00:00",
+    "model": "qwen2.5-3b-instruct-q4_k_m",
+    "stage": "extract",
+    "stream": false,
+    "finish_reason": null,
+    "usage": {
+      "prompt_tokens": 2181,
+      "completion_tokens": 316,
+      "total_tokens": 2497
+    },
+    "prompt_chars": 6310,
+    "response_chars": 978,
+    "error": null,
+    "duration_ms": 6497,
+    "response": "{\n  \"requirements\": [\n    {\n      \"canonical_name\": \"Партономия\",\n      \"id\": \"partonomia\"\n    }\n  ],\n  \"concepts\": [\n    {\n      \"canonical_name\": \"страна\",\n      \"aliases\": [\"country\"]\n    },\n    {\n      \"canonical_name\": \"область\",\n      \"aliases\": [\"region\"]\n    },\n    {\n      \"canonical_name\": \"район\",\n      \"aliases\": [\"district\"]\n    },\n    {\n      \"canonical_name\": \"город\",\n      \"aliases\": [\"city\"]\n    },\n    {\n      \"canonical_name\": \"улица\",\n      \"aliases\": [\"street\"]\n    },\n    {\n      \"canonical_name\": \"дом\",\n      \"aliases\": [\"house\"]\n    }\n  ],\n  \"contracts\": [],\n  \"relationships\": [\n    {\n      \"from\": \"Партономия\",\n      \"to\": \"страна\"\n    },\n    {\n      \"from\": \"Партономия\",\n      \"to\": \"область\"\n    },\n    {\n      \"from\": \"Партономия\",\n      \"to\": \"район\"\n    },\n    {\n      \"from\": \"Партономия\",\n      \"to\": \"город\"\n    },\n    {\n      \"from\": \"Партономия\",\n      \"to\": \"улица\"\n    },\n    {\n      \"from\": \"Партономия\",\n      \"to\": \"дом\"\n    }\n  ]\n}",
+    "truncated": {
+      "response": false
+    },
+    "labels": {
+      "source_url": "docs/01_ontology_and_domain_profile.md",
+      "chunk_id": "chk:b23dbe2d1b7d"
+    }
+  },
+  {
+    "ts": "2026-09-30T14:21:22+00:00",
+    "model": "qwen2.5-3b-instruct-q4_k_m",
+    "stage": "extract",
+    "stream": false,
+    "finish_reason": null,
+    "usage": {
+      "prompt_tokens": 2231,
+      "completion_tokens": 218,
+      "total_tokens": 2449
+    },
+    "prompt_chars": 6807,
+    "response_chars": 762,
+    "error": null,
+    "duration_ms": 8140,
+    "response": "{\n  \"requirements\": [\n    {\n      \"canonical_name\": \"profiles_available\",\n      \"id\": \"document\"\n    }\n  ],\n  \"concepts\": [\n    {\n      \"canonical_name\": \"llm_enabled\",\n      \"id\": \"document\"\n    },\n    {\n      \"canonical_name\": \"namespaces_yaml\",\n      \"id\": \"document\"\n    }\n  ],\n  \"contracts\": [\n    {\n      \"canonical_name\": \"llm_enabled\",\n      \"id\": \"user\"\n    },\n    {\n      \"canonical_name\": \"namespaces_yaml\",\n      \"id\": \"user\"\n    }\n  ],\n  \"relationships\": [\n    {\n      \"from\": \"profiles_available\",\n      \"to\": \"llm_enabled\"\n    },\n    {\n      \"from\": \"profiles_available\",\n      \"to\": \"namespaces_yaml\"\n    },\n    {\n      \"from\": \"llm_enabled\",\n      \"to\": \"document\"\n    },\n    {\n      \"from\": \"namespaces_yaml\",\n      \"to\": \"document\"\n    }\n  ]\n}",
+    "truncated": {
+      "response": false
+    },
+    "labels": {
+      "source_url": "docs/01_ontology_and_domain_profile.md",
+      "chunk_id": "chk:a51265c5b90a"
+    }
+  },
+  {
+    "ts": "2026-09-30T14:21:45+00:00",
+    "model": "qwen2.5-3b-instruct-q4_k_m",
+    "stage": "extract",
+    "stream": false,
+    "finish_reason": null,
+    "usage": {
+      "prompt_tokens": 1871,
+      "completion_tokens": 900,
+      "total_tokens": 2771
+    },
+    "prompt_chars": 5232,
+    "response_chars": 2999,
+    "error": null,
+    "duration_ms": 8228,
+    "response": "{\n  \"requirements\": [\n    {\n      \"canonical_name\": \"DEDUP_STAGE\",\n      \"id\": \"DedupStage\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_AUTO_THRESHOLD\",\n      \"id\": \"dedup_auto_threshold\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_LLM_THRESHOLD\",\n      \"id\": \"dedup_llm_threshold\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO_THRESHOLD\",\n      \"id\": \"similar_to_threshold\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_AUTO\",\n      \"id\": \"DEDUP_AUTO\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_LLM\",\n      \"id\": \"DEDUP_LLM\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO\",\n      \"id\": \"SIMILAR_TO\"\n    }\n  ],\n  \"concepts\": [\n    {\n      \"canonical_name\": \"DEDUP_STAGE\",\n      \"aliases\": [\n        \"DedupStage\"\n      ],\n      \"description\": \"Сущность, которая сливает сущности при точном совпадении нормализованного canonical key (_identity_key).\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_AUTO\",\n      \"aliases\": [\n        \"DEDUP_AUTO\"\n      ],\n      \"description\": \"Константа, задающая порог точного совпадения для дедупликации.\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_LLM\",\n      \"aliases\": [\n        \"DEDUP_LLM\"\n      ],\n      \"description\": \"Константа, задающая порог точного совпадения для дедупликации с использованием LLM.\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO\",\n      \"aliases\": [\n        \"SIMILAR_TO\"\n      ],\n      \"description\": \"Константа, задающая порог схождения для косинусного разрешения сущностей.\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO_THRESHOLD\",\n      \"aliases\": [\n        \"SIMILAR_TO_THRESHOLD\"\n      ],\n      \"description\": \"Порог схождения для косинусного разрешения сущностей.\"\n    }\n  ],\n  \"contracts\": [\n    {\n      \"canonical_name\": \"DEDUP_STAGE\",\n      \"name\": \"DedupStage\",\n      \"id\": \"DedupStage\",\n      \"category\": \"ingestion_service/pipeline/orchestrator.py\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_AUTO\",\n      \"name\": \"DEDUP_AUTO\",\n      \"id\": \"DEDUP_AUTO\",\n      \"category\": \"namespace: normalizer\"\n    },\n    {\n      \"canonical_name\": \"DEDUP_LLM\",\n      \"name\": \"DEDUP_LLM\",\n      \"id\": \"DEDUP_LLM\",\n      \"category\": \"namespace: normalizer\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO\",\n      \"name\": \"SIMILAR_TO\",\n      \"id\": \"SIMILAR_TO\",\n      \"category\": \"namespace: normalizer\"\n    },\n    {\n      \"canonical_name\": \"SIMILAR_TO_THRESHOLD\",\n      \"name\": \"SIMILAR_TO_THRESHOLD\",\n      \"id\": \"SIMILAR_TO_THRESHOLD\",\n      \"category\": \"namespace: normalizer\"\n    }\n  ],\n  \"relationships\": [\n    {\n      \"from\": \"DEDUP_STAGE\",\n      \"to\": \"DEDUP_STAGE\"\n    },\n    {\n      \"from\": \"DEDUP_AUTO\",\n      \"to\": \"DEDUP_AUTO\"\n    },\n    {\n      \"from\": \"DEDUP_LLM\",\n      \"to\": \"DEDUP_LLM\"\n    },\n    {\n      \"from\": \"SIMILAR_TO\",\n      \"to\": \"SIMILAR_TO\"\n    },\n    {\n      \"from\": \"DEDUP_AUTO_THRESHOLD\",\n      \"to\": \"DEDUP_AUTO_THRESHOLD\"\n    },\n    {\n      \"from\": \"DEDUP_LLM_THRESHOLD\",\n      \"to\": \"DEDUP_LLM_THRESHOLD\"\n    },\n    {\n      \"from\": \"SIMILAR_TO_THRESHOLD\",\n      \"to\": \"SIMILAR_TO_THRESHOLD\"\n    }\n  ]\n}",
+    "truncated": {
+      "response": false
+    },
+    "labels": {
+      "source_url": "docs/plans/cosine-dedup.md",
+      "chunk_id": "chk:daa34cdf7ee7"
+    }
+  }
+]

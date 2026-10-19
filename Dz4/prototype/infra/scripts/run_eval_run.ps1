@@ -8,7 +8,8 @@
 
       1. проверяет/поднимает стенд (`up -d --wait`);
       2. запускает фоновый сборщик ресурсов (eval_sample_resources.ps1);
-      3. выполняет `docker compose run --rm eval-runner run_eval.py ...`;
+      3. выполняет `docker compose run --rm eval-runner run_eval.py ...`, попутно
+         перехватывая stdout и stderr раннера в logs/runner.log;
       4. останавливает сборщик и пишет resources.json (старт/пик/финал);
       5. выгружает логи сервисов в logs/*.log — иначе они умрут вместе с prune;
       6. дописывает строку прогона в reports/INDEX.md и reports/index.json.
@@ -45,13 +46,34 @@ param(
     [int]$LimitDocs,
     [string]$Note = '',
     [string[]]$Dataset = @('/app/infra/eval/it/questions.jsonl'),
-    [string[]]$ExtraDataset = @('/app/infra/eval/it/questions_graph.jsonl'),
+    # Набор `it` один (ADR-040), поэтому по умолчанию ничего не добавляется.
+    # Параметр остаётся для доменов, у которых наборов несколько.
+    [string[]]$ExtraDataset = @(),
     [string]$SourcePrefix = 'docs',
     [switch]$NoJudge,
     [switch]$RetrievalOnly,
     [switch]$Trace,
     [string]$CompareWith,
     [int]$SampleIntervalSec = 5,
+    # Окна и бюджеты в секундах (B3). Раньше был один флаг --wait-timeout, и он
+    # означал «5 минут на всю пачку документов», то есть на полном корпусе падал
+    # гарантированно. Теперь величины разведены по смыслу, и каждая ограничивает
+    # своё (0 = дефолт раннера):
+    #   UnreachableTimeoutSec — опросы не отвечают (стенд недоступен);
+    #   JobTimeoutSec         — опросы идут, но эта джоба не двигается;
+    #   WaitCeilingSec        — жёсткий кап на всю пачку джоб;
+    #   SlotTimeoutSec        — свободный слот исполнителя на один документ (429);
+    #   SubmitBudgetSec       — бюджет всей фазы подачи корпуса.
+    # Первые три — взаимоисключающие условия, а не «кто меньше», поэтому их
+    # соотношение ни на что не влияет. Последние два ограничивают фазу POST, а не
+    # ожидание джоб; смешивать их нельзя, иначе лимит умножается на число файлов.
+    # Флаги есть у раннера, но wrapper собирает аргументы только из этого param(),
+    # лишние флаги не пробрасываются.
+    [int]$UnreachableTimeoutSec = 0,
+    [int]$JobTimeoutSec = 0,
+    [int]$WaitCeilingSec = 0,
+    [int]$SlotTimeoutSec = 0,
+    [int]$SubmitBudgetSec = 0,
     [switch]$SkipUp,
     [switch]$KeepStack
 )
@@ -63,6 +85,9 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $infraDir)
 $composeFile = Join-Path $infraDir 'compose.eval-minimal.yaml'
 $reportsRoot = Join-Path (Split-Path -Parent $infraDir) 'reports'
 $samplerScript = Join-Path $scriptDir 'eval_sample_resources.ps1'
+# Перехват вывода нативной команды вынесен отдельно: ловушки PowerShell 5.1 в нём
+# задокументированы и проверяются прогоном, а не пересказом здесь.
+. (Join-Path $scriptDir 'Invoke-Captured.ps1')
 
 if (-not $RunName) {
     $RunName = 'run-{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $Mode
@@ -71,6 +96,7 @@ $runDir = Join-Path $reportsRoot $RunName
 $samplesPath = Join-Path $runDir 'resources.samples.jsonl'
 $stopFile = Join-Path $runDir 'resources.stop'
 $logsDir = Join-Path $runDir 'logs'
+$runnerLog = Join-Path $logsDir 'runner.log'
 
 function Get-GitTreeState {
     <#
@@ -101,7 +127,21 @@ function Get-GitTreeState {
 
 function Invoke-Compose {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]]$ComposeArgs)
-    & docker compose -p $Project -f $composeFile @ComposeArgs
+    # Та же ловушка, что описана в `Invoke-Captured.ps1` п.2, только для compose: docker
+    # compose пишет в stderr обычный прогресс (`Container ... Running`), и при
+    # `$ErrorActionPreference = 'Stop'` это становится terminating-ошибкой. Обёртка падала
+    # ДО подъёма стенда и ДО запуска прогона, то есть на сообщении о состоянии, а не об
+    # ошибке. Приём тот же: понизить политику на время вызова и восстановить в `finally`.
+    #
+    # `$LASTEXITCODE` после вызова сохраняется: вызывающий проверяет его сам, и именно он
+    # говорит, поднялся стенд или нет.
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & docker compose -p $Project -f $composeFile @ComposeArgs
+    } finally {
+        $ErrorActionPreference = $previous
+    }
 }
 
 # --- предусловия ----------------------------------------------------------
@@ -109,16 +149,64 @@ function Invoke-Compose {
 if (-not (Test-Path -LiteralPath $composeFile)) {
     throw "Не найден compose-файл: $composeFile"
 }
-if (-not $env:RUN_CODE_COMMIT) {
-    $env:RUN_CODE_COMMIT = (& git -C $repoRoot rev-parse --short HEAD).Trim()
-    Write-Host "RUN_CODE_COMMIT не задан — беру из HEAD: $($env:RUN_CODE_COMMIT)"
-}
+# Ревизия кода, попадающая в артефакты, вычисляется здесь всегда, а не только когда
+# переменная пуста. Иначе переменная, оставшаяся в сессии от прошлого прогона, молча
+# уехала бы в манифест: `run_eval.py` проверяет только наличие, поэтому прогон записался бы
+# с чужим старым хэшем и остался бы правдоподобным. Выровнено с `run_e2e_cleanup.ps1`
+# и `run_e2e_depth.ps1`, которые выставляют её принудительно.
+$env:RUN_CODE_COMMIT = (& git -C $repoRoot rev-parse --short HEAD).Trim()
+Write-Host "RUN_CODE_COMMIT взят из HEAD: $($env:RUN_CODE_COMMIT)"
 $env:RUN_CODE_TREE = Get-GitTreeState
 if (-not $env:GRAPH_AUTH_API_KEY) { $env:GRAPH_AUTH_API_KEY = 'changeme' }
-if (-not $env:NEO4J_PASSWORD) { $env:NEO4J_PASSWORD = 'graphrag' }
+# `NEO4J_PASSWORD` НЕ подставляется по умолчанию, и это не осторожность, а требование
+# к таймингу: compose читает `infra/.env`, и значение ОТТУДА переопределяет всё, что
+# положено в переменную окружения. Если обвязка подставит свой дефолт, Neo4j получит
+# пароль, отличный от того, которым инициализирован том, и станет unhealthy - с
+# сообщением про контейнер, а не про пароль. Замер: пароль тома в `infra/.env`
+# отличается от дефолта обвязки.
+if (-not $env:NEO4J_PASSWORD) {
+    $envFile = Join-Path $PSScriptRoot '..\.env'
+    if (Test-Path -LiteralPath $envFile) {
+        $fromFile = (Get-Content -LiteralPath $envFile -Encoding UTF8 |
+            Where-Object { $_ -match '^NEO4J_PASSWORD=' } |
+            Select-Object -First 1) -replace '^NEO4J_PASSWORD=', ''
+        if ($fromFile) {
+            $env:NEO4J_PASSWORD = $fromFile.Trim()
+            Write-Host 'NEO4J_PASSWORD взят из infra/.env (как инициализирован том)'
+        }
+    }
+    if (-not $env:NEO4J_PASSWORD) {
+        throw 'NEO4J_PASSWORD не задан ни в окружении, ни в infra/.env: том Neo4j ' +
+        'инициализирован неизвестным паролем, и подставлять свой значит получить ' +
+        'unhealthy с сообщением не о том.'
+    }
+}
+
+# ADR-053, решение владельца от 2026-10-14: кандидаты производит сам ingestion-пайплайн,
+# перед `EXTRACT` и после проверки no-op. Папки `pre-ingest/`, переменной
+# `CANDIDATES_HOST_DIR` и предварительного запуска стадии больше нет.
+#
+# Прежняя проверка жила здесь не зря: она ловила ровно тот отказ, когда папка оказывалась
+# пустой и каждый документ уходил только в вектор при статусе `succeeded`. Но ловить
+# больше нечего - папки нет, а пустой каталог снаружи контейнера теперь не может привести
+# к потере списка: кандидаты не пересекают границу контейнеров.
+Write-Host 'кандидаты: производит ingestion-пайплайн, предварительный запуск не требуется'
 
 New-Item -ItemType Directory -Force -Path $runDir | Out-Null
 New-Item -ItemType Directory -Force -Path $logsDir | Out-Null
+
+# --- журнал обмена с LLM ---------------------------------------------------
+# `LLM_EXCHANGE_LOG=full` без пути означает «писать в stdout через structlog», а оттуда
+# записи не доезжают ни в отчёт, ни в `docker logs` - проверено: ноль записей. Поэтому
+# путь задаётся здесь явно и указывает ВНУТРИ контейнера, а не на хосте.
+if ($env:LLM_EXCHANGE_LOG -and $env:LLM_EXCHANGE_LOG -ne 'off') {
+    $exchangeDir = Join-Path $runDir 'exchange'
+    New-Item -ItemType Directory -Force -Path $exchangeDir | Out-Null
+    if (-not $env:LLM_EXCHANGE_LOG_FILE) {
+        $env:LLM_EXCHANGE_LOG_FILE = "/reports/$RunName/exchange/llm_exchange.jsonl"
+    }
+    Write-Host "журнал обмена: $($env:LLM_EXCHANGE_LOG) -> $env:LLM_EXCHANGE_LOG_FILE"
+}
 
 # --- аргументы раннера ----------------------------------------------------
 
@@ -132,6 +220,11 @@ foreach ($ds in $Dataset) { $evalArgs += @('--dataset', $ds) }
 foreach ($ds in $ExtraDataset) { if ($ds) { $evalArgs += @('--extra-dataset', $ds) } }
 foreach ($doc in ($Documents | Where-Object { $_ })) { $evalArgs += @('--documents', $doc) }
 if ($PSBoundParameters.ContainsKey('LimitDocs')) { $evalArgs += @('--limit-docs', "$LimitDocs") }
+if ($PSBoundParameters.ContainsKey('UnreachableTimeoutSec') -and $UnreachableTimeoutSec -gt 0) { $evalArgs += @('--unreachable-timeout', "$UnreachableTimeoutSec") }
+if ($PSBoundParameters.ContainsKey('JobTimeoutSec') -and $JobTimeoutSec -gt 0) { $evalArgs += @('--job-timeout', "$JobTimeoutSec") }
+if ($PSBoundParameters.ContainsKey('WaitCeilingSec') -and $WaitCeilingSec -gt 0) { $evalArgs += @('--wait-ceiling', "$WaitCeilingSec") }
+if ($PSBoundParameters.ContainsKey('SlotTimeoutSec') -and $SlotTimeoutSec -gt 0) { $evalArgs += @('--slot-timeout', "$SlotTimeoutSec") }
+if ($PSBoundParameters.ContainsKey('SubmitBudgetSec') -and $SubmitBudgetSec -gt 0) { $evalArgs += @('--submit-budget', "$SubmitBudgetSec") }
 if ($Note) { $evalArgs += @('--note', $Note) }
 if ($NoJudge) { $evalArgs += '--no-judge' }
 if ($RetrievalOnly) { $evalArgs += '--retrieval-only' }
@@ -166,8 +259,30 @@ $sampler = Start-Process -FilePath 'powershell.exe' `
 
 $startedAt = Get-Date
 Write-Host "==> прогон $RunName"
-Invoke-Compose 'run' '--rm' '--no-deps' 'eval-runner' 'python' @($evalArgs[1..($evalArgs.Count - 1)])
-$runExit = $LASTEXITCODE
+# Splatting по переменной, а не `@($evalArgs[1..N])`: array subexpression схлопывает срез
+# в ОДИН аргумент, и python получает «--domain it --mode both ...» одной строкой,
+# отвечая `unknown option`. Проверено: 6 элементов вместо 11.
+#
+# Первый элемент (`/app/infra/eval/run_eval.py`) резать НЕЛЬЗЯ, и это отдельная ошибка от
+# предыдущей: у сервиса `eval-runner` в compose нет ни `command`, ни `entrypoint`, поэтому
+# `docker compose run ... python <args>` отдаёт `<args>` самому python. Образ даёт только
+# `ENTRYPOINT ["uv","run","--no-sync"]`, скрипт в него не зашит. Со срезом python получал
+# первым аргументом `--domain` и падал с `unknown option --domain` — прогон не начинался.
+$evalTail = $evalArgs
+# Вывод раннера перехватывается в logs/runner.log по ходу прогона. Без этого прогон
+# на полном корпусе нечем разбирать: логи сервисов выгружаются позже и переживают
+# prune, а stdout раннера жил только в консоли и терялся вместе с окном.
+# Код возврата берётся ИЗ ВЫЗОВА, а не из конвейера, и перехват не имеет права
+# бросить скрипт на строке stderr — обе оговорки разобраны в Invoke-Captured.ps1.
+$runExit = Invoke-Captured -LogPath $runnerLog -Header @(
+    "# run: $RunName",
+    "# commit: $env:RUN_CODE_COMMIT",
+    "# tree: $env:RUN_CODE_TREE",
+    "# command: $hostCommand",
+    "# started: $($startedAt.ToString('o'))"
+) -Command {
+    Invoke-Compose 'run' '--rm' '--no-deps' 'eval-runner' 'python' @evalTail
+}
 $finishedAt = Get-Date
 
 # --- 4. resources.json ----------------------------------------------------
@@ -341,6 +456,7 @@ if (-not $KeepStack) {
 Write-Host ''
 Write-Host "Прогон: $RunName"
 Write-Host "Папка:  $runDir"
+Write-Host "Лог:    $runnerLog"
 if ($resources) {
     Write-Host ("Пик RAM: {0} ГБ | VRAM: {1} МБ | Время: {2} с" -f `
             $resources.host_used_peak_gb, $resources.gpu_peak_used_mb, $resources.wall_time_s)

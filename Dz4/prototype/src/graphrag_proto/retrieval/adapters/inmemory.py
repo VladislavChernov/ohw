@@ -18,19 +18,31 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from contextlib import contextmanager
 from typing import Any
 
 from graphrag_proto.retrieval.adapters.base import (
+    OWNERLESS_SOURCE,
     VECTOR_METADATA_BACKFILL_KEYS,
     Consistency,
     GraphStoreProvider,
     VectorStoreProvider,
+    _expand_depth,
+    _expand_direction,
+    _expand_kinds,
 )
 
 _TERM_COND_RE = re.compile(r"toLower\(n\.(\w+)\)\s+CONTAINS\s+toLower\(t\)")
 _LABEL_COND_RE = re.compile(r"m:(\w+)")
 _PROVENANCE_KEYS = ("source_ids", "chunk_ids", "variants", "aliases")
+
+
+def _as_str_list(value: Any) -> list[str]:
+    """Список строк из metadata: не список — пустой список, а не итерация по строке."""
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if item]
+    return []
 
 
 
@@ -90,6 +102,9 @@ class InMemoryGraphStore(GraphStoreProvider):
                     "labels": list(dict.fromkeys([*existing["labels"], *(node.get("labels") or [])])),
                     "properties": properties,
                 }
+        elif kind == "delete_edge":
+            from_id, to_id, edge_type = arg
+            self._edges.pop((from_id, to_id, edge_type), None)
         elif kind == "remove_source":
             domain = arg["domain"]
             source_url = arg["source_url"]
@@ -106,11 +121,13 @@ class InMemoryGraphStore(GraphStoreProvider):
                     continue
                 if isinstance(source_values, list):
                     properties["source_ids"] = [value for value in source_values if value != source_url]
-                properties["chunk_ids"] = [
-                    value
-                    for value in (chunk_values if isinstance(chunk_values, list) else [])
-                    if value not in chunk_ids
-                ]
+                # Только если свойство уже было: создание `chunk_ids = []` превращало
+                # нетронутую структурную сущность в кандидата на уборку, то есть обновление
+                # документа само порождало мусор, который затем съедала уборка.
+                if isinstance(chunk_values, list):
+                    properties["chunk_ids"] = [
+                        value for value in chunk_values if value not in chunk_ids
+                    ]
             for _key, properties in list(self._edges.items()):
                 edge_domain = properties.get("domain")
                 if edge_domain is not None and edge_domain != domain:
@@ -125,11 +142,13 @@ class InMemoryGraphStore(GraphStoreProvider):
                     properties["source_ids"] = [
                         value for value in source_values if value != source_url
                     ]
-                properties["chunk_ids"] = [
-                    value
-                    for value in (chunk_values if isinstance(chunk_values, list) else [])
-                    if value not in chunk_ids
-                ]
+                # Только если свойство уже было: создание `chunk_ids = []` превращало
+                # нетронутую структурную связь в кандидата на уборку, то есть обновление
+                # документа само порождало мусор, который затем съедала уборка.
+                if isinstance(chunk_values, list):
+                    properties["chunk_ids"] = [
+                        value for value in chunk_values if value not in chunk_ids
+                    ]
         elif kind == "upsert_edges":
             for edge in arg:
                 key = (edge["from_id"], edge["to_id"], edge["type"])
@@ -221,11 +240,15 @@ class InMemoryGraphStore(GraphStoreProvider):
         self,
         context_ids: list[str],
         *,
-        direction: str = "parent",
+        direction: str = "both",
+        kinds: Sequence[str] | None = None,
         max_depth: int = 2,
         max_fanout: int = 8,
         max_nodes: int = 32,
     ) -> list[dict[str, Any]]:
+        walk = _expand_direction(direction)
+        allowed = _expand_kinds(kinds)
+        depth_limit = _expand_depth(max_depth)
         by_id = {node_id: node for node_id, node in self._nodes.items()}
         by_tag = {
             str(node["properties"].get("tag_id")): node_id
@@ -249,21 +272,28 @@ class InMemoryGraphStore(GraphStoreProvider):
         result: list[dict[str, Any]] = []
         while queue and len(result) < max_nodes:
             current, depth, path = queue.pop(0)
-            if depth >= max_depth:
+            if depth >= depth_limit:
                 continue
             fanout = 0
             for (from_id, to_id, edge_type), properties in self._edges.items():
-                if direction == "parent":
+                kind = str(properties.get("kind") or edge_type)
+                if allowed is not None and kind.upper() not in allowed:
+                    continue
+                if walk == "out":
                     if from_id != current:
                         continue
                     neighbor = to_id
-                    kind = str(properties.get("kind") or edge_type).lower()
-                    if kind not in {"parent", "context"}:
-                        continue
-                else:
+                elif walk == "in":
                     if to_id != current:
                         continue
                     neighbor = from_id
+                else:
+                    if current == from_id:
+                        neighbor = to_id
+                    elif current == to_id:
+                        neighbor = from_id
+                    else:
+                        continue
                 if neighbor in visited or fanout >= max_fanout:
                     continue
                 node = by_id.get(neighbor)
@@ -284,7 +314,7 @@ class InMemoryGraphStore(GraphStoreProvider):
                         or node["properties"].get("tag_id"),
                         "path": next_path,
                         "depth": depth + 1,
-                        "kind": str(properties.get("kind") or edge_type),
+                        "kind": kind,
                         "source_ids": node["properties"].get("source_ids", []),
                         "chunk_ids": node["properties"].get("chunk_ids", []),
                         "domain": node["properties"].get("domain"),
@@ -328,8 +358,90 @@ class InMemoryGraphStore(GraphStoreProvider):
             {"domain": domain, "source_url": source_url, "chunk_ids": list(chunk_ids)},
         )
 
-    def list_chunk_ids_of_source(self, source_id: str) -> list[str]:
-        return sorted(to_id for (from_id, to_id, etype) in self._edges if from_id == source_id and etype == "CONTAINS")
+    def delete_orphans(self, domain: str, *, dry_run: bool) -> tuple[int, int]:
+        """Осиротевшие доменные связи и узлы (ADR-014, `docs/02` §4.5).
+
+        Три правила зафиксированы до кода и здесь соблюдаются буквально:
+
+        - канонический признак жизни — **непустой `chunk_ids`**, а не `source_ids`; наличие
+          свойства обязательно (`is not None`), иначе под нож попадут структурные рёбра, у
+          которых `chunk_ids` нет вовсе;
+        - **порядок: связи, затем узлы** — обратный ломает счёт, удалённый узел уносит связь,
+          которую мы посчитали удалённой, не удаляя её;
+        - **`dry_run` ничего не удаляет**, только считает.
+
+        Узлы считаются мусорными, если у них нет ни поддерживающих чанков, ни инцидентных
+        связей, и удаляются с инцидентными рёбрами (в Neo4j это `DETACH DELETE`).
+        """
+        orphan_edges: list[tuple[str, str, str]] = []
+        for key, properties in self._edges.items():
+            if "chunk_ids" not in properties:
+                continue  # структурное ребро: свойства нет, а значит нет и основания судить
+            if properties.get("domain") != domain:
+                continue
+            chunk_values = properties.get("chunk_ids")
+            if isinstance(chunk_values, list) and chunk_values:
+                continue  # поддержано живым чанком
+            orphan_edges.append(key)
+
+        orphan_nodes = [
+            node_id
+            for node_id, node in self._nodes.items()
+            if node["properties"].get("domain") == domain
+            and isinstance(node["properties"].get("chunk_ids"), list)
+            and not node["properties"]["chunk_ids"]
+            and not any(
+                from_id == node_id or to_id == node_id for from_id, to_id, _etype in self._edges
+            )
+        ]
+
+        # ADR-047: счётчики раздельные. Сумма попадала в поле связей, и удалённые узлы
+        # отчётом назывались связями.
+        planned = (len(orphan_edges), len(orphan_nodes))
+        if dry_run:
+            return planned
+
+        # Внутри транзакции уборка не откатывается: подсчёт читает текущее состояние, а
+        # буфер применяется лишь на выходе, поэтому вернувшийся счётчик не соответствовал бы
+        # удалённому. Раньше это дало бы «правдоподобный ноль» в отчёте. Запрещаем явно,
+        # а не молча, и по той же причине удаление не идёт в горячий путь (ADR-028):
+        # откатить удалённое без повторной экстракции нельзя.
+        if self._journal is not None:
+            raise RuntimeError(
+                "delete_orphans нельзя вызывать внутри write-транзакции: "
+                "подсчёт до удаления обязателен, а буфер применяется на выходе"
+            )
+        for key in orphan_edges:
+            self._do("delete_edge", list(key))
+        for node_id in orphan_nodes:
+            self._do("delete_node", node_id)
+        return planned
+
+    def chunk_revisions_by_source(self, domain: str) -> dict[str, dict[str, int]] | None:
+        """Ревизии чанков по владельцу, один проход по нодам (ADR-046 п. 3)."""
+        grouped: dict[str, dict[str, int]] = {}
+        for node in self._nodes.values():
+            if "Chunk" not in list(node.get("labels") or []):
+                continue
+            properties = node.get("properties") or {}
+            if str(properties.get("domain") or "") != domain:
+                continue
+            owner = str(properties.get("source_url") or "") or OWNERLESS_SOURCE
+            revisions = grouped.setdefault(owner, {})
+            revision = str(properties.get("projection_revision") or "")
+            revisions[revision] = revisions.get(revision, 0) + 1
+        return grouped
+
+    def list_chunk_ids_of_source(self, source_url: str, domain: str) -> list[str]:
+        """Чанки документа по полю владельца (ADR-046 п. 9: якорь `Source` удалён, раньше
+        здесь был обход `CONTAINS`)."""
+        return sorted(
+            node_id
+            for node_id, node in self._nodes.items()
+            if "Chunk" in list(node.get("labels") or [])
+            and str((node.get("properties") or {}).get("source_url") or "") == source_url
+            and str((node.get("properties") or {}).get("domain") or "") == domain
+        )
 
     # ----------------------------------------------------------------- A-2 capability
 
@@ -495,6 +607,44 @@ class InMemoryVectorStore(VectorStoreProvider):
             or str((item.get("metadata") or {}).get("projection_revision")) == projection_revision
             for item in self._vectors.values()
         )
+
+    def get_chunks_by_ids(
+        self,
+        chunk_ids: Sequence[str],
+        domain: str | None = None,
+    ) -> list[dict[str, Any]] | None:
+        """Тексты чанков по идентификаторам: мост «обход → читаемый кандидат».
+
+        Здесь вектор лежит по ключу `chunk_id`, поэтому чтение — прямой доступ, без
+        сортировки и без обхода всех записей. Идентификаторы приводятся к строке: обход
+        отдаёт их из свойств узла, где тип не закреплён.
+        """
+        wanted = [str(value) for value in chunk_ids if value]
+        if not wanted:
+            return []
+        rows: list[dict[str, Any]] = []
+        for chunk_id in wanted:
+            item = self._vectors.get(chunk_id)
+            if item is None:
+                continue
+            metadata = item.get("metadata") or {}
+            if domain is not None and str(metadata.get("domain") or "") != domain:
+                continue
+            rows.append(
+                {
+                    "chunk_id": chunk_id,
+                    "text": str(item.get("text") or ""),
+                    "source_url": str(metadata.get("source_url") or ""),
+                    "domain": metadata.get("domain"),
+                    "index": metadata.get("index"),
+                    # Отбор по сущностям вопроса считается по свойству самого
+                    # кандидата (ADR-072); без этих полей мостовой чанк нечем
+                    # подтвердить, и проверка свелась бы к строкам обхода.
+                    "context_ids": _as_str_list(metadata.get("context_ids")),
+                    "tag_ids": _as_str_list(metadata.get("tag_ids")),
+                }
+            )
+        return rows
 
     def list_chunk_ids_of_source(
         self,

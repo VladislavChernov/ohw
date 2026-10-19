@@ -17,6 +17,23 @@ dependencies = [
     "neo4j>=5.26",
     "requests>=2.32",
     "streamlit>=1.40",
+    # Кандидаты сущностей для стадии pre-ingest (ADR-053). НАТАША ОБЩАЯ, НЕ ЭКСКЛЮЗИВ
+    # СТАДИИ: стоит в `[project.dependencies]`, поэтому `uv sync --no-dev` ставит её в
+    # КАЖДЫЙ образ этого проекта вместе с моделью slovnet+navec (~37 МБ, измерено).
+    # Раньше комментарий утверждал обратное - «natasha не нужен ingestion-пайплайну»,
+    # и это было верно только пока образ ingestion-api был старше самой зависимости.
+    #
+    # Правило для того, кто хочет natasha в своём сервисе: зависимость уже есть, код
+    # монтируется томом `../src:/app/src:ro`, и НИЧЕГО ДОПИСЫВАТЬ НЕ НУЖНО - нужно
+    # пересобрать образ сервиса (`docker build` или `compose build`). Том монтирует
+    # только `.py`; Python-пакеты живут в образе, поэтому без пересборки `import
+    # natasha` упадёт `ModuleNotFoundError`, как это и было у образа
+    # `ohw/ingestion-service:prototype`, собранного 2026-09-16, до 2026-10-05.
+    #
+    # Почему не extras: у extras своя карта зависимостей на каждый образ, и ошибка
+    # «поставил без extras» повторяет ровно то, что описано выше. Плата ~37 МБ на образ
+    # измерена и принята; решение о переносе в extras не принято.
+    "natasha>=1.6",
 ]
 
 [project.scripts]
@@ -30,6 +47,7 @@ graphrag-demo-ui = "graphrag_proto.demo_ui.cli:main"
 graphrag-topology = "graphrag_proto.topology_service.app:main"
 graphrag-embeddings = "graphrag_proto.embeddings_service.app:main"
 graphrag-reranker = "graphrag_proto.reranker_service.app:main"
+graphrag-pre-ingest = "graphrag_proto.pre_ingest.generate:main"
 
 [dependency-groups]
 dev = [
@@ -77,4 +95,11 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = ["llama_index", "llama_index.*", "llama_index.core", "llama_index.core.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Стадия pre-ingest (ADR-053). natasha не публикует заглушек типов, ровно как
+# streamlit, torch и langchain выше; модуль используется в одной функции, где типы
+# проверяются по факту, а не аннотацией.
+module = ["natasha", "natasha.*"]
 ignore_missing_imports = true

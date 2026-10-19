@@ -1,0 +1,78 @@
+{
+  "before": {
+    "relations": 31,
+    "nodes": 12,
+    "structural_relations": 27,
+    "orphan_relations": 0,
+    "orphan_nodes": 0,
+    "orphan_node_ids": [],
+    "orphan_relations_by_type": {},
+    "contains": 4,
+    "mentions": 23,
+    "by_kind": {
+      "CITES": 1,
+      "CONTAINS": 4,
+      "DERIVES_FROM": 1,
+      "MENTIONS": 23,
+      "RELATED": 1,
+      "SUPPORTS": 1
+    }
+  },
+  "between": {
+    "relations": 29,
+    "nodes": 12,
+    "structural_relations": 24,
+    "orphan_relations": 1,
+    "orphan_nodes": 0,
+    "orphan_node_ids": [],
+    "orphan_relations_by_type": {
+      "DERIVES_FROM": 1
+    },
+    "contains": 4,
+    "mentions": 20,
+    "by_kind": {
+      "CITES": 1,
+      "CONTAINS": 4,
+      "DERIVES_FROM": 1,
+      "MENTIONS": 20,
+      "RELATED": 2,
+      "SUPPORTS": 1
+    }
+  },
+  "after": {
+    "relations": 28,
+    "nodes": 12,
+    "structural_relations": 24,
+    "orphan_relations": 0,
+    "orphan_nodes": 0,
+    "orphan_node_ids": [],
+    "orphan_relations_by_type": {},
+    "contains": 4,
+    "mentions": 20,
+    "by_kind": {
+      "CITES": 1,
+      "CONTAINS": 4,
+      "MENTIONS": 20,
+      "RELATED": 2,
+      "SUPPORTS": 1
+    }
+  },
+  "after_second": {
+    "relations": 28,
+    "nodes": 12,
+    "structural_relations": 24,
+    "orphan_relations": 0,
+    "orphan_nodes": 0,
+    "orphan_node_ids": [],
+    "orphan_relations_by_type": {},
+    "contains": 4,
+    "mentions": 20,
+    "by_kind": {
+      "CITES": 1,
+      "CONTAINS": 4,
+      "MENTIONS": 20,
+      "RELATED": 2,
+      "SUPPORTS": 1
+    }
+  }
+}

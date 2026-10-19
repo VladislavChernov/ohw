@@ -1,0 +1,38 @@
+{
+  "run_valid": true,
+  "verdicts": {
+    "T1": {
+      "verdict": "pass",
+      "reason": "есть связи с пустым chunk_ids"
+    },
+    "T2": {
+      "verdict": "pass",
+      "reason": "CONTAINS 4->4, MENTIONS 20->20; структурные среди кандидатов: нет; кандидаты по типам: {'DERIVES_FROM': 1}"
+    },
+    "T3": {
+      "verdict": "pass",
+      "reason": "связей с пустым chunk_ids не осталось"
+    },
+    "T4": {
+      "verdict": "pass",
+      "reason": "связь жива после ревизии носителя"
+    },
+    "T5": {
+      "verdict": "pass",
+      "reason": "plan=1 fact=1 дельта=1 (связи 1 + узлы 0)"
+    },
+    "T6": {
+      "verdict": "pass",
+      "reason": "planned=removed=0 и снимок графа не изменился"
+    },
+    "T7": {
+      "verdict": "not_evaluated",
+      "reason": "в этом сценарии недоказуемо: без конкурентного ingest planned и removed обязаны совпасть, схлопывание неотличимо от корректности. Покрыто юнит-тестом."
+    },
+    "T8": {
+      "verdict": "pass",
+      "reason": "27 записей длительностей у 3 ingest-джоб; для джобы уборки неприменимо"
+    }
+  },
+  "finished_at": "2026-09-29T14:06:10+00:00"
+}

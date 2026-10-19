@@ -13,10 +13,19 @@ ontology:
   node_types:
     - type: "Movie"
       unique_key: "canonical_name"
+      # `gloss` и `emitted` добавлены вместе с генератором инструкции (2026-09-29),
+      # см. `domain_profile.it.yaml`: пояснения и «что выдаёт модель» живут в данных.
+      gloss: "фильм; ремейки и сиквелы - SIMILAR_TO, а не тот же объект"
+      emitted: ["canonical_name", "name"]
     - type: "Director"
       unique_key: "canonical_name"
+      gloss: "режиссёр; варианты написания имени склеиваются глоссарием"
+      emitted: ["canonical_name"]
     - type: "Genre"
       unique_key: "canonical_name"
+      gloss: "жанр или тематическая категория"
+      emitted: ["canonical_name"]
+  chunk_entity_edge: "MENTIONS"
   edge_types:
     - from: "Director"
       to: "Movie"
@@ -33,31 +42,21 @@ extraction:
   prompt_template:
     id: "extract_cinema_v1"
     system: "Извлеки сущности и связи по онтологии cinema (фильмы, режиссёры, жанры)."
-  temperature: 0.1
-  max_tokens: 4096
 
 validation:
   rules: []
 
-canonicalization:
-  nodes:
-    Movie:
-      layers: ["unicode", "glossary", "trim_lower"]
-    Director:
-      layers: ["unicode", "glossary", "trim_lower"]
-    Genre:
-      layers: ["unicode", "glossary", "trim_lower"]
-
+# Секция `canonicalization` удалена вместе с мёртвым содержимым `canonicalization.nodes`
+# (бандл tidy-domain-profile-keys, 61050ae). Оставленный ключ без тела даёт в YAML `None`,
+# а не маппинг, и профиль целиком переставал грузиться: Config Service отвечал 422, и
+# query-контур не мог получить профиль домена. Слои трансформации ключа идентичности
+# (ADR-007) реализованы в коде — `orchestrator._identity_key`.
 chunking:
   strategy: "sliding_window"
   chunk_size: 512
   overlap: 64
 
 context_assembly:
-  template:
-    id: "context_cinema_v1"
-    priorities: ["graph", "vector"]
-  max_tokens: 4096
   eviction: "drop_lowest_reranker_score"
 
 retrieval:
@@ -66,8 +65,7 @@ retrieval:
   # подмножество Cypher — см. InMemoryGraphStore (ограниченная грамматика).
   # Тумблер графовой оси: false — только векторный поиск (env RETRIEVAL_GRAPH_ENABLED перекрывает).
   graph_search_enabled: true
-  cypher_template: |
-    MATCH (n) WHERE any(t IN $terms WHERE toLower(n.canonical_name) CONTAINS toLower(t) OR toLower(n.name) CONTAINS toLower(t) OR toLower(n.id) CONTAINS toLower(t))
-    OPTIONAL MATCH (n)-[r]-(m) WHERE m:{node_labels}
-    RETURN n, m, type(r) AS rel_type
-    LIMIT $max_nodes
+  # Глубина обхода по умолчанию: середина допустимого диапазона 1..6 (решение владельца
+  # 2026-09-29). Потолок живёт в MAX_EXPANSION_DEPTH, а не здесь; зажим объявляется в
+  # трассировке (`depth_clamped`). Кодовый фолбэк (2) ниже намеренно меньше.
+  max_depth: 3

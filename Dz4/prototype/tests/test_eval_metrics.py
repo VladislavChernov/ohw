@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 
@@ -17,7 +18,13 @@ from graphrag_proto.eval.metrics import (
 class _StubJudge:
     """Фейк-judge: детерминированные вердикты для groundedness/coverage."""
 
-    def generate(self, prompt: str, system: str = "", stream: bool = True) -> Iterator[str]:
+    def generate(
+        self,
+        prompt: str,
+        system: str = "",
+        stream: bool = True,
+        labels: dict[str, str] | None = None,
+    ) -> Iterator[str]:
         if "Подтверждается ли" in prompt or "Содержится ли" in prompt:
             yield "yes"
         else:
@@ -129,6 +136,163 @@ def test_lift_report_fail_on_regression() -> None:
     target = {"retrieval": {"recall_at_k": 0.9}, "generation": {"groundedness": 0.5, "coverage": 0.6}}
     report = lift_report(baseline, target)
     assert report["verdict"] == "fail"
+
+
+def _ingest_quality(**kwargs: object) -> dict[str, Any]:
+    base = {
+        "llm_layer_dropped_documents": 0,
+        "llm_layer_lost_entities": 0,
+        "llm_layer_lost_edges": 0,
+        "enrichment_degraded_documents": 0,
+        "loss": False,
+    }
+    base.update(kwargs)
+    return base
+
+
+def test_lift_report_invalidates_when_target_lost_llm_layer() -> None:
+    """Потеря слоя инвалидирует прогон, даже когда метрики выглядят улучшением.
+
+    Смещение одностороннее: пропавшие факты нельзя ни найти, ни вспомнить, поэтому
+    недооценка recall_graph/necessity/coverage гарантирована. `pass` по таким числам
+    утверждал бы о системе то, чего измерение не проверяло.
+    """
+    baseline = {
+        "retrieval": {"recall_at_k": 0.5},
+        "generation": {"groundedness": 0.7, "coverage": 0.6},
+    }
+    target = {
+        "retrieval": {"recall_at_k": 0.9},
+        "generation": {"groundedness": 0.8, "coverage": 0.7},
+        "ingest_quality": _ingest_quality(
+            llm_layer_dropped_documents=3,
+            llm_layer_lost_entities=412,
+            llm_layer_lost_edges=63,
+            loss=True,
+        ),
+    }
+
+    report = lift_report(baseline, target)
+
+    assert report["verdict"] == "invalid"
+    assert any("потерян LLM-слой" in reason for reason in report["verdict_reasons"])
+    # причина обязана называть размер: «что-то сломалось» не помогает разбираться
+    assert any("3 док." in reason and "412" in reason for reason in report["verdict_reasons"])
+
+
+def test_lift_report_invalidates_when_baseline_lost_llm_layer() -> None:
+    """Потеря в baseline смещает базу сравнения так же, как потеря в target.
+
+    Проверяется обе стороны пары: незаметная потеря в baseline делает delta
+    бессмысленным ровно так же, как потеря в target.
+    """
+    baseline = {
+        "retrieval": {"recall_at_k": 0.5},
+        "generation": {"groundedness": 0.7, "coverage": 0.6},
+        "ingest_quality": _ingest_quality(
+            llm_layer_dropped_documents=1, llm_layer_lost_entities=5, loss=True
+        ),
+    }
+    target = {
+        "retrieval": {"recall_at_k": 0.9},
+        "generation": {"groundedness": 0.8, "coverage": 0.7},
+    }
+
+    report = lift_report(baseline, target)
+
+    assert report["verdict"] == "invalid"
+    assert any("baseline" in reason for reason in report["verdict_reasons"])
+
+
+def test_lift_report_keeps_verdict_when_degraded_without_loss() -> None:
+    """Деградация без потери слоя прогон не инвалидирует.
+
+    Профиль не загрузился — экстракция не запускалась, терять было нечего, векторная
+    ось цела. Блокировать вердикт из-за этого — значит научить читателей игнорировать
+    предупреждение целиком, включая настоящие случаи.
+    """
+    baseline = {
+        "retrieval": {"recall_at_k": 0.5},
+        "generation": {"groundedness": 0.7, "coverage": 0.6},
+    }
+    target = {
+        "retrieval": {"recall_at_k": 0.8},
+        "generation": {"groundedness": 0.8, "coverage": 0.7},
+        "ingest_quality": _ingest_quality(
+            enrichment_degraded_documents=4, loss=False
+        ),
+    }
+
+    report = lift_report(baseline, target)
+
+    assert report["verdict"] == "pass"
+    assert report["verdict_reasons"] == []
+
+
+def test_lift_report_names_why_verdict_is_invalid() -> None:
+    """`invalid` без причины — это «разбирайтесь сами», и его не читают как причину.
+
+    Проверяется на существующем пути (degraded_questions), а не только на новом: если
+    причина вводится ради одного случая, она рано или поздно теряется на старом.
+    """
+    baseline = {
+        "retrieval": {"recall_at_k": 0.5},
+        "generation": {"groundedness": 0.7, "coverage": 0.6},
+    }
+    target = {
+        "retrieval": {"recall_at_k": 0.8},
+        "generation": {"groundedness": 0.8, "coverage": 0.7},
+        "graph_contribution": {"degraded_questions": 2},
+    }
+
+    report = lift_report(baseline, target)
+
+    assert report["verdict"] == "invalid"
+    assert report["verdict_reasons"] == ["вопросы с недоступным графовым вкладом: 2"]
+
+
+def test_lift_report_invalidates_when_config_drifted_between_modes() -> None:
+    """Пара, измеренная разными настройками, не является измерением вклада графа.
+
+    Тогда delta измеряет «вклад графа ПЛЮС разницу между конфигами», и разделить эти две
+    части нечем. Конфигурация закрепляется на первый запрос каждого режима, поэтому дрейф
+    возможен, если файл изменили между baseline и target, — и он обязан быть назван.
+    """
+    baseline = {
+        "retrieval": {"recall_at_k": 0.5},
+        "generation": {"groundedness": 0.7, "coverage": 0.6},
+        "config": {"config_drift": True, "profile_fingerprint": "aaa"},
+    }
+    target = {
+        "retrieval": {"recall_at_k": 0.9},
+        "generation": {"groundedness": 0.8, "coverage": 0.7},
+        "config": {"config_drift": True, "profile_fingerprint": "bbb"},
+    }
+
+    report = lift_report(baseline, target)
+
+    assert report["verdict"] == "invalid"
+    assert any("конфигурация изменилась" in reason for reason in report["verdict_reasons"])
+
+
+def test_lift_report_keeps_verdict_when_config_is_identical() -> None:
+    """Одинаковый конфиг обоих режимов — норма, а не повод для тревоги."""
+    config = {"config_drift": False, "profile_fingerprint": "aaa"}
+    baseline = {
+        "retrieval": {"recall_at_k": 0.5},
+        "generation": {"groundedness": 0.7, "coverage": 0.6},
+        "config": config,
+    }
+    target = {
+        "retrieval": {"recall_at_k": 0.9},
+        "generation": {"groundedness": 0.8, "coverage": 0.7},
+        "config": config,
+    }
+
+    report = lift_report(baseline, target)
+
+    assert report["verdict"] == "pass"
+    assert report["verdict_reasons"] == []
 
 
 def test_lift_report_missing_generation_metrics() -> None:

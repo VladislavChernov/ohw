@@ -13,38 +13,77 @@ import json
 import logging
 import os
 import random
+import re
 import sys
 import time
 import unicodedata
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections import Counter
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
+from itertools import pairwise
+from pathlib import Path
 from typing import Any, TypeVar
 
+from graphrag_proto.ingestion_service.pipeline.candidates import (
+    CandidatesProductionError,
+    load_candidates,
+    produce_candidates,
+)
 from graphrag_proto.ingestion_service.pipeline.chunker import (
     Chunker,
     build_chunker,
     build_chunker_for,
     build_chunker_from_profile,
 )
+from graphrag_proto.ingestion_service.pipeline.profile_contract import (
+    PROFILE_PROBLEM_LOG,
+    validate_ingestion_profile,
+)
+from graphrag_proto.ingestion_service.pipeline.prompt_renderer import (
+    extraction_identity,
+    instruction_fingerprint,
+    render_candidates_block,
+    render_instruction,
+)
 from graphrag_proto.ingestion_service.projection import (
     ProjectionState,
     ProjectionStateStore,
     projection_revision_for,
     projection_transition_allowed,
+    source_projection_revision,
 )
-from graphrag_proto.retrieval.adapters.base import Embedder, GraphStoreProvider, VectorStoreProvider
+from graphrag_proto.retrieval.adapters.base import (
+    OWNED_ENTITY_FIELDS as _OWNED_ENTITY_FIELDS,
+)
+from graphrag_proto.retrieval.adapters.base import (
+    Embedder,
+    GraphStoreProvider,
+    VectorStoreProvider,
+)
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
+from graphrag_proto.retrieval.adapters.llm import (
+    LLMAdapterError,
+    LLMHTTPError,
+    LLMResponseError,
+    LLMTimeoutError,
+    LLMUnavailableError,
+)
 
-DEDUP_AUTO = 0.92
-DEDUP_LLM = 0.75
-SIMILAR_TO = 0.85
+#: Вид ручного утверждения. `document` - принадлежит документу и живёт с ним: получает
+#: опору на чанки, теряет её при ревизии и убирается как кандидат. `user` - принадлежит
+#: пользователю: опоры не получает и переживает ревизию документа, потому что для
+#: предиката уборки остаётся структурной. Решение владельца от 2026-09-29, `docs/02` §1.2.
+SCOPE_DOCUMENT = "document"
+SCOPE_USER = "user"
 
-EXTRACTOR_VERSION = "deterministic:v1"
+#: Метка ноды, которую объявил человек, а не модель. Отдельное значение, а не
+#: отсутствие поля: раньше нода без `extractor_version` получала метку
+#: `deterministic:v1` и тем самым утверждала, что её придумала заглушка (ADR-049 п. 3).
+MANUAL_NODE_VERSION = "user:manual"
 
-SOURCE_LABEL = "Source"
 CHUNK_LABEL = "Chunk"
 ENTITY_LABEL = "Entity"
 CONTEXT_NODE_LABEL = "ContextNode"
@@ -65,6 +104,16 @@ def _load_profile(ctx: PipelineContext, profile_fetcher: ProfileFetcher | None) 
     if profile_fetcher is None:
         ctx.profile = {}
         ctx.profile_loaded = True
+        # Пустой профиль - не «профиля нет», а «его не принесли». Разница выглядит
+        # как успех: LLM-экстракция уходит в детерминированный путь с `cause=None`,
+        # и по отчёте это читается как «извлечение отработало». Раньше такой отказ
+        # обнаруживался только потому, что тест спотыкался о него; в бою он был бы тихим.
+        _log.warning(
+            "профиль не передан: экстракция уйдёт в детерминированный путь, "
+            "домен=%s, источник=%s",
+            ctx.domain,
+            ctx.source_url,
+        )
         return
     try:
         profile = profile_fetcher(ctx.domain)
@@ -80,6 +129,28 @@ def _load_profile(ctx: PipelineContext, profile_fetcher: ProfileFetcher | None) 
         return
     ctx.profile = profile
     ctx.profile_loaded = True
+    # Валидация контракта — здесь, а не в Config Service, потому что это единственная
+    # общая точка для всех трёх стадий ingest, и потому что ingest может грузить профиль
+    # из локального YAML в обход Config Service вообще без проверок.
+    #
+    # Ошибки НЕ превращаются в исключение: ADR-031 §2 требует, чтобы optional enrichment
+    # не блокировал сохранение документа, и «упасть на битом профиле» нарушало бы это.
+    # Громкость обеспечивается ERROR-логом, `cause=profile_invalid` и счётчиком — этого
+    # хватает, чтобы дефект был виден и не мог проскочить как «просто деградация».
+    if not profile:
+        # Пустой профиль — законное состояние (профиль не настроен), а не дефект.
+        return
+    verdict = validate_ingestion_profile(profile)
+    if verdict.errors and PROFILE_PROBLEM_LOG.due(ctx.domain, "error", verdict.errors):
+        _log.error(
+            "профиль домена %r нарушает контракт экстракции: %s — LLM-слой построен не "
+            "будет, ноды не извлекаются, а причина уйдёт в enrichment_causes отчёта "
+            "(лог один раз на набор проблем)",
+            ctx.domain,
+            "; ".join(verdict.errors),
+        )
+    if verdict.warnings and PROFILE_PROBLEM_LOG.due(ctx.domain, "warning", verdict.warnings):
+        _log.warning("профиль домена %r: %s", ctx.domain, "; ".join(verdict.warnings))
 
 
 def _profile_llm_enabled(profile: dict[str, Any]) -> bool:
@@ -98,14 +169,75 @@ def _identity_key(value: object) -> str:
     return " ".join(normalized.casefold().split())
 
 
+def _iter_name_words(text: str) -> list[str]:
+    """Слова и соседние пары слов текста — кандидаты на имя сущности.
+
+    Пары нужны для составных имён вроде `Document Registry`: по одному слову такое имя
+    не найдётся, а искать только целые фразы нельзя — тогда `REQUIREMENT_3` или
+    `CONCEPT_JOB_ALERTS` не нашлись бы и сочли бы «из текста», хотя в тексте их нет.
+    Тройки не берутся: они почти всегда дают ложные совпадения на длинных русских
+    оборотах, а цена ошибки тут — либо пропущенная выдумка, либо невидимая.
+    """
+    words = text.split()
+    candidates = list(words)
+    candidates.extend(f"{first} {second}" for first, second in pairwise(words))
+    return candidates
+
+
 def _extraction_template(profile: dict[str, Any]) -> dict[str, Any]:
     extraction = profile.get("extraction")
     template = extraction.get("prompt_template") if isinstance(extraction, dict) else None
     if not isinstance(template, dict):
-        raise TypeError("в профиле отсутствует extraction.prompt_template")
-    if not isinstance(template.get("user"), str) or not isinstance(template.get("system"), str):
-        raise TypeError("extraction.prompt_template должен содержать system и user")
+        raise ExtractionConfigError("в профиле отсутствует extraction.prompt_template")
+    if not isinstance(template.get("system"), str):
+        raise ExtractionConfigError("extraction.prompt_template должен содержать system")
+    # `user` необязателен с 2026-09-29: метод извлечения добавляет генератор инструкции,
+    # и требование его здесь означало бы, что профиль обязан дублировать метод в прозе.
+    # Заданный, но нестроковый `user` - ошибка, отсутствующий - законен.
+    if "user" in template and not isinstance(template.get("user"), str):
+        raise ExtractionConfigError("extraction.prompt_template.user задан, но не является строкой")
     return template
+
+
+def _declared_names_in_answer(raw: str) -> list[str]:
+    """Имена, объявленные в СЫРОМ ответе, — в том числе в обрезанном.
+
+    Разбор не должен требовать валидного JSON: смысл функции в том, чтобы посчитать
+    имена тогда, когда JSON не закрылся. Поэтому это не `json.loads`, а поиск полей
+    регуляркой: ответ в этом состоянии невалиден по построению, и строгий разбор не
+    ответил бы на вопрос «что модель вообще выдала».
+
+    Регулярка смотрит `canonical_name` и `name` рядом с фигурными скобками, потому что
+    в обрезанном ответе значения иногда остаются, а закрывающих скобок уже нет.
+    """
+    found = re.findall(r'"(?:canonical_name|name)"\s*:\s*"([^"]+)"', raw)
+    return [item.strip() for item in found if item.strip()]
+
+
+def _declared_relations_in_answer(raw: str) -> list[tuple[str, str]]:
+    """Пары (`from`, `to`) из сырого ответа, включая обрезанный.
+
+    Ключ пары склеивается из обоих концов: у вырожденного ответа вершина одна и та же,
+    и считать нужно уникальные ПАРЫ, а не число концов - иначе 108 повторов
+    `NormalizeStage -> ...` посчитались бы как 108 разных связей.
+    """
+    pairs = re.findall(r'"from"\s*:\s*"([^"]*)"\s*,\s*"to"\s*:\s*"([^"]*)"', raw)
+    return [
+        (source.strip(), target.strip())
+        for source, target in pairs
+        if source.strip() and target.strip()
+    ]
+
+
+def _answer_shape(raw: str) -> tuple[int, int, int]:
+    """(строк всего, строк уникальных, баланс фигурных скобок) по сырому ответу.
+
+    Доля дублирующихся строк и незакрытый JSON - два разных признака одного вырождения,
+    и оба видны без разбора JSON. Баланс скобок берётся по всему ответу, включая
+    обрамление: незакрытая скобка означает, что JSON не закрылся никогда.
+    """
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    return len(lines), len(set(lines)), raw.count("{") - raw.count("}")
 
 
 def _parse_extraction_payload(raw: str) -> dict[str, Any]:
@@ -120,9 +252,9 @@ def _parse_extraction_payload(raw: str) -> dict[str, Any]:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise ValueError("EXTRACT LLM должен вернуть валидный JSON") from exc
+        raise ExtractionModelError("EXTRACT LLM должен вернуть валидный JSON") from exc
     if not isinstance(payload, dict):
-        raise TypeError("EXTRACT LLM должен вернуть JSON-объект")
+        raise ExtractionModelError("EXTRACT LLM должен вернуть JSON-объект")
     return payload
 
 
@@ -216,6 +348,80 @@ def _safe_entity_description(value: object, ctx: PipelineContext) -> str | None:
     return value
 
 
+#: Поля записи, из которых берётся имя сущности при проверке концов связи.
+#:
+#: `id` здесь отсутствует **намеренно и по контракту**: `id` — идентификатор в пределах
+#: домена, а не имя. Именно из `id` модель брала концы в прогоне expA, где они оказались
+#: выдуманными (`REQ-1..3`, `CON-1..4`) и не разрешились ни один: 12 концов из 12. Включение
+#: `id` в список создало бы второй канал именования и сделало бы разрешимость зависящей от
+#: того, какое поле модель заполнила, то есть выдумка became бы неотличима от имени.
+#: Правильный ремонт — промт (объявить `id` прочитанным из текста, а не назначаемым именем)
+#: плюс запись неразрешённого конца фактом вместо сноса слоя (ADR-037).
+#:
+#: Контракт закреплён тестом `tests/test_grounding_verdicts.py`. Если он когда-нибудь перестанет
+#: быть правдой, тест и этот список меняются вместе, а тест не отключается: иначе он станет
+#: защитой от исправления.
+ENTITY_NAME_FIELDS: tuple[str, ...] = ("tag_id", "canonical", "canonical_name", "name")
+
+#: Поле, которое валидация считает каноническим. Объявлено отдельно от ролей, потому что это
+#: единственное утверждение о полях, которое обязано выстоять при правке состава списка.
+ENTITY_CANONICAL_FIELD: str = "canonical"
+
+#: Роль каждого поля в соглашении об именах. Нужна рядом со списком, потому что именно из неё
+#: берётся **положительная** формулировка контракта: «поле, которое онтология называет
+#: каноническим, обязано быть источником имени». Такая формулировка переживает правку состава
+#: списка, тогда как проверка «`id` не входит» замораживала бы сегодняшний перечень и первая же
+#: правка онтологии упёрлась бы в тест как в ошибку.
+ENTITY_FIELD_ROLES: dict[str, str] = {
+    "tag_id": "tagger-assigned identifier, used only when the model did not name the entity",
+    "canonical": "the name the ontology declares canonical; written by _entity_record from canonical_name or canonical or name",
+    "canonical_name": "model-written canonical name; folded into `canonical` by _entity_record",
+    "name": "display name; falls back to `canonical` when absent",
+}
+
+#: Ключи конца связи и их алиасы — в том порядке, в каком их читает `_validate_edges`:
+#: `relation.get("from") or relation.get("from_id")`. Порядок обязателен: при обоих
+#: заполненных полях побеждает первое, и счётчик разрешимости обязан считать тот же конец.
+#:
+#: Список живёт здесь, а не в приборе измерения, потому что прибор играет этот же ответ:
+#: своя копия списка означала бы второе соглашение об именах ровно там, где расхождение
+#: молчит.
+ENDPOINT_KEYS: tuple[tuple[str, ...], ...] = (("from", "from_id"), ("to", "to_id"))
+
+#: Поля ответа модели, которые не являются именем, но в которых модель всё равно писала
+#: концы. Нужны для измерения, а не для валидации: их присутствие в ответе означает, что
+#: модель назвала сущность не тем полем. `category` добавлен по прогону expD.
+NON_NAME_FIELDS: tuple[str, ...] = ("id", "category", "description")
+
+
+def _entity_names_from_item(item: Mapping[str, Any]) -> tuple[str, str]:
+    """`(canonical, name)` из ответа модели — ровно так, как их кладёт `_entity_record`.
+
+    Вынесено отдельно, потому что прибор, считающий разрешимость, обязан разрешать имя
+    **тем же** способом. Расхождение двух реализаций уже стоило одного неверного вывода:
+    прибор, взявший больше полей, чем валидатор, показал «0 неразрешённых» там, где их было 12.
+    """
+    canonical = item.get("canonical_name") or item.get("canonical") or item.get("name")
+    name = item.get("name")
+    if not isinstance(name, str) or not name.strip():
+        name = canonical
+    return (
+        canonical if isinstance(canonical, str) else "",
+        name if isinstance(name, str) else "",
+    )
+
+
+def _declared_names(records: Iterable[Mapping[str, Any]]) -> set[str]:
+    """Ключи идентичности имён, которые валидация считает объявленными."""
+    known: set[str] = set()
+    for record in records:
+        for key in ENTITY_NAME_FIELDS:
+            value = record.get(key)
+            if isinstance(value, str) and value:
+                known.add(_identity_key(value))
+    return known
+
+
 def _entity_record(
     entity_type: str,
     item: dict[str, Any],
@@ -223,12 +429,9 @@ def _entity_record(
     chunk_id: str,
     extractor_version: str,
 ) -> dict[str, Any]:
-    canonical = item.get("canonical_name") or item.get("canonical") or item.get("name")
-    if not isinstance(canonical, str) or not canonical.strip():
-        raise ValueError(f"сущность {entity_type} должна иметь имя")
-    name = item.get("name")
-    if not isinstance(name, str) or not name.strip():
-        name = canonical
+    canonical, name = _entity_names_from_item(item)
+    if not canonical.strip():
+        raise ValueError(f"сущность {entity_type} без канонического имени")
     record: dict[str, Any] = {
         "type": entity_type,
         "name": name,
@@ -240,12 +443,20 @@ def _entity_record(
         "origin": "ai",
         "variants": [name],
     }
-    for key in ("id", "description", "category", "tag_id", "confidence"):
+    for key in ("id", "description", "category", "confidence"):
         value = item.get(key)
         if key == "description":
             value = _safe_entity_description(value, ctx)
         if value is not None:
             record[key] = value
+    # `tag_id` из ответа модели НЕ копируется (L1-05: идентичность узла детерминирована
+    # Python-кодом, LLM — только optional enrichment). Промпт его и не запрашивает
+    # (`domain_profile.*.yaml`, extraction.prompt_template), то есть поле приходило
+    # непрошенным и могло молча создать дубль-ноду вместо слияния по canonical key.
+    # Считаем, а не просто игнорируем: частота показывает, путает ли модель
+    # идентичность с содержимым, и делает решение обратным по данным, а не по спору.
+    if item.get("tag_id"):
+        ctx.model_tag_ids_ignored += 1
     record["origin"] = "ai"
     properties = item.get("properties")
     if isinstance(properties, dict):
@@ -260,10 +471,6 @@ def _chunk_id(domain: str, source_url: str, index: int) -> str:
     """Стабильный идентификатор чанка (L2-04: оси связаны по chunk_id)."""
     digest = hashlib.sha256(f"{domain}:{source_url}:{index}".encode()).hexdigest()[:12]
     return f"chk:{digest}"
-
-
-def _source_node_id(domain: str, source_url: str) -> str:
-    return f"src:{domain}:{source_url}"
 
 
 def _entity_node_id(domain: str, canonical_name: str) -> str:
@@ -290,6 +497,11 @@ STAGES = (
     "COMMIT",
 )
 
+#: Стадии, которые читают профиль. `INGEST` его не читает, а джоба-noop не читает
+#: ничего: профиль загружается перед первой из этих, и только если работа не отпала
+#: как noop. Отсюда и «раз на джобу» - ровно один вызов фетчера на не-noop джобу.
+_PROFILE_CONSUMER_STAGES = frozenset({"CHUNK", "EXTRACT", "COMMIT"})
+
 
 @dataclass
 class PipelineContext:
@@ -299,6 +511,7 @@ class PipelineContext:
     source_url: str
     source_path: str | None = None
     document: Any = None
+    raw_text: str = ""
     chunks: list[str] = field(default_factory=list)
     chunks_meta: list[dict[str, Any]] = field(default_factory=list)
     entities: list[dict[str, Any]] = field(default_factory=list)
@@ -311,6 +524,108 @@ class PipelineContext:
     profile_error: str | None = None
     enrichment_degraded: bool = False
     enrichment_error: str | None = None
+    # Отдельный факт от `enrichment_degraded`: слой не просто «обработан хуже», а
+    # ПОТЕРЯН целиком. Флаг ставится в точке сброса, а не в логе, иначе значение
+    # пришлось бы вылавливать из текста. Одна метрика на оба факта хуже, чем никакой:
+    # профиль не загрузился (ничего не потеряно, LLM и не пытались построить) и
+    # исключение в экстракции (потерян весь слой) дают одно и то же «деградация».
+    #
+    # Ставится по факту исчезнувших записей (см. `_degrade_after_extraction_failure`), а
+    # не по факту срабатывания сброса: сброс до первого ответа модели теряет ноль, и
+    # такой документ в счётчике потерь был бы ложью.
+    llm_layer_dropped: bool = False
+    # Сколько записей и рёбер ПОТЕРЯНО сбросом, а сколько LLM-слой произвёл. Счётчик
+    # «документов с потерей» отвечает на вопрос «как часто», числа — на вопрос «сколько
+    # стоит»: одна потеря — это две записи или две тысячи, и решение о починке
+    # принимается по второму.
+    llm_layer_lost_entities: int = 0
+    llm_layer_lost_edges: int = 0
+    llm_records: int = 0
+    llm_edges: int = 0
+    # ADR-052: сколько имён модель выдала и сколько из них реально есть в тексте чанка.
+    # Оба числа — про извлечение, а не про запись: считаются на ответе модели, до COMMIT.
+    # Ноль означает «извлечение не вернуло ни одного имени», а не «все имена настоящие».
+    llm_names_total: int = 0
+    llm_names_grounded: int = 0
+    # ADR-053: ограничение имен списком кандидатов. `candidates_absent` — список не
+    # найден, и по решению владельца документ грузится только в вектор: это режим
+    # работы, а не потеря. `candidates_total` — размер списка документа.
+    # `llm_names_off_list` — сколько имён модель выдала ВНЕ списка: ограничение может
+    # нарушаться, и это обязано быть числом, а не ощущением по ответам.
+    # `chunks_without_candidates` — сколько чанков ушло в модель без списка кандидатов.
+    candidates_absent: bool = False
+    candidates_total: int = 0
+    llm_names_off_list: int = 0
+    chunks_without_candidates: int = 0
+    chunks_total: int = 0
+    # ADR-056: вырождение ответа модели, а не обрыв по длине. Измерено на
+    # `docs/02_pipeline_and_normalizer.md`: модель объявила 120 связей, из которых
+    # уникальны 33, а 108 из 120 имели `from = NormalizeStage`. `max_tokens` тут ни при
+    # чём - увеличение лимита даёт ещё цикл, а не закрытый JSON.
+    #
+    # Числа считаются по СЫРОМУ ответу, а не по распарсенным записям: при обрыве
+    # распарсенных записей нет вовсе, и счётчики выше дают ноль при полном отсутствии
+    # проверки. Молчащий ноль читается как «модель не нарушила ограничение».
+    #
+    # `*_declared` — сколько объявлено, `*_unique` — сколько уникально. Диагноз делается
+    # по отношению уникальных к объявленным, а не по соседним дублям: в измеренном ответе
+    # одинаковых пар подряд не было ни разу, и детектор соседних повторов эту поломку
+    # пропустил бы.
+    llm_names_raw: int = 0
+    llm_names_raw_unique: int = 0
+    llm_names_raw_off_list: int = 0
+    llm_names_raw_grounded: int = 0
+    llm_relations_declared: int = 0
+    llm_relations_unique: int = 0
+    llm_answer_lines: int = 0
+    llm_answer_lines_unique: int = 0
+    llm_answer_brace_balance: int = 0
+    # Счётчика «тип вне онтологии» здесь НЕТ, и это решение, а не недосмотр: тип
+    # сущности задаётся ключом payload, который определяет СХЕМА ответа, а не модель.
+    # Поэтому значение вне онтологии невозможно by construction, и счётчик был бы
+    # гарантированным нулём. Проект такое прямо запрещает: прибор, который не может
+    # измерить, обязан сказать «не измерено», а не 0.
+    # Причина деградации (`CAUSE_*`), а не её текст: текст можно переформулировать
+    # вместе с причиной, имя — нет.
+    enrichment_cause: str | None = None
+    extraction_passport: dict[str, Any] | None = None
+    # Фактический расход токенов последнего вызова LLM, как его сообщил сервер. Нужен,
+    # чтобы отвечать на вопрос «кто жрёт токены - промпт или ответ» по числам, а не по
+    # ощущению: раньше расход не снимался вовсе.
+    llm_usage: dict[str, Any] | None = None
+    # Неразрешённые концы связей (ADR-037, случай 3). Заполняются вместо сноса слоя:
+    # каждый элемент — один конец с ИМЕНЕМ, как модель его написала, `chunk_id` и видом
+    # связи. Имя хранится исходным, а не ключом идентичности: джоба уборки обязана уметь
+    # сопоставить конец с текстом, а ключ для этого бесполезен.
+    #
+    # Отдельный список, а не флаг: «был неразрешённый конец» и «какие именно» — разные
+    # вопросы, и флагом второй не ответить.
+    unresolved_endpoints: list[dict[str, Any]] = field(default_factory=list)
+    # Счётчики разрешимости (ADR-039). Копятся по ходу EXTRACT, потому что знаменатели —
+    # объявленные сущности и концы — считаются там же, где их и разбирали. Пишутся в отчёт
+    # на КАЖДОЙ джобе, прошедшей EXTRACT, включая нули: без знаменателя доля не считается,
+    # а «концов нет» и «не считали» — разные утверждения.
+    resolvability: dict[str, Any] = field(default_factory=dict)
+    # Множества имён **на весь документ**. Считать «уникальные» суммой по чанкам нельзя:
+    # имя, встретившееся в двух чанках, было бы посчитано дважды, и число уехало бы вверх
+    # ровно там, где документ длиннее. Обратная величина, чем кажется: длинный документ дал бы
+    # больше «уникальных», хотя уникальных ровно столько же.
+    declared_name_keys: set[str] = field(default_factory=set)
+    endpoint_keys: set[str] = field(default_factory=set)
+    model_tag_ids_ignored: int = 0
+    ambiguous_aliases: int = 0
+    # Ноды, записанные этой джобой в ГРАФ, сгруппированные по производителю
+    # (`extractor_version`) — ADR-049 п. 4. Заполняется в COMMIT после успешной записи.
+    #
+    # Смысл узкий и потому проверяемый: кто создал ноды **этой** сборки. Это не история
+    # извлечений: `extractor_version` перезаписывается на том же MERGE, что и остальное
+    # содержимое, поэтому прежнего значения в графе не остаётся (см. ADR-049, раздел про
+    # требование M0). Хранить историю извлечений — отдельная задача, и она не решена.
+    #
+    # Нужно, чтобы прогон читался: появление здесь чужого производителя означает, что
+    # ноды в графе появились не из ответа модели, и это видно по числам, а не по догадке
+    # о том, какая ветка EXTRACT отработала.
+    nodes_by_extractor_version: dict[str, int] = field(default_factory=dict)
     graph_projection_status: str = "not_requested"
     graph_projection_error: str | None = None
     registry_result: tuple[str, int, bool] | None = None
@@ -343,6 +658,17 @@ class IngestStage(Stage):
 
         document = reader.read(Path(ctx.source_path or ""), ctx.source_url, ctx.domain)
         ctx.document = document
+        # Сырой текст источника нужен для сверки `sha256` со списком кандидатов (ADR-053).
+        # Считать хеш по `blocks` нельзя: блоки не сохраняют исходную разметку, и хеш
+        # документа тогда не совпал бы с тем, что посчитал pre-ingest по файлу, - то есть
+        # проверка свежести всегда отвергала бы правильный список.
+        try:
+            ctx.raw_text = Path(ctx.source_path or "").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # Источник, который не читается как текст (например, PDF), просто не имеет
+            # списка кандидатов: стадия pre-ingest работает с markdown. Это штатный путь,
+            # а не повод ронять загрузку.
+            ctx.raw_text = ""
 
 
 class ChunkStage(Stage):
@@ -405,8 +731,133 @@ class EmbedStage(Stage):
             meta["chunk_id"] = _chunk_id(ctx.domain, ctx.source_url, meta["index"])
 
 
+class ExtractionConfigError(RuntimeError):
+    """Профиль или конфигурация домена не позволяют выполнить экстракцию.
+
+    Это НАШ дефект конфигурации, а не сбой модели: чинить надо профиль, а не LLM.
+    Раньше такое приходило как `TypeError` из резолвера, и широкий `except Exception`
+    не мог отличить его от сбоя модели — оба выглядели как «LLM не справился», и
+    счётчик деградации показывал модель там, где виноват конфиг.
+    """
+
+
+class ExtractionModelError(RuntimeError):
+    """Модель или её адаптер вернули негодный результат либо упали.
+
+    Граница намеренно узкая: сюда превращаются только сбои на границе с моделью
+    (вызов адаптера, разбор ответа, проверка формы ответа). Дефекты нашего кода
+    после этой границы остаются дефектами и падают громко, иначе они надевали бы
+    маску «модель не справилась» и уводили расследование не туда.
+    """
+
+
+# Причины деградации, различаемые потребителем. Не перечисление «на вкус»: у них
+# разные действия. `profile_unavailable` — профиль не пришёл/сломан, экстракция не
+# запускалась, потери нет; `profile_invalid` — профиль есть, но негоден (чинить
+# конфиг); `model_error` — модель ответила негодным (чинить промпт/модель).
+# `model_unavailable` / `model_timeout` / `model_http_error` — транспорт до модели не
+# дошёл: поднять стенд, посмотреть его логи, увеличить таймаут. Раньше все четыре сводились
+# в `model_error`, и разбор уводил к провайдеру модели вместо своего стенда.
+CAUSE_PROFILE_UNAVAILABLE = "profile_unavailable"
+CAUSE_PROFILE_INVALID = "profile_invalid"
+CAUSE_MODEL_ERROR = "model_error"
+CAUSE_MODEL_UNAVAILABLE = "model_unavailable"
+CAUSE_MODEL_TIMEOUT = "model_timeout"
+CAUSE_MODEL_HTTP_ERROR = "model_http_error"
+
+# Причины, по которым экстракция LLM не состоялась, хотя её ждали (ADR-049).
+# Отдельные имена, потому что ремонт у них разный, — тот же довод, что у четырёх
+# транспортных причин выше. До ADR-049 все три ветки были молчаливыми: не ставили
+# флаг, не называли причину и не писали лог, а документ уходил в COMMIT без
+# слоя сущностей и читался как «извлечение отработало».
+CAUSE_LLM_DISABLED_BY_CONFIG = "llm_disabled_by_config"
+CAUSE_FAKE_LLM_ADAPTER = "fake_llm_adapter"
+CAUSE_PROFILE_NOT_ENABLING_LLM = "profile_not_enabling_llm"
+CAUSE_LLM_ADAPTER_MISSING = "llm_adapter_missing"
+
+#: Транспортная ошибка адаптера → причина деградации. Словарь, а не цепочка `isinstance`,
+#: потому что цепочка выросла бы вместе с числом классов и перестала бы читаться.
+ADAPTER_CAUSES: dict[type, str] = {
+    LLMUnavailableError: CAUSE_MODEL_UNAVAILABLE,
+    LLMTimeoutError: CAUSE_MODEL_TIMEOUT,
+    LLMHTTPError: CAUSE_MODEL_HTTP_ERROR,
+    LLMResponseError: CAUSE_MODEL_ERROR,
+}
+
+
+def _degradation_cause(exc: Exception) -> str:
+    """Причина деградации по ТИПУ исключения, а не по его тексту.
+
+    Идёт по цепочке `__cause__`, потому что на границе с моделью исходная транспортная
+    ошибка обёрнута в `ExtractionModelError` — классифицировать только внешний тип значило
+    бы вернуть `model_error` всем четверым, то есть вернуть ту неразличимость, ради
+    устранения которой типы и введены.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        for exc_type, cause in ADAPTER_CAUSES.items():
+            if isinstance(current, exc_type):
+                return cause
+        if isinstance(current, ExtractionConfigError):
+            return CAUSE_PROFILE_INVALID
+        current = current.__cause__
+    return CAUSE_MODEL_ERROR
+
+
+def _extraction_passport(
+    ctx: PipelineContext, llm: Any, instruction: str, identity: str
+) -> dict[str, Any]:
+    """Паспорт извлечения: чем выполнялся разбор, кроме текста документа.
+
+    **Единица воспроизведения — документ и его версия, а не джоба.** Это решение владельца
+    от 2026-09-29, и выбор неочевиден: `job_id` тоже уникален, но воспроизводим только при
+    повторе той же джобы, чего на практике не делает никто, а при ретрае он меняется - то
+    есть паспорт оказался бы нестабилен ровно там, где нужнее. `source_url` плюс версия
+    переживают ретрай, и «переизвлечь этот документ и получить то же» работает.
+
+    Значения, влияющие на извлечение, читаются из адаптера, а не из профиля: `extraction.*`
+    в профиле объявлены, но не читаются, а действующие числа живут в блоке `llm`. Записать
+    в паспорт профильные означало бы записать неправду - это и есть то расхождение
+    (0.1 против 0.3), из-за которого паспорт и понадобился.
+
+    Обращение к приватным полям адаптера осознанно: это единственный источник правды о том,
+    с чем он реально пойдёт к серверу, а любые параллельные настройки разъедутся с ним же -
+    и паспорт начнёт описывать не то, что выполнялось.
+    """
+    profile = ctx.profile or {}
+    raw_meta = profile.get("profile")
+    meta = raw_meta if isinstance(raw_meta, Mapping) else {}
+    return {
+        "domain": ctx.domain,
+        "source_url": ctx.source_url,
+        "document_version": int(getattr(ctx, "document_version", 0) or 0),
+        "profile": f"{meta.get('name') or '?'!s}@{meta.get('version') or '0'!s}",
+        "llm_enabled": _profile_llm_enabled(profile),
+        "model": str(getattr(llm, "_model", "") or ""),
+        "temperature": getattr(llm, "_temperature", ""),
+        "max_tokens": getattr(llm, "_max_tokens", ""),
+        "context_window": getattr(llm, "_context_window", "") or "не объявлено стендом",
+        "timeout_s": getattr(llm, "_timeout_s", ""),
+        "seed": getattr(llm, "_seed", None) or "не задан (temperature=0 делает его ненужным)",
+        "instruction_fingerprint": instruction_fingerprint(instruction),
+        "identity": identity,
+        # Фактический расход токенов, если сервер его сообщил. Это единственное место, где
+        # видно, во сколько обошёлся разбор: без него паспорт описывает, ЧЕМ выполнялось,
+        # но не СКОЛЬКО стоило, и вопрос «кто жрёт токены» не имеет ответа по числам.
+        "usage": dict(ctx.llm_usage) if isinstance(ctx.llm_usage, dict) and ctx.llm_usage else None,
+        # Инструкция целиком: она и есть переиспользуемая часть, текст чанков уже в `Chunk`.
+        "instruction": instruction,
+    }
+
+
 class ExtractStage(Stage):
-    """EXTRACT: LLM или детерминированный fallback."""
+    """EXTRACT: LLM-слой, а при невозможности — объявление деградации (ADR-049).
+
+    Раньше здесь была заглушка, которая создавала ноды из токенов текста. Теперь её нет:
+    ни одна из веток, ведущих в неё, не пишет в граф ничего.
+    """
 
     name = "EXTRACT"
 
@@ -423,37 +874,266 @@ class ExtractStage(Stage):
     def run(self, ctx: PipelineContext) -> None:
         if not _llm_extraction_enabled():
             _load_profile(ctx, self._profile_fetcher)
-            self._extract_deterministic(ctx)
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_LLM_DISABLED_BY_CONFIG,
+                "EXTRACT_LLM не объявлен: экстракция LLM выключена конфигурацией",
+            )
             return
         if getattr(self._llm, "is_fake", False):
             if not ctx.profile_loaded:
                 ctx.profile = {}
                 ctx.profile_loaded = True
-            self._extract_deterministic(ctx)
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_FAKE_LLM_ADAPTER,
+                "адаптер LLM помечен is_fake: его ответы не несут извлечения",
+            )
             return
         _load_profile(ctx, self._profile_fetcher)
-        if ctx.profile_error:
-            ctx.enrichment_degraded = True
-            ctx.enrichment_error = ctx.profile_error
-        if not ctx.profile or not _profile_llm_enabled(ctx.profile) or self._llm is None:
-            self._extract_deterministic(ctx)
+        # Причину `profile_unavailable` объявляет ветка `not ctx.profile` ниже, а не этот
+        # участок. `_load_profile` ставит `profile_error` только вместе с пустым профилем
+        # (исключение загрузчика и «профиль не mapping»), поэтому объявлять деградацию
+        # здесь было дублированием. Дублирование опасно: если бы `_load_profile` стал
+        # оставлять непустой профиль вместе с ошибкой, экстракция ушла бы в `_extract_llm`,
+        # а джоба осталась бы помеченной `enrichment_degraded` с причиной, которой не
+        # было,- то есть «деградация объявлена, извлечение выполнено».
+        # Две причины, а не одна: у профиля и у адаптера ремонт разный, и обЪединённая
+        # строка читалась бы «виновато что-то одно» — ровно та неразличимость, ради
+        # устранения которой по ТИПУ классифицируются и транспортные ошибки.
+        if not ctx.profile:
+            # Профиль не пришёл — причина здесь `profile_unavailable`, а НЕ «профиль не
+            # разрешает LLM». Первая означает «экстракция не запускалась и не могла
+            # запуститься», вторая — «запустилась бы, если бы профиль разрешал». Сливать
+            # их нельзя: это ровно то различие, ради которого имена разведены (ADR-032
+            # п. 3), и слилось бы оно здесь впервые — именно на этой ветке.
+            if ctx.profile_error:
+                self._declare_extraction_fallback(ctx, CAUSE_PROFILE_UNAVAILABLE, ctx.profile_error)
+                return
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_PROFILE_NOT_ENABLING_LLM,
+                "профиль домена пуст: объявлять LLM-экстракцию нечем",
+            )
+            return
+        if not _profile_llm_enabled(ctx.profile):
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_PROFILE_NOT_ENABLING_LLM,
+                "профиль домена не объявляет extraction.llm_enabled",
+            )
+            return
+        if self._llm is None:
+            self._declare_extraction_fallback(
+                ctx,
+                CAUSE_LLM_ADAPTER_MISSING,
+                "адаптер LLM не собран: извлечение выполнять нечем",
+            )
             return
         if not self._optional_failure:
             self._extract_llm(ctx)
+            self._record_llm_volume(ctx)
             return
         try:
             self._extract_llm(ctx)
-        except Exception as exc:  # noqa: BLE001
-            ctx.entities = []
-            ctx.entity_edges = []
-            ctx.enrichment_degraded = True
-            ctx.enrichment_error = str(exc)
-            self._extract_deterministic(ctx)
+        except (ExtractionConfigError, ExtractionModelError) as exc:
+            self._degrade_after_extraction_failure(ctx, exc)
+            return
+        self._record_llm_volume(ctx)
+
+    @staticmethod
+    def _record_llm_volume(ctx: PipelineContext) -> None:
+        """Зафиксировать объём LLM-слоя там, где он вычислен (ADR-033, п. 2).
+
+        Значение эмитится здесь, а не восстанавливается потребителем из строк БД или
+        из текста сообщения: восстановленное значение однажды разъедется с реальностью
+        без всякого следа.
+        """
+        ctx.llm_records = len(ctx.entities)
+        ctx.llm_edges = len(ctx.entity_edges)
+
+    def _degrade_after_extraction_failure(self, ctx: PipelineContext, exc: Exception) -> None:
+        """Сбросить LLM-слой и честно сказать, ЧТО именно исчезло.
+
+        ПРОТОТИПНОЕ ПОВЕДЕНИЕ, для боевого ingest неприемлемо (ADR-032): потеря
+        необратима, повторная загрузка того же `content_hash` — no-op (см.
+        CommitStage.try_noop), то есть простая перезагрузка файла НЕ перезапустит
+        экстракцию.
+
+        Ловим ровно два класса: негодную конфигурацию и сбой на границе с моделью. Широкий
+        `except Exception` больше не используется — дефект нашего кода обязан упасть
+        громко, иначе он выдаёт себя за «модель не справилась» и уводит
+        расследование не туда, а счётчик деградации показывает чужую причину.
+
+        Причина выбирается по типу, а не по тексту: недоступный стенд, таймаут, код
+        ошибки и негодный ответ — четыре разных ремонта, и раньше они были одной строкой.
+
+        Сброс больше **не подставляет токены** на место утраченного (ADR-049). Раньше последней
+        строкой здесь стоял вызов детерминированной заглушки, и на место утраченных сущностей
+        попадали слова текста: база получала 1391 выдуманную сущность, а отчёт — ни одного
+        признака, что это подмена. Теперь документ уходит в COMMIT без слоя.
+        """
+        # Сколько записей и рёбер ПЕРЕЖИВАЛИ бы сброс: это и есть потеря. Пока
+        # считаем ДО очистки — иначе потеря всегда выглядит нулевой.
+        lost_entities = len(ctx.entities)
+        lost_edges = len(ctx.entity_edges)
+        ctx.entities = []
+        ctx.entity_edges = []
+        # Объём LLM-слоя известен даже при сбое: то, что модель успела вернуть, и есть
+        # то, что мы сейчас уничтожаем.
+        ctx.llm_records = lost_entities
+        ctx.llm_edges = lost_edges
+        ctx.llm_layer_lost_entities = lost_entities
+        ctx.llm_layer_lost_edges = lost_edges
+        # Сброс без записей — не потеря. Флаг «слой потерян» ставится по факту
+        # исчезнувших фактов, а не по факту сработавшего пути сброса: иначе
+        # счётчик завышает потерю на документах, где терять было нечего, и его
+        # перестают читать.
+        ctx.llm_layer_dropped = bool(lost_entities or lost_edges)
+        self._declare_extraction_fallback(ctx, _degradation_cause(exc), str(exc))
+
+    def _declare_extraction_fallback(
+        self, ctx: PipelineContext, cause: str, detail: str
+    ) -> None:
+        """Объявить, что LLM-слоя не будет, и назвать почему (ADR-049).
+
+        Единственная точка, где ставится `enrichment_degraded` для всех веток EXTRACT без
+        извлечения. Одна, а не по месту каждой ветки: раньше три ветки были молчаливыми
+        (не ставили флаг, не называли причину, не писали лог), а четвёртая, сброс после
+        сбоя модели, объявлялась в своём месте — и по отчёту их было не различить вовсе.
+
+        Ничего не создаёт. Это не заглушка, которой выключили запись, а объявление:
+        код, строящий ноды, удалён, и вернуть его нельзя, не написав его заново.
+
+        `ctx.entities` и `ctx.entity_edges` здесь **не** чистятся. Здесь их и нечего чистить:
+        в ветках конфигурации извлечение не начиналось, а в ветке сбоя их уже сбросил
+        `_degrade_after_extraction_failure` — причём ДО подсчёта потери. Молчаливый сброс
+        внутри функции, названной «объявить», был бы новой ловушкой на месте старой.
+        """
+        ctx.enrichment_degraded = True
+        ctx.enrichment_cause = cause
+        ctx.enrichment_error = detail
+        # По одной строке на документ, без rate-limit: событие по природе документное, а
+        # молчание здесь стоило 1391 ноды в графе. Читаемость важнее частоты строк.
+        _log.error(
+            "экстракция LLM не дала слоя, документ уйдёт в COMMIT без сущностей: "
+            "причина=%s, детали=%s, домен=%s, источник=%s, потеряно_записей=%d, потеряно_рёбер=%d",
+            cause,
+            detail,
+            ctx.domain,
+            ctx.source_url,
+            ctx.llm_layer_lost_entities,
+            ctx.llm_layer_lost_edges,
+        )
+
+    def _measure_raw_answer(
+        self,
+        raw: str,
+        chunk: str,
+        chunk_candidates: tuple[str, ...],
+        chunk_id: str,
+        ctx: PipelineContext,
+    ) -> None:
+        """Считает по сырому ответу то, что разбор не доносит.
+
+        Здесь три разных вопроса, и раньше не отвечал ни один из них при обрыве:
+
+        * сколько имён и сколько из них уникально - дубли имён означают вырождение на
+          нодах, а не на связях (в измеренном ответе с 120 связями имена были чистыми,
+          а в ответе с запрещёнными связями наоборот - 35 вхождений против 24 уникальных);
+        * сколько имён вне списка кандидатов и сколько при этом есть в тексте - только
+          эти два числа вместе различают провал полноты пре-ингеста и выдумку модели,
+          а лечение у них противоположное;
+        * сколько пар объявлено и сколько уникально - это и есть мера зацикливания.
+
+        Имена сверяются с тем же списком кандидатов ЧАНКА, куда смотрит модель, и тем же
+        ключом `_identity_key`, что и остальной разбор: иначе прибор читал бы не то,
+        что читает код.
+        """
+        names = _declared_names_in_answer(raw)
+        unique_names = {_identity_key(name) for name in names}
+        allowed = self._allowed_keys(chunk_candidates)
+        chunk_keys = {_identity_key(word) for word in _iter_name_words(chunk)}
+
+        ctx.llm_names_raw += len(names)
+        ctx.llm_names_raw_unique += len(unique_names)
+        ctx.llm_names_raw_off_list += sum(1 for name in unique_names if name not in allowed)
+        ctx.llm_names_raw_grounded += sum(1 for name in unique_names if name in chunk_keys)
+
+        pairs = _declared_relations_in_answer(raw)
+        ctx.llm_relations_declared += len(pairs)
+        ctx.llm_relations_unique += len(set(pairs))
+
+        lines, unique_lines, brace = _answer_shape(raw)
+        ctx.llm_answer_lines += lines
+        ctx.llm_answer_lines_unique += unique_lines
+        ctx.llm_answer_brace_balance += brace
+
+        if len(pairs) >= 10 and len(set(pairs)) * 2 < len(pairs):
+            _log.error(
+                "ответ модели выродился в повтор пар (%d объявлено, %d уникальных, "
+                "вершин-источников мало). Похоже на зацикливание, а не на нехватку токенов: "
+                "чанк %s, повышение лимита ответа проблему не снимет",
+                len(pairs),
+                len(set(pairs)),
+                chunk_id,
+            )
+
+    def _check_candidate_membership(
+        self,
+        record: dict[str, Any],
+        chunk_candidates: tuple[str, ...],
+        chunk_id: str,
+        ctx: PipelineContext,
+    ) -> None:
+        """Сверяет извлечённое имя со списком кандидатов чанка (ADR-053).
+
+        Ключи берутся из `_entity_record`: запись называется `canonical`, а не
+        `canonical_name`. Читать несуществующий ключ было тихим дефектом - функция
+        выходила по `if not canonical` на КАЖДОЙ записи, и счётчик нарушений был
+        всегда нулём при полном отсутствии проверки. Зелёный гейт этого не видел,
+        потому что ненулевое значение никто не утверждал.
+
+        Проверяется только имя. Тип здесь проверять бессмысленно: он определяется
+        ключом payload, который задаёт СХЕМА ответа, а не модель, поэтому «тип вне
+        онтологии» невозможен by construction. Счётчик для него был бы гарантированным
+        нулём - тем самым запрещённым в этом проекте.
+
+        Нарушение не роняет разбор: запись остаётся в графе, потому что «модель ошиблась»
+        и «сущности нет» - разные утверждения. Но нарушение обязано быть посчитано и
+        залогировано, иначе ограничение выглядит работающим, пока тихо не перестаёт.
+        """
+        canonical = str(record.get("canonical") or "").strip()
+        if not canonical:
+            return
+        allowed = self._allowed_keys(chunk_candidates)
+        if _identity_key(canonical) not in allowed:
+            ctx.llm_names_off_list += 1
+            _log.warning(
+                "имя вне списка кандидатов: %r (чанк %s, %d кандидатов в списке)",
+                canonical,
+                chunk_id,
+                len(chunk_candidates),
+            )
+
+    @staticmethod
+    def _allowed_keys(candidates: tuple[str, ...]) -> set[str]:
+        return {_identity_key(name) for name in candidates}
 
     def _extract_llm(self, ctx: PipelineContext) -> None:
         template = _extraction_template(ctx.profile or {})
-        prompt_id = str(template.get("id") or "extract")
-        extractor_version = f"llm:{prompt_id}"
+        # Схема в инструкции не пишется руками: она генерируется из профиля, иначе вид
+        # связи, добавленный в `ontology.edge_types` и забытый в прозе, оказывается
+        # объявленным и никогда не извлекаемым - и выглядит как «модель не выдаёт связи».
+        # `prompt_id` остаётся человекочитаемой подписью в отчёте, но идентичностью
+        # извлечения не является: версия считается от содержимого инструкции.
+        instruction = render_instruction(ctx.profile or {}, str(template.get("user") or ""))
+        declared_types = [
+            str(item.get("type") or "")
+            for item in _profile_node_types(ctx.profile or {})
+        ]
+        extractor_version = extraction_identity(ctx.profile or {}, instruction)
+        ctx.extraction_passport = _extraction_passport(ctx, self._llm, instruction, extractor_version)
         entity_payloads = {
             "tags": CONTEXT_NODE_LABEL,
             "entities": CONTEXT_NODE_LABEL,
@@ -467,40 +1147,165 @@ class ExtractStage(Stage):
         allowed_fields = {"relationships", "links", *entity_payloads}
         llm = self._llm
         if llm is None:
-            raise RuntimeError("EXTRACT: LLM adapter is required for profile extraction")
+            raise ExtractionConfigError("EXTRACT: LLM adapter is required for profile extraction")
+        # Список кандидатов документа (ADR-053, решение владельца от 2026-10-14). Его производит
+        # сам пайплайн, прямо здесь: до правки список лежал в папке и требовал ручного запуска
+        # стадии, а отсутствие файла означало тихий уход в vector-only со статусом
+        # `succeeded`. Теперь файла нет «просто так», а список получен из того же текста,
+        # который идёт в разбор.
+        #
+        # Стадия не запускается на неизменившемся документе: до этой точки доходит только
+        # джоба, не отсечённая no-op, - иначе NER отрабатывал бы вхолостую.
+        if not ctx.source_path:
+            raise CandidatesProductionError(
+                f"неизвестен файл документа для {ctx.source_url}: негде положить кандидатов"
+            )
+        document_path = Path(ctx.source_path)
+        produced_at = produce_candidates(document_path, ctx.raw_text or "")
+        _log.info(
+            "кандидаты для %s получены и положены рядом с документом: %s",
+            ctx.source_url,
+            produced_at,
+        )
+        candidate_list = load_candidates(document_path, ctx.raw_text or "")
+        ctx.candidates_total = len(candidate_list)
+        # Знаменатель для «чанков без кандидатов»: без него доля не считается, а
+        # «пропущено 10 чанков» неизвестно из чего - из десяти или из трёхсот.
+        ctx.chunks_total = len(ctx.chunks)
         for index, chunk in enumerate(ctx.chunks):
             chunk_id = self._chunk_id(ctx, index)
+            chunk_candidates = candidate_list.for_chunk(chunk)
+# Чанк без кандидатов. После ADR-054 (markdown не режется по блокам кода) таких
+            # чанков на корпусе НЕТ: было 10 из 343, стало 0 из 221. Ветка остаётся
+            # не мёртвой - разбиение может измениться, - но решение «пропускать вызов»
+            # владельцем НЕ принималось, и по умолчанию вызов уходит с запретом
+            # придумывать имена. Факт считается, чтобы смена разбиения была видна.
+            if not chunk_candidates:
+                ctx.chunks_without_candidates += 1
+                _log.warning(
+                    "чанк %s не содержит кандидатов (%d из %d чанков документа): %s",
+                    chunk_id,
+                    ctx.chunks_without_candidates,
+                    ctx.chunks_total,
+                    ctx.source_url,
+                )
+            chunk_candidates_block = render_candidates_block(
+                chunk_candidates,
+                declared_types=declared_types,
+            )
             prompt = (
-                f"{template['user']}\n\n"
+                f"{instruction}\n\n"
+                f"{chunk_candidates_block}\n\n"
                 f"Текст документа для извлечения (чанк {index + 1}):\n{chunk}"
             )
-            raw = "".join(
-                llm.generate(prompt, system=str(template["system"]), stream=False)
-            )
+            # Граница с моделью: ровно здесь всё, что пришло извне, становится
+            # `ExtractionModelError`. Внутри блока нет нашей логики, поэтому
+            # классификация здесь не съест наш дефект — а за пределами блока такой
+            # дефект падает сам, вместо того чтобы выдать себя за сбой модели.
+            #
+            # Тип транспортной ошибки СОХРАНЯЕТСЯ (`from exc`), иначе классификация ниже
+            # не сможет отличить «стенд не отвечает» от «модель ответила ерундой».
+            try:
+                raw = "".join(
+                    llm.generate(
+                        prompt,
+                        system=str(template["system"]),
+                        stream=False,
+                        # Идентификаторы, а не текст: по ним запись обмена соединяется с
+                        # документом и чанком. Текст чанка в журнал не пишется.
+                        labels={
+                            "source_url": str(ctx.source_url),
+                            "chunk_id": str(chunk_id),
+                        },
+                    )
+                )
+            except LLMAdapterError as exc:
+                # Улика едет в текст ошибки, а не теряется: `ExtractionModelError` попадает
+                # в запись джобы, и по нему видно, что модель успела наговорить до обрыва.
+                # Без этого вопрос «что именно модель пишет в ответ» был неотвечаемым.
+                detail = getattr(exc, "raw", None)
+                raise ExtractionModelError(
+                    f"вызов LLM не удался: {exc}"
+                    + (f"\n--- ответ модели (усечён) ---\n{detail}" if detail else "")
+                ) from exc
+            except Exception as exc:  # граница с внешним адаптером, ловится намеренно
+                raise ExtractionModelError(f"вызов LLM не удался: {exc}") from exc
+            usage = getattr(llm, "last_usage", None)
+            if isinstance(usage, dict) and usage:
+                ctx.llm_usage = usage
+            # ADR-056: вырождение и ограничение имён меряются по сырому ответу ДО разбора.
+            # После разбора эти числа не восстановимы: на обрезанном JSON парсер падает,
+            # и все счётчики выше остаются нулём при полном отсутствии проверки - то есть
+            # отчёт называет нормой ситуацию, где модель выдала 35 имён, 21 вне списка.
+            self._measure_raw_answer(raw, chunk, chunk_candidates, chunk_id, ctx)
             payload = _parse_extraction_payload(raw)
             records: list[dict[str, Any]] = []
             unknown_fields = set(payload) - allowed_fields
             if unknown_fields:
-                raise ValueError(f"EXTRACT содержит неизвестные поля: {sorted(unknown_fields)}")
+                raise ExtractionModelError(
+                    f"EXTRACT содержит неизвестные поля: {sorted(unknown_fields)}"
+                )
             for key, entity_type in entity_payloads.items():
                 items = payload.get(key, [])
                 if not isinstance(items, list):
-                    raise TypeError(f"EXTRACT поле {key!r} должно быть списком")
+                    raise ExtractionModelError(f"EXTRACT поле {key!r} должно быть списком")
                 for item in items:
                     if not isinstance(item, dict):
-                        raise TypeError(f"EXTRACT поле {key!r} содержит не-объект")
-                    records.append(
-                        _entity_record(
-                            entity_type,
-                            item,
-                            ctx,
-                            chunk_id,
-                            extractor_version,
-                        )
+                        raise ExtractionModelError(f"EXTRACT поле {key!r} содержит не-объект")
+                    record = _entity_record(
+                        entity_type,
+                        item,
+                        ctx,
+                        chunk_id,
+                        extractor_version,
                     )
+                    # Имя сверяется со списком кандидатов того же чанка: модель получила
+                    # именно его и обязана была выбирать из него. Ответ вне списка - не
+                    # повод для отказа разбора, но повод быть посчитанным: иначе ограничение
+                    # выглядит работающим, пока тихо не перестаёт.
+                    self._check_candidate_membership(
+                        record,
+                        chunk_candidates,
+                        chunk_id,
+                        ctx,
+                    )
+                    records.append(record)
             relations = payload.get("relationships", payload.get("links", []))
-            self._validate_edges(relations, records)
+            unresolved = self._validate_edges(relations, records)
+            # Индекс по КЛЮЧИ неразрешённого имени — тем же `_identity_key`, каким
+            # пользуется валидация. Сопоставление по сырой строке было бы вторым,
+            # несовпадающим с кодом соглашением об именах, то есть ровно тем дефектом,
+            # который прибор уже ловил дважды.
+            unresolved_by_key = {
+                _identity_key(item["endpoint_name"]) for item in unresolved
+            }
+            # ADR-052: сколько имён модели есть в самом чанке. Считается здесь, а не в
+            # приборе, потому что здесь есть и текст чанка, и разобранный ответ: прибор,
+            # читающий другой набор данных, измерял бы другое (ровно тот класс дефекта,
+            # который ловил обмен полями). Ключ сравнения - `_identity_key`, тот же, каким
+            # склеиваются идентичности, иначе «ё» и регистр давали бы ложное «выдумано».
+            # Имена, пришедшие не из текста, попадают в граф и неотличимы от настоящих:
+            # измерить это иначе нечем.
+            chunk_keys = {_identity_key(word) for word in _iter_name_words(chunk)}
+            for record in records:
+                # Ключ после нормализации — `canonical`, а не `canonical_name`: его
+                # переносит `_entity_record`. Читать исходное поле здесь означало бы
+                # считать ноль у каждой записи, и метрика тихо врала бы.
+                name = str(record.get("canonical") or "")
+                if not name:
+                    continue
+                ctx.llm_names_total += 1
+                if _identity_key(name) in chunk_keys:
+                    ctx.llm_names_grounded += 1
             ctx.entities.extend(records)
+            ctx.unresolved_endpoints.extend(
+                {
+                    **item,
+                    "chunk_id": chunk_id,
+                    "endpoint_key": _identity_key(item["endpoint_name"]),
+                }
+                for item in unresolved
+            )
             for relation in relations:
                 edge: dict[str, Any] = {}
                 if relation.get("from") is not None:
@@ -520,7 +1325,139 @@ class ExtractStage(Stage):
                     if key in relation:
                         edge[key] = relation[key]
                 edge["origin"] = "ai"
+                # Происхождение ставит платформа, а не модель: промпт прямо запрещает
+                # `chunk_ids` в relationships, потому что концы задаются именами. Но связь —
+                # утверждение, и у него должна быть опора, иначе её нечем чистить: предикат
+                # отбора опирается на `chunk_ids` (`docs/02` §4.5), и без них ни одна доменная
+                # связь не является кандидатом на уборку. Экстракция почанковая, и нужный
+                # `chunk_id` здесь в области видимости.
+                edge.setdefault("source_ids", [ctx.source_url])
+                edge["chunk_ids"] = [chunk_id]
+                # Неразрешённый конец: строка связи СОХРАНЯЕТСЯ с пометкой, иначе теряются
+                # `kind` и `confidence` — то есть ровно то, ради чего извлечение и делалось
+                # (ADR-038). Факт о неизвестном имени пишется отдельно, исходным именем.
+                if unresolved_by_key:
+                    missing = [
+                        side
+                        for side, keys in (("from", ("from", "from_id")), ("to", ("to", "to_id")))
+                        if any(
+                            _identity_key(relation.get(key) or "") in unresolved_by_key
+                            for key in keys
+                            if relation.get(key)
+                        )
+                    ]
+                    if missing:
+                        edge["endpoint_unresolved"] = True
+                        edge["unresolved_sides"] = missing
                 ctx.entity_edges.append(edge)
+            self._accumulate_resolvability(
+                ctx, records, relations, unresolved_by_key, unresolved
+            )
+        if ctx.model_tag_ids_ignored:
+            # Одна строка на документ, а не на сущность: при ~77 сущностях на чанк
+            # поштучный лог дал бы десятки тысяч строк на документ.
+            _log.warning(
+                "tag_id в ответе LLM проигнорирован: идентичность считает платформа "
+                "(L1-05); проигнорировано=%d, источник=%s",
+                ctx.model_tag_ids_ignored,
+                ctx.source_url,
+            )
+
+    @staticmethod
+    def _accumulate_resolvability(
+        ctx: PipelineContext,
+        records: list[dict[str, Any]],
+        relations: list[dict[str, Any]],
+        unresolved_by_key: set[str],
+        unresolved: list[dict[str, Any]],
+    ) -> None:
+        """Копнуть счётчики разрешимости по чанку (ADR-039).
+
+        Считаются **слоты концов**, а не связи: у связи два конца, и в expA все шесть потеряли
+        оба. Считать по связям удвоило долю, и числитель при этом был верным — то есть ошибка
+        пережила пересчёт.
+
+        Неразрешённые концы считаются и по слотам, и по именам, потому что это разные
+        величины: один и тот же конец встречается в нескольких слотах (expA — 12 и 7), и
+        агрегат по джобам суммирует именно слоты.
+
+        Структура (петли, взаимные пары, входящая связность) копится по тем же рёбрам и
+        от версии кода не зависит.
+        """
+        stats = ctx.resolvability
+        stats["chunks"] = int(stats.get("chunks") or 0) + 1
+        stats["entities_declared"] = int(stats.get("entities_declared") or 0) + len(records)
+        stats["relations"] = int(stats.get("relations") or 0) + len(relations)
+        ctx.declared_name_keys |= _declared_names(records)
+
+        declared_keys = _declared_names(records)
+        slot_keys: list[str] = []
+        for relation in relations:
+            for keys in ENDPOINT_KEYS:
+                for key in keys:
+                    value = relation.get(key)
+                    if isinstance(value, str) and value.strip():
+                        slot_keys.append(_identity_key(value.strip()))
+                        break
+        stats["endpoints_total"] = int(stats.get("endpoints_total") or 0) + len(slot_keys)
+        resolved_slots = sum(1 for key in slot_keys if key in declared_keys)
+        stats["endpoints_resolved"] = int(stats.get("endpoints_resolved") or 0) + resolved_slots
+        stats["endpoints_unresolved"] = int(stats.get("endpoints_unresolved") or 0) + (
+            len(slot_keys) - resolved_slots
+        )
+        ctx.endpoint_keys.update(slot_keys)
+        unresolved_names: set[str] = set()
+        stats["names_unresolved"] = int(stats.get("names_unresolved") or 0) + len(
+            unresolved_by_key
+        )
+        unresolved_names |= unresolved_by_key
+        stats["names_resolved"] = int(stats.get("names_resolved") or 0) + len(
+            {key for key in slot_keys} - unresolved_by_key
+        )
+
+        # Из какого поля модель взяла неразрешённое имя. Ключ -> поле, а не счётчик попаданий:
+        # уклон в одно поле и разнобой — разные дефекты с разными владельцами, и одно число их
+        # не различает. Сравнение по `_identity_key`, тем же, что у валидации.
+        by_field = dict(stats.get("by_field") or {})
+        non_name: dict[str, set[str]] = {}
+        for record in records:
+            for non_name_field in NON_NAME_FIELDS:
+                value = record.get(non_name_field)
+                if isinstance(value, str) and value.strip():
+                    non_name.setdefault(_identity_key(value.strip()), set()).add(non_name_field)
+        for fact in unresolved:
+            name_key = _identity_key(str(fact.get("endpoint_name") or ""))
+            for source_field in non_name.get(name_key, ()):
+                by_field[source_field] = int(by_field.get(source_field, 0)) + 1
+        stats["by_field"] = by_field
+
+        pairs = [
+            (
+                _identity_key(str(relation.get("from") or relation.get("from_id") or "")),
+                _identity_key(str(relation.get("to") or relation.get("to_id") or "")),
+            )
+            for relation in relations
+            if (relation.get("from") or relation.get("from_id"))
+            and (relation.get("to") or relation.get("to_id"))
+        ]
+        loops = {a for a, b in pairs if a == b}
+        stats["self_loops"] = int(stats.get("self_loops") or 0) + len(loops)
+        mutual = 0
+        for index, (a, b) in enumerate(pairs):
+            if a == b:
+                continue
+            for other in pairs[index + 1 :]:
+                if a == other[1] and b == other[0]:
+                    mutual += 1
+        stats["mutual_pairs"] = int(stats.get("mutual_pairs") or 0) + mutual
+        fan_in = Counter(target for _, target in pairs)
+        if fan_in:
+            peak = max(fan_in.values())
+            if peak > int(stats.get("max_fan_in") or 0):
+                stats["max_fan_in"] = peak
+        # «Уникальные» считаются на документ целиком, а не суммой по чанкам.
+        stats["entities_distinct"] = len(ctx.declared_name_keys)
+        stats["endpoints_distinct"] = len(ctx.endpoint_keys)
 
     def _chunk_id(self, ctx: PipelineContext, index: int) -> str:
         for meta in ctx.chunks_meta:
@@ -532,54 +1469,52 @@ class ExtractStage(Stage):
     def _validate_edges(
         relations: object,
         records: list[dict[str, Any]],
-    ) -> None:
+    ) -> list[dict[str, Any]]:
+        """Проверить концы связей и вернуть неразрешённые (ADR-037, случай 3).
+
+        Неразрешённый конец **не сносит слой**. Он возвращается наружу, чтобы вызывающий
+        записал факт; раньше здесь поднималось `ExtractionModelError`, и одна такая связь
+        уничтожала весь LLM-слой документа — вместе с `kind` и `confidence` тех связей,
+        которые были в порядке. Проверка «объявлено ли имя среди имён этого ответа»
+        продолжает работать ровно так же: она никуда не делась, изменилось то, что
+        происходит при её неудаче.
+
+        Форма негодного ответа (не список, не объект, пустой конец) по-прежнему
+        поднимает `ExtractionModelError`: это не вопрос разрешимости, это негодный JSON,
+        и притворяться, что мы его «записали фактом», нельзя.
+        """
         if not isinstance(relations, list):
-            raise TypeError("EXTRACT поле relationships должно быть списком")
-        known: set[str] = set()
-        for record in records:
-            for key in ("tag_id", "canonical", "canonical_name", "name"):
-                value = record.get(key)
-                if isinstance(value, str) and value:
-                    known.add(_identity_key(value))
+            raise ExtractionModelError("EXTRACT поле relationships должно быть списком")
+        known: set[str] = _declared_names(records)
+        unresolved: list[dict[str, Any]] = []
         for relation in relations:
             if not isinstance(relation, dict):
-                raise TypeError("EXTRACT relationship должен быть объектом")
+                raise ExtractionModelError("EXTRACT relationship должен быть объектом")
             source = relation.get("from") or relation.get("from_id")
             target = relation.get("to") or relation.get("to_id")
             if not isinstance(source, str) or not source or not isinstance(target, str) or not target:
-                raise ValueError("relationship должен содержать from и to")
-            if _identity_key(source) not in known or _identity_key(target) not in known:
-                raise ValueError("relationship ссылается на неизвестную сущность")
-
-    def _extract_deterministic(self, ctx: PipelineContext) -> None:
-        seen: dict[str, dict[str, Any]] = {}
-        for index, chunk in enumerate(ctx.chunks):
-            chunk_id = self._chunk_id(ctx, index)
-            for token in chunk.split():
-                word = "".join(c for c in token.lower() if c.isalpha())
-                if len(word) < 5 or not word.isalpha():
-                    continue
-                current = seen.get(word)
-                if current is None:
-                    current = {
-                        "type": CONTEXT_NODE_LABEL,
-                        "name": word,
-                        "canonical_name": word,
-                        "tag_id": f"tag:{ctx.domain}:{word}",
-                        "source": ctx.source_url,
-                        "sources": [ctx.source_url],
-                        "canonical": word,
-                        "chunk_ids": [chunk_id],
-                        "extractor_version": EXTRACTOR_VERSION,
-                        "origin": "system",
-                        "variants": [word],
-                    }
-                    seen[word] = current
-                    ctx.entities.append(current)
-                    continue
-                current["chunk_ids"] = list(dict.fromkeys([*_entity_chunk_ids(current), chunk_id]))
-                current["sources"] = list(dict.fromkeys([*_entity_sources(current), ctx.source_url]))
-                current["variants"] = list(dict.fromkeys([*_entity_variants(current), word]))
+                raise ExtractionModelError("relationship должен содержать from и to")
+            missing = [
+                side
+                for side, value in (("from", source), ("to", target))
+                if _identity_key(value) not in known
+            ]
+            kind = str(relation.get("kind") or relation.get("type") or "RELATED")
+            # По одному факту на КАЖДЫЙ неразрешённый конец. Один факт на связь выглядел бы
+            # экономнее, но если неразрешённых концов два, второй потерял бы имя — и джоба
+            # уборки не смогла бы его сопоставить ни с чем.
+            for side, name, other in (("from", source, target), ("to", target, source)):
+                if side in missing:
+                    unresolved.append(
+                        {
+                            "unresolved_sides": missing,
+                            "unresolved_side": side,
+                            "endpoint_name": name,
+                            "other_endpoint_name": other,
+                            "relation_kind": kind,
+                        }
+                    )
+        return unresolved
 
 
 class NormalizeStage(Stage):
@@ -624,13 +1559,33 @@ class NormalizeStage(Stage):
                 elif previous != entity_id:
                     mapping[key] = ""
                     ambiguous_aliases.add(key)
+        # L3-02: неоднозначные варианты не объединяются молча — алиасы для них
+        # подавлены выше. Но «не молча» про слияние, а не про наблюдаемость: без
+        # этого счётчика нельзя отличить документ без неоднозначности от документа,
+        # где их были десятки и молча выбросили. UNIQUE-constraint этого не даст —
+        # он умеет только слить или отвергнуть (ADR-031 §4).
+        ctx.ambiguous_aliases = len(ambiguous_aliases)
+        if ctx.ambiguous_aliases:
+            _log.warning(
+                "NORMALIZE: неоднозначные ключи не объединены (L3-02): ключей=%d, "
+                "алиасы для них подавлены, источник=%s",
+                ctx.ambiguous_aliases,
+                ctx.source_url,
+            )
         for edge in ctx.entity_edges:
-            if edge.get("from_id") is not None or edge.get("to_id") is not None:
-                continue
-            source = str(edge.get("from") or "")
-            target = str(edge.get("to") or "")
-            edge["from"] = mapping.get(_identity_key(source)) or source
-            edge["to"] = mapping.get(_identity_key(target)) or target
+            # Каждый конец переводится независимо. Раньше стоял `continue` на всю связь,
+            # если непуст **любой** из `from_id`/`to_id`, и это ломало смешанную форму
+            # `from` + `to` + `to_id`, которую модель отдаёт законно: `to_id` есть, значит
+            # стадия решила, что переводить нечего, и оставила `from` сырым именем. Дальше
+            # COMMIT сравнивал имя с множеством `tag:it:...` и валил весь документ
+            # (`docs/api_reference.md`: `from_id='Query API Contract'` при 38 узлах).
+            for name_key, id_key in (("from", "from_id"), ("to", "to_id")):
+                if edge.get(id_key) is not None:
+                    continue
+                value = str(edge.get(name_key) or "")
+                if not value:
+                    continue
+                edge[name_key] = mapping.get(_identity_key(value)) or value
         unique_edges: dict[tuple[str, str, str], dict[str, Any]] = {}
         for edge in ctx.entity_edges:
             source = str(edge.get("from_id") or edge.get("from") or "")
@@ -757,6 +1712,18 @@ class ValidateStage(Stage):
                 raise ValueError("context node без tag_id/name на VALIDATE")
             if not entity.get("sources") and not entity.get("source_ids"):
                 raise ValueError("context node без provenance на VALIDATE")
+            # ADR-049 п. 3: у ноды обязано быть имя её создателя. Проверка живёт здесь,
+            # а не на записи ноды, потому что VALIDATE уже отвечает за форму записи и
+            # сообщает о ней читаемым текстом; «упасть позже и с другим сообщением»
+            # хуже, чем «не дойти до COMMIT вовсе». До ADR-049 здесь стояло значение по
+            # умолчанию `deterministic:v1`, и нода без производителя получала метку
+            # заглушки — то есть дефект проходил как норма.
+            if not entity.get("extractor_version"):
+                raise ValueError(
+                    "context node без extractor_version на VALIDATE: "
+                    f"производитель ноды '{entity.get('canonical') or entity.get('name') or '?'}' "
+                    "не назван, а значение по умолчанию у поля нет (ADR-049)"
+                )
         for edge in ctx.entity_edges:
             has_endpoints = all(
                 isinstance(edge.get(key), str) and edge[key]
@@ -788,6 +1755,41 @@ def _is_atomic_pair(graph: GraphStoreProvider, vector: VectorStoreProvider) -> b
         and graph.engine_key() is not None
         and graph.engine_key() == vector.engine_key()
     )
+
+
+def _record_written_node_versions(ctx: PipelineContext, nodes: list[dict[str, Any]]) -> None:
+    """Посчитать ноды, записанные этой джобой в граф, по производителю (ADR-049 п. 4).
+
+    Считается по факту состоявшейся записи, а не при сборке `nodes`. Причина не в том, что
+    при компенсации best_effort-пары (ADR-024) ноды исчезают из графа, - они там
+    **остаются** (см. `test_commit_stage.py::test_best_effort_compensates_graph_on_vector_failure`).
+    Причина в том, что компенсация бросает `CommitStageError` раньше, чем счётчик заполняется:
+    джоба не записала проекцию как свою, и `graph_projection_status` это уже сообщает.
+
+    Записи схлопываются по `node_id`, и побеждает последняя - ровно так же, как их мержит
+    граф: `nodes` сортируется по `node_id` стабильным sort, при равных ключах порядок
+    сохраняется, а запись применяется построчно и входящее значение перебивает прежнее.
+    Обычный случай коллизии - человек помечает то, что модель уже нашла: тег без `tag_id`
+    разрешается в `node_id` найденной сущности. Без схлопывания счётчик насчитывал бы две
+    ноды там, где граф держит одну, и `nodes_written` разошлось бы с графом.
+
+    Ноды `Chunk` пропускаются: поля `extractor_version` у них нет, и приписать им
+    производителя, которого у них не было, - ровно та ошибка, ради устранения которой
+    значение по умолчанию и было снято. Молча пропустить ноду без поля нельзя, поэтому
+    отсутствие поля здесь просто не попадает в счётчик, а счётчик остаётся перечислением
+    того, что производитель известен.
+    """
+    by_node_id: dict[str, str] = {}
+    for node in nodes:
+        node_id = str(node.get("node_id") or "")
+        version = (node.get("properties") or {}).get("extractor_version")
+        if not node_id or not version:
+            continue
+        by_node_id[node_id] = str(version)
+    counts: dict[str, int] = {}
+    for version in by_node_id.values():
+        counts[version] = counts.get(version, 0) + 1
+    ctx.nodes_by_extractor_version = counts
 
 
 # ------------------------------------------------------------------ ADR-028 retry
@@ -974,12 +1976,16 @@ class CommitStage(Stage):
                 ctx.registry_result = (current["doc_id"], current["version"], False)
                 ctx.commit_applied = True
                 return
+            # ADR-046, пункт 8: `revision` (отпечаток множества документов) остаётся, но
+            # больше не Currency-меткой проекции — на вопрос «изменились ли данные этого
+            # источника» отпечаток набора ответить не может. Он остаётся атрибуцией
+            # («проекция построена из корпуса X») и по-прежнему отдаётся реестром.
             ctx.metadata["revision"] = self._registry.data_revision_after(doc)
             config_fingerprint = os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
             if self._graph_store is not None:
-                ctx.metadata["projection_revision"] = projection_revision_for(
-                    str(ctx.metadata["revision"]),
-                    config_fingerprint,
+                # Метка актуальности принадлежит источнику, а не домену.
+                ctx.metadata["projection_revision"] = source_projection_revision(
+                    doc.content_hash, config_fingerprint
                 )
             try:
                 self._write(doc, ctx)
@@ -1007,11 +2013,21 @@ class CommitStage(Stage):
         if not data_revision:
             return
         config_fingerprint = os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
+        # ADR-046, пункт 8: у состояния остаётся отпечаток множества — но как атрибуция
+        # («проекция построена из корпуса X»), а не как условие готовности.
         projection_revision = projection_revision_for(data_revision, config_fingerprint)
         status = ctx.graph_projection_status
         active_source_count = self._registry.active_source_count(ctx.domain)
         if status == "committed":
-            state_status = "ready" if active_source_count <= 1 else "pending"
+            # ADR-046, пункт 4: эвристика `active_source_count <= 1` снята. Она вычисляла не
+            # «последняя джоба в пачке», а «в домене ровно один документ», и потому на любом
+            # корпусе из нескольких документов `ready` был недостижим никогда — измерено:
+            # `pending`, `input_source_count=3`, `processed_source_count=1`. Угадывать конец
+            # пачки нечем: пачки в системе нет, а «последней джобы» не отличить от любой.
+            # Теперь коммит публикует `ready`, а решает **проверка**: она пораздельная и видит
+            # расхождения, поэтому несоответствие станет `degraded` с числом, а не вечным
+            # `pending`, который читается как «ещё не догрузили».
+            state_status = "ready"
             processed = 1
             failed = 0
         elif status in {"degraded", "disabled"}:
@@ -1023,7 +2039,17 @@ class CommitStage(Stage):
             processed = 0
             failed = 0
         current = self._projection_state_store.get(ctx.domain)
-        if current is not None and current.is_ready(data_revision, config_fingerprint):
+        # ADR-046 п. 8 снял `data_revision` из `is_ready`, поэтому условие «ничего не
+        # изменилось» нельзя делегировать на `is_ready`: после первой джобы состояние `ready`,
+        # и каждая следующая вышла бы из функции, не записав ни состояние, ни ревизию
+        # своего источника. Проверяем отпечаток явно — он и есть признак «ничего не
+        # изменилось», а условием готовности он больше не является.
+        if (
+            current is not None
+            and current.status == "ready"
+            and current.data_revision == data_revision
+            and current.config_fingerprint == config_fingerprint
+        ):
             return
         if (
             current is not None
@@ -1036,6 +2062,19 @@ class CommitStage(Stage):
         if current is not None and not projection_transition_allowed(current, state_status):
             return
         try:
+            # ADR-046: пораздельная ревизия источника пишется **всегда**, независимо от
+            # того, сменится ли статус состояния. Иначе источник, чья публикация не прошла,
+            # остался бы без ревизии — и проверка не смогла бы отличить «нет ревизии» от
+            # «ревизия есть».
+            source_revision_value = source_projection_revision(
+                ctx.document.content_hash, config_fingerprint
+            )
+            self._projection_state_store.put_source_revision(
+                ctx.domain,
+                ctx.document.source_url,
+                source_revision_value,
+                ctx.document.content_hash,
+            )
             next_state = ProjectionState(
                 domain=ctx.domain,
                 data_revision=data_revision,
@@ -1049,10 +2088,7 @@ class CommitStage(Stage):
                 failed_source_count=failed,
                 started_at="",
                 finished_at=None,
-                last_error=(
-                    ctx.graph_projection_error
-                    or ("inline_projection_pending" if state_status == "pending" else None)
-                ),
+                last_error=(ctx.graph_projection_error or None),
             )
             expected_revision = current.projection_revision if current is not None else None
             self._projection_state_store.compare_and_set(
@@ -1071,11 +2107,16 @@ class CommitStage(Stage):
                 raise RuntimeError("COMMIT: vector store is required for baseline")
             self._write_vector_only(doc, ctx)
             return
+        # ADR-053: документ без списка кандидатов грузится только в вектор. Это решение
+        # владельца, а не следствие пустого извлечения: без списка модель выдумывает
+        # половину имён (ADR-052), и «граф из выдумок» хуже, чем «графа нет».
+        if ctx.candidates_absent:
+            self._write_vector_only(doc, ctx)
+            return
         if vector is None:
             raise RuntimeError("COMMIT: vector store is required for baseline")
         domain = doc.domain
         source_url = doc.source_url
-        source_id = _source_node_id(domain, source_url)
         entities = list(ctx.entities)
         entity_edges = list(ctx.entity_edges)
         alias_ids: dict[str, set[str]] = {}
@@ -1108,6 +2149,18 @@ class CommitStage(Stage):
             record.setdefault("name", canonical)
             record.setdefault("type", CONTEXT_NODE_LABEL)
             record.setdefault("origin", "user")
+            # ADR-049 п. 3: метка ставится здесь, где производитель известен, а не
+            # подставляется на записи ноды. Раньше здесь поля не было, и запись ноды
+            # подставляла метку заглушки - то есть ручной тег, который человек поставил
+            # сам, получал `extractor_version` чужого происхождения.
+            #
+            # Именно присваивание, а не `setdefault`: на этом пути производитель известен
+            # по построению - запись вносит загрузка, то есть человек. Значение, присланное
+            # клиентом, не подсказка, а попытка выдать ручную ноду за модельную, а явный
+            # `null` превратился бы в строку `"None"` - производителя, которого нет.
+            # Теги приходят свободной формой и дописываются уже после VALIDATE, поэтому
+            # проверка обязательного поля их не увидит.
+            record["extractor_version"] = MANUAL_NODE_VERSION
             record.setdefault("sources", [source_url])
             record.setdefault("source_ids", [source_url])
             entities.append(record)
@@ -1116,26 +2169,103 @@ class CommitStage(Stage):
             if isinstance(link, dict):
                 relation = dict(link)
                 relation.setdefault("origin", "user")
-                relation.setdefault("source_ids", [source_url])
+                # `scope` различает два вида ручных утверждений (решение владельца
+                # 2026-09-29). По умолчанию связь документная: она пришла с загрузкой и
+                # держится на этом документе. Явный `scope: "user"` - утверждение,
+                # принадлежащее пользователю, а не документу.
+                #
+                # Различие не выдумано, а следует из уже существующей механики. Документная
+                # связь получает в опору чанки документа, и тогда `chunk_ids IS NOT NULL`
+                # делает её кандидатом на уборку. Пользовательская не получает ничьей опоры
+                # и, что важнее, не претендует на `source_ids` документа: `_remove_source`
+                # снимает происхождение по этому списку, и будь он там - ревизия удалила бы
+                # пользовательское утверждение вместе с документом, то есть различие было бы
+                # только наполовину и выглядело бы работающим.
+                relation.setdefault("scope", SCOPE_DOCUMENT)
+                if relation["scope"] != SCOPE_USER:
+                    relation.setdefault("source_ids", [source_url])
                 entity_edges.append(relation)
 
         all_chunk_ids = [str(meta["chunk_id"]) for meta in ctx.chunks_meta]
         for entity in entities:
             if entity.get("tag_id") and not _entity_chunk_ids(entity):
                 entity["chunk_ids"] = list(all_chunk_ids)
+        # Связь — такое же утверждение в этом документе, как тег, и получает опору здесь
+        # же. Раньше `chunk_ids` проставлялись только сущностям, и ручная связь оставалась
+        # неотличимой от структурной по предикату `chunk_ids IS NOT NULL`, то есть
+        # неубираемой навсегда (`docs/02` §4.5, дыра зафиксирована там же). Уже
+        # проставленную опору не трогаем: у извлечённой связи она своя, почанковая.
+        for relation in entity_edges:
+            # Пользовательское утверждение опоры не получает: оно не привязано к документу,
+            # и `chunk_ids IS NULL` делает его структурным для предиката уборки, то есть
+            # переживающим ревизию. Документная связь, включая любую извлечённую, опору
+            # получает - иначе предикат её не увидит.
+            if relation.get("scope") == SCOPE_USER:
+                continue
+            if not relation.get("chunk_ids"):
+                relation["chunk_ids"] = list(all_chunk_ids)
 
-        nodes: list[dict[str, Any]] = [
-            {
-                "node_id": source_id,
-                "labels": [SOURCE_LABEL],
-                "properties": {
-                    "source_url": source_url,
-                    "domain": domain,
-                    "doc_type": doc.doc_type,
-                },
-            }
-        ]
+        # ADR-046 п. 9: ноды-якоря источника в схеме нет. Отпечаток содержимого и ревизия
+        # выражены на самих чанках: `content_hash` документа и вычисленная из него вместе с
+        # конфигом ревизия. Обе величины вычисляемые, поэтому разойтиться им не с чем и
+        # дублировать ожидаемое значение во втором хранилище не нужно.
+        source_projection_revision_value = source_projection_revision(
+            doc.content_hash, os.environ.get("PROJECTION_CONFIG_FINGERPRINT", "default")
+        )
+        nodes: list[dict[str, Any]] = []
         entity_ids: dict[str, dict[str, Any]] = {}
+        # ADR-058: что ФАКТИЧЕСКИ уходит в запись, видно здесь и нигде больше.
+        #
+        # Зачем: потеря ноды или связи не видна ни в одном счётчике, потому что она
+        # происходит в адаптере, ниже пайплайна - `DedupStage` отработал, отчёт заполнен,
+        # документ `succeeded`, а граф просто тише на одну запись. На живом прогоне это дало
+        # два неверных вывода подряд: по `size(chunk_ids) = 1` была объявлена «потеря
+        # привязки», а по расхождению счётчиков - «дедуп не применился». Оба раза вывод
+        # строился по симптому, потому что записи не было видно.
+        #
+        # Лог стоит ДО сборки `nodes`: обращение к реестру ниже может отказать, и тогда
+        # факт «дошло до сборки плана записи» должен остаться в журнале - иначе отказ
+        # реестра неотличим от «стадия не запускалась».
+        #
+        # Пишутся идентификаторы и имена, НЕ содержимое свойств: журнал не должен
+        # превращаться в копию корпуса (то же основание, что у `LLM_EXCHANGE_LOG`).
+        # Объём заведомо приемлем: 56 нод на документ, при 225 чанках корпуса это порядка
+        # трёх тысяч строк на полную перезагрузку - цена, которую платит отсутствие
+        # диагностики.
+        if _log.isEnabledFor(logging.INFO):
+            _log.info(
+                "COMMIT: план записи, источник=%s, домен=%s, нод=%d, связей=%d, "
+                "кандидатов документа=%s, неразрешённых концов=%d",
+                source_url,
+                domain,
+                len(entities),
+                len(entity_edges),
+                ctx.candidates_total,
+                len(ctx.unresolved_endpoints),
+            )
+            for entity in entities:
+                _log.info(
+                    "COMMIT нода: node_id=%s имя=%r чанки=%s источники=%s",
+                    _context_node_id(domain, entity),
+                    str(
+                        entity.get("canonical_name")
+                        or entity.get("canonical")
+                        or entity.get("name")
+                        or ""
+                    ),
+                    _entity_chunk_ids(entity),
+                    _entity_sources(entity),
+                )
+            for relation in entity_edges:
+                _log.info(
+                    "COMMIT связь: %r -[%s]-> %r",
+                    relation.get("from"),
+                    relation.get("kind") or relation.get("type"),
+                    relation.get("to"),
+                )
+        # ADR-044: версия, которую присвоит эта загрузка (`registry.upsert` = current + 1).
+        # Считается под `source_lock`, поэтому две загрузки одного источника не сойдутся.
+        owner_version = self._registry.current_version(doc.domain, doc.source_url) + 1
         for entity in entities:
             canonical = str(
                 entity.get("canonical_name") or entity.get("canonical") or entity.get("name") or ""
@@ -1148,13 +2278,25 @@ class CommitStage(Stage):
                 "canonical_name": canonical,
                 "source_ids": _entity_sources(entity) or [source_url],
                 "chunk_ids": _entity_chunk_ids(entity),
-                "extractor_version": str(entity.get("extractor_version") or EXTRACTOR_VERSION),
+                # ADR-049 п. 3: поле обязательное и значения по умолчанию не имеет.
+                # Раньше здесь стояло `or EXTRACTOR_VERSION`, и метку заглушки получала
+                # любая нода без поля — включая ручной тег, который собрали без него.
+                # Теперь производителей ровно два, оба ставят поле сами, а отсутствие
+                # поля — дефект нашего кода, который обязан падать громко, а не получать
+                # чужую метку и выглядеть при этом извлечённым.
+                "extractor_version": str(entity["extractor_version"]),
                 "variants": _entity_variants(entity),
                 "properties": dict(entity.get("properties") or {}),
             }
             for key in ("id", "description", "category", "aliases", "origin", "confidence"):
                 if key in entity:
                     properties[key] = entity[key]
+            # ADR-044: содержимое помечается владельцем — источником и версией, которую
+            # получит эта загрузка. Версия считается один раз на документ, а не на ноду.
+            for key in _OWNED_ENTITY_FIELDS:
+                if key in properties:
+                    properties[f"{key}_source_url"] = source_url
+                    properties[f"{key}_version"] = owner_version
             nodes.append(
                 {
                     "node_id": entity_id,
@@ -1164,33 +2306,132 @@ class CommitStage(Stage):
             )
 
         edges: list[dict[str, Any]] = []
+        skipped_unresolved = 0
         for relation in entity_edges:
             source = str(relation.get("from_id") or relation.get("from") or "")
             target = str(relation.get("to_id") or relation.get("to") or "")
             if not source or not target:
                 raise ValueError("COMMIT: link requires from_id and to_id")
+            # Связь с неразрешённым концом в граф НЕ пишется (ADR-038, п. 3): её второй
+            # конец не существует как нода, и обход упёрся бы в висящий конец. Раньше
+            # здесь был `raise`, и одна такая связь валила весь документ на COMMIT — то
+            # есть пункт 3 ADR-037 переносил потерю из EXTRACT в COMMIT, не устраняя её.
+            # Строка связи и факт о неразрешённости остаются в контексте и в отчёте джобы,
+            # то есть `kind` и `confidence` не теряются — они не попадают в обход.
+            if relation.get("endpoint_unresolved"):
+                skipped_unresolved += 1
+                continue
             kind = str(relation.get("kind") or relation.get("type") or "RELATED")
             relation_type = kind.upper() if kind.replace("_", "").isalnum() else "RELATED"
             edge_properties = dict(relation.get("properties") or {})
             edge_properties.setdefault("kind", kind)
+            if relation.get("scope"):
+                edge_properties.setdefault("scope", str(relation["scope"]))
             edge_properties.setdefault("domain", domain)
             edge_properties.setdefault("origin", "system")
-            edge_properties.setdefault("source_ids", [source_url])
+            # Пользовательское утверждение не претендует на документ, поэтому и
+            # `source_ids` документа ему не достаётся: `_remove_source` снимает
+            # происхождение по этому списку, и будь он там - ревизия удалила бы связь,
+            # которая должна пережить документ.
+            if relation.get("scope") != SCOPE_USER:
+                edge_properties.setdefault("source_ids", [source_url])
             for key in ("origin", "confidence", "source_ids"):
                 if key in relation:
                     edge_properties[key] = relation[key]
+            if relation.get("chunk_ids"):
+                edge_properties["chunk_ids"] = list(relation["chunk_ids"])
+            # `chunk_ids` связи - опора, на которой держится весь предикат уборки
+            # (`docs/02` §4.5): без неё связь выглядит структурной (`chunk_ids IS NULL`),
+            # а такой класс уборка обязана не трогать. Копируется только непустое значение:
+            # у связи, которой нечем подтвердить опору, свойства `chunk_ids` не должно быть
+            # вовсе, иначе она станет кандидатом на удаление, то есть потеряет данные.
+            #
+            # Пропуск этого присваивания стоил дороже всего: связи создавались без опоры,
+            # предикат не видел ни одной, и уборка была пустым упражнением на любом корпусе.
+            # Нашёл это E2E-прогон (`test_artifacts/e2e-cleanup/`), а не тесты: тесты
+            # строиили рёбра руками, уже с `chunk_ids` в свойствах, либо проверяли защиту
+            # связи, которая как раз и не была кандидатом.
             edges.append(
                 {
                     "from_id": source,
                     "to_id": target,
                     "type": relation_type,
+                    # Имена концов сохраняются для диагностики: `from_id`/`to_id` к
+                    # этому моменту уже могут быть идентификаторами, и по ним одним
+                    # не отличить «модель дала имя» от «сущность не дожила».
+                    "from_name": relation.get("from"),
+                    "to_name": relation.get("to"),
                     "properties": edge_properties,
                 }
             )
         known_ids = set(entity_ids)
+        # Последний шанс перевести конец в идентификатор. NORMALIZE это уже делает, но
+        # сущность могла не дожить до COMMIT (слияние, подавленный неоднозначный алиас),
+        # и тогда имя осталось бы именем. Ключ здесь единственное место, где оба конца
+        # сравниваются с одним и тем же множеством, поэтому перевод делается тут.
         for edge in edges:
-            if edge["from_id"] not in known_ids or edge["to_id"] not in known_ids:
-                raise ValueError("COMMIT: link references unknown context node")
+            for id_key, name_key in (("from_id", "from_name"), ("to_id", "to_name")):
+                value = edge[id_key]
+                if value in known_ids:
+                    continue
+                resolved = entity_ids.get(_context_node_id(domain, {"canonical_name": value}))
+                if resolved is not None:
+                    edge[id_key] = resolved
+        dropped_edges: list[dict[str, Any]] = []
+        for edge in edges:
+            if edge["from_id"] in known_ids and edge["to_id"] in known_ids:
+                continue
+            # Решение владельца от 2026-10-02: конец вне идентификаторов - это факт
+            # (ADR-037), а не гибель документа. Раньше здесь был `raise`, и одна
+            # непереведённая связь валила весь документ на COMMIT.
+            missing = [
+                side
+                for side, value in (("from_id", edge["from_id"]), ("to_id", edge["to_id"]))
+                if value not in known_ids
+            ]
+            dropped_edges.append(
+                {
+                    "endpoint_name": str(edge[missing[0]]),
+                    "endpoint_key": _identity_key(str(edge[missing[0]])),
+                    "relation_kind": str(edge.get("kind") or edge["type"]),
+                    "other_endpoint_name": str(
+                        edge["to_name"] if missing[0] == "from_id" else edge["from_name"]
+                    ),
+                    "stage": "COMMIT",
+                }
+            )
+        if dropped_edges:
+            edges = [
+                edge
+                for edge in edges
+                if edge["from_id"] in known_ids and edge["to_id"] in known_ids
+            ]
+            # Счётчик не теряется: молчание здесь стоило недели работы. Пустой граф даёт
+            # `necessity = 0`, который читается как «граф не нужен», а не как «связи не
+            # записались». Поэтому потеря попадает и в лог, и в счётчик разрешимости.
+            ctx.unresolved_endpoints.extend(dropped_edges)
+            skipped_unresolved += len(dropped_edges)
+            _log.error(
+                "COMMIT: связи с концом вне идентификаторов не записаны: %d, источник=%s, "
+                "концы=%s",
+                len(dropped_edges),
+                source_url,
+                [item["endpoint_name"] for item in dropped_edges],
+            )
+        if skipped_unresolved:
+            # Видно на логе, а не только в таблице: «связь не записана» и «связи не было»
+            # — разные утверждения, и второе неверно.
+            #
+            # Уровень ERROR и сами концы — решение владельца от 2026-10-02. INFO с одним
+            # счётчиком прятал потерю: в прогоне `docs/api_reference.md` молча не записалось
+            # 29 связей из 32, и в отчёте это выглядело как успех. Молчание здесь опаснее
+            # всего: пустой граф даёт `necessity = 0`, который читается как «граф не нужен».
+            _log.error(
+                "связи с неразрешённым концом не записаны в граф: %d, источник=%s, концы=%s",
+                skipped_unresolved,
+                source_url,
+                [fact.get("endpoint_name") for fact in ctx.unresolved_endpoints],
+            )
 
         vectors: list[dict[str, Any]] = []
         written_chunk_ids = [str(meta["chunk_id"]) for meta in ctx.chunks_meta]
@@ -1198,6 +2439,9 @@ class CommitStage(Stage):
         for meta in ctx.chunks_meta:
             chunk_id = str(meta["chunk_id"])
             text = ctx.chunks[meta["index"]]
+            # ADR-046 п. 9: носитель ревизии — сам Chunk. Отдельной ноды источника в схеме
+            # нет, поэтому ревизия источника выражена его `content_hash`, а ревизия чанка
+            # выводится из него же; разойтись им не с чем, обе величины вычисляемые.
             nodes.append(
                 {
                     "node_id": chunk_id,
@@ -1208,18 +2452,8 @@ class CommitStage(Stage):
                         "source_url": source_url,
                         "domain": domain,
                         "index": meta["index"],
-                    },
-                }
-            )
-            edges.append(
-                {
-                    "from_id": source_id,
-                    "to_id": chunk_id,
-                    "type": "CONTAINS",
-                    "properties": {
-                        "domain": domain,
-                        "origin": "system",
-                        "source_ids": [source_url],
+                        "content_hash": doc.content_hash,
+                        "projection_revision": source_projection_revision_value,
                     },
                 }
             )
@@ -1265,13 +2499,14 @@ class CommitStage(Stage):
         ):
             raise ValueError("COMMIT: entity ссылается на неизвестный chunk_id")
 
-        stale_chunks = list(
-            dict.fromkeys(
-                [
-                    *graph.list_chunk_ids_of_source(source_id),
-                    *vector.list_chunk_ids_of_source(source_url, domain),
-                ]
-            )
+        # ADR-046 п. 9: якоря источника нет, поэтому обе оси перечисляют чанки документа
+        # по `source_url`. Союз нужен для устойчивости к частичному сбою: если векторная
+        # запись уже исчезла, перечисление только по ней не снимет ноду чанка с графа.
+        stale_chunks = sorted(
+            {
+                *graph.list_chunk_ids_of_source(source_url, domain),
+                *vector.list_chunk_ids_of_source(source_url, domain),
+            }
         )
 
         # ADR-028: детерминированный порядок — защита от deadlock-циклов (S2, 2.3)
@@ -1293,21 +2528,25 @@ class CommitStage(Stage):
                     source_url,
                 ),
             )
-            ctx.graph_projection_status = "committed"
-            return
-        # best_effort: ретраи и компенсация выполняются по осям внутри _write_best_effort
-        self._write_best_effort(
-            graph,
-            vector,
-            nodes,
-            edges,
-            vectors,
-            stale_chunks,
-            written_chunk_ids,
-            domain,
-            source_url,
-        )
+        else:
+            # best_effort: ретраи и компенсация выполняются по осям внутри _write_best_effort
+            self._write_best_effort(
+                graph,
+                vector,
+                nodes,
+                edges,
+                vectors,
+                stale_chunks,
+                written_chunk_ids,
+                domain,
+                source_url,
+            )
+        # Обе ветки сходятся здесь, и только здесь запись считалась состоявшейся. Раньше
+        # `graph_projection_status = "committed"` стоял в двух местах, и добавить туда же
+        # счётчик нод означало бы два места, которые надо не забыть при следующей правке
+        # пути записи. Одно место — единственное, где факт уже установлен.
         ctx.graph_projection_status = "committed"
+        _record_written_node_versions(ctx, nodes)
 
     def _write_vector_only(self, doc: Any, ctx: PipelineContext) -> None:
         vector = self._vector_store
@@ -1578,8 +2817,11 @@ def _soft_delete_source_locked(
         return False
 
     def _do_delete() -> bool:
-        source_id = _source_node_id(domain, source_url)
-        chunk_ids = set(graph_store.list_chunk_ids_of_source(source_id))
+        # ADR-046 п. 9: якоря источника удалён из схемы, поэтому обе оси перечисляют
+        # чанки документа по полю `source_url`. Союз оставлен намеренно: после частичного
+        # сбоя оси расходятся, и перечисление только по одной из них оставило бы ноду
+        # чанка в графе навсегда (проверено тестом частичного удаления).
+        chunk_ids = set(graph_store.list_chunk_ids_of_source(source_url, domain))
         chunk_ids.update(vector_store.list_chunk_ids_of_source(source_url, domain))
         ordered_chunk_ids = sorted(chunk_ids)
         with graph_store.transaction() as graph_tx, vector_store.transaction() as vector_tx:
@@ -1607,21 +2849,45 @@ def _soft_delete_source_locked(
 
 
 class Analyzer:
-    """Оркестратор последовательного прогона этапов."""
-
-    def __init__(self, stages: list[Stage]) -> None:
+    """Полный конвейер джобы: стадии по `STAGES`."""
+    def __init__(self, stages: list[Stage], profile_fetcher: ProfileFetcher | None = None) -> None:
         self._stages = {s.name: s for s in stages}
+        # Профиль - свойство прогона, а не сборки стадий. Его грузили три стадии
+        # (CHUNK, EXTRACT, COMMIT), и каждая держала собственный фетчер, а
+        # `_load_profile` выходил по `ctx.profile_loaded`, то есть авторитетом
+        # становился **кто позвал первым**. Связка в `app.py` была правильной - один
+        # `profile_loader.load` на все три, - но свойство держалось на ней, а не на коде:
+        # стадия без фетчера замораживала `profile={}`, и LLM-экстракция молча
+        # выключалась с `cause=None`. Теперь грузит Analyzer, один раз, до стадий.
+        self._profile_fetcher = profile_fetcher
 
     def run(self, ctx: PipelineContext) -> None:
         for name in STAGES:
+            self._prepare_stage(name, ctx)
             self._stages[name].run(ctx)
             if name == "INGEST" and self.try_noop(ctx):
                 return
 
     def run_one(self, name: str, ctx: PipelineContext) -> None:
+        # Тот же профиль, что и в `run`: `Executor` идёт по стадиям через `run_one`, и
+        # грузил его только `run` - путь сервиса остался бы без профиля при полностью
+        # правильной сборке. Инициализация общая, иначе это свойство держится на том,
+        # какой из двух путей позвали.
+        self._prepare_stage(name, ctx)
         if ctx.noop and name not in {"INGEST", "COMMIT"}:
             return
         self._stages[name].run(ctx)
+
+    def _prepare_stage(self, name: str, ctx: PipelineContext) -> None:
+        """Грузит профиль перед первой стадией, которая его читает.
+
+        Не раньше и не при любой стадии: `INGEST` профиль не читает, а джоба, оказавшаяся
+        noop, не читает его вообще. Из-за безусловной загрузки на каждой стадии повторная
+        джоба на тот же `source_url` грузила профиль второй раз, и проверка «профиль
+        грузится раз на джобу» стала зависеть от порядка стадий, а не от решения.
+        """
+        if name in _PROFILE_CONSUMER_STAGES and not ctx.noop:
+            _load_profile(ctx, self._profile_fetcher)
 
     def try_noop(self, ctx: PipelineContext) -> bool:
         commit_stage = self._stages.get("COMMIT")

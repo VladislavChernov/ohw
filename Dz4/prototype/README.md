@@ -124,6 +124,11 @@ uv run --no-sync python /mnt/d/Otus/ohw/Dz4/prototype/infra/eval/run_eval.py --h
 [infra/eval/pilots/docs-review](./infra/eval/pilots/docs-review/README.md).
 Это прямой pipeline-eval, не e2e и не исправление известных ограничений метрик.
 
+## Приборы извлечения
+
+Офлайн-вердикты по записанным журналам обмена и гард происхождения имён в примере связи.
+Инструкция: [README-extraction-instruments](./infra/eval/README-extraction-instruments.md).
+
 ## Структура
 
 Основные каталоги и файлы (сокращённая схема):

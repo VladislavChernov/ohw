@@ -27,8 +27,8 @@
   эпоха по умолчанию, обратная совместимость); InMemory-бакет ключуется
   `(domain, revision)`. Старые эпохи не достаются (неток-se search) и дочищаются TTL.
 - Pipeline: `run(query, domain, emit, revision=None)` → ревизия уходит в lookup/store;
-  в `done` добавляется `revision` (str | None) — fingerprint среза для Eval (ADR-015)
-  и явный bounded staleness (L2-04).
+в `done` добавляется `revision` (str | None) — fingerprint среза для Eval (ADR-015)
+    и явный bounded staleness (L2-07).
 - Worker: поллер ревизий по потребности — перед каждым `process_one` вызывается
   `revisions.revision(task.domain)` (per-domain refresh не чаще интервала; задержка
   bump ≤ интервал поллинга). Никакого статического списка доменов не требуется.

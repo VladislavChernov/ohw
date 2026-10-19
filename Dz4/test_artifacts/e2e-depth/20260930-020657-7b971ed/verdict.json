@@ -1,0 +1,30 @@
+{
+  "run_valid": true,
+  "checks": {
+    "T9": {
+      "verdict": "fail",
+      "reason": "документов цепочки 4, ожидалось 2"
+    },
+    "T10": {
+      "verdict": "fail",
+      "reason": "документов цепочки 4, ожидалось 3"
+    },
+    "T11": {
+      "verdict": "fail",
+      "reason": "узлов цепочки пройдено 0, ожидалось 4"
+    },
+    "T12": {
+      "verdict": "fail",
+      "reason": "узлов цепочки пройдено 0, ожидалось 4"
+    }
+  },
+  "cache_note": "На попадании в семантический кэш глубина запроса не применяется, и effective_retrieval в ответе отсутствует вовсе (pipeline.py отдаёт cached_done без него). Поэтому вопросы различаются текстом, и каждый замер обязан увидеть cache_hit=false, иначе вердикт inconclusive, а не pass",
+  "chain": [
+    "chain_a",
+    "chain_b",
+    "chain_c",
+    "chain_d"
+  ],
+  "anchor_question": "Zvonkyi Hvorist Ukladu",
+  "finished_at": "2026-09-29T23:08:04+00:00"
+}

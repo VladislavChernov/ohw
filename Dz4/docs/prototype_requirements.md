@@ -79,6 +79,68 @@
 - bge-m3 и Qwen 2.5 Coder 7B Abliterate работают **поочерёдно** через compose-профили
   (`embeddings` / `llm`), ограничение среды прототипа — гейтинг L4-01 (ADR-027), риск №1 (`docs/06` §5).
 
+### 3.3. Наполнение базы: требования по платформам
+
+Наполнение вынесено из стенда в отдельные скрипты (ADR-065): стенду `ingestion-api` не нужен,
+а база живёт в общем томе. Требования к инструменту различаются по платформам **намеренно**,
+и различие зафиксировано, а не оставлено на волю случая.
+
+| Платформа | Видеокарта | Процессор |
+|---|---|---|
+| Linux, macOS | `Demo/ingest.sh` | `Demo/ingest-cpu.sh` |
+| Windows | `Demo/ingest.ps1` | **скрипта нет**, шаги ниже |
+
+**Почему для Windows на процессоре нет скрипта.** Наполнение базы — редкая операция: она
+нужна, чтобы собрать набор заранее, а не чтобы пользоваться демо. Извлечение на процессоре
+идёт часами на документ (на видеокарте измерено ≈33 с на чанк, `Demo/measured-load-time.md`),
+и автоматизация редкого медленного пути на второй платформе означала бы четыре скрипта там,
+где достаточно трёх. Вместо четвёртого — инструкция.
+
+**Что делать на Windows без видеокарты** (те же шаги, что делает `ingest-cpu.sh`):
+
+1. Поднять стенд вместе с ингестом:
+   `docker compose -f compose.runtime.yaml -f compose.ingest.yaml --profile ingest up -d --wait`
+   **Без** `compose.runtime-gpu.yaml` — на машине без NVIDIA он не поднимется.
+2. Загрузить документы в `ingestion-api` (`POST /api/v1/ingestion/documents`), дождаться
+   статуса `succeeded` у каждой джобы.
+3. Опустить оверлей ингеста:
+   `docker compose -f compose.runtime.yaml -f compose.ingest.yaml --profile ingest down`
+   Том останется на месте; вопросы продолжают работать.
+
+**Требуемое окружение для этого пути:** Docker Engine v24.0+, Compose v2.20+, 8 ядер CPU,
+16 ГБ RAM (Neo4j ограничен 1.5 ГБ JVM). Видеокарта не требуется.
+
+**Обходной путь, предпочтительный для демонстрации:** набор `ready` выгружается архивом и
+восстанавливается без ингеста (`demo.ps1 restore`), то есть наполнение вообще не требуется.
+
+### 3.4. Известное ограничение: на больших объёмах модель галлюцинирует
+
+На проверенных объёмах извлечение перестаёт держаться источника. Это не «не хватило
+токенов» и не транспортный сбой: модель застревает, начинает выдумывать имена и повторяет
+их, пока ответ не обрежется по лимиту.
+
+Измерено на `05_adr_log` (239 чанков, 1319 кандидатов подано в каждом чанке):
+
+| что | значение |
+|---|---|
+| первые 19 имён ответа | 4 отсутствуют в документе, первое — пятое по счёту |
+| последние 351 имя | 309 отсутствуют (88%) |
+| `llm_names_raw_grounded` | 46 из 271 — на поданный список легла меньше четверти |
+| `llm_answer_brace_balance` | 0 — JSON не закрыт |
+
+**Последствие для данных:** теряется только граф. Векторный слой грузится целиком —
+после деградировавшей перезагрузки `05_adr_log` в базе 239 чанков, у всех вектор размерности
+1024, текст совпадает с текущим файлом. Документ остаётся искомым по вектору, но сущностей
+и связей не даёт: графа по нему нет вовсе.
+
+Практический вывод: **отсутствие сущностей у большого документа — не признак того, что
+граф не нужен.** Проверять надо журнал джоб, а не число узлов: потеря LLM-слоя при этом не
+отражается в статусе джобы (`succeeded`), и по одному статусу она не видна. Видимость
+потери сделана в скриптах ингеста и в Demo-UI (ADR-066).
+
+Объём — не единственная причина: выдумывание появляется уже на пятом имени. Поэтому
+«сократить объём» может ослабить проявление и не устранить причину.
+
 ## 4. Стек прототипа (выбранные backend'ы; не архитектурная привязка)
 
 | Ось | Выбранная реализация | Интерфейс адаптера |
@@ -153,17 +215,21 @@ Dz4/
 
 ## 6. Состав работ по вехам
 
-> **Статус реализации (обновлено 2026-09-10):**
+> **Статус реализации (уточнено 2026-09-27):**
 >
-> | Веха | Статус | Коммиты | Кратко |
-> |------|--------|---------|--------|
-> | M0 — Инфраструктура | ✅ закрыта | `9225b3a` | Compose+профили, Config :8001, Glossary :8003, Neo4j+llama.cpp |
-> | M1 — Ingestion Pipeline | ✅ закрыта | `55914ff` | Ingestion API :8002, primitive-этапы INGEST→COMMIT, DocumentReader (ADR-021) |
-> | M2 — Query API async + Retriever | ✅ закрыта | `a9c36f3`, `b7558ca`, `93b96c3` | Query :8000+SSE, Worker+Valkey (ADR-023), vector-first ретривер, demo-ui+e2e, тумблер граф-оси |
-> | M3 — Адаптеры и runtime-переключение | 🚧 в работе | `dfb7e9f`, `81490af`, `0208c28` | Бандлы 2/3 и 3/3 реализованы и закоммичены: `add-real-embeddings-reranker` (Embeddings :8004 bge-m3, Reranker :8006 bge-reranker-base, адаптеры, EmbedStage на Embedder, live mock + real-прогон MiniLM/CE) и `add-semantic-cache` (Valkey-кэш семантических ответов, hit/miss + `cache_hit`/`cache_lookup_s`; A-2 — честный контракт атомарности COMMIT) |
-> | M4 — Eval и гейт готовности | ⬜ не начата | — | — |
-> | M5 — MCP-шлюз и UI | ⬜ не начата | — | — |
-> | M6 — Внешние источники (коннекторы) | ⬜ запланирована | — | План-бандл `add-source-connectors`; гайд `docs/connectors_guide.md`; реализация — по потребности, вне скоупа M3–M5 |
+> Колонка коммитов убрана. Раньше там стояли хеши, но они не резолвятся: история репозитория
+> была переписана при вычистке внутренних путей, и указанные коммиты больше не существуют.
+> Ссылаться на бандл — устойчиво; хеш пережил бы только до следующего переписывания.
+>
+> | Веха | Статус | Кратко |
+> |------|--------|--------|
+> | M0 — Инфраструктура | ✅ закрыта | Compose+профили, Config :8001, Glossary :8003, Neo4j+llama.cpp |
+> | M1 — Ingestion Pipeline | ✅ закрыта | Ingestion API :8002, primitive-этапы INGEST→COMMIT, DocumentReader (ADR-021) |
+> | M2 — Query API async + Retriever | ✅ закрыта | Query :8000+SSE, Worker+Valkey (ADR-023), vector-first ретривер, demo-ui+e2e, тумблер граф-оси |
+> | M3 — Адаптеры и runtime-переключение | ✅ закрыта | Бандлы 2/3 и 3/3 реализованы и закоммичены: `add-real-embeddings-reranker` (Embeddings :8004 bge-m3, Reranker :8006 bge-reranker-base, адаптеры, EmbedStage на Embedder, live mock + real-прогон MiniLM/CE) и `add-semantic-cache` (Valkey-кэш семантических ответов, hit/miss + `cache_hit`/`cache_lookup_s`; A-2 — честный контракт атомарности COMMIT) |
+> | M4 — Eval и гейт готовности | 🚧 в работе | Раннер, метрики, датасеты и артефакты реализованы (`openspec/changes/add-prototype-m4-eval`, чек-лист §6 ниже); не выполнено главное — ни одного прогона, удовлетворяющего контракту артефактов `docs/test_plan.md` §5–§6. Хранимые `lift_report` непарны, поэтому приёмка не подтверждена |
+> | M5 — MCP-шлюз и UI | ⬜ не начата | — |
+> | M6 — Внешние источники (коннекторы) | ⬜ запланирована | План-бандл `add-source-connectors`; гайд `docs/connectors_guide.md`; реализация — по потребности, вне скоупа M3–M5 |
 >
 > Детали каждого бандла — в `docs/history.md` «Этап 9» и `openspec/changes/<bundle>/`.
 > Отдельные пункты вех, помеченные ниже как «(partial)», реализованы частично
@@ -180,11 +246,11 @@ Dz4/
 - [x] Ingestion API (:8002): POST /documents, GET/DELETE /jobs/{id} (ADR-018).
 - [x] Этап INGEST→COMMIT: CHUNK (512/64), EMBED (bge-m3, batch 32; на прототипе до M3 —
       детерминированный эмбеддер, см. add-real-embeddings-reranker), EXTRACT (Qwen),
-      NORMALIZE (v3, fallback), DEDUP (0.92/0.75/0.85), CONTRACT, VALIDATE, COMMIT.
+      NORMALIZE (v3, fallback), DEDUP (слияние по нормализованному ключу), CONTRACT, VALIDATE, COMMIT.
 - [x] Document Registry + версии источника (ADR-014), идемпотентность по content hash.
 - [x] Семейство «запуск профилей embeddings/ingestion поочерёдно» (гейтинг L4-01, ограничение
       среды — ADR-027): процедура
-      фазирования — `docs/demo_runbook.md` «GPU-гейтинг»; реальный VRAM-прогон с
+      фазирования — `docs/prototype_stack_runbook.md` «GPU-гейтинг»; реальный VRAM-прогон с
       bge-m3 :8004 — в бандле 2/3 add-real-embeddings-reranker.
 
 ### Веха 2 — Query API (асинхронный контур)
@@ -204,7 +270,7 @@ Dz4/
 - [x] Несколько профилей доменов (it / library / cinema) + переключение активацией (L1-01):
       активация через `POST /domain/activate` (Config :8001); Glossary и Query-сервис
       тянут активный домен pull-моделью на каждый запрос — переключение без рестарта
-      (`docs/demo_runbook.md`, `tests/test_domain_activation.py`).
+      (`docs/prototype_stack_runbook.md`, `tests/test_domain_activation.py`).
 
 ### Веха 3-хвосты — чанкинг: ABC, настройки, структура, внешние сплиттеры, native index
 - [x] `Chunker` ABC + `SlidingWindowChunker`: вынос `_sliding_window` (512/64) из оркестратора
@@ -236,14 +302,14 @@ Dz4/
       недостаточно»); допущение инвалидации TTL+`clear()`, planned upgrade — epoch-bump
       `query:sc:<rev>:<domain>` (Веха 4-хвост), зафиксировано ADR-025.
 - [x] Тесты: `tests/test_semantic_cache.py`, кэш-hit/miss в `test_retrieval_pipeline.py`,
-      hot-reload-preserve в `test_worker_hotreload.py`; коммит `0208c28`.
+      hot-reload-preserve в `test_worker_hotreload.py`.
 
 ### Веха 4 — Eval и гейт готовности
-- [x] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (50 вопросов/it, 10/library, 10/cinema)
+- [x] Eval-датасет `prototype/infra/eval/{domain}/questions.jsonl` (74 вопроса/it, 10/library, 10/cinema)
       — валидация через `tests/test_eval_dataset.py`, формат ADR-015 (id, query, golden_sources, golden_facts, category).
 - [x] Метрики Retrieval@K=5 (Recall, Precision, MRR, nDCG), generation (groundedness, coverage,
       hallucination_rate) — `src/graphrag_proto/eval/metrics.py`, 10 unit-тестов (`test_eval_metrics.py`).
-- [x] Eval-раннер `src/graphrag_proto/eval/run_eval.py` — CLI `run_eval.py --domain --mode --questions`,
+- [x] Eval-раннер `prototype/infra/eval/run_eval.py` — CLI `run_eval.py --domain --mode --questions`,
       агрегация метрик, lift-отчёт JSON+markdown.
 - [x] Контрактный тест `tests/test_llm_openai_adapter.py` — streaming, non-streaming, HTTP 500,
       timeout, connection refused; 5 тестов через stub HTTP-сервер.

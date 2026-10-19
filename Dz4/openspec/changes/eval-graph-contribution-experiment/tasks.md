@@ -1,4 +1,11 @@
 # Задачи: эксперимент «вклад графа»
+> **Актуальный состав набора (2026-10-03).** Цифры «50 вопросов» ниже верны как
+> описание состояния на дату и не переписаны. Действующий набор — ADR-040:
+> `prototype/infra/eval/it/questions.jsonl`, **74 вопроса**, из них **8** с
+> `golden_graph_evidence: true` и **24** с префиксом `it_graph_`.
+> Состав и методика приёмки: `prototype/infra/eval/README-dataset.md`.
+> Корпус ингеста — **30 документов**: `docs/archive/` и `docs/plans/` исключены
+> маркером `.ingest-ignore` (было 37).
 
 > **Supersession notice (2026-09-25):** typed-ontology/constraint tasks 1.1–1.6 and 8.1–8.4
 > are historical implementation evidence, not acceptance criteria for the current concept.
@@ -114,10 +121,27 @@
       `as_of 2026-09-22`).
 - [x] 4.4. Новый `it/questions_graph.jsonl`: графо-специфичные/multi-hop,
       `golden_graph_evidence`, цель ≥ 15 вопросов с ≥ 8 `graph_required`. Реализовано:
-      16 вопросов, 9 `graph_required` с `golden_graph_evidence: true`; факты сверены с
-      `docs/*.md`; `test_it_questions_graph_dataset` зелёный.
+      24 вопроса, 8 `graph_required` с `golden_graph_evidence: true`; факты сверены с
+      `docs/*.md`; `test_it_questions_graph_dataset` зелёный. Числа поправлены 2026-10-01:
+      ранее здесь стояло «16 вопросов, 9 `graph_required`», что не соответствовало файлу.
+      **Позже, 2026-10-01, набор упразднён по ADR-040 и слит в `it/questions.jsonl`; тест
+      переименован в `test_it_questions_dataset`. Запись выше описывает состояние на момент
+      выполнения задачи и не переписывается.**
 - [x] 4.5. Раннер: `--extra-dataset` (несколько наборов мержатся, id сохраняются).
       Реализовано: `merge_datasets` + флаг; тест на дедупликацию id зелёный.
+- [x] 4.6. **ADR-040: золотой набор `it` — один файл.** `questions_graph.jsonl` удалён,
+      74 вопроса в `it/questions.jsonl`, `golden_graph_evidence` проставлен явно у всех строк.
+      Причина: граница файла не совпадала с маркером (из 24 строк `true` был только у 8), а
+      два набора уже дали неверное «9 из 66» вместо 8 из 74. Описано в
+      `prototype/infra/eval/README-dataset.md`.
+- [ ] 4.7. **Ревью эталонов — блокер финального прогона.** Ни один из 74 вопросов не
+      проходил ревью. Измерено: у 71 вопроса хотя бы один `golden_source` менялся позже
+      `as_of` (до 9 дней), набор последний раз правили 2026-09-26, документация — до
+      2026-10-01. Порядок: rubric → разведка → ревью → финал.
+- [ ] 4.8. **Срез для человека — 14 вопросов, состав зафиксирован до чтения ответов.**
+      Все 8 `golden_graph_evidence: true` плюс 6 с `reasoning_type` из `contradiction`,
+      `causal-risk`, `evidence-boundary`, `conditional`. Поверх — слабые цитаты по разведке и
+      базовая выборка из `single-hop`.
 
 ## 5. Артефакты прогона и режимы запуска
 

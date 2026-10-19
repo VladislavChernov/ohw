@@ -1,0 +1,13 @@
+{
+  "calls": 1,
+  "prompt_tokens_total": 1871,
+  "completion_tokens_total": 900,
+  "prompt_tokens_avg": 1871.0,
+  "completion_tokens_avg": 900.0,
+  "errors": {},
+  "response_chars_min": 2999,
+  "response_chars_max": 2999,
+  "response_chars_median": 2999,
+  "labels_present": 1,
+  "truncated_any": 1
+}

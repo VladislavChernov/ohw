@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 CONTEXT_TOKEN_LIMIT = 4096
@@ -27,6 +27,23 @@ class ContextResult:
     skeleton_count: int
     body_count: int
     dropped: int
+    # Токены скелета и тела - РАЗДЕЛЬНО, а не только их сумму. Пока известна лишь сумма,
+    # нельзя отличить "граф занял место текста" от "граф занял своё место": скелет входит
+    # первым и не вытесняется, тело получает остаток, поэтому доля скелета - это и есть
+    # цена, которую платит тело.
+    skeleton_tokens: int = 0
+    body_tokens: int = 0
+    max_tokens: int = 0
+    # САМИ строки, попавшие в промпт. Без них вопрос "что именно модель увидела от графа"
+    # по готовому прогону не отвечается вовсе: числа говорят, сколько строк было, а что
+    # они содержали - остаётся догадкой. Объём ограничен сверху `max_graph_nodes` и бюджетом,
+    # то есть сохраняемое не превосходит того, что реально ушло в промпт.
+    skeleton_lines: list[str] = field(default_factory=list)
+    # Идентификаторы чанков, чей текст РЕАЛЬНО вошёл в промпт (не вытеснен лимитом).
+    # Критерий ADR-072 требует «текст чанка доехал в контекст», и по `body_count` этого
+    # не видно: число говорит, сколько чанков было, но не какие. Чанк без `chunk_id`
+    # в список не попадает — «не измерено» не превращается в пустую строку-идентификатор.
+    body_chunk_ids: list[str] = field(default_factory=list)
 
 
 def render_skeleton(rows: list[dict[str, Any]]) -> list[str]:
@@ -88,6 +105,7 @@ class ContextAssembly:
 
         ordered = sorted(body_chunks, key=lambda c: float(c.get("score") or 0.0), reverse=True)
         body_parts: list[str] = []
+        body_chunk_ids: list[str] = []
         body_tokens = 0
         remaining = self._max_tokens - skeleton_tokens
         for chunk in ordered:
@@ -98,6 +116,9 @@ class ContextAssembly:
                 continue
             body_parts.append(rendered)
             body_tokens += tokens
+            chunk_id = str(chunk.get("chunk_id") or "")
+            if chunk_id:
+                body_chunk_ids.append(chunk_id)
 
         full = [skeleton_text] if selected_skeleton else []
         if body_parts:
@@ -109,4 +130,9 @@ class ContextAssembly:
             skeleton_count=len(selected_skeleton),
             body_count=len(body_parts),
             dropped=dropped,
+            skeleton_tokens=skeleton_tokens,
+            body_tokens=body_tokens,
+            max_tokens=self._max_tokens,
+            skeleton_lines=list(selected_skeleton),
+            body_chunk_ids=body_chunk_ids,
         )

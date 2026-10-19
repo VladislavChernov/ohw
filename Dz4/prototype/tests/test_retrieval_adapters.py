@@ -6,14 +6,17 @@ from typing import Self
 
 import pytest
 
-from graphrag_proto.retrieval.adapters.base import VectorStoreProvider
+from graphrag_proto.retrieval.adapters.base import (
+    VectorStoreProvider,
+    _node_properties,
+)
 from graphrag_proto.retrieval.adapters.deterministic import (
     DeterministicEmbedder,
     deterministic_embedding,
 )
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
 from graphrag_proto.retrieval.adapters.llm import FakeLLM
-from graphrag_proto.retrieval.adapters.neo4j import Neo4jVectorStore
+from graphrag_proto.retrieval.adapters.neo4j import Neo4jGraphStore, Neo4jVectorStore
 from graphrag_proto.retrieval.adapters.reranker import NoOpRerankerAdapter
 from graphrag_proto.retrieval.adapters.schemas import normalize_vector_row
 from graphrag_proto.retrieval.retrievers import VectorRetriever
@@ -22,11 +25,6 @@ from graphrag_proto.retrieval.retrievers import VectorRetriever
 def _seed(graph: InMemoryGraphStore) -> None:
     graph.upsert_nodes(
         [
-            {
-                "node_id": "src:it:src://a.txt",
-                "labels": ["Source"],
-                "properties": {"source_url": "src://a.txt", "domain": "it"},
-            },
             {
                 "node_id": "chk:abc",
                 "labels": ["Chunk"],
@@ -71,12 +69,6 @@ def _seed(graph: InMemoryGraphStore) -> None:
     )
     graph.upsert_edges(
         [
-            {
-                "from_id": "src:it:src://a.txt",
-                "to_id": "chk:abc",
-                "type": "CONTAINS",
-                "properties": {},
-            },
             {
                 "from_id": "tag:it:database",
                 "to_id": "tag:it:storage",
@@ -124,15 +116,41 @@ def test_inmemory_context_expansion_uses_tag_id_and_respects_bounds() -> None:
     assert "_labels" not in rows[0]
 
 
-def test_remove_source_clears_edge_provenance() -> None:
+def test_inmemory_expansion_traverses_extraction_kinds_in_both_directions() -> None:
+    """Виды из промпта экстракции не должны отсекаться фильтром обхода (ADR-031, open)."""
     store = InMemoryGraphStore()
-    _seed(store)
+    store.upsert_nodes(
+        [
+            {
+                "node_id": "tag:it:alpha",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": "tag:it:alpha",
+                    "canonical_name": "Альфа",
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            },
+            {
+                "node_id": "tag:it:beta",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": "tag:it:beta",
+                    "canonical_name": "Бета",
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            },
+        ]
+    )
     store.upsert_edges(
         [
             {
-                "from_id": "tag:it:database",
-                "to_id": "tag:it:storage",
-                "type": "RELATED",
+                "from_id": "tag:it:alpha",
+                "to_id": "tag:it:beta",
+                "type": "CONTRADICTS",
                 "properties": {
                     "source_ids": ["src://a.txt"],
                     "chunk_ids": ["chk:abc"],
@@ -141,11 +159,305 @@ def test_remove_source_clears_edge_provenance() -> None:
         ]
     )
 
+    forward = store.expand(["tag:it:alpha"], max_nodes=3)
+    backward = store.expand(["tag:it:beta"], max_nodes=3)
+
+    assert [row["node_id"] for row in forward] == ["tag:it:beta"]
+    assert [row["kind"] for row in forward] == ["CONTRADICTS"]
+    assert [row["node_id"] for row in backward] == ["tag:it:alpha"]
+    assert [row["kind"] for row in backward] == ["CONTRADICTS"]
+
+
+def test_inmemory_expansion_kinds_narrows_traversal() -> None:
+    store = InMemoryGraphStore()
+    store.upsert_nodes(
+        [
+            {
+                "node_id": f"tag:it:{name}",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": f"tag:it:{name}",
+                    "canonical_name": name,
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+            for name in ("alpha", "beta", "gamma")
+        ]
+    )
+    store.upsert_edges(
+        [
+            {
+                "from_id": "tag:it:alpha",
+                "to_id": "tag:it:beta",
+                "type": "CONTRADICTS",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            },
+            {
+                "from_id": "tag:it:alpha",
+                "to_id": "tag:it:gamma",
+                "type": "SIMILAR_TO",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            },
+        ]
+    )
+
+    only_similar = store.expand(["tag:it:alpha"], kinds=["SIMILAR_TO"], max_nodes=3)
+
+    assert [row["node_id"] for row in only_similar] == ["tag:it:gamma"]
+    assert store.expand(["tag:it:alpha"], kinds=["any"], max_nodes=3)
+    assert store.expand(["tag:it:alpha"], kinds=[], max_nodes=3)
+
+
+def test_inmemory_expansion_legacy_direction_values_map_to_single_axis() -> None:
+    store = InMemoryGraphStore()
+    store.upsert_nodes(
+        [
+            {
+                "node_id": f"tag:it:{name}",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": f"tag:it:{name}",
+                    "canonical_name": name,
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+            for name in ("alpha", "beta")
+        ]
+    )
+    store.upsert_edges(
+        [
+            {
+                "from_id": "tag:it:alpha",
+                "to_id": "tag:it:beta",
+                "type": "REQUIRES_CONSTRAINT",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+        ]
+    )
+
+    outgoing = store.expand(["tag:it:alpha"], direction="parent", max_nodes=3)
+    incoming = store.expand(["tag:it:alpha"], direction="related", max_nodes=3)
+
+    assert [row["node_id"] for row in outgoing] == ["tag:it:beta"]
+    assert incoming == []
+
+
+def test_neo4j_expansion_query_is_not_restricted_to_parent_or_related() -> None:
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    session = _Session()
+    store._session = lambda: session
+
+    store.expand(["tag:it:alpha"], max_nodes=3)
+
+    assert ":PARENT" not in session.query
+    assert ":RELATED" not in session.query
+    assert "-[*1..2]-" in session.query
+
+    store.expand(["tag:it:alpha"], direction="out", kinds=["CONTRADICTS"], max_nodes=3)
+
+    assert "MATCH path=(seed)-[:CONTRADICTS*1..2]->(node)" in session.query
+
+    store.expand(["tag:it:alpha"], direction="in", max_nodes=3)
+
+    assert "MATCH path=(seed)<-[*1..2]-(node)" in session.query
+
+
+def test_expansion_depth_is_capped_and_shared_across_adapters() -> None:
+    """Профиль может запросить больше предела, но урезание обязано быть общим и явным."""
+    from graphrag_proto.retrieval.adapters.base import MAX_EXPANSION_DEPTH, _expand_depth
+
+    assert _expand_depth(1) == 1
+    assert _expand_depth(MAX_EXPANSION_DEPTH) == MAX_EXPANSION_DEPTH
+    assert _expand_depth(MAX_EXPANSION_DEPTH + 5) == MAX_EXPANSION_DEPTH
+    assert _expand_depth(0) == 1
+    assert _expand_depth(-7) == 1
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    session = _Session()
+    store._session = lambda: session
+
+    store.expand(["tag:it:alpha"], max_depth=99, max_nodes=3)
+
+    assert f"1..{MAX_EXPANSION_DEPTH}]" in session.query
+    assert "1..99" not in session.query
+
+
+def test_relevance_of_source_without_candidate_is_absent_not_constant() -> None:
+    """У источника без кандидата relevance нет, и это сказано явно (ADR-064).
+
+    Раньше здесь стояла константа `1.0`, и рядом с оценкой кандидата она читалась как
+    «вдвое релевантнее». Ни одна метрика это поле не читает — `retrieval_metrics` считает по
+    порядку источников, — то есть сравнение, которое читатель себе воображал, не делал никто.
+
+    `None`, а не `0.0`: ноль — это «оценили и признали неважным». Здесь не оценено ничего.
+    """
+    from graphrag_proto.retrieval.pipeline import build_sources
+
+    chunks = [{"source_url": "s://a.txt", "chunk_id": "chk:1", "score": 0.9}]
+    skeleton = [{"n": {"node_id": "tag:it:x", "source_ids": ["s://b.txt"]}}]
+
+    rows = {row["source_url"]: row for row in build_sources(chunks, skeleton)}
+
+    # Источник с кандидатом: оценка кандидата, основание `score`.
+    assert rows["s://a.txt"]["relevance"] == pytest.approx(0.9)
+    assert rows["s://a.txt"]["relevance_basis"] == "score"
+    # Источник без кандидата: оценки нет, и основание это объявляет.
+    assert rows["s://b.txt"]["relevance"] is None
+    assert rows["s://b.txt"]["relevance_basis"] == "none"
+    assert rows["s://b.txt"]["relevance"] != 0.0, (
+        "ноль читается как измеренная величина, а её не измеряли"
+    )
+
+
+def test_both_axes_of_one_source_share_the_same_relevance() -> None:
+    """Relevance принадлежит источнику, а не паре «источник + ось» (ADR-064).
+
+    Ось отвечает на вопрос «кто принёс», а не «насколько релевантно». Когда у источника есть
+    кандидат, обе его оси показывают одно и то же число, иначе в выдаче снова появляется
+    сравнение, которого никто не делал.
+    """
+    from graphrag_proto.retrieval.pipeline import build_sources
+
+    chunks = [{"source_url": "s://a.txt", "chunk_id": "chk:1", "score": 0.7}]
+    skeleton = [{"n": {"node_id": "tag:it:x", "source_ids": ["s://a.txt"]}}]
+
+    rows = [row for row in build_sources(chunks, skeleton) if row["source_url"] == "s://a.txt"]
+
+    axes = {row["axis"] for row in rows}
+    assert axes == {"vector", "graph"}, "источник принесён обеими осями"
+    scores = [row["relevance"] for row in rows]
+    assert all(score == pytest.approx(0.7) for score in scores), (
+        f"оси показали разные числа: {scores}"
+    )
+    assert {row["relevance_basis"] for row in rows} == {"score"}
+    # Метка одна и та же: ось отвечает «кто принёс», метка — «что с документом».
+    assert len({row["graph_knowledge"] for row in rows}) == 1
+def test_expansion_depth_cap_is_identical_in_both_adapters() -> None:
+    """Предел глубины обязан действовать одинаково: иначе стенд и тесты дают разный граф.
+
+    Регрессия: `MAX_EXPANSION_DEPTH` применялся только в neo4j.py, а inmemory.py
+    использовал сырое `max_depth`. Из-за этого in-memory путь, на котором держатся
+    юнит-тесты, не был защищён пределом.
+    """
+    from graphrag_proto.retrieval.adapters.base import MAX_EXPANSION_DEPTH, _expand_depth
+
+    store = InMemoryGraphStore()
+    # Цепочка ДЛИННЕЕ потолка, и это условие проверяется явно. Раньше цепочка была из
+    # 5 узлов, а потолок 3, и тест проходил; после подъёма потолка до 6 цепочка стала
+    # короче него, ограничителем перестал быть потолок - и тест стал проходить даже с
+    # ПОЛНОСТЬЮ отключённым ограничением, то есть проверял уже не то. Теперь любой
+    # потолок снова упирается в цепочку, и проверка не может выродиться незаметно.
+    chain_length = MAX_EXPANSION_DEPTH + 2
+    assert chain_length > MAX_EXPANSION_DEPTH
+    store.upsert_nodes(
+        [
+            {
+                "node_id": f"tag:it:{name}",
+                "labels": ["ContextNode"],
+                "properties": {
+                    "tag_id": f"tag:it:{name}",
+                    "canonical_name": name,
+                    "domain": "it",
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+            for name in (f"n{index}" for index in range(chain_length))
+        ]
+    )
+    store.upsert_edges(
+        [
+            {
+                "from_id": f"tag:it:n{index}",
+                "to_id": f"tag:it:n{index + 1}",
+                "type": "REFERENCES",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            }
+            for index in range(chain_length - 1)
+        ]
+    )
+
+    beyond_cap = MAX_EXPANSION_DEPTH + 10
+    rows = store.expand(["tag:it:n0"], max_depth=beyond_cap, max_nodes=chain_length * 4)
+
+    assert rows, "цепочка рёбер должна находиться"
+    assert max(row["depth"] for row in rows) == MAX_EXPANSION_DEPTH
+    assert len(rows) == MAX_EXPANSION_DEPTH
+    assert _expand_depth(beyond_cap) == MAX_EXPANSION_DEPTH
+    # Глубина 6 обязана быть достижима: иначе «потолок 6» ничего не разрешает и
+    # документированная партономия (5 хопов от дома до страны) остаётся недостижимой.
+    assert _expand_depth(MAX_EXPANSION_DEPTH) == 6
+
+
+def test_remove_source_clears_edge_provenance() -> None:
+    """Снятие источника чистит опору, но НЕ создаёт её там, где её не было.
+
+    Разделение существенно. Связь, у которой опора была и осталась пустой, обязана стать
+    кандидатом на уборку - это и есть ретракция утверждения. А связь, у которой опоры не
+    было никогда (пользовательское утверждение, структурная связь), обязана её не получить:
+    появление `chunk_ids = []` превращало нетронутую связь в кандидата, то есть обновление
+    документа само порождало мусор, который затем съедала уборка.
+
+    Прежняя версия теста проверяла только первый случай и проходила на втором случайно:
+    у ребра фикстуры `chunk_ids` не было, код его создавал, и проверка видела ожидаемое
+    `[]`. То есть тест закреплял поведение, которое и было дырой.
+    """
+    store = InMemoryGraphStore()
+    _seed(store)
+    # Свои идентификаторы, а не узлы фикстуры: у фикстуры уже есть ребро с `origin: user`
+    # на ключе (database, storage, RELATED), и `upsert_edges` сольётся с ним, сохранив
+    # ручное происхождение и выбросив `chunk_ids` из входящих свойств. Тест на ретракцию
+    # не должен зависеть от чужого приоритета слияния.
+    with_support = ("tag:it:probe_a", "tag:it:probe_b", "PROBE_WITH_SUPPORT")
+    without_support = ("tag:it:probe_c", "tag:it:probe_d", "PROBE_WITHOUT_SUPPORT")
+    store.upsert_edges(
+        [
+            {
+                "from_id": "tag:it:probe_a",
+                "to_id": "tag:it:probe_b",
+                "type": "PROBE_WITH_SUPPORT",
+                "properties": {
+                    "source_ids": ["src://a.txt"],
+                    "chunk_ids": ["chk:abc"],
+                },
+            },
+            {
+                "from_id": "tag:it:probe_c",
+                "to_id": "tag:it:probe_d",
+                "type": "PROBE_WITHOUT_SUPPORT",
+                "properties": {"source_ids": ["src://a.txt"], "scope": "user"},
+            },
+        ]
+    )
+    assert store._edges[with_support]["chunk_ids"] == ["chk:abc"]
+    assert "chunk_ids" not in store._edges[without_support]
+
     store.remove_source_from_entities("it", "src://a.txt", ["chk:abc"])
 
-    edge = store._edges[("tag:it:database", "tag:it:storage", "RELATED")]
-    assert edge["source_ids"] == []
-    assert edge["chunk_ids"] == []
+    # Опора была и стала пустой - это кандидат, и так должно быть.
+    assert store._edges[with_support]["source_ids"] == []
+    assert store._edges[with_support].get("chunk_ids") == []
+    # Связи без опоры снятие источника не должно награждать пустым списком.
+    assert "chunk_ids" not in store._edges[without_support], (
+        "связи без опоры создано chunk_ids: [] - она стала кандидатом на уборку, "
+        "хотя документ её не утверждал"
+    )
 
 
 def test_inmemory_context_expansion_without_seeds_returns_empty() -> None:
@@ -235,11 +547,13 @@ def test_delete_context_node_removes_incident_links() -> None:
     assert store.delete_node("tag:it:storage") is False
 
 
-def test_list_chunk_ids_of_source_returns_contains() -> None:
+def test_list_chunk_ids_of_source_selects_chunks_by_owner() -> None:
+    """ADR-046 п. 9: перечисление идёт по полю владельца на чанке, а не по связи CONTAINS."""
     store = InMemoryGraphStore()
     _seed(store)
 
-    assert store.list_chunk_ids_of_source("src:it:src://a.txt") == ["chk:abc"]
+    assert store.list_chunk_ids_of_source("src://a.txt", "it") == ["chk:abc"]
+    assert store.list_chunk_ids_of_source("src://missing.txt", "it") == []
 
 
 def test_remove_source_clears_context_node_provenance() -> None:
@@ -506,7 +820,244 @@ def test_fake_llm_deltas_and_full_text() -> None:
 def test_openai_adapter_http_connect_error_is_runtime() -> None:
     from graphrag_proto.retrieval.adapters.llm import OpenAICompatibleAdapter
 
-    adapter = OpenAICompatibleAdapter(base_url="http://127.0.0.1:1", timeout_s=0.2)
+    adapter = OpenAICompatibleAdapter(model="test-model", base_url="http://127.0.0.1:1", timeout_s=0.2)
 
     with pytest.raises(RuntimeError):
         list(adapter.generate("hi"))
+
+
+def test_neo4j_fanout_is_counted_per_branch_point_not_per_seed() -> None:
+    """Ветвление ограничивается ПО УЗЛУ, как в in-memory, а не суммарно на старт.
+
+    Различие не косметическое. При счёте по seed ограничение съедалось ближайшими
+    строками: на глубине больше 1 промежуточный узел разветвлялся как угодно, и глубина
+    почти не добавляла ответа. При счёте по узлу 8 - это «не больше 8 соседей от каждого
+    узла», то есть ровно то, что делает in-memory, и параметр наконец значит одно и то же
+    в обоих адаптерах.
+    """
+    rows = [
+        # Три соседа n0: при лимите 2 третьй отбрасывается.
+        {"path": ["tag:it:n0", "tag:it:a1"], "node": {"node_id": "tag:it:a1"}, "depth": 1},
+        {"path": ["tag:it:n0", "tag:it:a2"], "node": {"node_id": "tag:it:a2"}, "depth": 1},
+        {"path": ["tag:it:n0", "tag:it:a3"], "node": {"node_id": "tag:it:a3"}, "depth": 1},
+        # По одному ребру из a1 и a2: лимит считается от КАЖДОГО из них, а не от n0,
+        # поэтому при счёте по seed эти строки были бы отброшены как третьи и четвёртые.
+        {
+            "path": ["tag:it:n0", "tag:it:a1", "tag:it:b1"],
+            "node": {"node_id": "tag:it:b1"},
+            "depth": 2,
+        },
+        {
+            "path": ["tag:it:n0", "tag:it:a2", "tag:it:b2"],
+            "node": {"node_id": "tag:it:b2"},
+            "depth": 2,
+        },
+    ]
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return rows
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    found = store.expand(["tag:it:n0"], max_depth=2, max_fanout=2, max_nodes=10)
+    ids = [row["node_id"] for row in found]
+
+    assert ids == ["tag:it:a1", "tag:it:a2", "tag:it:b1", "tag:it:b2"], ids
+    assert "tag:it:a3" not in ids, "третий сосед n0 превышает лимит ветвления"
+    assert "tag:it:b1" in ids, "ребро из a1 не должно съедать лимит n0"
+
+
+def test_neo4j_fanout_limit_applies_per_node_on_one_chain() -> None:
+    """На цепочке лимит 1 - это один сосед от КАЖДОГО узла, а не одна строка на старт.
+
+    Контраст с прежним счётом по seed резкий: при счёте по seed из цепочки
+    n0 -> n1 -> n2 прошла бы только n1, и глубина 2 была бы недостижима в принципе.
+    """
+    rows = [
+        {
+            "path": ["tag:it:n0", "tag:it:n1"],
+            "node": {"node_id": "tag:it:n1"},
+            "depth": 1,
+        },
+        {
+            "path": ["tag:it:n0", "tag:it:n1", "tag:it:n2"],
+            "node": {"node_id": "tag:it:n2"},
+            "depth": 2,
+        },
+    ]
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return rows
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    found = store.expand(["tag:it:n0"], max_depth=2, max_fanout=1, max_nodes=10)
+    assert [row["node_id"] for row in found] == ["tag:it:n1", "tag:it:n2"]
+
+
+def test_node_properties_tolerates_json_string_from_ingest() -> None:
+    """Свойства узла, пришедшие строкой, читаются как отображение, а не роняют обход.
+
+    Находка E2E-прогона глубины на стенде: ingest пишет `properties` JSON-текстом, поэтому
+    на живом графе это строка `"{}"`, и `dict("{}")` падает с ValueError. Юнит-тесты этого
+    не видели: они строили узлы руками и клали туда отображение. Ровно тот класс, что и с
+    `chunk_ids`, - механизм написан, на реальных данных не исполнялся.
+    """
+    assert _node_properties({"a": 1}) == {"a": 1}
+    assert _node_properties('{"a": 1}') == {"a": 1}
+    assert _node_properties("{}") == {}
+    assert _node_properties("не json") == {}
+    assert _node_properties("") == {}
+    assert _node_properties(None) == {}
+    assert _node_properties(42) == {}
+    # Байты - это тоже Sequence, как и строка, и перебирать их нельзя: на первой же
+    # распаковке цели падало бы. Ветки для «списка пар» нет намеренно, её писали на
+    # умозаключении, и она была неверной.
+    assert _node_properties(b"{}") == {}
+    assert _node_properties([("a", 1)]) == {}
+
+
+def test_neo4j_expand_survives_string_properties_on_live_nodes() -> None:
+    """Тот же случай на уровне адаптера: обход не должен падать из-за чужого свойства."""
+    rows = [
+        {
+            "path": ["tag:it:seed", "tag:it:n1"],
+            # Именно то, что отдаёт живой ingest: properties строкой, а не отображением.
+            "node": {"node_id": "tag:it:n1", "properties": "{}", "domain": "it"},
+            "depth": 1,
+        }
+    ]
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return rows
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    found = store.expand(["tag:it:seed"], max_depth=1, max_nodes=4)
+
+    assert [row["node_id"] for row in found] == ["tag:it:n1"]
+    assert found[0]["properties"] == {}, "непрочитанное свойство даёт пустое отображение"
+
+
+def test_neo4j_expand_query_excludes_chunk_nodes() -> None:
+    """Развёртка не должна возвращать текстовые узлы (ADR-068).
+
+    Гард стоит на тексте запроса, а не на результате, и это не слабость гарда, а следствие
+    самого дефекта: `LIMIT` стоит ВНУТРИ запроса, поэтому python-фильтр после выборки уже
+    не вернёт потраченный бюджет. Поведенческая проверка здесь невозможна по построению —
+    строка, съевшая лимит, исчезает до того, как её увидит вызывающий код.
+
+    Что именно ломается без этого условия: ребро `MENTIONS` идёт чанк -> сущность, и обход
+    с направлением `both` проходит по нему назад, попадая в узлы чанков. У чанка нет ни
+    `source_ids`, ни `chunk_ids`, поэтому `_has_active_provenance` режет такие строки, а
+    лимит к этому моменту уже израсходован. При `max_nodes=5` на месте выживает ноль строк.
+    """
+
+    captured: dict[str, str] = {}
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return []
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            captured["query"] = query
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    store.expand(["tag:it:seed"], max_depth=1, max_nodes=4)
+
+    query = captured["query"]
+    assert "NOT node:Chunk" in query, (
+        "развёртка обязана исключать узлы чанков: текст даёт векторная ось и мост по chunk_ids"
+    )
+    # Ограничение остаётся внутри запроса - иначе правка потеряла бы смысл.
+    assert "LIMIT $max_nodes" in query
+
+
+def test_neo4j_expand_query_orders_before_limiting() -> None:
+    """Срез должен идти по порядку, а не по тому, что Cypher вернул первой (ADR-070).
+
+    Порядок строк в Cypher контрактом не задан, поэтому без сортировки один и тот же запрос
+    дважды даёт разный набор, а замер становится неповторяемым. `ORDER BY` обязан стоять
+    ДО `LIMIT`: после него сортировка не имела бы смысла, строки режутся раньше, чем
+    упорядочиваются.
+
+    Ближние пути идут первыми: сид получен из найденного чанка, и ближе к нему - ближе к
+    вопросу. Равенство по расстоянию снимается по `node_id`, иначе порядок снова зависит от
+    плана запроса.
+    """
+    captured: dict[str, str] = {}
+
+    class _Rows:
+        def data(self) -> list[dict[str, object]]:
+            return []
+
+    class _RowsSession:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *args: object) -> bool:
+            return False
+
+        def run(self, query: str, parameters: dict[str, object]) -> _Rows:
+            captured["query"] = query
+            return _Rows()
+
+    store = Neo4jGraphStore("bolt://localhost:7687", "neo4j", "pass")
+    store._session = lambda: _RowsSession()  # type: ignore[assignment]
+
+    store.expand(["tag:it:seed"], max_depth=3, max_nodes=5)
+
+    query = captured["query"]
+    order_at = query.find("ORDER BY")
+    limit_at = query.find("LIMIT $max_nodes")
+    assert order_at != -1, "развёртка обязана упорядочивать выборку до среза"
+    assert limit_at != -1, "ограничение выборки обязано остаться"
+    assert order_at < limit_at, "ORDER BY после LIMIT не влияет на то, что попало в срез"
+    assert "depth" in query[order_at:], "сортировка обязана идти по длине пути"
+    assert "node_id" in query[order_at:], "равные расстояния снимаются по node_id"

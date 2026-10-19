@@ -1,8 +1,8 @@
 """Live Neo4j parity для offline projection (LP-13).
 
 Полный обычный suite работает на InMemory; этот файл — единственная проверка
-того, что тот же projection job даёт тот же результат на живом Neo4j: Source/Chunk
-anchors, `CONTAINS`-связи, provenance, vector metadata backfill, `verify_projection`
+    сущности, что job реально построил и проверил узлы, рёбра и сохранил его на настоящем Neo4j:
+    Chunk-анкоры, `MENTIONS`-рёбра, provenance, vector metadata backfill, `verify_projection`
 и retention с domain-фильтром.
 
 Запуск (только при поднятом Neo4j):
@@ -65,7 +65,7 @@ def live_pair() -> tuple[Neo4jGraphStore, Neo4jVectorStore]:
         pytest.skip(f"Neo4j недоступен по {_live_uri()}: {type(exc).__name__}")
     yield graph, vector
     # Чистим строго по префиксу lp13:// — префикс есть и в source_url, и в
-    # производных node_id (chk:lp13://…, src:lp13:lp13://…, tag:lp13:lp13://…),
+    # идентификаторы node_id (chk:lp13://:, tag:lp13:lp13://:),
     # поэтому фильтр по вхождению, а не по node_id STARTS WITH. Домен теста
     # изолирован (lp13), а чужие узлы/связи не трогаются.
     graph.query("MATCH (n) WHERE n.node_id CONTAINS 'lp13://' DETACH DELETE n")
@@ -81,11 +81,6 @@ def _unit(source_url: str) -> ProjectionUnit:
     return ProjectionUnit(
         source_url=source_url,
         nodes=[
-            {
-                "node_id": f"src:{_DOMAIN}:{source_url}",
-                "labels": ["Source"],
-                "properties": {"source_url": source_url, "domain": _DOMAIN},
-            },
             {
                 "node_id": chunk_id,
                 "labels": ["Chunk"],
@@ -111,18 +106,7 @@ def _unit(source_url: str) -> ProjectionUnit:
                 },
             },
         ],
-        edges=[
-            {
-                "from_id": f"src:{_DOMAIN}:{source_url}",
-                "to_id": chunk_id,
-                "type": "CONTAINS",
-                "properties": {
-                    "domain": _DOMAIN,
-                    "source_ids": [source_url],
-                    "chunk_ids": [chunk_id],
-                },
-            }
-        ],
+        edges=[],
         vector_metadata=[
             {
                 "chunk_id": chunk_id,
@@ -166,8 +150,10 @@ def test_live_projection_writes_anchors_and_backfills_vectors(
     chunk = graph.get_node(chunk_id)
     assert chunk is not None and chunk["domain"] == _DOMAIN
     assert chunk["source_url"] == source
-    assert graph.get_node(f"src:{_DOMAIN}:{source}") is not None
-    assert graph.verify_edge(f"src:{_DOMAIN}:{source}", chunk_id, "CONTAINS") is True
+    # ADR-046 п. 9: ноды-якоря источника нет и ребро CONTAINS не пишется; владелец
+    # выражен полем source_url на самом чанке.
+    assert graph.get_node(f"src:{_DOMAIN}:{source}") is None
+    assert graph.verify_edge(f"src:{_DOMAIN}:{source}", chunk_id, "CONTAINS") is False
     tag = graph.get_node(tag_id)
     assert tag is not None and tag["source_ids"] == [source]
     metadata = vector.get_vector_metadata(chunk_id)
@@ -205,12 +191,8 @@ def test_live_projection_is_idempotent_and_does_not_duplicate_anchors(
         {"node_id": f"chk:{source}"},
     )
     assert int(rows[0]["c"]) == 1
-    edges = graph.query(
-        "MATCH (:Source {node_id: $from_id})-[r:CONTAINS]->(:Chunk {node_id: $to_id}) "
-        "RETURN count(r) AS c",
-        {"from_id": f"src:{_DOMAIN}:{source}", "to_id": f"chk:{source}"},
-    )
-    assert int(edges[0]["c"]) == 1
+    # Повторный прогон не плодит ни нод-якорей, ни рёбер CONTAINS: их больше нет в схеме
+    # (ADR-046 п. 9), и идемпотентность проверяется тем, что чанк остался один.
 
 
 def test_live_projection_retention_cleans_graph_and_vectors(
@@ -243,16 +225,10 @@ def test_live_projection_retention_cleans_graph_and_vectors(
     assert state.status == "ready", state.last_error
     assert state.skipped_source_count == 1
     assert graph.get_node(f"chk:{source}") is None
-    assert graph.get_node(f"src:{_DOMAIN}:{source}") is None
     tag = graph.get_node(f"tag:{_DOMAIN}:{source}")
     assert tag is not None and tag["source_ids"] == []
     assert vector.get_vector_metadata(f"chk:{source}") is None
-    edges = graph.query(
-        "MATCH (:Source {node_id: $from_id})-[r:CONTAINS]->(:Chunk {node_id: $to_id}) "
-        "RETURN count(r) AS c",
-        {"from_id": f"src:{_DOMAIN}:{source}", "to_id": f"chk:{source}"},
-    )
-    assert int(edges[0]["c"]) == 0
+    assert graph.list_chunk_ids_of_source(source, _DOMAIN) == []
     audit_events = [
         event
         for event in _job(graph, vector, source, registry, include_unit=False).audit_log

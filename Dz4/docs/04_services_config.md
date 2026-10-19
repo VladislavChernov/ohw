@@ -161,22 +161,55 @@ factorial: ["!", "fact"]
 
 ## 5. Конфигурация сервисов
 
-### 5.1. Полный набор ключей runtime config (Config Service namespaces)
+### 5.0 Лимит памяти ingestion-api
+
+Задан в `compose.ingest.yaml`: `mem_limit: ${INGEST_MEM_LIMIT:-500m}`.
+
+Цифра не взята с потолка, а следует из замера 2026-10-14 в этом же образе и тем же
+интерпретатором, что и приложение:
+
+| состояние | RSS |
+|---|---|
+| сервис поднят, NER ещё не загружен | 56,8 МиБ |
+| весь модуль сервиса импортирован, NER не тронут | 47,0 МиБ |
+| после первой загрузки, NER загружен | 147,3 МиБ |
+| живой контейнер после завершения job | 249,9 МиБ |
+
+Прибавка самого NER — **100,2 МиБ**; модель кэшируется в процессе и не выгружается,
+поэтому платится один раз за жизнь контейнера, а не за документ. 500 МиБ — это вдвое от
+измеренного максимума, а не от среднего.
+
+**Если контейнер начнёт падать с OOM — лимит убрать целиком, а не поднимать.** Замер снят с
+одной короткой джобы на малом документе, а не с корпуса: настоящий потолок не измерен, и
+жёсткая граница превратила бы его в отказ при нормальной работе вместо тихого перерасхода.
+Значение 2,04 ГБ из Docker Desktop — сумма по всем контейнерам стенда, к ингесту это
+отношения не имеет.
+
+### 5.1 Где какой параметр живёт
+
+Отдельный конфигуратор не нужен: `infra/config/namespaces.yaml` загружается в SQLite
+`runtime_config` с ключом `(namespace, key)` и управляется через Config API. Проблема не в
+отсутствии механизма, а в том, что подключён он частично — см. 5.3.
+
+Правило разделения — **меняет ли значение уже записанные данные**:
+
+| Дом | Что попадает | Последствие изменения |
+|---|---|---|
+| **Config Service** (`namespaces.yaml`) | выбор адаптеров (`adapters`), параметры LLM (`llm`), чанкинг-дефолты (`chunking`), `auth`, `domain.active_profile` | меняет ответ, но не то, что лежит в хранилище; переключается на hot |
+**Domain Profile** | поведение во время записи: чанкинг, промпт экстракции, `expansion_direction`, `expansion_kinds`, `filter_demote_scale`, `ordering`, пороги дедупликации | версионируется вместе с корпусом и требует re-ingest |
+
+Отсюда важное следствие: пороги дедупликации, даже если будут реализованы, должны жить в
+профиле, а не в `namespace: normalizer` — изменение порога меняет уже слитые сущности в графе,
+то есть инвалидирует projection.
+
+### 5.2 Полный набор ключей runtime config (Config Service namespaces)
 
 **namespace: domain**
 - `active_profile` ("it")
 - `profiles_available`
 - `auto_reload`
 
-**namespace: retrieval**
-- `cosine_threshold` (0.7)
-- `max_graph_nodes` (5)
-- `max_vector_chunks` (5)
-- `context_size` (4096)
-- `reranker_enabled`
-- `graph_search_enabled`
-- `similar_to_expansion`
-
+**namespace: retrieval — удалён 2026-10-03.** Блок объявлял `cosine_threshold`, `max_graph_nodes`, `max_vector_chunks`, `context_size`, `reranker_enabled`, `graph_search_enabled`, `similar_to_expansion` и не читался ничем: query-контур берёт `retrieval` из Domain Profile (`retrieval/pipeline.py`), а `namespaces.py` отдаёт наружу только `domain`, `chunking`, `adapters`, `llm`. Плюс блок `flags:` дублировал три из этих флагов — одно и то же было объявлено дважды.
 **namespace: extraction**
 - `model` ("qwen2.5-coder-7b-instruct-abliterated-q4_k_m")
 - `temperature` (0.1)
@@ -184,6 +217,8 @@ factorial: ["!", "fact"]
 - Примечание: доменный prompt_template подгружается динамически из профиля
 
 **namespace: normalizer**
+- Объявлен, но **не читается кодом** (проверено 2026-09-26). Косинусная политика дедупликации
+  не реализована, см. инвариант `L3-02a` и план `docs/plans/cosine-dedup.md`.
 - `dedup_auto_threshold` (0.92)
 - `dedup_llm_threshold` (0.75)
 - `similar_to_threshold` (0.85)
@@ -224,6 +259,24 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
   LangChain/LlamaIndex — optional dependency (group `[chunking]`), lazy import;
   без установленного пакета выбранный адаптер даёт fail-fast при вызове.
 
+- `MD_KEEP_CODE_SPLIT` (не задана = не режем) - разделять ли markdown на блоки
+  `text`/`code` по ограждениям ``` . По умолчанию НЕ режем (ADR-054): разрез оставлял
+  подводку в одном чанке, а её содержимое - в соседнем, и это давало 10 чанков без
+  кандидатов. Внимание: переменная меняет `content_hash` каждого `.md`, а значит требует
+  полного перезалива корпуса и обнуляет базлайны прибора. Нераспознанное значение
+  логируется предупреждением.
+- Кандидаты сущностей (ADR-053) — **не env-параметр**. Список имён производит стадия внутри
+  ingestion-пайплайна, перед `EXTRACT` и после проверки no-op, и кладётся рядом с файлом
+  документа в `INGESTION_UPLOAD_DIR`. Отдельного `CANDIDATES_DIR` больше нет, и папки с
+  кандидатами в репозитории тоже: документ хранится в своём каталоге и в базе, а оба файла
+  джобы временные. Форма — решение владельца от 2026-10-14, см. §1.2а
+  `02_pipeline_and_normalizer.md`.
+- `CANDIDATES_KEEP` (не задана = убираем) — отключение уборки **для отладки**. При `1` файлы
+  джобы сохраняются, и джоба пишет в отчёт, что уборка выключена и сколько файлов осталось:
+  отключённая уборка никогда не выглядит как неисправная. Нераспознанное значение
+  логируется предупреждением и трактуется как «убираем» — опечатка не должна молча включать
+  отладку и копить мусор. Уборка работает и без него.
+
 **namespace: storage**
 - `graph_store` ("neo4j") — optional backend для graph experiment: Neo4jGraphStore / MemgraphGraphStore; baseline может работать без него.
 - `vector_store` ("neo4j") — векторная ось: Neo4jVectorStore / QdrantVectorStore.
@@ -237,12 +290,7 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
 **namespace: auth**
 - `api_key` ("changeme")
 
-**namespace: flags**
-- `graph_search_enabled`
-- `reranker_enabled`
-- `similar_to_expansion`
-- `semantic_validation`
-
+**namespace: flags — удалён 2026-10-03.** Дублировал `graph_search_enabled`, `reranker_enabled`, `similar_to_expansion` из `retrieval` того же файла и не читался ничем.
 **namespace: adapters (новое в v5)**
 - `graph_store` ("neo4j")
 - `vector_store` ("neo4j")
@@ -252,3 +300,35 @@ real-режимы, а также клиент (`BgeM3ServiceAdapter`) испол
 
 Допустимые id каждого слота — каталог фабрики `retrieval/adapters/factory.py::ADAPTER_CATALOG`
 (SSOT по контракту `tests/test_adapter_catalog_ssot.py`: значение YAML ∈ каталог слота).
+
+### 5.3 Что из этого реально подключено
+
+Проверено по коду 2026-09-26. Механизм Config Service универсален, но из
+`infra/config/namespaces.yaml` код читает только `domain.active_profile`
+(`ingestion_service/app.py`). Остальное:
+
+| Ключ | Состояние |
+|---|---|
+`domain.active_profile` | **читается**, определяет профиль по умолчанию |
+`chunking.*` | читается через env и профиль; в `namespaces.yaml` используется как последний fallback |
+`normalizer.*` | **не читается**; косинусная дедупликация не реализована (`L3-02a`) |
+`retrieval.cosine_threshold` | **удалён 2026-10-03** |
+`retrieval.similar_to_expansion` | **удалён 2026-10-03** |
+`retrieval.max_graph_nodes` | **дублируется**: конвейер берёт одноимённый ключ из профиля, значение из YAML не подключено, в конструкторе стоит литерал `5` |
+`retrieval.context_size`, `max_vector_chunks`, `reranker_enabled` | передаются в сервисы через параметры подключения, а не через YAML |
+`storage.*`, `auth.*`, `adapters.*`, `projection.lease_seconds` | читаются env и compose; YAML используется как документация и дефолт |
+
+Журнал обмена с LLM - отдельный режим, а не строчка в таблице: у него четыре уровня, и
+выбор уровня решает, попадет ли текст документа в лог. Переменные `LLM_EXCHANGE_LOG`
+(`off` / `meta` / `response` / `full`), `LLM_EXCHANGE_LOG_FILE`,
+`LLM_EXCHANGE_LOG_MAX_CHARS`; по умолчанию все выключено. Уровень `response` пишет
+ответ модели без промпта, а в извлечении текст чанка лежит внутри промпта - поэтому
+«без текста документа» означает «без промпта», а не отдельную настройку. Подробно:
+[`llm_exchange_log.md`](./llm_exchange_log.md).
+
+Параметры retrieval в текущем коде живут в секции `retrieval` Domain Profile
+(`expansion_direction`, `expansion_kinds`, `max_depth`, `max_fanout`,
+`max_graph_nodes`, `filter_demote_scale`, `ordering`, `rrf_k`). Это соответствует правилу 5.0 для параметров
+записи, но для параметров чтения домом должен стать Config Service — подключение namespaces
+к `QueryPipeline` не сделано. Отдельный конфигуратор для этого не требуется, требуется
+проводка существующего.

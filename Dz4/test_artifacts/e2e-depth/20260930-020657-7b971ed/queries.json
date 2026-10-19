@@ -1,0 +1,98 @@
+[
+  {
+    "id": "T9",
+    "why": "один хоп: якорь и первое звено",
+    "question": "Zvonkyi Hvorist Ukladu",
+    "requested_depth": 1,
+    "max_depth_requested": 1,
+    "max_depth_effective": 1,
+    "depth_clamped": false,
+    "cache_hit": false,
+    "chain_nodes_walked": [],
+    "chain_node_count": 0,
+    "chain_documents": [
+      "tag:it:chain_a",
+      "tag:it:chain_b",
+      "tag:it:chain_c",
+      "tag:it:chain_d"
+    ],
+    "chain_document_count": 4,
+    "hop_depths": [],
+    "graph_expansion": [],
+    "expect_node_count": 2,
+    "expect_document_count": 2,
+    "expect_clamped": false
+  },
+  {
+    "id": "T10",
+    "why": "два хопа: якорь и два звена",
+    "question": "Zvonkyi Hvorist Ukladu, вторая проверка",
+    "requested_depth": 2,
+    "max_depth_requested": 2,
+    "max_depth_effective": 2,
+    "depth_clamped": false,
+    "cache_hit": false,
+    "chain_nodes_walked": [],
+    "chain_node_count": 0,
+    "chain_documents": [
+      "tag:it:chain_a",
+      "tag:it:chain_b",
+      "tag:it:chain_c",
+      "tag:it:chain_d"
+    ],
+    "chain_document_count": 4,
+    "hop_depths": [],
+    "graph_expansion": [],
+    "expect_node_count": 3,
+    "expect_document_count": 3,
+    "expect_clamped": false
+  },
+  {
+    "id": "T11",
+    "why": "просьба дальше потолка: зажим обязателен и обязан быть объявлен",
+    "question": "Zvonkyi Hvorist Ukladu, третья проверка",
+    "requested_depth": 99,
+    "max_depth_requested": 99,
+    "max_depth_effective": 6,
+    "depth_clamped": true,
+    "cache_hit": false,
+    "chain_nodes_walked": [],
+    "chain_node_count": 0,
+    "chain_documents": [
+      "tag:it:chain_a",
+      "tag:it:chain_b",
+      "tag:it:chain_c",
+      "tag:it:chain_d"
+    ],
+    "chain_document_count": 4,
+    "hop_depths": [],
+    "graph_expansion": [],
+    "expect_node_count": 4,
+    "expect_document_count": 4,
+    "expect_clamped": true
+  },
+  {
+    "id": "T12",
+    "why": "та же полная глубина без зажима: тот же результат, но depth_clamped нет",
+    "question": "Zvonkyi Hvorist Ukladu, четвёртая проверка",
+    "requested_depth": 3,
+    "max_depth_requested": 3,
+    "max_depth_effective": 3,
+    "depth_clamped": false,
+    "cache_hit": false,
+    "chain_nodes_walked": [],
+    "chain_node_count": 0,
+    "chain_documents": [
+      "tag:it:chain_a",
+      "tag:it:chain_b",
+      "tag:it:chain_c",
+      "tag:it:chain_d"
+    ],
+    "chain_document_count": 4,
+    "hop_depths": [],
+    "graph_expansion": [],
+    "expect_node_count": 4,
+    "expect_document_count": 4,
+    "expect_clamped": false
+  }
+]

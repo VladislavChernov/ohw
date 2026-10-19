@@ -1,0 +1,13 @@
+{
+  "calls": 0,
+  "prompt_tokens_total": 0,
+  "completion_tokens_total": 0,
+  "prompt_tokens_avg": 0,
+  "completion_tokens_avg": 0,
+  "errors": {},
+  "response_chars_min": 0,
+  "response_chars_max": 0,
+  "response_chars_median": 0,
+  "labels_present": 0,
+  "truncated_any": 0
+}

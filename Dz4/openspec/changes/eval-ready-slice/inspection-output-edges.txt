@@ -1,0 +1,11 @@
+from_name, rel, edge_sources, origin, to_name
+"adr-012", "REQUIRES_CONSTRAINT", ["docs/adapters_specification.md"], "ai", "vector-only baseline graph adapter"
+"api", "REFERENCES", ["docs/adapters_guide.md"], "ai", "get /config/adapters"
+name, sources, chunks
+"accepted_at", ["docs/api_reference.md"], ["chk:a6a191deb0fd"]
+"adr-012", ["docs/adapters_guide.md", "docs/adapters_specification.md"], ["chk:cc93040df8a0", "chk:3b620b739e49"]
+"aliases", ["docs/data_model.md"], ["chk:30aff13fab0a"]
+"get /config/adapters", ["docs/adapters_guide.md"], ["chk:7cc00f38f4b6"]
+"soft-delete", ["docs/adapters_specification.md"], ["chk:ab357ad94b52"]
+"topology orchestrator", ["docs/00_hi_level_architecture.md", "docs/04_services_config.md"], ["chk:158d290adfe1", "chk:cc1ff39468af"]
+"vector-only baseline graph adapter", ["docs/adapters_specification.md"], ["chk:3b620b739e49"]

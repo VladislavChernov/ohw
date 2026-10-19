@@ -10,6 +10,23 @@
 > `neo4j.py`, `docs/data_model.md §6`, `docs/03_retriever.md`,
 > `eval-graph-contribution-experiment/design.md`.
 
+## Куда делось живое содержимое этого разбора
+
+Пометка «superseded» сама по себе не говорит, что из файла ещё нужно, поэтому указано
+явно (2026-09-30):
+
+- **«Вопрос 3. Бизнес-сущности в графе или только Chunk-цепочки?» и §3c «Почему так вышло»** —
+  это as-built вопросы по записи, и они теперь отвечены в `Ingest/ingest_as_built.md`
+  §10.2 (метка `ContextNode`, три стратегии записи) и §12.2 (тип ноды в метку не доходит).
+  Читать этот файл вместо снимка для ответа на них нельзя.
+- **«Вопрос 2. Как Cypher-шаблон понимает, за какие узлы зацепиться»** — про retrieval,
+  снимок модуля ингеста его не касается, и он остаётся верным по существу.
+- **«Вопрос 1. Что возвращает GraphRetriever»** — то же: retrieval, не ингест.
+
+То есть файл остаётся источником по retrieval-вопросам и перестаёт быть источником по
+вопросам записи. Правило 8 `analitic/ANALYTICAL_NOTES_RULES.md` требует при архивировании
+указать версию и причину; до архивирования указано, что именно переехало.
+
 ---
 
 ## Вопрос 1. Что возвращает GraphRetriever — сырой JSON или отформатированный текст?
@@ -148,12 +165,8 @@ LIMIT $max_nodes
 Файл: `orchestrator.py:417-472`
 
 ```python
-# Source: всегда
-nodes = [{
-    "node_id": source_id,          # src:{domain}:{source_url}
-    "labels": [SOURCE_LABEL],      # "Source"
-    ...
-}]
+# Source: больше не пишется (ADR-046 п. 9 — якорь удалён как остаток двухуровневой
+# схемы). Владелец чанка выражен полем `source_url` на самом чанке.
 
 # Сущности: ВСЕгда одна метка "Entity"
 for entity in ctx.entities:
@@ -164,19 +177,29 @@ for entity in ctx.entities:
         "properties": {
             "canonical_name": canonical,
             "source_ids": [...],
-            "extractor_version": EXTRACTOR_VERSION,
+            # Поле обязательное, значения по умолчанию нет (ADR-049 п. 3). Раньше здесь
+            # стояло `entity.get("extractor_version") or EXTRACTOR_VERSION`, и метку
+            # заглушки `deterministic:v1` получала любая нода без поля, включая ручной
+            # тег. Модель ставит `llm:<профиль>@<версия>:<отпечаток>`, человек — `user:manual`.
+            "extractor_version": str(entity["extractor_version"]),
             "variants": [...]
         }
+
+# ВНИМАНИЕ: этот фрагмент отставал от кода ещё до ADR-049 — метка узла `ContextNode`
+# (`CONTEXT_NODE_LABEL`), а не `Entity`, и идентичность считает `_context_node_id` от
+# `canonical_name`, а не `_entity_node_id`. Приведён в соответствие только фрагмент про
+# `extractor_version`; остальное не трогали, чтобы не переписывать чужой разбор целиком.
 
 **Результат в графе:**
 
 | Узел | Метка | Откуда |
 |---|---|---|
-| Источник | `Source` | CommitStage._write |
+| Источник | — | ноды нет (ADR-046 п. 9) |
 | Сущность | `Entity` | CommitStage._write (все сущности — одна метка) |
 | Чанк | `Chunk` | CommitStage._write |
 
-Рёбра: только `Source -[CONTAINS]-> Chunk`. Между Entity-узлами рёбер нет.
+Рёбра между чанками и источником не пишутся: якорь и `CONTAINS` удалены (ADR-046 п. 9), связь
+заменена полем `Chunk.source_url`. Между Entity-узлами рёбер нет.
 
 ### b) Что обещает Domain Profile (онтология)
 

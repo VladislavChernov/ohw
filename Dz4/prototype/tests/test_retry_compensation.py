@@ -81,14 +81,22 @@ class FakeTransientGraph(InMemoryGraphStore):
         super().upsert_nodes(nodes)
 
 
-SOURCE_ID = "src:it:src://d.txt"
 CONTEXT_NODE_ID = "tag:it:failed-entity"
 CHUNK_IDS = ["chk:a", "chk:b"]
 
+# ADR-046 п. 9: ноды-якоря источника нет, чанки объявляют владельца полями
+# `source_url`/`domain` (L2-03), и связь CONTAINS больше не пишется.
 NODES: list[dict[str, Any]] = [
-    {"node_id": SOURCE_ID, "labels": ["Source"], "properties": {"source_url": "src://d.txt"}},
     *[
-        {"node_id": chunk_id, "labels": ["Chunk"], "properties": {"text": chunk_id}}
+        {
+            "node_id": chunk_id,
+            "labels": ["Chunk"],
+            "properties": {
+                "text": chunk_id,
+                "source_url": "src://d.txt",
+                "domain": "it",
+            },
+        }
         for chunk_id in CHUNK_IDS
     ],
     {
@@ -102,10 +110,7 @@ NODES: list[dict[str, Any]] = [
         },
     },
 ]
-EDGES: list[dict[str, Any]] = [
-    {"from_id": SOURCE_ID, "to_id": chunk_id, "type": "CONTAINS", "properties": {}}
-    for chunk_id in CHUNK_IDS
-]
+EDGES: list[dict[str, Any]] = []
 VECTORS: list[dict[str, Any]] = [
     {"chunk_id": chunk_id, "embedding": [0.1, 0.2], "metadata": {"text": chunk_id}}
     for chunk_id in CHUNK_IDS
@@ -234,9 +239,8 @@ def test_best_effort_retries_transient_axis_without_compensation() -> None:
     _write_best_effort(graph, vector)
 
     assert vector.calls == 2, "вторая ось обязана быть повторена"
-    assert graph.list_chunk_ids_of_source(SOURCE_ID) == CHUNK_IDS, "граф записан"
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == CHUNK_IDS, "граф записан"
     assert sorted(vector._vectors) == CHUNK_IDS, "вектор записан после повтора"
-    assert graph.get_node(SOURCE_ID) is not None
 
 
 def test_best_effort_compensates_after_exhausted_retries() -> None:
@@ -249,9 +253,8 @@ def test_best_effort_compensates_after_exhausted_retries() -> None:
     assert excinfo.value.compensated is True
     assert "компенсирован" in str(excinfo.value)
     assert vector.calls == N_RETRY_COMMIT + 1, "компенсация — строго после исчерпания повторов"
-    assert graph.list_chunk_ids_of_source(SOURCE_ID) == [], "чанки графа компенсированы"
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == [], "чанки графа компенсированы"
     assert not vector._vectors, "орфанов в векторной оси нет (L2-03)"
-    assert graph.get_node(SOURCE_ID) is not None, "Source сохраняется (ADR-014)"
     assert isinstance(excinfo.value.__cause__, TransientError), "причина сохранена (UC12-02)"
 
 
@@ -265,7 +268,7 @@ def test_best_effort_non_transient_second_axis_compensates_immediately() -> None
 
     assert excinfo.value.compensated is True
     assert vector.calls == 1, "non-transient не ретраится (спека §2)"
-    assert graph.list_chunk_ids_of_source(SOURCE_ID) == []
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == []
     assert not vector._vectors
     assert isinstance(excinfo.value.__cause__, RuntimeError)
 
@@ -285,7 +288,7 @@ def test_best_effort_first_axis_transient_fails_without_compensation() -> None:
 
     assert graph.calls == N_RETRY_COMMIT + 1, "первая ось ретраится как transient"
     assert not vector._vectors, "векторная ось не затрагивалась (L2-03)"
-    assert graph.get_node(SOURCE_ID) is None, "транзакция графа откатилась"
+    assert graph.list_chunk_ids_of_source("src://d.txt", "it") == [], "транзакция графа откатилась"
 
 
 def test_compensation_failure_is_reported_as_uncompensated(monkeypatch: Any) -> None:
@@ -321,7 +324,6 @@ def test_compensate_removes_written_and_stale_chunks() -> None:
 
     assert graph.get_node("chk:a") is None
     assert graph.get_node("stale:x") is None
-    assert graph.get_node(SOURCE_ID) is not None
     assert not vector._vectors, "векторы удалены, включая stale"
 
 

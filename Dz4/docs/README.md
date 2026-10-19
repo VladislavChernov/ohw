@@ -30,6 +30,7 @@
 |----------|----------|
 | [02_pipeline_and_normalizer.md](./02_pipeline_and_normalizer.md) | Регламент Ingestion Pipeline (primitive-этапов) и Normalizer v3 |
 | [chunkers_guide.md](./chunkers_guide.md) | Контракт Chunker и регламент добавления чанкер-стратегий (родные + плагин через entry_points) |
+| [plugins_guide.md](./plugins_guide.md) | Адаптер или плагин: как выбрать механизм расширения и как добавить своё |
 | [03_retriever.md](./03_retriever.md) | Стратегия ретривера и слияния контекста |
 
 ### API и сервисы
@@ -46,6 +47,7 @@
 | Документ | Описание |
 |----------|----------|
 | [06_operations_and_risks.md](./06_operations_and_risks.md) | Масштабирование, метрики, профили и матрица рисков |
+| [llm_exchange_log.md](./llm_exchange_log.md) | Журнал обмена с LLM: уровни, что попадает в лог, как включить |
 | [operations_requirements.md](./operations_requirements.md) | Эксплуатационные требования: бэкап, retention, reconciliation, аудит, A/B |
 | [infrastructure_stack.md](./infrastructure_stack.md) | Технологический стек: контейнеры, языки, СУБД, профили, лицензии |
 | [security.md](./security.md) | Безопасность: аутентификация, роли, транспорт, секреты, лимиты |
@@ -62,8 +64,8 @@
 |----------|----------|
 | [prototype_requirements.md](./prototype_requirements.md) | Требования к прототипу: цель, границы, стек, вехи, eval-гейт, заглушки User Guide / Runbook |
 | [test_plan.md](./test_plan.md) | План испытаний прототипа: что и как измеряем — уровни метрик, артефакты прогона, режимы запуска, границы измерения |
-| [demo_runbook.md](./demo_runbook.md) | Runbook демо-контура: подъём стека, `:8503`, сценарии в браузере, прогон e2e |
-| [demo_user_guide.md](./demo_user_guide.md) | Руководство пользователя демо: что нужно, скачивание, запуск, сценарий в браузере, как устроено |
+| [prototype_stack_runbook.md](./prototype_stack_runbook.md) | Runbook демо-контура: подъём стека, `:8503`, сценарии в браузере, прогон e2e |
+| [prototype_stack_user_guide.md](./prototype_stack_user_guide.md) | Руководство пользователя демо: что нужно, скачивание, запуск, сценарий в браузере, как устроено |
 | [web_layer_replacement.md](./web_layer_replacement.md) | Замена веб-слоя (Query API Gateway): контракты границы, процедура, контрактные тесты |
 
 ### Артефакты прототипа (вне docs/)

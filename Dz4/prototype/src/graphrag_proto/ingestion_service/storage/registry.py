@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import builtins
 import hashlib
+import json
+import sqlite3
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -250,6 +252,9 @@ class JobStore:
         self._lock = threading.RLock()
         self._conn = connect_sqlite(db_path)
         self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        self._conn.execute(
             "CREATE TABLE IF NOT EXISTS jobs ("
             "job_id TEXT PRIMARY KEY, "
             "source_url TEXT NOT NULL, "
@@ -272,6 +277,258 @@ class JobStore:
             "PRIMARY KEY (job_id, stage)"
             ")"
         )
+        # Структурные сигналы джобы — отдельная таблица, а НЕ текст в `job_stages.message`.
+        # Причина: число, на котором строится решение, не должно зависеть от разбора
+        # сообщения. Одна рефакторинга формата — и метрика потерь молча читает ноль, а
+        # «мы никогда не теряем слой» выглядит как хорошая новость. Тихий ноль в метрике
+        # потерь — худший вид поломки, он не выглядит как поломка.
+        #
+        # Новая таблица, а не колонка в `job_stages`: `CREATE TABLE IF NOT EXISTS` создаёт
+        # её на существующих базах без миграции, тогда как добавление колонки потребовало бы
+        # ALTER TABLE на каждой развёрнутой базе.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_signals ("
+            "job_id TEXT NOT NULL, "
+            "stage TEXT NOT NULL, "
+            "name TEXT NOT NULL, "
+            "ts TEXT NOT NULL, "
+            "PRIMARY KEY (job_id, stage, name)"
+            ")"
+        )
+        # ЧИСЛОВЫЕ факты обогащения: причина и объёмы. Флагов здесь нет намеренно —
+        # «деградация» и «слой потерян» уже живут в `job_signals`, и вторая копия
+        # означала бы два источника для одного факта: они разъедутся, и потребитель
+        # будет читать не тот, что сработал. Здесь только то, чего у флагов нет: сколько
+        # именно исчезло и сколько модель вернула.
+        #
+        # Отдельная таблица, а не колонка в `job_stages`: `CREATE TABLE IF NOT EXISTS`
+        # создаёт её на существующих базах без миграции, тогда как добавление колонки
+        # потребовало бы ALTER TABLE на каждой развёрнутой базе.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_enrichment ("
+            "job_id TEXT PRIMARY KEY, "
+            "cause TEXT, "
+            "lost_entities INTEGER NOT NULL DEFAULT 0, "
+            "lost_edges INTEGER NOT NULL DEFAULT 0, "
+            "llm_records INTEGER NOT NULL DEFAULT 0, "
+            "llm_edges INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_total INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_grounded INTEGER NOT NULL DEFAULT 0, "
+# ADR-053: ограничение списком кандидатов. `candidates_absent` хранится как
+            # 0/1, а не выводится из `candidates_total`: «список был пуст» и «список не
+            # нашли» - разные события, и оба означают разбор, которого не было.
+            "candidates_absent INTEGER NOT NULL DEFAULT 0, "
+            "candidates_total INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_off_list INTEGER NOT NULL DEFAULT 0, "
+            "chunks_without_candidates INTEGER NOT NULL DEFAULT 0, "
+            "chunks_total INTEGER NOT NULL DEFAULT 0, "
+            # ADR-056: вырождение ответа модели. `llm_answer_brace_balance` может быть
+            # отрицательным, поэтому у него дефолт 0, а «NOT NULL DEFAULT 0» не мешает:
+            # миграция ниже добавляет именно эту колонку отдельно от остальных.
+            "llm_names_raw INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_raw_unique INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_raw_off_list INTEGER NOT NULL DEFAULT 0, "
+            "llm_names_raw_grounded INTEGER NOT NULL DEFAULT 0, "
+            "llm_relations_declared INTEGER NOT NULL DEFAULT 0, "
+            "llm_relations_unique INTEGER NOT NULL DEFAULT 0, "
+            "llm_answer_lines INTEGER NOT NULL DEFAULT 0, "
+            "llm_answer_lines_unique INTEGER NOT NULL DEFAULT 0, "
+            "llm_answer_brace_balance INTEGER NOT NULL DEFAULT 0, "
+            "ts TEXT NOT NULL"
+            ")"
+        )
+        # ADR-052: колонки groundedness добавлены в уже развёрнутую базу, а
+        # `CREATE TABLE IF NOT EXISTS` на существующей таблице ничего не добавляет. Без
+        # этого `INSERT` падал бы с «no such column» на любой базе, созданной до правки, -
+        # то есть отказ на данных, а не на чистой установке. Миграция идемпотентная:
+        # повторный запуск на уже мигрированной базе молча ничего не делает.
+        for column in ("llm_names_total", "llm_names_grounded"):
+            try:
+                self._conn.execute(
+                    f"ALTER TABLE job_enrichment ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                # «duplicate column name» - колонка уже есть, и это не ошибка.
+                pass
+# ADR-053: те же колонки, что и выше, по той же причине.
+        for column in (
+            "candidates_absent",
+            "candidates_total",
+            "llm_names_off_list",
+            "chunks_without_candidates",
+            "chunks_total",
+            # ADR-056: те же колонки, тот же идемпотентный ALTER.
+            "llm_names_raw",
+            "llm_names_raw_unique",
+            "llm_names_raw_off_list",
+            "llm_names_raw_grounded",
+            "llm_relations_declared",
+            "llm_relations_unique",
+            "llm_answer_lines",
+            "llm_answer_lines_unique",
+            "llm_answer_brace_balance",
+        ):
+            try:
+                self._conn.execute(
+                    f"ALTER TABLE job_enrichment ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError as exc:
+                # «duplicate column name» - колонка уже есть, и это не ошибка. Любая
+                # другая перебрасывается: молча проглотить её означало бы оставить базу
+                # НЕмигрированной, и падение пришлось бы на `INSERT` с «no such column» -
+                # ровно та ошибка, ради которой миграция и написана.
+                if "duplicate column name" not in str(exc):
+                    raise
+        # ДЛИТЕЛЬНОСТИ стадий: измеряются в момент перехода и хранятся явно.
+        #
+        # Почему не разность `job_stages.ts`: `update_stage` при переходе к следующей
+        # стадии перезаписывает `ts` предыдущей, поэтому у всех завершённых стадий `ts` —
+        # момент ОКОНЧАНИЯ. Разности соседних `ts` длительностями не являются, а
+        # длительность последней стадии не восстанавливается вовсе. По этой же причине
+        # повышение разрешения `ts` до миллисекунд контракт не удовлетворяет: моменты
+        # останутся моментами окончания, просто более точными.
+        #
+        # Почему новая таблица, а не колонка в `job_stages`: `CREATE TABLE IF NOT EXISTS`
+        # создаёт её на уже развёрнутой базе без миграции, а колонка потребовала бы
+        # ALTER TABLE везде, где пайплайн уже отработал. Тот же довод, что и у
+        # `job_signals`/`job_enrichment`.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_stage_durations ("
+            "job_id TEXT NOT NULL, "
+            "stage TEXT NOT NULL, "
+            "started_ts TEXT NOT NULL, "
+            "duration_ms INTEGER, "
+            "PRIMARY KEY (job_id, stage)"
+            ")"
+        )
+        # Факт уборки осиротевших связей/узлов (ADR-014, `docs/02` §4.5). Таблица, а не
+        # сигнал в `job_signals`: решение строится на числах (сколько посчитано, сколько
+        # удалено), а сигнал — имя, и разбор текста для числа недопустим.
+        # `planned_*` и `removed_*` разнесены: подсчёт и удаление разделены по времени,
+        # и их расхождение — сигнал о гонке, который нельзя терять.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_orphan_cleanup ("
+            "job_id TEXT PRIMARY KEY, "
+            "domain TEXT NOT NULL, "
+            "planned_relations INTEGER NOT NULL DEFAULT 0, "
+            "removed_relations INTEGER NOT NULL DEFAULT 0, "
+            "planned_nodes INTEGER NOT NULL DEFAULT 0, "
+            "removed_nodes INTEGER NOT NULL DEFAULT 0, "
+            "mode TEXT NOT NULL, "
+            "ts TEXT NOT NULL"
+            ")"
+        )
+        # СЧЁТЧИКИ РАЗРЕШИМОСТИ (ADR-039). Отдельная таблица, а не столбцы в `job_enrichment`,
+        # и это не оформление: добавление столбца потребовало бы `ALTER` на каждой базе,
+        # где пайплайн уже отработал, а `CREATE TABLE IF NOT EXISTS` не нужен вовсе.
+        #
+        # Отдельная таблица **не дублирует** `job_enrichment`: объём слоя и факт его потери
+        # там и остаются, а здесь только то, чего там нет, — счётчики концов и структуры.
+        # Два источника одного числа разъедутся, поэтому числа живут в одном месте.
+        #
+        # `by_field_json` — распределение неразрешённых концов по полям, из которых модель
+        # их взяла (`id`, `category`). JSON, а не отдельные столбцы: набор полей задаёт модель
+        # ответа, а не схема, и столбец на каждый возможный ключ означал бы `ALTER` при
+        # каждом новом поле — то есть ровно то, чего эта таблица избегает.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_resolvability ("
+            "job_id TEXT PRIMARY KEY, "
+            "chunks INTEGER NOT NULL DEFAULT 0, "
+            "entities_declared INTEGER NOT NULL DEFAULT 0, "
+            "entities_distinct INTEGER NOT NULL DEFAULT 0, "
+            "relations INTEGER NOT NULL DEFAULT 0, "
+            "endpoints_total INTEGER NOT NULL DEFAULT 0, "
+            "endpoints_distinct INTEGER NOT NULL DEFAULT 0, "
+            "endpoints_resolved INTEGER NOT NULL DEFAULT 0, "
+            "endpoints_unresolved INTEGER NOT NULL DEFAULT 0, "
+            "names_resolved INTEGER NOT NULL DEFAULT 0, "
+            "names_unresolved INTEGER NOT NULL DEFAULT 0, "
+            "self_loops INTEGER NOT NULL DEFAULT 0, "
+            "mutual_pairs INTEGER NOT NULL DEFAULT 0, "
+            "max_fan_in INTEGER NOT NULL DEFAULT 0, "
+            "measured INTEGER NOT NULL DEFAULT 1, "
+            "measured_in_stage TEXT, "
+            "by_field_json TEXT NOT NULL DEFAULT '{}', "
+            "ts TEXT NOT NULL"
+            ")"
+        )
+        # Неразрешённые концы связей (ADR-037 случай 3, ADR-038). Имя таблицы говорит ровно
+        # то, что проверялось: «нет среди имён этого ответа», а НЕ «не существует в домене».
+        # Различие не в пользу безопасности - отсутствие ноды вероятнее её присутствия, и
+        # имя `job_unresolved_reference` читалось бы как доказательство отсутствия, чем
+        # факт не является. Проверка в коде отвечает только на вопрос про объявленный ответ.
+        #
+        # `endpoint_name` хранит ИМЯ КАК ЕГО НАПИСАЛА МОДЕЛЬ, а `endpoint_key` — ключ
+        # идентичности. Оба нужны: джоба уборки сопоставляет конец с текстом по имени, и по
+        # одному ключу она не найдёт ничего, потому что ключ уже потерял написание.
+        # Первичный ключ не содержит `endpoint_name`, поэтому два одинаковых конца из разных
+        # мест документа схлопываются: факт о НЕРАЗРЕШЁННОСТИ имени один, а не два.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_endpoint_missing_in_response ("
+            "job_id TEXT NOT NULL, "
+            "source_url TEXT NOT NULL, "
+            "chunk_id TEXT, "
+            "endpoint_name TEXT NOT NULL, "
+            "endpoint_key TEXT NOT NULL, "
+            "relation_kind TEXT NOT NULL, "
+            "other_endpoint_name TEXT, "
+            "ts TEXT NOT NULL, "
+            "PRIMARY KEY (job_id, endpoint_key, chunk_id, relation_kind)"
+            ")"
+        )
+        # Индекс по `endpoint_key` обязателен: джоба уборки обходит факты по нему, а не
+        # сканирует таблицу. Отдельный индекс по `job_id` — чтобы видеть неразрешённое по
+        # джобе, не выбирая все концы домена.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_missing_endpoint_key "
+            "ON job_endpoint_missing_in_response (endpoint_key)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_missing_endpoint_job "
+            "ON job_endpoint_missing_in_response (job_id)"
+        )
+        # Паспорт извлечения - отдельной таблицей по тем же основаниям, что и факты выше:
+        # это числа и имена, которые должен сравнивать потребитель, а не текст, который
+        # он разбирает. `message` стадии занят причиной деградации, и `note_stage`
+        # перетирает - закреплено тестом, - поэтому паспорт не мог бы туда поместиться.
+        # Инструкция хранится целиком: она и есть переиспользуемая часть, а текст чанков
+        # уже лежит в узлах `Chunk`, и вторая копия корпуса в базе джоб была бы дороже
+        # пользы. `CREATE TABLE IF NOT EXISTS` - как и у соседних таблиц, миграций нет.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_extraction_passport ("
+            "job_id TEXT PRIMARY KEY, "
+            "domain TEXT NOT NULL, "
+            "source_url TEXT NOT NULL, "
+            "document_version INTEGER NOT NULL DEFAULT 0, "
+            "profile TEXT NOT NULL, "
+            "llm_enabled INTEGER NOT NULL DEFAULT 0, "
+            "model TEXT NOT NULL, "
+            "temperature TEXT NOT NULL, "
+            "max_tokens TEXT NOT NULL, "
+            "timeout_s TEXT NOT NULL, "
+            "seed TEXT NOT NULL, "
+            "instruction_fingerprint TEXT NOT NULL, "
+            "identity TEXT NOT NULL, "
+            "instruction TEXT NOT NULL, "
+            "ts TEXT NOT NULL"
+            ")"
+        )
+        # НОДЫ ДЖОБЫ ПО ПРОИЗВОДИТЕЛЮ (ADR-049 п. 4). Таблица, а не столбец в
+        # `job_enrichment`, по тому же доводу, что и у соседних: `CREATE TABLE IF NOT EXISTS`
+        # создаёт её на уже развёрнутой базе без миграции, а столбец потребовал бы `ALTER`
+        # везде, где пайплайн уже отработал.
+        #
+        # Набор значений задаёт не схема, а то, кто создаёт ноды, поэтому распределение
+        # хранится JSON, а не столбцом на каждый возможный производителя. Одна строка на
+        # джобу: считается по факту состоявшейся записи в графе, и джоба пишет её один раз.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS job_nodes_by_extractor ("
+            "job_id TEXT PRIMARY KEY, "
+            "by_version_json TEXT NOT NULL, "
+            "graph_projection_status TEXT NOT NULL, "
+            "ts TEXT NOT NULL"
+            ")"
+        )
         self._conn.commit()
 
     def close(self) -> None:
@@ -289,11 +546,53 @@ class JobStore:
             )
             self._conn.commit()
 
+    def _open_stage_clock(self, job_id: str, stage: str, now: datetime) -> None:
+        """Открыть часы стадии в момент её фактического начала.
+
+        Разрешение миллисекундное — контракт требует границ гистограммы от 0.005 с, и
+        секундные часы дали бы ровно тот ноль, ради устранения которого всё затевалось.
+
+        `INSERT OR REPLACE` означает «последнее наблюдение побеждает»: повторный вход в
+        ту же стадию перезапускает её часы. Это совпадает с семантикой `job_stages`,
+        где повторный вызов тоже перезаписывает строку, и не требует отдельного решения
+        про накопление по попыткам.
+        """
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_stage_durations "
+                "(job_id, stage, started_ts, duration_ms) VALUES (?, ?, ?, NULL)",
+                (job_id, stage, now.isoformat(timespec="milliseconds")),
+            )
+
+    def _close_stage_clock(self, job_id: str, stage: str, now: datetime) -> None:
+        """Записать прошедшее время стадии в момент её завершения.
+
+        Повторное закрытие ничего не делает: длительность факта, а не пересчёт задним
+        числом. Отсутствие строки тоже не ошибка — стадии могла не быть.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT started_ts, duration_ms FROM job_stage_durations "
+                "WHERE job_id=? AND stage=?",
+                (job_id, stage),
+            ).fetchone()
+            if row is None or row[1] is not None:
+                return
+            started = datetime.fromisoformat(str(row[0]))
+            elapsed_ms = round((now - started).total_seconds() * 1000)
+            self._conn.execute(
+                "UPDATE job_stage_durations SET duration_ms=? WHERE job_id=? AND stage=?",
+                # Часы могут «поехать назад» при переводе; длительность отрицательной
+                # быть не может, а молчаливый ноль в метрике хуже явного нуля.
+                (max(0, int(elapsed_ms)), job_id, stage),
+            )
+
     def update_stage(self, job_id: str, stage: str, message: str = "") -> None:
         from datetime import datetime
 
         with self._lock:
-            now = datetime.now(UTC).isoformat(timespec="seconds")
+            now_dt = datetime.now(UTC)
+            now = now_dt.isoformat(timespec="seconds")
             status_row = self._conn.execute(
                 "SELECT status, stage FROM jobs WHERE job_id=?", (job_id,)
             ).fetchone()
@@ -309,6 +608,8 @@ class JobStore:
                     "WHERE job_id=? AND stage=? AND status='running'",
                     (now, job_id, prev_stage),
                 )
+                # длительность меряется здесь, а не восстанавливается из `ts` позже
+                self._close_stage_clock(job_id, prev_stage, now_dt)
             self._conn.execute(
                 "UPDATE jobs SET status='running', stage=?, updated_at=? WHERE job_id=?",
                 (stage, now, job_id),
@@ -318,13 +619,15 @@ class JobStore:
                 "VALUES (?, ?, 'running', ?, ?)",
                 (job_id, stage, message, now),
             )
+            self._open_stage_clock(job_id, stage, now_dt)
             self._conn.commit()
 
     def finish(self, job_id: str, status: str, error: str | None = None) -> None:
         from datetime import datetime
 
         with self._lock:
-            now = datetime.now(UTC).isoformat(timespec="seconds")
+            now_dt = datetime.now(UTC)
+            now = now_dt.isoformat(timespec="seconds")
             status_row = self._conn.execute(
                 "SELECT status FROM jobs WHERE job_id=?", (job_id,)
             ).fetchone()
@@ -338,6 +641,14 @@ class JobStore:
             )
             # все «висящие» running-этапы приводим к финальному статусу журнала
             stage_status = "succeeded" if terminal == "succeeded" else terminal
+            running = self._conn.execute(
+                "SELECT stage FROM job_stages WHERE job_id=? AND status='running'",
+                (job_id,),
+            ).fetchall()
+            # Последняя стадия закрывается только здесь: `update_stage` больше не
+            # вызывается, поэтому без этого её время не сохранилось бы вовсе.
+            for (running_stage,) in running:
+                self._close_stage_clock(job_id, str(running_stage), now_dt)
             self._conn.execute(
                 "UPDATE job_stages SET status=? WHERE job_id=? AND status='running'",
                 (stage_status, job_id),
@@ -411,6 +722,564 @@ class JobStore:
             for r in rows
         ]
         return items, total
+
+    def stage_durations(self, job_id: str) -> builtins.dict[str, int]:
+        """Длительности завершённых стадий в миллисекундах: ``{стадия: мс}``.
+
+        Идущая стадия в словаре ОТСУТСТВУЕТ, а не равна нулю. Нулевая длительность и
+        отсутствие наблюдения — разные вещи, и слияние их делает метрику
+        правдоподобной и неверной одновременно: в среднем по стадиям появился бы
+        ноль, который на самом деле означает «не считали».
+
+        Единица хранения — миллисекунды; в отчёт метрики уходит в секундах, как того
+        требует конвенция Prometheus для имени длительности.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT stage, duration_ms FROM job_stage_durations "
+                "WHERE job_id=? AND duration_ms IS NOT NULL ORDER BY started_ts",
+                (job_id,),
+            ).fetchall()
+        return {str(r[0]): int(r[1]) for r in rows}
+
+    def note_stage(self, job_id: str, stage: str, message: str) -> None:
+        """Дописать message к уже начатой стадии, не трогая её статус.
+
+        `update_stage` для этого не годится: он помечает предыдущую running-стадию
+        как succeeded и новую ставит в running. Вызов после завершения джобы
+        вернул бы stage в состояние `running` у уже финальной джобы.
+        """
+        with self._lock:
+            # Перетирание, а не дописывание: закреплено тестом
+            # `test_job_signals_are_structural_and_independent_of_message`, где две
+            # последовательные пометки дают в итоге последнюю. Докстринг выше утверждал
+            # обратное, и на него поведёт ли паспорт извлечения - но спецификация
+            # здесь это тест, и он прав. Поэтому паспорт пишется в собственную таблицу,
+            # а не конкурирует за `message`: одна ячейка на стадию - один факт.
+            self._conn.execute(
+                "UPDATE job_stages SET message=? WHERE job_id=? AND stage=?",
+                (message, job_id, stage),
+            )
+            self._conn.commit()
+
+    def record_extraction_passport(self, job_id: str, passport: dict[str, Any]) -> None:
+        """Паспорт извлечения: чем выполнялся разбор, кроме текста документа.
+
+        **Единица воспроизведения — документ и его версия, а не джоба** (решение владельца
+        2026-09-29). `job_id` уникален, но воспроизводим только при повторе той же джобы,
+        чего на практике не делает никто, а при ретрае он меняется; `source_url` плюс версия
+        переживают ретрай, и «переизвлечь этот документ и получить то же» работает.
+
+        Значения влияющих параметров приходят из адаптера, а не из профиля: `extraction.*`
+        в профиле объявлены, но не читаются, и действующие числа живут в блоке `llm`.
+        Записать профильные означало бы записать неправду - это и есть то расхождение
+        (0.1 против 0.3), ради которого паспорт и понадобился.
+        """
+        from datetime import datetime
+
+        def _text(key: str) -> str:
+            # Не `or ""`: температура извлечения равна 0.0, а ноль ложен, и пустая строка
+            # съедала бы ровно то значение, ради которого паспорт и писался. В базу
+            # кладём текст, потому что SQLite хранит числа REAL и потерял бы 0.0 против
+            # NULL неразличимо, а «не задано» и «ноль» здесь — разные вещи.
+            value = passport.get(key)
+            return "" if value is None else str(value)
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_extraction_passport ("
+                "job_id, domain, source_url, document_version, profile, llm_enabled, "
+                "model, temperature, max_tokens, timeout_s, seed, "
+                "instruction_fingerprint, identity, instruction, ts"
+                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    _text("domain"),
+                    _text("source_url"),
+                    int(passport.get("document_version") or 0),
+                    _text("profile"),
+                    1 if passport.get("llm_enabled") else 0,
+                    _text("model"),
+                    _text("temperature"),
+                    _text("max_tokens"),
+                    _text("timeout_s"),
+                    _text("seed"),
+                    _text("instruction_fingerprint"),
+                    _text("identity"),
+                    _text("instruction"),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def extraction_passport(self, job_id: str) -> dict[str, Any] | None:
+        """Паспорт джобы, `None` - если извлечение не дошло до LLM-пути.
+
+        Отсутствие паспорта - не ноль: это разные вещи, и путать их нельзя, потому что
+        «извлечение не запускалось» и «запускалось с такой-то моделью» требуют разных
+        действий.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM job_extraction_passport WHERE job_id=?", (job_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        keys = [
+            "job_id", "domain", "source_url", "document_version", "profile",
+            "llm_enabled", "model", "temperature", "max_tokens", "timeout_s", "seed",
+            "instruction_fingerprint", "identity", "instruction", "ts",
+        ]
+        return dict(zip(keys, row, strict=False))
+
+    def record_orphan_cleanup(
+        self,
+        job_id: str,
+        domain: str,
+        *,
+        planned_relations: int,
+        removed_relations: int,
+        planned_nodes: int,
+        removed_nodes: int,
+        mode: str,
+    ) -> None:
+        """Факт уборки осиротевших связей и узлов — отдельной таблицей, не текстом.
+
+        Отдельная таблица, а не сигнал в `job_signals`, потому что здесь нужны **числа**,
+        а сигнал это имя. Мотив тот же, что у `job_enrichment`: решение строится на числе, а
+        число не должно зависеть от разбора сообщения.
+
+        Подсчёт и удаление разведены по времени (между проходами может прийти другой ingest),
+        поэтому `planned_*` и `removed_*` хранятся раздельно: расхождение между ними — это
+        сигнал о гонке, а не повод его терять.
+
+        Требовалось писать факт в той же транзакции, что и удаление, — иначе сбой между
+        коммитами даст правдоподобный ноль, который читается как «удалять нечего».
+        **В коде этого нет:** удаление идёт в Neo4j отдельными коммитами, а эта запись — в
+        SQLite, то есть ни общей транзакции, ни общей базы. Правило удаления от этого не
+        меняется, меняется только доставка факта; решение и фактическая последовательность —
+        ADR-014, четвёртая корректирующая запись (пп. 20–23), средство — transactional
+        outbox, отложенный на M6-Growth.
+        """
+        from datetime import datetime
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_orphan_cleanup ("
+                "job_id, domain, planned_relations, removed_relations, "
+                "planned_nodes, removed_nodes, mode, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    domain,
+                    int(planned_relations),
+                    int(removed_relations),
+                    int(planned_nodes),
+                    int(removed_nodes),
+                    mode,
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def orphan_cleanup(self, job_id: str) -> dict[str, Any] | None:
+        """Факт уборки джобы; отсутствие факта — `None`, а не ноль."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT domain, planned_relations, removed_relations, planned_nodes, "
+                "removed_nodes, mode, ts FROM job_orphan_cleanup WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "domain": str(row[0]),
+            "planned_relations": int(row[1]),
+            "removed_relations": int(row[2]),
+            "planned_nodes": int(row[3]),
+            "removed_nodes": int(row[4]),
+            "mode": str(row[5]),
+            "ts": str(row[6]),
+        }
+
+    def set_signal(self, job_id: str, stage: str, name: str) -> None:
+        """Отметить структурный сигнал джобы (например, потерю LLM-слоя).
+
+        Сигнал — машинное поле, а не текст. Consumer читает его без разбора
+        `message`, поэтому формат сообщения можно менять свободно.
+        """
+        from datetime import datetime
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_signals (job_id, stage, name, ts) "
+                "VALUES (?, ?, ?, ?)",
+                (job_id, stage, name, datetime.now(UTC).isoformat(timespec="seconds")),
+            )
+            self._conn.commit()
+
+    def signals(self, job_id: str) -> dict[str, str]:
+        """Сигналы джобы как ``{имя: стадия}``; отсутствие сигнала — отсутствие ключа."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, stage FROM job_signals WHERE job_id=? ORDER BY ts",
+                (job_id,),
+            ).fetchall()
+        return {str(name): str(stage) for name, stage in rows}
+
+    def record_enrichment(
+        self,
+        job_id: str,
+        *,
+        cause: str | None,
+        lost_entities: int,
+        lost_edges: int,
+        llm_records: int,
+        llm_edges: int,
+llm_names_total: int = 0,
+        llm_names_grounded: int = 0,
+        candidates_absent: bool = False,
+        candidates_total: int = 0,
+        llm_names_off_list: int = 0,
+        chunks_without_candidates: int = 0,
+        chunks_total: int = 0,
+        # ADR-056: вырождение ответа. Без этих чисел на живом прогоне видно только
+        # `cause: model_error`, и по нему нельзя отличить нехватку токенов от зацикливания.
+        llm_names_raw: int = 0,
+        llm_names_raw_unique: int = 0,
+        llm_names_raw_off_list: int = 0,
+        llm_names_raw_grounded: int = 0,
+        llm_relations_declared: int = 0,
+        llm_relations_unique: int = 0,
+        llm_answer_lines: int = 0,
+        llm_answer_lines_unique: int = 0,
+        llm_answer_brace_balance: int = 0,
+    ) -> None:
+        """Записать числовые факты обогащения джобы (одна строка на джобу).
+
+        Пишется и для недеградировавшей джобы: объём LLM-слоя нужен как
+        ЗНАМЕНАТЕЛЬ. Считать «записи на документ, где экстракция вообще не
+        запускалась» — значит приписать детерминированному fallback то, что сделала
+        модель, либо приписать модели то, что сделал fallback.
+        """
+        from datetime import datetime
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_enrichment (job_id, cause, lost_entities, "
+"lost_edges, llm_records, llm_edges, llm_names_total, llm_names_grounded, "
+                "candidates_absent, candidates_total, llm_names_off_list, "
+                "chunks_without_candidates, chunks_total, "
+                "llm_names_raw, llm_names_raw_unique, llm_names_raw_off_list, "
+                "llm_names_raw_grounded, llm_relations_declared, llm_relations_unique, "
+                "llm_answer_lines, llm_answer_lines_unique, llm_answer_brace_balance, "
+                "ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    cause,
+                    int(lost_entities),
+                    int(lost_edges),
+                    int(llm_records),
+                    int(llm_edges),
+                    int(llm_names_total),
+                    int(llm_names_grounded),
+                    1 if candidates_absent else 0,
+                    int(candidates_total),
+                    int(llm_names_off_list),
+                    int(chunks_without_candidates),
+                    int(chunks_total),
+                    int(llm_names_raw),
+                    int(llm_names_raw_unique),
+                    int(llm_names_raw_off_list),
+                    int(llm_names_raw_grounded),
+                    int(llm_relations_declared),
+                    int(llm_relations_unique),
+                    int(llm_answer_lines),
+                    int(llm_answer_lines_unique),
+                    int(llm_answer_brace_balance),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def record_nodes_by_extractor(
+        self,
+        job_id: str,
+        by_version: dict[str, int],
+        *,
+        graph_projection_status: str,
+    ) -> None:
+        """Записать, сколько нод джоба записала в граф, по производителю (ADR-049 п. 4).
+
+        Пишется в том числе пустым dict, и рядом кладётся `graph_projection_status`.
+        Без статуса пустое распределение нечитаемо: «сущностей не было» и «запись в граф
+        не состоялась» — разные результаты, и оба выглядели бы как `{}`. Со статусом
+        отличить их можно, не заглядывая в лог.
+
+        Ключи приводятся к строке и сортируются при записи: значение, которое читается
+        человеком и сравнивается в отчёте, не должно зависеть от порядка обхода.
+        """
+        from datetime import datetime
+
+        payload = json.dumps(
+            {str(key): int(value) for key, value in sorted(by_version.items())},
+            ensure_ascii=False,
+        )
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_nodes_by_extractor (job_id, by_version_json, "
+                "graph_projection_status, ts) VALUES (?, ?, ?, ?)",
+                (
+                    job_id,
+                    payload,
+                    str(graph_projection_status),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def nodes_by_extractor(self, job_id: str) -> dict[str, Any] | None:
+        """Распределение нод джобы по производителю; ``None`` — записи не было.
+
+        Отсутствие строки и пустая строка — разные вещи, и потребителю это важно:
+        отсутствие строки означает, что джоба не дошла до записи в граф (no-op, отказ,
+        джоба без COMMIT), и тогда счётчик пуст **не потому, что нод не было**.
+
+        Поэтому отсутствие возвращается как ``None``, а не как ``{}``. Раньше оба случая
+        выглядели одинаково, и прибор читал упавшую джобу как «запись состоялась, нод
+        ноль» - ровно то слияние, которое ADR-049 п. 4 и запрещает.
+
+        ``json.JSONDecodeError`` тоже означает «не измерено», а не «ноль»: значение
+        записано, но нечитаемо, и подменять его нулём нельзя.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT by_version_json, graph_projection_status FROM job_nodes_by_extractor "
+                "WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(str(row[0]))
+        except json.JSONDecodeError:
+            return None
+        counts = data if isinstance(data, dict) else {}
+        return {
+            "by_extractor_version": {str(key): int(value) for key, value in counts.items()},
+            "graph_projection_status": str(row[1]),
+        }
+
+    def record_resolvability(self, job_id: str, stats: dict[str, Any], stage: str = "") -> None:
+        """Записать счётчики разрешимости джобы (ADR-039).
+
+        Пишется на **каждой** джобе, прошедшей EXTRACT, включая нулевые значения: доля
+        неразрешённых концов не вычисляется без знаменателя, а «концов нет» и «не считали»
+        — разные утверждения. Отсутствие строки означало бы второе, то есть молчание.
+
+        `measured` отделён от нулевых счётчиков именно поэтому: он отвечает на вопрос
+        «считал ли кто-нибудь», а не «что насчитали». При отсутствии измерения он равен 0,
+        и читатель получает `unknown`, а не «дефекта не было».
+
+        `stage` — стадия, В КОТОРОЙ мерили, а не «стадия завершена». Имя `stage_completed`
+        утверждало бы второе, а это разные вещи: при прерванной стадии счётчики могли быть
+        собраны на неполном наборе чанков. Значение нужно, чтобы по строке отличить полное
+        измерение от неполного, не читая `jobs.status` — статус меняется позже и живёт в
+        другой таблице.
+        """
+        from datetime import datetime
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO job_resolvability (job_id, chunks, entities_declared, "
+                "entities_distinct, relations, endpoints_total, endpoints_distinct, "
+                "endpoints_resolved, endpoints_unresolved, names_resolved, names_unresolved, "
+                "self_loops, mutual_pairs, max_fan_in, measured, measured_in_stage, "
+                "by_field_json, ts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    job_id,
+                    int(stats.get("chunks") or 0),
+                    int(stats.get("entities_declared") or 0),
+                    int(stats.get("entities_distinct") or 0),
+                    int(stats.get("relations") or 0),
+                    int(stats.get("endpoints_total") or 0),
+                    int(stats.get("endpoints_distinct") or 0),
+                    int(stats.get("endpoints_resolved") or 0),
+                    int(stats.get("endpoints_unresolved") or 0),
+                    int(stats.get("names_resolved") or 0),
+                    int(stats.get("names_unresolved") or 0),
+                    int(stats.get("self_loops") or 0),
+                    int(stats.get("mutual_pairs") or 0),
+                    int(stats.get("max_fan_in") or 0),
+                    int(stats.get("measured", 1)),
+                    stage or None,
+                    json.dumps(stats.get("by_field") or {}, ensure_ascii=False, sort_keys=True),
+                    datetime.now(UTC).isoformat(timespec="seconds"),
+                ),
+            )
+            self._conn.commit()
+
+    def resolvability(self, job_id: str) -> dict[str, Any]:
+        """Счётчики разрешимости; `{}` — их не было (EXTRACT не дошёл до записи).
+
+        `measured == 0` означает «счётчики есть, но их не измеряли» — читатель обязан
+        трактовать такие числа как `unknown`, а не как ноль.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT chunks, entities_declared, entities_distinct, relations, "
+                "endpoints_total, endpoints_distinct, endpoints_resolved, endpoints_unresolved, "
+                "names_resolved, names_unresolved, self_loops, mutual_pairs, max_fan_in, "
+                "measured, measured_in_stage, by_field_json FROM job_resolvability WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return {}
+        try:
+            by_field = json.loads(row[15]) if row[15] else {}
+        except json.JSONDecodeError:
+            by_field = {}
+        keys = (
+            "chunks",
+            "entities_declared",
+            "entities_distinct",
+            "relations",
+            "endpoints_total",
+            "endpoints_distinct",
+            "endpoints_resolved",
+            "endpoints_unresolved",
+            "names_resolved",
+            "names_unresolved",
+            "self_loops",
+            "mutual_pairs",
+            "max_fan_in",
+        )
+        out: dict[str, Any] = {key: int(row[index]) for index, key in enumerate(keys)}
+        out["measured"] = int(row[13])
+        out["measured_in_stage"] = str(row[14]) if row[14] else None
+        out["by_field"] = by_field if isinstance(by_field, dict) else {}
+        return out
+
+    def record_missing_endpoints(
+        self,
+        job_id: str,
+        source_url: str,
+        items: builtins.list[dict[str, Any]],
+    ) -> None:
+        """Записать неразрешённые концы связей (ADR-037 случай 3).
+
+        Пишется на каждой джобе, где такие концы были, и **не пишется**, где их не было:
+        пустая вставка не отличается от «экстракция не дошла до записи», и джоба уборки
+        потом не отличит «проверили и всё хорошо» от «не проверили». Отсутствие строк
+        здесь читается как «концы разрешились», и это допустимое утверждение только потому,
+        что стадия обязана была до этого дойти — а это уже видно по остальным таблицам.
+
+        `endpoint_key` приходит уже посчитанным: `_identity_key` живёт в оркестраторе, и
+        копия правила нормализации в хранилище была бы вторым соглашением об именах.
+        """
+        from datetime import datetime
+
+        if not items:
+            return
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        with self._lock:
+            self._conn.executemany(
+                "INSERT OR REPLACE INTO job_endpoint_missing_in_response "
+                "(job_id, source_url, chunk_id, endpoint_name, endpoint_key, relation_kind, "
+                "other_endpoint_name, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        job_id,
+                        source_url,
+                        item.get("chunk_id"),
+                        str(item.get("endpoint_name") or ""),
+                        str(item.get("endpoint_key") or ""),
+                        str(item.get("relation_kind") or ""),
+                        item.get("other_endpoint_name"),
+                        now,
+                    )
+                    for item in items
+                ],
+            )
+            self._conn.commit()
+
+    def missing_endpoints(self, job_id: str) -> builtins.list[dict[str, Any]]:
+        """Неразрешённые концы джобы; ``[]`` — их не было."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT chunk_id, endpoint_name, endpoint_key, relation_kind, "
+                "other_endpoint_name FROM job_endpoint_missing_in_response "
+                "WHERE job_id=? ORDER BY endpoint_key",
+                (job_id,),
+            ).fetchall()
+        return [
+            {
+                "chunk_id": r[0],
+                "endpoint_name": r[1],
+                "endpoint_key": r[2],
+                "relation_kind": r[3],
+                "other_endpoint_name": r[4],
+            }
+            for r in rows
+        ]
+
+    def enrichment(self, job_id: str) -> dict[str, Any]:
+        """Числовые факты обогащения; ``{}`` — их не было (EXTRACT не дошёл до записи)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT cause, lost_entities, lost_edges, llm_records, llm_edges, "
+                "llm_names_total, llm_names_grounded, "
+"candidates_absent, candidates_total, llm_names_off_list, "
+                "chunks_without_candidates, chunks_total, "
+                "llm_names_raw, llm_names_raw_unique, llm_names_raw_off_list, "
+                "llm_names_raw_grounded, llm_relations_declared, llm_relations_unique, "
+                "llm_answer_lines, llm_answer_lines_unique, llm_answer_brace_balance "
+                "FROM job_enrichment WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        if row is None:
+            return {}
+        return {
+            "cause": row[0],
+            "lost_entities": int(row[1]),
+            "lost_edges": int(row[2]),
+            "llm_records": int(row[3]),
+            "llm_edges": int(row[4]),
+            # ADR-052. Ноль при нуле имён означает «нечего было проверять», а не «все
+            # имена настоящие»: потребитель обязан смотреть на оба числа вместе.
+            "llm_names_total": int(row[5]),
+            "llm_names_grounded": int(row[6]),
+            # ADR-053. `candidates_absent` - документ ушёл только в вектор, потому что
+            # списка не было. Это НЕ выводится из `candidates_total`: список мог быть
+            # пустым, а мог отсутствовать, и разбира это разные события.
+            "candidates_absent": bool(row[7]),
+            "candidates_total": int(row[8]),
+            # Сколько имён модель выдала вне списка и сколько типов вне онтологии.
+            # Ненулевое значение означает, что ограничение нарушено, а не «список был
+            # плохой»: список из отчёта не читается, а имя видно в логе EXTRACT.
+"llm_names_off_list": int(row[9]),
+            "chunks_without_candidates": int(row[10]),
+            "chunks_total": int(row[11]),
+            # ADR-056: вырождение ответа, посчитанное по сырому тексту.
+            #
+            # `llm_names_raw_off_list` и `llm_names_raw_grounded` читаются ВМЕСТЕ, и это
+            # единственная пара, которая различает две разные поломки с разным лечением:
+            # имя вне списка, но присутствующее в тексте чанка, - это провал полноты
+            # пре-ингеста; имя вне списка и вне текста - выдумка модели.
+            #
+            # `llm_relations_declared` против `llm_relations_unique` - мера зацикливания.
+            # Отрицательный баланс скобок означает, что JSON не закрылся.
+            "llm_names_raw": int(row[12]),
+            "llm_names_raw_unique": int(row[13]),
+            "llm_names_raw_off_list": int(row[14]),
+            "llm_names_raw_grounded": int(row[15]),
+            "llm_relations_declared": int(row[16]),
+            "llm_relations_unique": int(row[17]),
+            "llm_answer_lines": int(row[18]),
+            "llm_answer_lines_unique": int(row[19]),
+            "llm_answer_brace_balance": int(row[20]),
+        }
 
     def stages(self, job_id: str) -> builtins.list[dict[str, Any]]:
         with self._lock:

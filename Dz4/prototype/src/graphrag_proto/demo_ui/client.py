@@ -5,6 +5,10 @@
 `GET /api/v1/ingestion/jobs/{job_id}`, `DELETE /api/v1/ingestion/documents`,
 `POST /query` (`{query, metadata:{domain}}`), `GET /query/tasks/{task_id}/stream`
 (SSE, конверт ADR-016), `DELETE /query/tasks/{task_id}`, список доменов Config Service.
+
+Плюс операторское обслуживание: `POST /api/v1/maintenance/orphan-cleanup`
+(`add-operator-maintenance-controls`). Планировщика нет намеренно — момент
+запуска выбирает оператор.
 """
 
 from __future__ import annotations
@@ -17,10 +21,34 @@ from typing import Any
 
 import requests
 
+from graphrag_proto.retrieval.adapters.base import MAX_EXPANSION_DEPTH
+
 INGESTION_URL = os.environ.get("INGESTION_URL", "http://localhost:8002")
 QUERY_URL = os.environ.get("QUERY_URL", "http://localhost:8000")
 CONFIG_URL = os.environ.get("CONFIG_URL", "http://localhost:8001")
 X_API_KEY = os.environ.get("X_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
+
+#: Границы ползунка глубины берутся из кода, а не пишутся в разметке: второе число в UI
+#: означало бы второе место, где живёт потолок, и ровно то расхождение, которое ползунок
+#: должен устранить.
+DEPTH_MIN = 1
+DEPTH_MAX = MAX_EXPANSION_DEPTH
+
+#: Начальное положение ползунка. Это НЕ конфигурация: запрос из UI всегда несёт значение
+#: явно, поэтому профиль не участвует. Авторитетное значение остаётся в профиле, а
+#: ползунок показывает то, что реально применилось, из `effective_retrieval` ответа.
+#: Расхождение с профилями ловит тест `test_slider_default_matches_profiles`.
+DEFAULT_SLIDER_DEPTH = 3
+
+#: Границы ползунка лимита строк обхода (ADR-069). Верхняя граница повторяет потолок
+#: конвейера, а не вводит свой: два разных потолка означали бы, что ползунок обещает
+#: проход туда, куда запрос не дойдёт.
+GRAPH_NODES_MIN = 1
+GRAPH_NODES_MAX = 500
+
+#: Начальное положение ползунка лимита узлов. Ровно то, что стоит в профилях по умолчанию,
+#: чтобы экран и профиль не расходились до первого движения ползунка.
+DEFAULT_SLIDER_GRAPH_NODES = 5
 
 
 @dataclass(frozen=True)
@@ -92,6 +120,28 @@ class DemoClient:
         domains = response.json().get("domains")
         return domains if isinstance(domains, list) else []
 
+    def ingestion_is_up(self) -> bool:
+        """Жив ли ingestion-api. `False` — это «сервис не запущен», а не «сломан».
+
+        Ингест вынесен в отдельный скрипт (ADR-065), поэтому в обычном запуске демо его
+        нет, и вкладка «Документы» большую часть времени недоступна. Различить «не
+        запущен» и «не отвечает» можно только пробой, поэтому она и делается - один раз
+        при загрузке страницы, а не по нажатию кнопки.
+
+        Отказ сети, отказ контейнера и неверный адрес дают одно и то же `False`: различие
+        между ними UI не показывает, и придумывать его значило бы показывать правдоподобную
+        догадку.
+        """
+        try:
+            response = requests.get(
+                f"{self._settings.ingestion_url}/health",
+                headers=self._headers,
+                timeout=3,
+            )
+        except requests.RequestException:
+            return False
+        return response.status_code < 400
+
     def upload_document(self, content: str, doc_type: str, domain: str, source_url: str) -> dict[str, Any]:
         response = requests.post(
             f"{self._settings.ingestion_url}/api/v1/ingestion/documents",
@@ -126,11 +176,53 @@ class DemoClient:
         _raise_for_status(response)
         return _json_dict(response)
 
-    def submit_query(self, query: str, domain: str) -> str:
+    def run_maintenance(self, domain: str) -> dict[str, Any]:
+        """Один проход уборки сиротских связей и узлов по домену.
+
+        Маршрут сознателен без планировщика: уборка удаляет данные из графа, цена
+        ошибки — молчаливая потеря, поэтому момент запуска выбирает оператор.
+
+        **Форма ответа читается по коду, а не по имени:** `run_orphan_cleanup`
+        возвращает `mode`, `skipped`, `planned_relations`, `removed_relations`,
+        `planned_nodes`, `removed_nodes`, а маршрут добавляет `job_id` и `domain`.
+        Счётчики раздельные с ADR-047; до него узлы попадали в `removed_relations`, а
+        `removed_nodes` всегда был нулём. Поля `skipped`, `removed_relations` и
+        `removed_nodes` обязательны для показа: без них «готово» неотличимо от
+        «не разрешено» и «удалять нечего».
+        """
+        response = requests.post(
+            f"{self._settings.ingestion_url}/api/v1/maintenance/orphan-cleanup",
+            headers=self._headers,
+            json={"domain": domain},
+            timeout=120,
+        )
+        _raise_for_status(response)
+        return _json_dict(response)
+
+    def submit_query(
+        self,
+        query: str,
+        domain: str,
+        max_depth: int | None = None,
+        max_graph_nodes: int | None = None,
+    ) -> str:
+        """Отправить вопрос. `max_depth` — глубина обхода (ADR-036).
+
+        `None` означает «не задавать»: поле не уходит в запрос, и глубину решает конфигурация
+        (Config Service -> профиль -> кодовый фолбэк). Это не то же самое, что `0` или
+        отсутствие слайдера, поэтому здесь именно `None`, и поле добавляется только когда
+        значение задано.
+        """
+        payload: dict[str, Any] = {"query": query, "metadata": {"domain": domain}}
+        if max_depth is not None:
+            payload["max_depth"] = int(max_depth)
+        # Лимит узлов обхода едет тем же правилом: None - поле не уходит (ADR-069).
+        if max_graph_nodes is not None:
+            payload["max_graph_nodes"] = int(max_graph_nodes)
         response = requests.post(
             f"{self._settings.query_url}/query",
             headers=self._headers,
-            json={"query": query, "metadata": {"domain": domain}},
+            json=payload,
             timeout=10,
         )
         _raise_for_status(response)

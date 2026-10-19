@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from graphrag_proto.ingestion_service.document import (
     Block,
@@ -8,7 +9,12 @@ from graphrag_proto.ingestion_service.document import (
     compute_content_hash,
     normalize_text,
 )
-from graphrag_proto.ingestion_service.readers.registry import MdReader, TxtReader, factory
+from graphrag_proto.ingestion_service.readers.registry import (
+    CODE_SPLIT_ENV,
+    MdReader,
+    TxtReader,
+    factory,
+)
 
 
 def test_normalize_text_joins_hyphen_breaks_cyrillic() -> None:
@@ -69,13 +75,47 @@ def test_txt_reader_single_text_block(tmp_path: Path) -> None:
     assert [b.type for b in doc.blocks] == ["text"]
 
 
-def test_md_reader_splits_code_blocks(tmp_path: Path) -> None:
+def test_md_reader_keeps_code_inline_with_prose(tmp_path: Path, monkeypatch: Any) -> None:
+    """По умолчанию markdown НЕ режется по ограждениям кода.
+
+    Причина измерением: разрез оставлял подводку в одном чанке, а её содержимое - в
+    соседнем. На корпусе из 30 документов это давало 10 чанков вообще без кандидатов,
+    то есть 10 разборов без ограничения списком.
+
+    Ограждения ``` при этом СОХРАНЯЮТСЯ в тексте: ретрив должен видеть, что это пример
+    кода, а не проза.
+    """
     p = tmp_path / "doc.md"
     p.write_text(
-        "Описание алгоритма.\n\n```python\ndef quicksort(a):\n    return a\n```\n\nКонец.",
+        "Проверка состояния:\n\n```python\ndef quicksort(a):\n    return a\n```\n\nГотово.",
         encoding="utf-8",
     )
+    monkeypatch.delenv(CODE_SPLIT_ENV, raising=False)
+
     doc = MdReader().read(p, "src://doc.md", "it")
+
+    assert [b.type for b in doc.blocks] == ["text"]
+    body = doc.blocks[0].data
+    assert "def quicksort" in body
+    assert "Проверка состояния:" in body
+    assert "```" in body, "ограждения обязаны сохраниться: это разметка, а не мусор"
+
+
+def test_md_reader_splits_code_blocks_when_asked(tmp_path: Path, monkeypatch: Any) -> None:
+    """Раздельное чтение возвращено переменной - ради A/B-сравнения границ чанков.
+
+    Оно меняет индексацию целиком, поэтому должно быть достижимо: иначе сравнить
+    режимы было бы нечем.
+    """
+    p = tmp_path / "doc.md"
+    p.write_text(
+        "Проверка состояния:\n\n```python\ndef quicksort(a):\n    return a\n```\n\nГотово.",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(CODE_SPLIT_ENV, "1")
+
+    doc = MdReader().read(p, "src://doc.md", "it")
+
     types = [b.type for b in doc.blocks]
     assert "code" in types
     assert "text" in types

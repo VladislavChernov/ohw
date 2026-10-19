@@ -7,7 +7,9 @@ Lifecycle (ADR-018): queued -> running (INGEST..COMMIT) -> succeeded | failed | 
 
 from __future__ import annotations
 
+import logging as _logging
 import os
+import sys
 import threading
 import uuid
 from datetime import UTC, datetime
@@ -17,6 +19,13 @@ from typing import Any
 from fastapi import Body, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 
+from graphrag_proto.ingestion_service.pipeline.candidates import (
+    CANDIDATES_KEEP_ENV,
+    CandidatesCleanupError,
+    count_remaining,
+    discard_candidates,
+    discard_document_upload,
+)
 from graphrag_proto.ingestion_service.pipeline.chunker import Chunker
 from graphrag_proto.ingestion_service.pipeline.orchestrator import (
     STAGES,
@@ -39,6 +48,7 @@ from graphrag_proto.ingestion_service.projection import (
     try_build_projection_state_store,
 )
 from graphrag_proto.ingestion_service.readers.registry import factory as readers_factory
+from graphrag_proto.ingestion_service.retention_policy import run_orphan_cleanup
 from graphrag_proto.ingestion_service.storage.registry import (
     STATUS_DELETED,
     DocumentRegistry,
@@ -56,6 +66,47 @@ from graphrag_proto.retrieval.profile import DomainProfileLoader
 HOST = "0.0.0.0"
 PORT = 8002
 ALLOWED_DOC_TYPES = {"txt", "md", "pdf"}
+
+# Логгер модуля. Появился вместе с ADR-050: сбой, при котором не удаётся терминализировать
+# запись джобы, обязан быть виден в логе. Иначе он выглядит как обычный 500, а джоба при
+# этом остаётся в `queued` навсегда — то есть «мы потеряли джобу» молча, а «мы потеряли
+# джобу» это ровно тот результат, который нельзя потерять молча.
+_log = _logging.getLogger(__name__)
+
+# Префикс пометки деградации optional-ингеста в message стадии EXTRACT. Владелец
+# контракта — здесь; читает его eval-раннер (`infra/eval/run_eval.py`), который
+# общается с сервисом по HTTP. Деградация иначе неотличима от успеха: джоба
+# остаётся `succeeded`, просто рёбер и фактов в графе меньше.
+ENRICHMENT_DEGRADED_PREFIX = "enrichment_degraded"
+# Имена структурных сигналов в ответе джобы (`job["signals"]`). Один канал на оба
+# факта: «документ обработан хуже» и «LLM-слой потерян». Именно они, а не текст
+# сообщения, являются источником данных для счётчиков: тихий ноль в метрике потерь
+# опаснее, чем её отсутствие, а один флаг полем и другой текстом означают два
+# механизма у потребителя.
+ENRICHMENT_DEGRADED_SIGNAL = "enrichment_degraded"
+# Суффикс к сообщению деградации, когда LLM-слой потерян ЦЕЛИКОМ, а не просто
+# обработан хуже. Отдельное имя, потому что `enrichment_degraded` ставится в двух
+# местах с противоположным смыслом: профиль не загрузился (ничего не потеряно) и
+# исключение в экстракции (потерян весь слой). Одна метка на оба факта не
+# интерпретируется: счётчик может показать высокую деградацию при нулевой потере.
+LLM_LAYER_DROPPED_MARKER = "[llm_layer_dropped]"
+#: Имя структурного сигнала в ответе джобы (`job["signals"]`), означающее « INGEST признал
+#: содержимое неизменным и пайплайн не пошёл дальше». Ставится сервисом, потому что
+#: потребитель не может вывести это из журнала стадий: `update_stage` вызывается перед
+#: КАЖДОЙ стадией, поэтому у no-op-джобы в журнале лежат все девять строк, включая
+#: `EXTRACT` и `COMMIT`, и стадия выглядит отработавшей. Раньше прибор и выводил no-op по
+#:journal `stage == "INGEST"` и на прогоне 2026-10-04 объявил три no-op-джобы холодной
+#: перезагрузкой с нулевым извлечением.
+INGEST_NOOP_SIGNAL = "ingest_noop"
+#: Префикс сигнала, который ставится, когда LLM-экстракция действительно отработала:
+#: `set_signal(job_id, "EXTRACT", f"extraction:{identity}")`. Свидетель работы, в отличие от
+#: строки стадии: паспорт пишется только когда `_extract_llm` была вызвана.
+EXTRACTION_SIGNAL_PREFIX = "extraction:"
+
+# Имя структурного сигнала в ответе джобы (`job["signals"]`). Именно он, а не текст
+# сообщения, является источником данных для счётчика потерь: тихий ноль в метрике
+# потерь опаснее, чем её отсутствие.
+LLM_LAYER_DROPPED_SIGNAL = "llm_layer_dropped"
 
 
 def _upload_dir() -> Path:
@@ -83,6 +134,40 @@ def _strict_profile_loading() -> bool:
     return os.environ.get("EXTRACT_LLM", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+#: Переопределение температуры именно для извлечения. Общая `LLM_TEMPERATURE` остаётся
+#: для генерации ответов на вопросы: там ненулевая температура осмысленна, здесь - нет.
+EXTRACTION_LLM_TEMPERATURE_ENV = "EXTRACTION_LLM_TEMPERATURE"
+
+#: Префикс паспорта извлечения в сообщении стадии. Префикс, а не отдельное поле, потому
+#: что канал для машинных значений один - `signals`, и вводить второй значило бы дать
+#: потребителю два механизма там, где он рассчитывает на один.
+EXTRACTION_PASSPORT_PREFIX = "extraction_passport: "
+
+
+def _extraction_temperature() -> float:
+    """Температура для стадии EXTRACT, отдельно от генерации ответов.
+
+    Извлечение - структурированный JSON, и семплирование здесь неуместно: при
+    `temperature` из профиля (0.3) выход модели гулял между прогонами на одном и том же
+    корпусе - от 15 до 214 связей, - то есть результат зависел от случайности, а не от
+    кода. Генерация ответа на вопрос с `0.3` разумна, поэтому переопределение точечное, а
+    не глобальное.
+
+    Дефолт здесь - сознательное решение, а не молчаливое значение: он виден в коде и
+    переопределяется переменной окружения, если понадобится осознанно семплировать.
+    """
+    raw = os.environ.get(EXTRACTION_LLM_TEMPERATURE_ENV, "").strip()
+    if not raw:
+        return 0.0
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"{EXTRACTION_LLM_TEMPERATURE_ENV}={raw!r} не число: температура извлечения "
+            f"обязана быть разбираемым числом, иначе поведение зависит от опечатки в конфиге"
+        ) from exc
+
+
 def build_analyzer(
     registry: DocumentRegistry,
     glossary_url: str,
@@ -95,14 +180,20 @@ def build_analyzer(
     projection_state_store: ProjectionStateStore | None = None,
 ) -> Analyzer:
     readers = {doc_type: readers_factory(doc_type) for doc_type in sorted(ALLOWED_DOC_TYPES)}
+    # Фетчер профиля - один, у Analyzer. Стадии его больше не получают: профиль
+    # замораживается на прогон джобы, а не тем, кто из стадий позвал первым.
     return Analyzer(
         [
             IngestStage(readers),
-            ChunkStage(chunker, profile_fetcher=profile_fetcher),
+            ChunkStage(chunker),
             EmbedStage(embedder or build_embedder()),
             ExtractStage(
-                llm=llm if llm is not None else build_llm(),
-                profile_fetcher=profile_fetcher,
+                llm=llm if llm is not None else build_llm(
+            temperature=_extraction_temperature(),
+            # Метка стадии в журнале обмена: из ingest модель зовёт только извлечение, и
+            # без метки записи обмена не отличить от вызовов генерации в query-service.
+            exchange_stage="extract",
+        ),
                 optional_failure=True,
             ),
             NormalizeStage(glossary_url),
@@ -113,11 +204,11 @@ def build_analyzer(
                 registry,
                 graph_store=graph_store,
                 vector_store=vector_store,
-                profile_fetcher=profile_fetcher,
                 graph_optional=True,
                 projection_state_store=projection_state_store,
             ),
-        ]
+        ],
+        profile_fetcher=profile_fetcher,
     )
 
 
@@ -156,7 +247,48 @@ class Executor:
             projection_state_store=projection_state_store,
         )
 
-    def start(
+    def try_reserve(self) -> bool:
+        """Занять слот исполнения без запуска работы. False — все слоты заняты (429).
+
+        Отдельный вызов от `start_reserved` не для удобства, а по существу: слот должен
+        занять раньше, чем вызывающий создаст запись в реестре (ADR-050). Пока запись
+        создаётся до резерва, отказ в слоте оставлял в реестре джобу, идентификатор которой
+        вызывающему не отдали, — по реестру она неотличима от принятой и упавшей.
+        """
+        return bool(self._slots.acquire(blocking=False))
+
+    def release(self) -> None:
+        """Вернуть слот, занятый `try_reserve`, не запустив работу.
+
+        Обязателен на любом сбое между резервом и запуском потока: иначе слот занят вечно,
+        и следующий запрос получит 429 при свободных слотах.
+        """
+        self._slots.release()
+
+    def start_reserved(
+        self,
+        job_id: str,
+        target: Path,
+        source_url: str,
+        domain: str,
+        doc_type: str,
+        tags: list[dict[str, Any]] | None = None,
+        links: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Запустить фоновый поток на слоте, уже занятом `try_reserve`.
+
+        Слот освобождает сам поток в `_run`. Если запуск не состоялся, вызывающий обязан
+        вызвать `release()` — иначе слот утечёт.
+        """
+        thread = threading.Thread(
+            target=self._run,
+            args=(job_id, target, source_url, domain, doc_type, tags or [], links or [], metadata or {}),
+            daemon=True,
+        )
+        thread.start()
+
+    def start_reserved_guarded(
         self,
         job_id: str,
         target: Path,
@@ -167,15 +299,33 @@ class Executor:
         links: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> bool:
-        """Запускает фоновый поток; False, если все слоты заняты (429)."""
-        if not self._slots.acquire(blocking=False):
+        """Занять слот, запустить поток и вернуть слот, если запуск не состоялся.
+
+        Единственный безопасный способ начать работу одной строкой. Отдельная пара
+        `try_reserve` / `start_reserved` нужна HTTP-пути, где между ними живёт создание
+        записи в реестре (ADR-050), и опасна как обёртка: забытый `release()` на сбое
+        заклинивает исполнитель навсегда. Этот метод освобождает слот сам.
+
+        Удалён вместо `start()`, который делал то же самое, но не освобождал слот при
+        неудачном запуске. Решение владельца от 2026-10-05: метода с нулём продакшн-вызовов
+        и таким поведением в `Executor` не остаётся.
+        """
+        if not self.try_reserve():
             return False
-        thread = threading.Thread(
-            target=self._run,
-            args=(job_id, target, source_url, domain, doc_type, tags or [], links or [], metadata or {}),
-            daemon=True,
-        )
-        thread.start()
+        try:
+            self.start_reserved(
+                job_id,
+                target,
+                source_url,
+                domain,
+                doc_type,
+                tags=tags,
+                links=links,
+                metadata=metadata,
+            )
+        except BaseException:
+            self.release()
+            raise
         return True
 
     def _run(
@@ -206,13 +356,197 @@ class Executor:
                     return
                 self._jobs.update_stage(job_id, stage_name)
                 self._analyzer.run_one(stage_name, ctx)
-                if stage_name == "INGEST":
-                    self._analyzer.try_noop(ctx)
+                # No-op объявляется СИГНАЛОМ, а не выводится потребителем из журнала стадий.
+                # Причина указана выше у `INGEST_NOOP_SIGNAL`: журнал не отличает отработавшую
+                # стадию от пропущенной, и поэтому по нему no-op не читается вовсе. `ctx.noop`
+                # в условии — страховка от будущей правки `try_noop`, а не дубль: сейчас
+                # функция возвращает True ровно тогда, когда выставила флаг.
+                if stage_name == "INGEST" and self._analyzer.try_noop(ctx) and ctx.noop:
+                    self._jobs.set_signal(job_id, stage_name, INGEST_NOOP_SIGNAL)
+                if stage_name == "EXTRACT":
+                    # Паспорт извлечения: всё, чем выполнялся разбор, кроме текста
+                    # документа. Пишется на каждой джобе, прошедшей EXTRACT, а не только
+                    # при деградации, - иначе «чем именно извлечено» остаётся неизвестным
+                    # именно там, где всё прошло хорошо и расходиться не с чем.
+                    if ctx.extraction_passport:
+                        passport = ctx.extraction_passport
+                        self._jobs.record_extraction_passport(job_id, passport)
+                        self._jobs.set_signal(job_id, stage_name, f"extraction:{passport['identity']}")
+                    # Факты об объёме пишутся на КАЖДОЙ джобе, прошедшей EXTRACT, а не
+                    # только при деградации: объём LLM-слоя — это знаменатель для
+                    # «записей на документ», и без него доля считается по документам,
+                    # где экстракция не запускалась вовсе.
+                    self._jobs.record_enrichment(
+                        job_id,
+                        cause=ctx.enrichment_cause,
+                        lost_entities=ctx.llm_layer_lost_entities,
+                        lost_edges=ctx.llm_layer_lost_edges,
+                        llm_records=ctx.llm_records,
+                        llm_edges=ctx.llm_edges,
+                        llm_names_total=ctx.llm_names_total,
+                        llm_names_grounded=ctx.llm_names_grounded,
+                        # ADR-053: без этих четырёх ограничение выглядит работающим,
+                        # пока тихо не перестаёт. `candidates_absent` в отчёте — это
+                        # «документ ушёл только в вектор», и по одному логу это не
+                        # отличить от обычной деградации.
+                        candidates_absent=ctx.candidates_absent,
+                        candidates_total=ctx.candidates_total,
+                        llm_names_off_list=ctx.llm_names_off_list,
+chunks_without_candidates=ctx.chunks_without_candidates,
+                        chunks_total=ctx.chunks_total,
+                        # ADR-056: вырождение ответа. Без этих чисел джоба с обрывом
+                        # отличается от джобы без вызова LLM только по `cause`, а по нему
+                        # «зациклилась модель» и «не хватило токенов» не различить.
+                        llm_names_raw=ctx.llm_names_raw,
+                        llm_names_raw_unique=ctx.llm_names_raw_unique,
+                        llm_names_raw_off_list=ctx.llm_names_raw_off_list,
+                        llm_names_raw_grounded=ctx.llm_names_raw_grounded,
+                        llm_relations_declared=ctx.llm_relations_declared,
+                        llm_relations_unique=ctx.llm_relations_unique,
+                        llm_answer_lines=ctx.llm_answer_lines,
+                        llm_answer_lines_unique=ctx.llm_answer_lines_unique,
+                        llm_answer_brace_balance=ctx.llm_answer_brace_balance,
+                    )
+                    # Неразрешённые концы — фактом, а не поводом снести слой (ADR-037).
+                    # Пишутся на каждой джобе, где они были; джоба уборки обходит их по
+                    # `endpoint_key`, поэтому отдельная запись на конец, а не счётчик.
+                    self._jobs.record_missing_endpoints(
+                        job_id, source_url, ctx.unresolved_endpoints
+                    )
+                    # Счётчики разрешимости пишутся на каждой джобе, прошедшей EXTRACT,
+                    # включая нули (ADR-039): без знаменателя доля не считается, а «концов
+                    # нет» и «не считали» — разные утверждения.
+                    self._jobs.record_resolvability(job_id, ctx.resolvability, stage=stage_name)
+                if stage_name == "COMMIT":
+                    # ADR-049 п. 4: кто создал ноды, записанные этой джобой. Пишется и для
+                    # no-op, и для джобы без сущностей: пустое распределение вместе со
+                    # `graph_projection_status` отличает «нод не было» от «запись не
+                    # состоялась», а без статуса оба выглядели бы одинаково.
+                    self._jobs.record_nodes_by_extractor(
+                        job_id,
+                        ctx.nodes_by_extractor_version,
+                        graph_projection_status=ctx.graph_projection_status,
+                    )
+                if ctx.enrichment_degraded:
+                    # Оба факта идут ОДНИМ каналом — полем `signals`. Канал заводится
+                    # один раз на оба флага: если один придёт полем, а другой текстом,
+                    # у потребителя будет два механизма, а объяснение «почему так»
+                    # станет историческим вместо замысла.
+                    self._jobs.set_signal(job_id, stage_name, ENRICHMENT_DEGRADED_SIGNAL)
+                    if ctx.llm_layer_dropped:
+                        self._jobs.set_signal(job_id, stage_name, LLM_LAYER_DROPPED_SIGNAL)
+                    # Сообщение остаётся человекочитаемой пометкой и несёт ПРИЧИНУ,
+                    # которой больше негде жить. Источником данных не является: рефакторинг
+                    # формата не должен обнулять счётчики.
+                    dropped = f" {LLM_LAYER_DROPPED_MARKER}" if ctx.llm_layer_dropped else ""
+                    self._jobs.note_stage(
+                        job_id,
+                        stage_name,
+                        f"{ENRICHMENT_DEGRADED_PREFIX}: {ctx.enrichment_error}{dropped}",
+)
+            self._discard_job_files(job_id, stage_name, target)
+            self._log_job_timings(job_id, source_url)
             self._jobs.finish(job_id, "succeeded")
         except Exception as exc:  # noqa: BLE001 - разнородные источники сбоев этапов
+            self._log_job_timings(job_id, source_url)
             self._jobs.finish(job_id, "failed", error=str(exc))
         finally:
             self._slots.release()
+
+    def _discard_job_files(self, job_id: str, stage_name: str, target: Path) -> None:
+        """Убирает оба файла джобы: документ и его кандидатов.
+
+        Вызывается после успешного прохода и после отсечки no-op: в обоих случаях разбор
+        либо состоялся, либо не потребовался, и оставшиеся файлы уехали бы в следующий
+        запуск. После отказа и деградации НЕ вызывается - там файлы остаются для разбора
+        причины.
+
+        Файл документа убирается наравне с кандидатами. До этого он удалялся только при
+        обрыве потока, и в каталоге загрузки копились полные копии документов: проверено на
+        томе, 62 файла, 2.8 МБ. Пока они живут, «документ в двух местах» нарушено.
+
+        Отделён от `_run`, потому что отказ уборки не должен менять статус джобы: запись
+        уже в базе, и `succeeded` -> `failed` из-за неудалённого файла означала бы
+        ложь в другую сторону. Отказ объявляется в логе и в отчёте.
+        """
+        directory = target.parent
+        source_name = target.name
+        try:
+            candidates_result = discard_candidates(target)
+            document_result = discard_document_upload(target)
+        except CandidatesCleanupError as exc:
+            _log.error("%s", exc)
+            self._jobs.note_stage(job_id, stage_name, f"файлы джобы не убраны: {exc}")
+            return
+        remaining = count_remaining(directory)
+        if "kept" in (candidates_result, document_result):
+            # Отключение уборки объявляется на каждой джобе, а не один раз при старте:
+            # иначе отчёт прогона выглядел бы как уборка, которая не работает, при
+            # исправном коде уборки и включённой отладке.
+            _log.warning(
+                "%s=%s: файлы джобы %s оставлены для отладки; во временной папке %d",
+                CANDIDATES_KEEP_ENV,
+                os.environ.get(CANDIDATES_KEEP_ENV, "").strip(),
+                source_name,
+                remaining,
+            )
+            self._jobs.note_stage(
+                job_id,
+                stage_name,
+                f"{CANDIDATES_KEEP_ENV}: файлы джобы оставлены для отладки; осталось в папке: "
+                f"{remaining}",
+            )
+            return
+        if candidates_result == "removed" or document_result == "removed":
+            _log.info(
+                "файлы джобы по %s убраны (кандидаты=%s, документ=%s); осталось во "
+                "временной папке: %d",
+                source_name,
+                candidates_result,
+                document_result,
+                remaining,
+            )
+        if remaining:
+            # Остаток публикуется всегда, а не только при неудачной уборке: папка может
+            # копить файлы по другим причинам, и молчание выглядело бы как «уборка
+            # работает», пока она не работает.
+            self._jobs.note_stage(
+                job_id,
+                stage_name,
+f"во временной папке кандидатов осталось файлов: {remaining}",
+            )
+
+    def _log_job_timings(self, job_id: str, source_url: str) -> None:
+        """Пишет суммарное время джобы и её самую долгую стадию.
+
+        Отдельная функция, потому что её результат нужен и при успехе, и при отказе: время
+        до отказа — тоже факт, и без него «стадия EXTRACT заняла 40 с и упала» остаётся
+        догадкой.
+
+        Пустые длительности не превращаются в ноль в отчёте: отсутствие строки означает
+        «стадия не измерялась», а не «стадия заняла 0 мс».
+        """
+        durations = self._jobs.stage_durations(job_id)
+        if not durations:
+            _log.warning(
+                "джоба %s источник=%s: длительности стадий не записаны - измерять нечего",
+                job_id,
+                source_url,
+            )
+            return
+        total_ms = sum(durations.values())
+        slowest_stage, slowest_ms = max(durations.items(), key=lambda item: item[1])
+        _log.info(
+            "джоба %s источник=%s: всего %d мс, стадий измерено %d, самая долгая %s=%d мс; "
+            "по стадиям: %s",
+            job_id,
+            source_url,
+            total_ms,
+            len(durations),
+            slowest_stage,
+            slowest_ms,
+            ", ".join(f"{stage}={ms}" for stage, ms in durations.items()),
+        )
 
     def cancel(self, job_id: str) -> bool:
         return self._jobs.cancel(job_id)
@@ -284,27 +618,97 @@ def create_app(
                     )
                 ),
             )
-        job_id = str(uuid.uuid4())
-        jobs.create(job_id, source_url, domain, doc_type)
-        target = upload_dir / f"{job_id}.{doc_type}"
-        if content is not None:
-            raw = content.encode("utf-8") if isinstance(content, str) else content
-            target.write_bytes(raw)
-        if not executor.start(
-            job_id,
-            target,
-            source_url,
-            domain,
-            doc_type,
-            tags=tags,
-            links=links,
-            metadata=metadata,
-        ):
-            jobs.finish(job_id, "failed", error="перегрузка: все слоты исполнения заняты")
+        # ADR-050: слот резервируется ДО создания записи в реестре и до записи файла. Отказ в
+        # резерве не оставляет ни записи, ни файла: 429 означает «не принято», и по реестру
+        # это видно буквально — записи нет. Раньше порядок был обратным, и отозванный запрос
+        # оставался в реестре как `failed` без идентификатора, который можно было бы
+        # предъявить.
+        if not executor.try_reserve():
             raise HTTPException(
                 status_code=429,
                 detail=f"все {max_concurrent} слотов исполнения заняты; повторите позже",
             )
+        job_id = str(uuid.uuid4())
+        target = upload_dir / f"{job_id}.{doc_type}"
+        started = False
+        try:
+            jobs.create(job_id, source_url, domain, doc_type)
+            if content is not None:
+                raw = content.encode("utf-8") if isinstance(content, str) else content
+                try:
+                    target.write_bytes(raw)
+                except BaseException:
+                    # Сбой записи обязан называть файл. Иначе в логе есть «джоба не
+                    # принята» без указания, какой именно файл не записался, а путь
+                    # загрузки — единственное, по чему отличают одну неудачную загрузку от
+                    # другой. `raw` здесь может быть и не `bytes` (тип `content` не
+                    # проверяется), поэтому размер не вычисляется: `len()` здесь упал бы
+                    # вторым исключением и закрыл собой настоящую причину.
+                    _log.exception(
+                        "не удалось записать файл загрузки %s для джобы %s (doc_type=%s)",
+                        target,
+                        job_id,
+                        doc_type,
+                    )
+                    raise
+            executor.start_reserved(
+                job_id,
+                target,
+                source_url,
+                domain,
+                doc_type,
+                tags=tags,
+                links=links,
+                metadata=metadata,
+            )
+            started = True
+        except BaseException as exc:
+            # `BaseException`, а не `Exception`: `MemoryError` и прочие наследники не
+            # являются `Exception`, и на них слот утекал бы навсегда. Перенос резерва выше
+            # `jobs.create` превратил в этом месте «джоба зависла в queued» в «джоба
+            # зависла в queued И исполнитель заклинил», то есть правка внесла утечку,
+            # которой до неё не было.
+            if not started:
+                executor.release()
+            if isinstance(exc, HTTPException):
+                # Единственный источник 429 в этом блоке — `try_reserve` выше, до записи,
+                # и добраться сюда он не может. Ветка оставлена как страховка: слот в этом
+                # случае действительно занят, так что `release()` здесь правильный.
+                raise
+            # Оборванный файл удаляется. Проверено поиском по `src`: файлы из
+            # `INGESTION_UPLOAD_DIR` никто не читает и не удаляет, то есть недописанный
+            # файл лежал бы там вечно, а по реестру джоба при этом терминальна и выглядит
+            # обработанной. Это тот же фантом, только на уровне файла. Удаление не может
+            # помешать чтению: поток в этом месте не запущен, а единственный читатель -
+            # `_run`, до которого дело не дошло.
+            if target.exists():
+                try:
+                    target.unlink()
+                except OSError:
+                    _log.exception(
+                        "не удалось удалить оборванный файл загрузки %s для джобы %s",
+                        target,
+                        job_id,
+                    )
+            # Запись в реестр терминализируется «по возможности». Если БД упала на
+            # `jobs.create`, она упадёт и на `finish`, и тогда запись останется в `queued`
+            # навечно. Это обязано быть видно в логе: иначе сбой базы данных выглядит как
+            # обычный 500, а джоба тем временем ждёт терминального статуса вечно.
+            logged = False
+            try:
+                jobs.finish(job_id, "failed", error=f"сбой при запуске джобы: {exc}")
+                logged = True
+            except Exception:  # noqa: BLE001 - терять причину нельзя, терять запись - можно
+                _log.exception(
+                    "джоба %s осталась без терминального статуса: сбой записи в реестр "
+                    "поверх сбоя %r",
+                    job_id,
+                    exc,
+                )
+            detail = f"не удалось принять джобу: {exc}"
+            if not logged:
+                detail += "; запись в реестре не терминализирована"
+            raise HTTPException(status_code=500, detail=detail) from exc
         return JSONResponse(
             {
                 "job_id": job_id,
@@ -325,6 +729,26 @@ def create_app(
         if not job:
             raise HTTPException(status_code=404, detail=f"джоба {job_id} не найдена")
         job["stages"] = jobs.stages(job_id)
+        # Длительности стадий. Они пишутся в базу на каждой джобе с момента появления
+        # таблицы, но наружу не отдавались: по HTTP время загрузки не было видно вообще,
+        # и оценка «сколько стоит стадия» бралась на глаз. Сумма рядом даёт знаменатель,
+        # без которого «стадия 12 с» ни о чём не говорит.
+        stage_durations = jobs.stage_durations(job_id)
+        job["stage_durations_ms"] = stage_durations
+        job["total_duration_ms"] = sum(stage_durations.values())
+        # Структурные сигналы (например, потеря LLM-слоя) отдельным полем: consumer
+        # не должен разбирать `message`, чтобы получить число.
+        job["signals"] = jobs.signals(job_id)
+        # Количественные факты обогащения — тот же принцип, но числа: сколько записей
+        # исчезло и сколько модель вернула. Флаг без размера потери отвечает на вопрос
+        # «было ли что терять», а не «сколько».
+        job["enrichment"] = jobs.enrichment(job_id)
+        # ADR-049 п. 4: ноды джобы по производителю. Кладётся рядом с `enrichment`, потому
+        # что это второй способ узнать, отработала ли экстракция: флаг деградации говорит
+        # «слоя не будет», а этот счётчик — «а вот кто именно создал то, что записалось».
+        # Пустой объект означает «строки нет», то есть джоба не дошла до записи в граф, и
+        # потребитель обязан отличать это от «нод ноль».
+        job["nodes_by_extractor"] = jobs.nodes_by_extractor(job_id)
         return job
 
     @app.delete("/api/v1/ingestion/jobs/{job_id}", dependencies=[Depends(require_key)])
@@ -358,6 +782,83 @@ def create_app(
             )
         return {"domain": domain, "source_url": source_url, "status": STATUS_DELETED}
 
+    @app.post("/api/v1/ingestion/documents/status", dependencies=[Depends(require_key)])
+    def document_status(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+        """«Загружен ли этот документ в текущем виде?» — без загрузки и без джобы.
+
+        Нужен для проверки ДО стадии pre-ingest: на неизменившемся документе стадия
+        отрабатывает вхолостую, а без отсечки её результат ещё и остаётся в папке.
+
+        **Хэш считает сервис своим ридером, а не вызывающая сторона.** Для markdown
+        `content_hash` зависит от `MD_KEEP_CODE_SPLIT`: другое разбиение - другой хэш.
+        Если бы стадия считала хэш у себя, расхождение выглядело бы как «документа нет»
+        и отсечка молча не срабатывала бы. Здесь единственный источник - тот же ридер,
+        которым считает реестр.
+
+        Ничего не пишет и не создаёт: чистый вопрос по реестру.
+        """
+        source_url = payload.get("source_url")
+        domain = payload.get("domain")
+        doc_type = payload.get("doc_type")
+        content = payload.get("content")
+        missing = [
+            name
+            for name, value in (
+                ("source_url", source_url),
+                ("domain", domain),
+                ("doc_type", doc_type),
+                ("content", content),
+            )
+            if not value
+        ]
+        if missing:
+            raise HTTPException(
+                status_code=422,
+                detail=f"обязательные поля не переданы: {', '.join(missing)}",
+            )
+        try:
+            reader = readers_factory(str(doc_type))
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"нет ридера для doc_type={doc_type!r}",
+            ) from exc
+
+        # Документ читается во временный файл: ридер принимает путь, а отправитель уже
+        # прислал содержимое. Запись идёт в каталог задания и удаляется сразу же - в
+        # `INGESTION_UPLOAD_DIR` ничего лишнего не остаётся.
+        upload_dir = _upload_dir()
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        scratch = upload_dir / f"status-{uuid.uuid4().hex}"
+        try:
+            scratch.write_text(str(content), encoding="utf-8")
+            document = reader.read(scratch, str(source_url), str(domain))
+        finally:
+            scratch.unlink(missing_ok=True)
+
+        current = registry.latest_active(str(domain), str(source_url))
+        if current is None:
+            return {
+                "source_url": source_url,
+                "domain": domain,
+                "doc_type": doc_type,
+                "content_hash": document.content_hash,
+                "known": False,
+                "unchanged": False,
+                "version": None,
+                "doc_id": None,
+            }
+        return {
+            "source_url": source_url,
+            "domain": domain,
+            "doc_type": doc_type,
+            "content_hash": document.content_hash,
+            "known": True,
+            "unchanged": bool(current["content_hash"] == document.content_hash),
+            "version": current["version"],
+            "doc_id": current["doc_id"],
+        }
+
     @app.get("/api/v1/ingestion/revision", dependencies=[Depends(require_key)])
     def get_revision(domain: str | None = None) -> dict[str, Any]:
         """Ревизия данных домена (ADR-026, Веха 4-хвост)."""
@@ -368,17 +869,72 @@ def create_app(
             "updated_at": registry.data_revision_updated_at(domain),
         }
 
+    @app.post("/api/v1/maintenance/orphan-cleanup", dependencies=[Depends(require_key)])
+    def maintenance_orphan_cleanup(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+        """Один проход уборки сиротских связей и узлов по домену (ADR-014, B3+C).
+
+        Маршрут существует, потому что уборка без маршрута не воспроизводима: прогон,
+        где её вызвали руками и не оставили следа, не отвечает на вопрос «что именно
+        удалилось». Здесь вызов возвращает подсчёты и `job_id`, а факт уборки пишется
+        в реестр — то есть след есть и в ответе, и в данных.
+
+        Отдельного планировщика нет намеренно: уборка фоновая, а её цена - молчаливая
+        потеря данных в графе, поэтому решение о моменте остаётся за оператором.
+        Режим политики (`DATA_RETENTION_MODE`) не переопределяется здесь: он свойство
+        развёртывания, см. `docs/02` §4.3.
+        """
+        domain = payload.get("domain")
+        if not domain:
+            raise HTTPException(status_code=422, detail="query-поле domain обязательно")
+        job_id = f"maintenance:{uuid.uuid4()}"
+        fact = run_orphan_cleanup(graph_store, jobs, job_id=job_id, domain=str(domain))
+        return {
+            "job_id": job_id,
+            "domain": domain,
+            "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            **fact,
+        }
+
     return app
 
 
+#: Уровень журнала пайплайна. ADR-058 требует INFO для плана записи, и без явной настройки
+#: он недостижим: uvicorn поднимает корневой логгер на WARNING, поэтому INFO-строки не
+#: доходят ни до stdout, ни до Loki. Молчание здесь опаснее объёма - именно отсутствие
+#: записи уже стоило двух неверных выводов о состоянии графа.
+LOG_LEVEL_ENV = "GRAPH_LOG_LEVEL"
+DEFAULT_LOG_LEVEL = "INFO"
+
+
 def main() -> None:
+    import logging
+
     import uvicorn
 
     from graphrag_proto.security import install_redaction
 
     install_redaction()
+    requested = (os.environ.get(LOG_LEVEL_ENV) or "").strip().upper()
+    level = requested or DEFAULT_LOG_LEVEL
+    if not getattr(logging, level, None):
+        # Неизвестное значение не должно молча подменяться: иначе оператор задал
+        # `GRAPH_LOG_LEVEL=INFOO` и думает, что видит журнал, а не видит ничего.
+        print(
+            f"{LOG_LEVEL_ENV}={requested!r} - неизвестный уровень, "
+            f"используется {DEFAULT_LOG_LEVEL}",
+            file=sys.stderr,
+        )
+        level = DEFAULT_LOG_LEVEL
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        stream=sys.stdout,
+    )
+    # uvicorn поднимает корневой логгер сам и своим `log_config`; без этого наша настройка
+    # была бы перезаписана при старте сервера.
+    logging.getLogger("graphrag_proto").setLevel(level)
     api_key = os.environ.get("AUTH_API_KEY") or os.environ.get("GRAPH_AUTH_API_KEY", "changeme")
-    uvicorn.run(create_app(api_key=api_key), host=HOST, port=PORT)
+    uvicorn.run(create_app(api_key=api_key), host=HOST, port=PORT, log_config=None)
 
 
 if __name__ == "__main__":

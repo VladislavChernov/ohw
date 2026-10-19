@@ -1,0 +1,52 @@
+[
+  {
+    "node_id": "tag:it:chain_a",
+    "source_url": "depth-probe/anchor.md",
+    "tag_id": "chain_a",
+    "job_id": "92123345-c989-4cb0-8ade-dc710e76d817",
+    "status": "failed",
+    "links": [
+      {
+        "from_id": "tag:it:chain_a",
+        "to_id": "tag:it:chain_b",
+        "kind": "REFERENCES"
+      }
+    ]
+  },
+  {
+    "node_id": "tag:it:chain_b",
+    "source_url": "depth-probe/second.md",
+    "tag_id": "chain_b",
+    "job_id": "2c28917d-2aeb-46e2-9787-178621d20bec",
+    "status": "failed",
+    "links": [
+      {
+        "from_id": "tag:it:chain_b",
+        "to_id": "tag:it:chain_c",
+        "kind": "REFERENCES"
+      }
+    ]
+  },
+  {
+    "node_id": "tag:it:chain_c",
+    "source_url": "depth-probe/third.md",
+    "tag_id": "chain_c",
+    "job_id": "2e732b73-c96a-445f-aaf8-a9d1da8c5d08",
+    "status": "failed",
+    "links": [
+      {
+        "from_id": "tag:it:chain_c",
+        "to_id": "tag:it:chain_d",
+        "kind": "REFERENCES"
+      }
+    ]
+  },
+  {
+    "node_id": "tag:it:chain_d",
+    "source_url": "depth-probe/tail.md",
+    "tag_id": "chain_d",
+    "job_id": "2ee050d0-b3c2-4d39-8932-ccfe90830d48",
+    "status": "succeeded",
+    "links": []
+  }
+]

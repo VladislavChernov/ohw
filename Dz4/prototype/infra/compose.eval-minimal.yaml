@@ -6,8 +6,11 @@ x-logging: &logging
   logging:
     driver: json-file
     options:
-      max-size: "10m"
-      max-file: "3"
+      # Ротация поднята с 10m×3: на диагностическом прогоне с журналом обмена `full` и
+      # усечённым корпусом журналы переполняли первый файл раньше, чем прогон доходил до
+      # интересного места. Обрезка логов на середине прогона выглядит как «сервис замолчал».
+      max-size: "100m"
+      max-file: "10"
 
 x-client-env: &client-env
   AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
@@ -43,6 +46,7 @@ services:
       DOMAIN_PROFILES_DIR: /profiles
       NAMESPACES_PATH: /config/namespaces.yaml
     volumes:
+      - ../src:/app/src:ro
       - config_data:/data
       - ../domain_profiles:/profiles:ro
       - ./config:/config:ro
@@ -61,6 +65,7 @@ services:
       CONFIG_URL: http://config-service:8001
       DOMAIN_PROFILES_DIR: /profiles
     volumes:
+      - ../src:/app/src:ro
       - ../domain_profiles:/profiles:ro
     depends_on:
       config-service:
@@ -102,6 +107,7 @@ services:
       EMBEDDINGS_DEVICE: cpu
       HF_HOME: /models/huggingface
     volumes:
+      - ../src:/app/src:ro
       - models_data:/models
     healthcheck:
       # Health is not a model warmup; use the upload preflight before ingestion.
@@ -125,18 +131,55 @@ services:
       INGEST_CHUNKER: sliding_window
       INGEST_CHUNK_SIZE: "512"
       INGEST_CHUNK_OVERLAP: "64"
+      # ADR-053: папка со списками кандидатов (`<документ>_candidates.json`).
+      #
+      # Путь ВНУТРИ контейнера фиксирован, настраивается только путь на хосте
+      # (`CANDIDATES_HOST_DIR`). Две переменные с одинаковым смыслом «куда смотреть» -
+      # это ловушка: их можно задать не согласованно, и список будет искаться не там.
+      #
+      # Кандидаты производит сам пайплайн (ADR-053, решение владельца от 2026-10-14):
+      # `CANDIDATES_DIR` и папка `pre-ingest/` больше не нужны, и стадию запускать перед
+      # прогоном не надо. Список кладётся рядом с файлом документа и убирается с ним.
+      # Отключение уборки для отладки: при 1 файлы джобы остаются, и джоба пишет об этом
+      # в отчёт. По умолчанию 0 - уборка работает.
+      CANDIDATES_KEEP: "${CANDIDATES_KEEP:-0}"
       # Graph EXTRACT по онтологии профиля (Requirement|Concept|Contract + рёбра):
       # без флага извлечение детерминированное (Entity-слова), и настройки осей из
       # domain_profile.yaml к графу не применяются (типизированные узлы не создаются).
       EXTRACT_LLM: "true"
+      # Журнал обмена с LLM. `full` пишет промпт, системную инструкцию и ответ целиком —
+      # это единственный уровень, на котором видно, где модель «сходит с ума», потому что
+      # `meta` не содержит текста, а `response` содержит только ответ. Дефолт `off`:
+      # объём такого журнала на полном корпусе не кладут в Loki, и включать его надо
+      # явно, на конкретный прогон.
+      # `LLM_EXCHANGE_LOG_MAX_CHARS` по умолчанию 8000 обрезает промпт, а обрезанный
+      # промпт нельзя отличить от полного — поэтому для диагностики его поднимают.
+      LLM_EXCHANGE_LOG: "${LLM_EXCHANGE_LOG:-off}"
+      LLM_EXCHANGE_LOG_FILE: "${LLM_EXCHANGE_LOG_FILE:-}"
+      LLM_EXCHANGE_LOG_MAX_CHARS: "${LLM_EXCHANGE_LOG_MAX_CHARS:-8000}"
+      # Имя модели обязательно объявляет сервис: в коде больше нет зашитого имени,
+      # отсутствие LLM_MODEL - ошибка конфигурации, а не повод угадать.
+      LLM_MODEL: "${LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}"
       # EXTRACT генерирует полный JSON по документу — токенов по умолчанию (2048) мало.
-      LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-4096}"
+      # 4096 не хватало: замер обрыва по длине показал, что ровно один чанк из N упирался
+      # в потолок, ответ резался посреди JSON, и терялся документ целиком (минус записи
+      # и рёбра). Поднятие потолка вопрос не закрывает само по себе, но 4096 заведомо
+      # ниже измеренной потребности.
+      LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-6144}"
       LLM_TIMEOUT_S: "${LLM_TIMEOUT_S:-600}"
+      # Логи должны быть видны без правки кода: по умолчанию INFO, иначе причина отказа
+      # остаётся только в отчёте, а на экране выглядит как пустой результат.
+      GRAPH_LOG_LEVEL: "${GRAPH_LOG_LEVEL:-INFO}"
     volumes:
+      - ../src:/app/src:ro
       - ingestion_data:/data
       - projection_data:/var/lib/graphrag/projection
       - ../domain_profiles:/profiles:ro
       - ./config:/config:ro
+      # Монтирования папки с кандидатами больше нет: кандидаты не пересекают границу
+      # контейнеров (ADR-053, 2026-10-14). Прежний `${CANDIDATES_HOST_DIR}:/candidates` был
+      # источником тихих отказов - с неверным путём docker создавал пустую папку, контейнер
+      # видел ноль кандидатов, и джобы завершались `succeeded` при пустом графе.
     depends_on:
       config-service:
         condition: service_healthy
@@ -196,7 +239,7 @@ services:
       LLM_ADAPTER: openai
       EVAL_LLM_ADAPTER: openai
       LLM_BASE_URL: http://llm:8080
-      LLM_MODEL: qwen2.5-coder-7b-instruct-abliterated-q4_k_m
+      LLM_MODEL: "${LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}"
       LLM_TEMPERATURE: "0"
       LLM_TIMEOUT_S: "300"
       RUN_CODE_COMMIT: "${RUN_CODE_COMMIT:?RUN_CODE_COMMIT must be provided by the host}"
@@ -204,6 +247,7 @@ services:
       # опрос/генерация могут занимать минуты.
       HTTP_CLIENT_TIMEOUT_S: "${HTTP_CLIENT_TIMEOUT_S:-600}"
     volumes:
+      - ../src:/app/src:ro
       - ./eval:/app/infra/eval:ro
       - ../..:/repo:ro
       - ./config:/config:ro
@@ -225,4 +269,19 @@ volumes:
   ingestion_data:
   projection_data:
   neo4j_data:
+  # Модель весит ~16 ГБ и была залита в этот том вручную, до того как он стал
+  # управляться compose. Поэтому том объявлен внешним: compose не пытается его пересоздать
+  # и не ругается предупреждением на каждом запуске.
+  #
+  # Побочный эффект, который стоит знать: предупреждение
+  # `volume ... already exists but was not created by Docker Compose` уходило в stderr, а
+  # `run_eval_run.ps1` понижает `$ErrorActionPreference` до `Stop` на время вызова compose
+  # (см. `Invoke-Compose`), то есть любое безобидное предупреждение роняло обёртку ДО
+  # подъёма стенда. Объявление `external` убирает предупреждение, а не замалчивает
+  # проблему.
+  #
+  # Том должен существовать: при `external: true` compose не создаёт его сам, и отсутствие
+  # даст явную ошибку вместо молчаливого старта без модели.
   models_data:
+    external: true
+    name: ohw-eval-minimal_models_data

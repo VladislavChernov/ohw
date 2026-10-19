@@ -1,0 +1,468 @@
+# Runtime-контур: только запросы и UI, без ingestion-api (ADR-058).
+#
+# Зачем отдельный файл. В `compose.yaml` ingestion-api и query-api живут рядом, и чтобы
+# «просто убрать ингест», надо было гасить сервисы руками. Здесь ингеста нет вовсе, и
+# вопрос «нужен ли он для запросов» снят: `revision_client.py` объявлен fail-open, без
+# ingestion-api он отдаёт `revision = None`, и ответы всё равно формируются.
+#
+# Что теряется без ingestion-api ровно одно — гарантия актуальности ревизии: нельзя
+# отличить «ответ по свежему корпусу» от «ответ по устаревшему». Это видимый счётчик
+# `revision_poll_errors_total`, а не молчание.
+#
+# ДВА НАБОРА ВНЕШНИХ ТОМОВ. Имя тома собирается из `VOL`, поэтому один и тот же файл
+# поднимает и пустую базу, и заполненную — различается только значение `VOL`.
+# См. `../README-deployment.md` §Как выбрать набор.
+#
+# Том `ready` создаётся compose, но сам по себе остаётся ПУСТЫМ: наполняет его
+# `compose.ingest.yaml`, которого в этом контуре нет. См. `compose.ingest.yaml`.
+#
+# Источник определений: `compose.yaml` (config, glossary, neo4j, embeddings, valkey,
+# query-api, query-worker, demo-ui, llm). Расхождения с ним намеренные и перечислены
+# в этом комментарии.
+
+name: ohw-runtime
+
+# Якоря брони видеокарты здесь больше нет: ею не пользуется ни один сервис этого файла.
+# Видеокарта подключается файлом `compose.runtime-gpu.yaml`. Оставленный якорь вводил бы
+# в заблуждение: имя на месте, а бронь не выдаётся.
+
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# Набор томов задаётся переменной `VOL` (`empty` или `ready`), поэтому один и тот же
+# файл поднимает и пустую базу, и заполненную. Тома в сервисах объявлены длинной
+# формой `type/source/target` - короткая не годится, потому что нужно указать и том,
+# и точку монтирования, а не только имя.
+
+services:
+  # ------------------------------------------------------------------ config
+  # Отличия от compose.yaml: том `config_data` объявлен external. Конфиг — это
+  # namespaces.yaml и adapters.yaml, и он задаёт, из чего собрана система; молча
+  # заменять его пустым значит запустить стенд с другим адаптером без предупреждения.
+  config-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/config-service:prototype
+    container_name: ohw-runtime-config
+    networks: [runtime_net]
+    ports: ["8001:8001"]
+    environment:
+      CONFIG_DB_PATH: /data/config.sqlite
+      DOMAIN_PROFILES_DIR: /profiles
+      NAMESPACES_PATH: /config/namespaces.yaml
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - ../src:/app/src:ro
+      - type: volume
+        source: config
+        target: /data
+      - ../domain_profiles:/profiles:ro
+      - ./config:/config:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # Было `5s`, и контейнер объявлялся unhealthy при холодном старте, а ПОТОМ сам
+      # становился healthy - то есть процесс просто импортировался дольше окна
+      # (наблюдалось 36 секунд до готовности). Здоровый контейнер в статусе unhealthy
+      # хуже отсутствия проверки: на такой статус начинают опираться как на отказ.
+      start_period: 60s
+    <<: *logging
+
+  glossary-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/glossary-service:prototype
+    # Точка входа ОБЯЗАТЕЛЬНА. Все пять образов собираются из одного Dockerfile, и его
+    # `CMD` - `graphrag-config`. Без этой строки glossary-сервис молча поднимал второй
+    # экземпляр config на порту 8001, а healthcheck ждал 8003, и стенд падал с
+    # «unhealthy» при вроде бы рабочем контейнере. Это ровно тот класс дефектов, который
+    # запрещён проектом: отказ выглядит как успех.
+    command: ["graphrag-glossary"]
+    container_name: ohw-runtime-glossary
+    networks: [runtime_net]
+    ports: ["8003:8003"]
+    environment:
+      CONFIG_URL: http://config-service:8001
+      DOMAIN_PROFILES_DIR: /profiles
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - ../src:/app/src:ro
+      - ../domain_profiles:/profiles:ro
+    depends_on:
+      config-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+    <<: *logging
+
+  # ------------------------------------------------------------------ neo4j
+  # Heap и pagecache взяты из eval-minimal: на холодном JVM healthcheck в 10s даёт
+  # «unhealthy» при рабочей базе, и compose смотрит именно на него. Значения про память
+  # заданы явно, потому что ADR-001 фиксирует пик на Neo4j как известное ограничение.
+  neo4j:
+    image: neo4j:5.26-community
+    container_name: ohw-runtime-neo4j
+    networks: [runtime_net]
+    ports: ["7474:7474", "7687:7687"]
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-graphrag}
+      NEO4J_server_memory_heap_max__size: "1G"
+      NEO4J_server_memory_pagecache_size: "512M"
+    volumes:
+      - type: volume
+        source: neo4j
+        target: /data
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "${NEO4J_PASSWORD:-graphrag}", "RETURN 1"]
+      interval: 30s
+      timeout: 60s
+      retries: 10
+      start_period: 90s
+    <<: *logging
+
+  # ------------------------------------------------------------- embeddings
+  # Устройство по умолчанию `cpu`, как в eval-minimal: LLM занимает всю VRAM, и bge-m3 на
+  # CUDA вместе с 7B не влезает в 8 ГБ. Для 3B включается `EMBEDDINGS_DEVICE=cuda`.
+  embeddings-service:
+    build:
+      context: ..
+      dockerfile: Dockerfile.embeddings
+    image: ohw/embeddings-service:prototype
+    container_name: ohw-runtime-embeddings
+    command: ["graphrag-embeddings"]
+    networks: [runtime_net]
+    ports: ["8004:8004"]
+    environment:
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSIONS: 1024
+      EMBEDDINGS_MOCK: ${EMBEDDINGS_MOCK:-false}
+      EMBEDDINGS_DEVICE: ${EMBEDDINGS_DEVICE:-cpu}
+      HF_HOME: /models/huggingface
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - ../src:/app/src:ro
+      - models_data:/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      # Замерено 2026-10-14: холодный старт 68 с, тёплый 6 с (три свежих контейнера
+      # подряд: 6,0 / 6,2 / 6,2 с). Причина холодного - первый раз слой образа читается
+      # целиком: `import sentence_transformers` даёт 66,4 с на холодных и 5,2 с на тёплых,
+      # при этом модель не грузится, она ленивая, а `uv run` занимает 0,1 с.
+      # Бюджет до `unhealthy` = start_period + retries × interval. При 10 с он был 60 с,
+      # и холодный старт в него не влезал: первый запуск на чистой машине падал, второй
+      # проходил, потому что контейнер уже лежал тёплым. Минимум по арифметике 18 с,
+      # взято 30 с.
+      start_period: 30s
+    # Брони видеокарты нет - см. пояснение у сервиса `llm` ниже. Здесь она тем более не
+    # нужна: `EMBEDDINGS_DEVICE` по умолчанию равен `cpu`, то есть модель всё равно
+    # считает на процессоре, а запрос устройства лишь заставляет Docker требовать драйвер
+    # NVIDIA на машине, где считать и не собирались.
+    <<: [*logging]
+
+  # ------------------------------------------------------------------- llm
+  # Модель и лимиты - переменными, чтобы один конфиг обслуживал и 7B, и 3B. Здесь
+  # ctx-size и max_tokens обязаны быть согласованы: предела 6144 для извлечения
+  # недостаточно, а 8192 требует окна не меньше 16k.
+  llm:
+    image: ohw/llm:prototype
+    container_name: ohw-runtime-llm
+    networks: [runtime_net]
+    ports: ["8080:8080"]
+    command:
+      - "--model"
+      - "/models/${RUNTIME_LLM_GGUF:-Qwen2.5-Coder-7B-Instruct-abliterated-Q4_K_M.gguf}"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8080"
+      - "--ctx-size"
+      - "${RUNTIME_LLM_CTX_SIZE:-16384}"
+      - "--n-gpu-layers"
+      - "${LLM_NGPU_LAYERS:-99}"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    # Брони видеокарты здесь НЕТ, и это сделано намеренно. Броня объявляется безусловно и
+    # на машине без драйвера NVIDIA Docker не может её удовлетворить - стенд не
+    # поднимется вообще, даже если считать нечем было бы. Видеокарта подключается отдельным
+    # файлом `compose.runtime-gpu.yaml`; тот же приём в общем слое: `infra/compose.yaml`
+    # без брони плюс `infra/compose.gpu.yaml`.
+    #
+    # Проверено, что перекрыть бронь сверху нельзя: ни `devices: []`, ни `devices: null`
+    # её не снимают, потому что в этом файле она пришла через YAML-merge. Снять можно
+    # только здесь, в базовом файле.
+    <<: [*logging]
+
+  # ----------------------------------------------------------------- valkey
+  # Очередь задач для асинхронного query-контура (ADR-023). Appendonly выключен
+  # намеренно: очередь не является источником истины, задачи переживают рестарт за счёт
+  # своей sqlite, а на диске она растёт без нужды.
+  valkey:
+    image: valkey/valkey:9.1.2
+    container_name: ohw-runtime-valkey
+    networks: [runtime_net]
+    ports: ["6379:6379"]
+    command: ["valkey-server", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+    <<: *logging
+
+  # -------------------------------------------------------------- query-api
+  # Отличия от compose.yaml: `EMBEDDER` по умолчанию `bge_m3_service` (в исходном файле
+  # `deterministic`, то есть вектора фиктивные - для просмотра UI это не годится),
+  # `INGESTION_URL` оставлен, потому что revision_client читает его из окружения, и
+  # `SEMANTIC_CACHE_ENABLED` выключен: кэш без ingestion-api нечего инвалидировать.
+  query-api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/query-api:prototype
+    command: ["graphrag-query-api"]
+    container_name: ohw-runtime-query-api
+    networks: [runtime_net]
+    ports: ["8000:8000"]
+    environment:
+      CONFIG_URL: http://config-service:8001
+      DOMAIN_PROFILES_DIR: /profiles
+      INFRA_TOPOLOGY_PATH: /topology/infra_topology.yaml
+      GRAPH_STORE: ${GRAPH_STORE:-neo4j}
+      VECTOR_STORE: ${VECTOR_STORE:-neo4j}
+      EMBEDDER: ${EMBEDDER:-bge_m3_service}
+      EMBEDDINGS_URL: http://embeddings-service:8004
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSIONS: "1024"
+      RERANKER: ${RERANKER:-noop}
+      LLM_ADAPTER: openai
+      LLM_BASE_URL: http://llm:8080
+      LLM_MODEL: ${RUNTIME_LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}
+      LLM_MAX_TOKENS: ${RUNTIME_LLM_MAX_TOKENS:-2048}
+      LLM_CTX_SIZE: ${RUNTIME_LLM_CTX_SIZE:-16384}
+      # ОБЯЗАТЕЛЬНО. Доменный профиль не содержит блока `llm:` вовсе, а `factory._llm_setting`
+      # требует эти значения либо из окружения, либо из профиля и падает при отсутствии
+      # обоих. Без этой строки query-worker падает при старте, и задача остаётся в очереди
+      # навсегда: UI показывает «задача q_...» и не движется, а сервис в `docker ps` выглядит
+      # поднятым. Значение `0` — как в eval-minimal: тот же состав задач должен давать тот же
+      # результат.
+      LLM_TEMPERATURE: ${RUNTIME_LLM_TEMPERATURE:-0}
+      # ОБЯЗАТЕЛЬНО: полный контракт `factory._LLM_SETTINGS` = base_url, model, temperature,
+      # max_tokens, timeout_s. Доменный профиль не содержит блока `llm:` ни по одному из
+      # них, поэтому каждая настройка обязана приходить из окружения. Задавать их по одной
+      # по ошибке запуска нельзя: воркер последовательно падал на `temperature`, затем на
+      # `timeout_s`, а UI всё это время показывал «задача q_...» без движения.
+      LLM_TIMEOUT_S: ${RUNTIME_LLM_TIMEOUT_S:-600}
+# ОБЯЗАТЕЛЬНО. Без этих трёх клиенты берут собственные значения по умолчанию, а
+      # сервер запущен с NEO4J_PASSWORD из окружения. Расхождение даёт
+      # `Neo.ClientError.Security.Unauthorized` уже на стадии vector - то есть после
+      # успешных embedding и до LLM. Те же значения, что в eval-minimal (строки 27-29).
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-graphrag}
+      # ОБЯЗАТЕЛЬНО. Дефолт `adapters/bge.py` = 5.0 с; на bge-m3 в CPU этого не хватает,
+      # задача падала на стадии embedding с `Read timed out. (read timeout=5.0)`, и НИ ОДНОГО
+      # запроса до LLM. Столько же, сколько на eval-стенде (eval-minimal:35 = 300,
+      # eval.yaml:14 = 60).
+      EMBEDDINGS_TIMEOUT_S: ${RUNTIME_EMBEDDINGS_TIMEOUT_S:-300}
+      QUERY_QUEUE: redis
+      QUERY_REDIS_URL: redis://valkey:6379/0
+      QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
+      INGESTION_URL: ${INGESTION_URL:-http://ingestion-api:8002}
+      SEMANTIC_CACHE_ENABLED: "false"
+      # Флаг оси графа обязателен и здесь, а не только у `query-worker`. Сегодня api
+      # отдаёт задание воркеру (`QUERY_QUEUE: redis`) и пайплайн не исполняет, поэтому
+      # отсутствие флага было безобидно. Но обход очереди — это синхронный путь, и тогда
+      # api исполнил бы пайплайн с дефолтом профиля, то есть ось была бы ВКЛЮЧЕНА при
+      # выключенной настройке оператора. Обнаружить это можно было только сравнением
+      # окружений двух контейнеров, и на замере 2026-10-17 так и вышло: переменная была
+      # у воркера и отсутствовала у api.
+      # Инвариант: компонент, который МОЖЕТ исполнить пайплайн, читает тот же флаг с тем
+      # же дефолтом. Сторожит `tests/test_runtime_compose_env.py`.
+      RETRIEVAL_GRAPH_ENABLED: ${RETRIEVAL_GRAPH_ENABLED:-true}
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+      GRAPH_LOG_LEVEL: ${GRAPH_LOG_LEVEL:-INFO}
+    volumes:
+      - ../src:/app/src:ro
+      - ../domain_profiles:/profiles:ro
+      - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
+      - type: volume
+        source: query
+        target: /data
+    depends_on:
+      config-service:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    <<: *logging
+
+  # ------------------------------------------------------------- query-worker
+  query-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/query-worker:prototype
+    command: ["graphrag-query-worker"]
+    container_name: ohw-runtime-query-worker
+    networks: [runtime_net]
+    environment:
+      CONFIG_URL: http://config-service:8001
+      DOMAIN_PROFILES_DIR: /profiles
+      INFRA_TOPOLOGY_PATH: /topology/infra_topology.yaml
+      GRAPH_STORE: ${GRAPH_STORE:-neo4j}
+      VECTOR_STORE: ${VECTOR_STORE:-neo4j}
+      EMBEDDER: ${EMBEDDER:-bge_m3_service}
+      EMBEDDINGS_URL: http://embeddings-service:8004
+      EMBEDDING_MODEL: bge-m3
+      EMBEDDING_DIMENSIONS: "1024"
+      RERANKER: ${RERANKER:-noop}
+      LLM_ADAPTER: openai
+      LLM_BASE_URL: http://llm:8080
+      LLM_MODEL: ${RUNTIME_LLM_MODEL:-qwen2.5-coder-7b-instruct-abliterated-q4_k_m}
+      LLM_MAX_TOKENS: ${RUNTIME_LLM_MAX_TOKENS:-2048}
+      LLM_CTX_SIZE: ${RUNTIME_LLM_CTX_SIZE:-16384}
+      # ОБЯЗАТЕЛЬНО: без этого воркер падает при старте с «LLM_TEMPERATURE не задан», и
+      # задача остаётся в очереди навсегда - UI показывает «задача q_...» и не движется.
+      LLM_TEMPERATURE: ${RUNTIME_LLM_TEMPERATURE:-0}
+      # ОБЯЗАТЕЛЬНО: полный контракт `factory._LLM_SETTINGS` = base_url, model, temperature,
+      # max_tokens, timeout_s. Доменный профиль не содержит блока `llm:` ни по одному из
+      # них, поэтому каждая настройка обязана приходить из окружения. Задавать их по одной
+      # по ошибке запуска нельзя: воркер последовательно падал на `temperature`, затем на
+      # `timeout_s`, а UI всё это время показывал «задача q_...» без движения.
+      LLM_TIMEOUT_S: ${RUNTIME_LLM_TIMEOUT_S:-600}
+      # ОБЯЗАТЕЛЬНО. Без этих трёх клиенты берут собственные значения по умолчанию, а
+      # сервер запущен с NEO4J_PASSWORD из окружения. Расхождение даёт
+      # `Neo.ClientError.Security.Unauthorized` уже на стадии vector - то есть после
+      # успешных embedding и до LLM. Те же значения, что в eval-minimal (строки 27-29).
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-graphrag}
+      # ОБЯЗАТЕЛЬНО. Дефолт `adapters/bge.py` = 5.0 с; на bge-m3 в CPU этого не хватает,
+      # задача падала на стадии embedding с `Read timed out. (read timeout=5.0)`, и НИ ОДНОГО
+      # запроса до LLM. Столько же, сколько на eval-стенде (eval-minimal:35 = 300,
+      # eval.yaml:14 = 60).
+      EMBEDDINGS_TIMEOUT_S: ${RUNTIME_EMBEDDINGS_TIMEOUT_S:-300}
+      # Логи воркера обязаны быть видны. Без этой переменной причина падения (например,
+      # timeout эмбеддингов) уезжает только в поток событий Redis, а на экране остаётся
+      # transport-ошибка UI - `ChunkedEncodingError`, которая указывает не туда.
+      GRAPH_LOG_LEVEL: ${GRAPH_LOG_LEVEL:-INFO}
+      QUERY_QUEUE: redis
+      QUERY_REDIS_URL: redis://valkey:6379/0
+      QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
+      RETRIEVAL_GRAPH_ENABLED: ${RETRIEVAL_GRAPH_ENABLED:-true}
+      REVISION_POLL_INTERVAL_S: ${REVISION_POLL_INTERVAL_S:-5.0}
+      REVISION_TIMEOUT_S: ${REVISION_TIMEOUT_S:-3.0}
+      INGESTION_URL: ${INGESTION_URL:-http://ingestion-api:8002}
+      TOPOLOGY_URL: ${TOPOLOGY_URL:-http://topology-orchestrator:8005}
+      TOPOLOGY_POLL_INTERVAL: ${TOPOLOGY_POLL_INTERVAL:-5}
+      PROJECTION_STATE_DB_PATH: /var/lib/graphrag/projection/projection.db
+      PROJECTION_CONFIG_FINGERPRINT: ${PROJECTION_CONFIG_FINGERPRINT:-default}
+      AUTH_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    volumes:
+      - ../src:/app/src:ro
+      - ../domain_profiles:/profiles:ro
+      - ../infra_topology.yaml:/topology/infra_topology.yaml:ro
+      - type: volume
+        source: query
+        target: /data
+      - type: volume
+        source: projection
+        target: /var/lib/graphrag/projection
+    depends_on:
+      config-service:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      llm:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+      embeddings-service:
+        condition: service_healthy
+    <<: *logging
+
+  # --------------------------------------------------------------- demo-ui
+  # Отличие от compose.yaml: `depends_on` без ingestion-api. Вкладка «Документы» при
+  # этом отдаст ошибку соединения - и это ожидаемо, потому что загрузки в этом
+  # контуре нет. Вкладка «Запросы» полностью рабочая.
+  demo-ui:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: ohw/demo-ui:prototype
+    command: ["graphrag-demo-ui"]
+    container_name: ohw-runtime-demo-ui
+    networks: [runtime_net]
+    ports: ["8503:8503"]
+    environment:
+      INGESTION_URL: ${INGESTION_URL:-http://ingestion-api:8002}
+      QUERY_URL: http://query-api:8000
+      CONFIG_URL: http://config-service:8001
+      X_API_KEY: ${GRAPH_AUTH_API_KEY:-changeme}
+    depends_on:
+      config-service:
+        condition: service_healthy
+      query-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8503/_stcore/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    <<: *logging
+
+    volumes:
+      - ../src:/app/src:ro
+networks:
+  runtime_net:
+    name: ohw-runtime
+
+volumes:
+  # Тома набора `VOL` создаются compose, если их нет. Объявлять их `external` было бы
+  # защитой от «поднялся на пустой базе, не заметил» - но защита обходится выбором
+  # набора, а стоит сломанного клона: готовая копия репозитория обязана запускаться
+  # без подготовки. Пустая база - осознанный выбор того, кто выбрал набор `empty`.
+  #
+  # Имена томов у Docker глобальные, относительности у них нет: `ohw-runtime_empty_neo4j`
+  # - одно и то же на любой машине. Набор выбирается переменной `VOL`.
+  neo4j:
+    name: ohw-runtime_${VOL}_neo4j
+  config:
+    name: ohw-runtime_${VOL}_config
+  query:
+    name: ohw-runtime_${VOL}_query
+  projection:
+    name: ohw-runtime_${VOL}_projection
+  # Модели: имя нейтральное и НЕ ссылается на том другого стенда. Раньше дефолтом стоял
+  # `ohw-eval-minimal_models_data`, то есть runtime зависел от наполненного тома
+  # постороннего стенда, и на чистой машине падал бы на отсутствующем томе.
+  models_data:
+    name: ${MODELS_VOLUME:-ohw_models}

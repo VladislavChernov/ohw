@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 from graphrag_proto.retrieval.adapters.base import (
     Embedder,
@@ -27,7 +29,6 @@ from graphrag_proto.retrieval.adapters.bge import BgeM3ServiceAdapter, BgeRerank
 from graphrag_proto.retrieval.adapters.deterministic import DeterministicEmbedder
 from graphrag_proto.retrieval.adapters.inmemory import InMemoryGraphStore, InMemoryVectorStore
 from graphrag_proto.retrieval.adapters.llm import (
-    DEFAULT_TIMEOUT_S,
     FakeLLM,
     OpenAICompatibleAdapter,
 )
@@ -138,17 +139,173 @@ def _build_reranker(kind: str) -> Reranker:
     raise ValueError(f"reranker={kind!r}: допустимо {', '.join(ADAPTER_CATALOG[SLOT_RERANKER])}")
 
 
-def _build_llm(kind: str) -> LLMInference:
+logger = logging.getLogger(__name__)
+
+# Ключ в профиле `llm` -> имя переменной окружения, которой стенд может переопределить
+# профиль. Порядок разрешения: env (явное намерение стенда) > профиль > ошибка.
+_LLM_SETTINGS: dict[str, str] = {
+    "base_url": "LLM_BASE_URL",
+    "model": "LLM_MODEL",
+    "temperature": "LLM_TEMPERATURE",
+    "max_tokens": "LLM_MAX_TOKENS",
+    "timeout_s": "LLM_TIMEOUT_S",
+    # `context_window` был объявлен в профиле и не читался нигде, из-за чего у
+    # `max_tokens` не было ни одной точки сверки: значение могло превышать окно модели,
+    # и тогда каждый ответ обрывался по длине, а обрыв не проверялся и выглядел как
+    # битый JSON, а для EXTRACT с optional_failure - как тихая деградация.
+    #
+    # Имя переменной совпадает с той, которой стенд поднимает сервер (`--ctx-size
+    # ${LLM_CTX_SIZE}`), и это не совпадение ради красоты: если бы адаптер и сервер
+    # читали разные переменные, проверка сверяла бы с одним числом, а обрывался бы ответ
+    # по другому - то есть проверка была бы верной и бесполезной.
+    "context_window": "LLM_CTX_SIZE",
+    # Необязательный: нужен только при ненулевой температуре. При `temperature = 0`
+    # жадный декодер детерминирован и seed ничего не добавляет.
+    "seed": "LLM_SEED",
+}
+
+_LLM_PROFILE_PATH = "infra/config/namespaces.yaml"
+
+
+def _llm_profile() -> Mapping[str, object]:
+    """Блок `llm` из SSOT-профиля `infra/config/namespaces.yaml` (docs/04 §5)."""
+    from graphrag_proto.config_service.namespaces import load_namespaces
+
+    env = os.environ.get("NAMESPACES_PATH", "").strip()
+    block = load_namespaces(Path(env) if env else Path(_LLM_PROFILE_PATH)).get("llm")
+    return block if isinstance(block, Mapping) else {}
+
+
+def _llm_setting(key: str, profile: Mapping[str, object]) -> str:
+    """Настройка LLM из env или профиля. Инлайновых дефолтов нет намеренно.
+
+    Раньше здесь стояли `http://llm:8080`, `qwen2.5-coder-7b-instruct-abliterated-
+    q4_k_m`, 0.3, 2048 и таймаут, и это плохо работало. LLM-сервер принимает в поле
+    `model` любое значение и отдаёт ту модель, что загружена, поэтому опечатка в имени
+    не давала ошибки, а тихо работала; опечатка в адресе уводила на другой стенд или
+    в никуда. Угадывать значение значит превратить ошибку конфигурации в тихую
+    неверную работу, поэтому отсутствие ключа - это ошибка с логом, а не повод
+    подставить что-нибудь.
+    """
+    env_name = _LLM_SETTINGS[key]
+    raw = os.environ.get(env_name, "").strip() or str(profile.get(key, "")).strip()
+    if not raw:
+        source = os.environ.get("NAMESPACES_PATH", "").strip() or _LLM_PROFILE_PATH
+        message = (
+            f"{env_name} не задан, и ключа `{key}` нет в блоке `llm` профиля ({source}). "
+            f"Настройка LLM обязана объявляться явно: env переопределяет профиль."
+        )
+        logger.error(message)
+        raise RuntimeError(message)
+    return raw
+
+
+def _llm_number(
+    key: str, profile: Mapping[str, object], cast: Callable[[str], float | int]
+) -> float | int:
+    raw = _llm_setting(key, profile)
+    try:
+        return cast(raw)
+    except ValueError as exc:
+        message = f"{_LLM_SETTINGS[key]}={raw!r} не приводится к {cast.__name__}: {exc}"
+        logger.error(message)
+        raise RuntimeError(message) from exc
+
+
+def llm_setting(key: str) -> str:
+    """Разрешённое значение настройки LLM: env стенда > профиль > ошибка.
+
+    Публично, потому что правило разрешения должно быть одно. `run_eval.py` строит
+    адаптер для судьи мимо фабрики, и своя копия этого правила разъехалась бы с
+    фабрикой при первой же правке - сначала env, потом профиль или наоборот.
+    """
+    return _llm_setting(key, _llm_profile())
+
+
+def _optional_llm_setting(key: str, profile: Mapping[str, object]) -> str:
+    """Значение настройки, которой может не быть, - молча, без ошибки.
+
+    Отдельная функция, а не `os.environ.get(...)` в одну строку, потому что рядом стоит
+    `_llm_setting`, который по замыслу **обязателен**: отсутствие - ошибка конфигурации.
+    Смешивать эти два поведения в одном хелпере нельзя, иначе либо сломается любой профиль
+    без необязательного ключа, либо необязательный ключ станет обязательным молча.
+    `context_window` именно необязательный: это метаданные для сверки, а не параметр
+    адаптера, и профиль без него остаётся рабочим - просто проверить бюджет нечем.
+    """
+    value = os.environ.get(_LLM_SETTINGS.get(key, key), "").strip()
+    return value or str(profile.get(key) or "").strip()
+
+
+def _check_token_budget(profile: Mapping[str, object]) -> None:
+    """`max_tokens` обязан влезать в окно модели — иначе ответ будет обрезан всегда.
+
+    Проверка на сборке, а не на запросе: подсчитать токены промпта без токенизатора
+    можно только эвристикой по символам, а ложное срабатывание на кириллице хуже, чем
+    грубая, но однозначная ошибка конфигурации. Фактический обрыв ловится отдельно, по
+    `finish_reason` в ответе.
+
+    Значения берутся тем же разрешением env > профиль, что и при сборке адаптера: раньше
+    в этой функции читался сырой профиль, и проверка молча проходила, когда стенд задавал
+    `max_tokens` через переменную окружения, то есть ровно в том случае, ради которого
+    проверка и нужна. Сама сверка необязательна: нет окна - нечего сверять.
+    """
+    raw_window = _optional_llm_setting("context_window", profile)
+    raw_budget = _optional_llm_setting("max_tokens", profile)
+    if not raw_window or not raw_budget:
+        return
+    try:
+        window = int(raw_window)
+        budget = int(raw_budget)
+    except ValueError:
+        return
+    if window <= 0 or budget <= window:
+        return
+    message = (
+        f"LLM_MAX_TOKENS={budget} больше окна модели ({_LLM_SETTINGS['context_window']}={window}). "
+        f"Каждый ответ будет обрезан по длине."
+    )
+    logging.getLogger(__name__).error(message)
+    raise RuntimeError(message)
+
+
+def _build_llm(
+    kind: str,
+    *,
+    temperature: float | None = None,
+    exchange_stage: str = "llm",
+) -> LLMInference:
     kind = kind.strip().lower()
     if kind == "fake":
         return FakeLLM()
     if kind == "openai":
+        profile = _llm_profile()
+        _check_token_budget(profile)
+        raw_seed = _optional_llm_setting("seed", profile)
+        seed: int | None = None
+        if raw_seed:
+            # Передаётся, а не хранится: при `temperature = 0` жадный декодер и так
+            # детерминирован, и seed не нужен. Нужен он ровно тогда, когда кто-то осознанно
+            # вернул ненулевую температуру - и тогда без него воспроизводимости нет.
+            try:
+                seed = int(raw_seed)
+            except ValueError as exc:
+                message = f"{_LLM_SETTINGS['seed']}={raw_seed!r} не целое число"
+                logging.getLogger(__name__).error(message)
+                raise RuntimeError(message) from exc
         return OpenAICompatibleAdapter(
-            base_url=_env("LLM_BASE_URL", "http://llm:8080"),
-            model=_env("LLM_MODEL", "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"),
-            temperature=_env_float("LLM_TEMPERATURE", 0.3),
-            max_tokens=_env_int("LLM_MAX_TOKENS", 2048),
-            timeout_s=_env_float("LLM_TIMEOUT_S", DEFAULT_TIMEOUT_S),
+            base_url=_llm_setting("base_url", profile),
+            model=_llm_setting("model", profile),
+            temperature=float(_llm_number("temperature", profile, float))
+            if temperature is None
+            else temperature,
+            max_tokens=int(_llm_number("max_tokens", profile, int)),
+            timeout_s=float(_llm_number("timeout_s", profile, float)),
+            seed=seed,
+# Окно приходит из профиля, а не из аргумента, и это не только про извлечение:
+    # адаптер один и тот же и для извлечения, и для генерации, и конструктор не должен
+    # решать, кто он. Значение профиля может быть строкой - приводится здесь, один раз.
+    context_window=_optional_llm_setting("context_window", profile) or None,
+            exchange_stage=exchange_stage,
         )
     raise ValueError(f"llm={kind!r}: допустимо {', '.join(ADAPTER_CATALOG[SLOT_LLM])}")
 
@@ -202,5 +359,19 @@ def build_reranker() -> Reranker:
     return _build_reranker(_resolve_slot(SLOT_RERANKER, None))
 
 
-def build_llm() -> LLMInference:
-    return _build_llm(_resolve_slot(SLOT_LLM, None))
+def build_llm(*, temperature: float | None = None, exchange_stage: str = "llm") -> LLMInference:
+    """Адаптер LLM для потребителя.
+
+    `temperature` - точечное переопределение, а не глобальная настройка: извлечению нужна
+    детерминированность, генерации ответа на вопрос - нет. Кто вызывает и с каким
+    значением, видно в точке вызова, а не спрятано в профиле, где одна величина обслуживала
+    оба случая.
+    """
+    # exchange_stage - метка стадии в журнале обмена (docs/llm_exchange_log.md). Её
+    # знает вызывающий, а не адаптер: из ingest его зовёт извлечение, из query-service -
+    # генерация, и в журнале это обязано различаться.
+    return _build_llm(
+        _resolve_slot(SLOT_LLM, None),
+        temperature=temperature,
+        exchange_stage=exchange_stage,
+    )

@@ -119,3 +119,37 @@ def test_endpoint_revision_422_without_domain(tmp_path: Path) -> None:
     with _AuthedClient(app) as client:
         resp = client.get("/api/v1/ingestion/revision")
         assert resp.status_code == 422
+
+
+def test_orphan_cleanup_route_returns_auditable_fact(tmp_path: Path) -> None:
+    """Маршрут уборки обязан оставлять след: job_id и подсчёты в ответе (B3+C).
+
+    Проверяется ровно то, ради чего маршрут и добавлен: вызов, сделанный руками, должен
+    отвечать на вопрос «что именно удалилось». Поэтому `job_id` не пустой и помечен
+    префиксом `maintenance:`, а факт содержит и план, и факт удаления.
+    """
+    app = create_app(upload_dir=tmp_path / "u", db_path=tmp_path / "i.db")
+    with _AuthedClient(app) as client:
+        resp = client.post("/api/v1/maintenance/orphan-cleanup", json={"domain": "it"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["job_id"].startswith("maintenance:")
+    assert body["domain"] == "it"
+    assert body["mode"] == "current_only"
+    assert "planned_relations" in body and "removed_relations" in body
+    assert body["skipped"] is False
+    assert body["created_at"]
+
+
+def test_orphan_cleanup_route_401_without_key(tmp_path: Path) -> None:
+    app = create_app(upload_dir=tmp_path / "u", db_path=tmp_path / "i.db")
+    with TestClient(app) as client:
+        resp = client.post("/api/v1/maintenance/orphan-cleanup", json={"domain": "it"})
+        assert resp.status_code == 401
+
+
+def test_orphan_cleanup_route_422_without_domain(tmp_path: Path) -> None:
+    app = create_app(upload_dir=tmp_path / "u", db_path=tmp_path / "i.db")
+    with _AuthedClient(app) as client:
+        resp = client.post("/api/v1/maintenance/orphan-cleanup", json={})
+        assert resp.status_code == 422

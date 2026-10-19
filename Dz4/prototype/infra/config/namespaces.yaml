@@ -11,33 +11,38 @@ domain:
   profiles_available: ["it", "library", "cinema"]
   auto_reload: false
 
-retrieval:
-  cosine_threshold: 0.7
-  max_graph_nodes: 5
-  max_vector_chunks: 5
-  context_size: 4096
-  reranker_enabled: true
-  graph_search_enabled: true
-  similar_to_expansion: true
-
 extraction:
   model: "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"
   temperature: 0.1
   max_tokens: 4096
 
+# Namespace normalizer: ключи дедупликации удалены 2026-09-26 вместе с константами
+# DEDUP_AUTO/DEDUP_LLM/SIMILAR_TO. Косинусная двухступенчатая политика не реализована,
+# см. инвариант L3-02a и openspec/changes/add-proposal-review-gate/review-records/
+# prompt_and_entity_resolution.md (вердикт deferred). Оставшиеся ключи тоже не читаются
+# кодом — приведены как декларация намерения, а не как рабочая конфигурация.
 normalizer:
-  dedup_auto_threshold: 0.92
-  dedup_llm_threshold: 0.75
-  similar_to_threshold: 0.85
   llm_canonicalize_fallback: true
   unicode_normalization: true
   log_normalization: true
 
+# Настройки LLM читает `factory._build_llm` (для слота `llm: openai`): env переопределяет
+# профиль, профиль - источник по умолчанию, отсутствие ключа - ошибка конфигурации.
+# Инлайновых дефолтов в коде нет намеренно, поэтому блок ниже обязан быть полным:
+# раньше `base_url` и `timeout_s` отсутствовали, и код подставлял их у себя, из-за чего
+# опечатка в адресе или имени модели не давала ошибки, а тихо работала.
 llm:
+  base_url: "http://llm:8080"
   model: "qwen2.5-coder-7b-instruct-abliterated-q4_k_m"
   temperature: 0.3
   max_tokens: 2048
-  context_window: 32768
+  timeout_s: 600
+# Окно модели. Значение одно и служит двум целям: им поднимается сервер
+  # (llama.cpp, переменная LLM_CTX_SIZE) и по нему же адаптер сверяет бюджет ответа.
+  # Пока здесь стояло 32768, обе цели расходились: сервер поднимался с окном 16384, то
+  # есть ответ обрезался по 16k, а сверка max_tokens считала, что он укладывается.
+  # Сверка была верной и бесполезной - именно поэтому число должно быть одно.
+  context_window: 16384
 
 embeddings:
   model: "bge-m3"
@@ -57,12 +62,6 @@ storage:
 
 auth:
   api_key: "${GRAPH_AUTH_API_KEY:-changeme}"
-
-flags:
-  graph_search_enabled: true
-  reranker_enabled: true
-  similar_to_expansion: true
-  semantic_validation: true
 
 adapters:
   graph_store: "neo4j"

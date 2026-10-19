@@ -1,0 +1,35 @@
+{
+  "variant": "expC-rule-plus-example",
+  "hypothesis": "правило 'не переименовывай' + нейтральный пример дают kind у всех связей и полностью разрешённые концы на документе в 4 раза больше",
+  "criteria": [
+    "C1 документ не деградирует (cause=None)",
+    "C2 у каждой связи есть kind",
+    "C3 каждый конец связи совпадает с объявленным canonical_name"
+  ],
+  "code_version": "606d0c1-profile-only-image-still-old",
+  "profile_variant": "domain_profile.it.yaml user: правило не переименовывай + пример CACHE_LIMIT->CACHE_EVICTION",
+  "sources": "01_ontology_and_domain_profile.md",
+  "ingestion_url": "http://127.0.0.1:8002",
+  "documents": [
+    {
+      "source_url": "01_ontology_and_domain_profile.md",
+      "status": "succeeded",
+      "cause": "model_error",
+      "degraded": true
+    }
+  ],
+  "verdict": "degraded",
+  "metrics": {
+    "calls": 1,
+    "prompt_tokens_total": 1845,
+    "completion_tokens_total": 657,
+    "prompt_tokens_avg": 1845.0,
+    "completion_tokens_avg": 657.0,
+    "errors": {},
+    "response_chars_min": 2419,
+    "response_chars_max": 2419,
+    "response_chars_median": 2419,
+    "labels_present": 1,
+    "truncated_any": 0
+  }
+}

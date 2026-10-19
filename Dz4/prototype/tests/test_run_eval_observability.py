@@ -16,6 +16,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,9 @@ _run_eval = _load_run_eval()
 
 GRAPH_SOURCE = "docs/02_profiling.md"
 VECTOR_SOURCE = "docs/03_indexes.md"
+# Фикстура ревизии: форма проверяется в тестах `observe_domain_revision`, здесь важно лишь
+# чтобы оба рукава получили одно и то же значение.
+REV_FAKE = "rev-fake"
 
 
 def _question(qid: str, golden: list[str] | None = None) -> dict[str, Any]:
@@ -105,6 +109,7 @@ def _corpus(tmp_path: Path, names: list[str]) -> Path:
 
 
 def _write_dataset(tmp_path: Path, questions: list[dict[str, Any]] | None = None) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
     path = tmp_path / "questions.jsonl"
     rows = questions if questions is not None else [_question("obs-01")]
     with open(path, "w", encoding="utf-8") as fh:
@@ -174,6 +179,7 @@ def test_golden_coverage_counts_fully_and_partially() -> None:
 
     coverage = _run_eval.golden_coverage(questions, {GRAPH_SOURCE, VECTOR_SOURCE})
 
+    assert coverage["mode"] == _run_eval.COVERAGE_MODE_MEASURED
     assert coverage["questions_total"] == 4
     assert coverage["fully_covered"] == 2
     assert coverage["partially_covered"] == 1
@@ -186,6 +192,38 @@ def test_golden_coverage_empty_dataset_is_null_ratio() -> None:
 
     assert coverage["questions_total"] == 0
     assert coverage["fully_covered_ratio"] is None
+
+
+def test_golden_coverage_zero_is_a_fact_when_composition_known() -> None:
+    """Пустой загруженный корпус — измеренный ноль, а не «неизвестно».
+
+    Различие принципиально: пустое множество означает «загрузок не было», и это факт,
+    который прибор видел; `None` означает «состава взять негде».
+    """
+    coverage = _run_eval.golden_coverage([_question("q1", [GRAPH_SOURCE])], set())
+
+    assert coverage["mode"] == _run_eval.COVERAGE_MODE_MEASURED
+    assert coverage["fully_covered"] == 0
+    assert coverage["fully_covered_ratio"] == 0.0
+
+
+def test_golden_coverage_unknown_is_not_zero() -> None:
+    """Прогон против готовой базы: состава нет — покрытие обязано молчать, а не врать нулём.
+
+    Прежний код отдавал здесь `0.0`, и отчёт утверждал, что эталонных источников в корпусе
+    нет, — то есть ложно утверждал о базе, в которой они есть. Счётчики остаются `null`:
+    пустой результат и ненайденный прибор не должны выглядеть одинаково.
+    """
+    questions = [_question("q1", [GRAPH_SOURCE]), _question("q2", [VECTOR_SOURCE])]
+
+    coverage = _run_eval.golden_coverage(questions, None)
+
+    assert coverage["mode"] == _run_eval.COVERAGE_MODE_UNKNOWN
+    assert coverage["reason"] == _run_eval.COVERAGE_UNKNOWN_REASON
+    # Размер датасета измерим, поэтому он заполнен; покрытие — нет.
+    assert coverage["questions_total"] == 2
+    for field in ("fully_covered", "partially_covered", "uncovered", "fully_covered_ratio"):
+        assert coverage[field] is None, field
 
 
 # --- graph_axis_active -----------------------------------------------------
@@ -246,15 +284,47 @@ def test_aggregate_flags_graph_axis_inactive_when_only_vector() -> None:
 # --- ingest_report ---------------------------------------------------------
 
 
-def test_build_ingest_report_detects_noop_by_stage() -> None:
+def test_build_ingest_report_reads_noop_from_signal_not_from_stage() -> None:
+    """Признак no-op приходит сигналом `ingest_noop`, а не выводится из последней стадии.
+
+    Тест прежнего поведения назывался `..._detects_noop_by_stage` и утверждал ровно то, что
+    ADR-049 п. 6 снял: `stage == "INGEST"` означает no-op. На стенде это давало ложь —
+    `Executor` пишет стадию **перед** запуском, поэтому джоба, остановленная на INGEST как
+    no-op, доходит в журнале до `COMMIT` и отчитывалась как холодная перезагрузка с нулевым
+    извлечением. Прогон 2026-10-04T02:21Z был отчитан именно так, тремя документами.
+
+    Сценарий здесь стендовский: у no-op-джобы в журнале **все девять стадий** и последняя
+    `COMMIT`, а отличает её только сигнал. Обратная проверка — что джоба без сигнала, но с
+    последней стадией `INGEST`, no-op **не** признаётся — живёт в
+    `test_run_eval_artifacts.py::test_noop_without_the_signal_is_not_guessed_from_the_stage_log`.
+    """
     submitted = [
         {"source_url": "docs/a.md", "relpath": "a.md", "bytes": 2048, "job_id": "j1", "waited_s": 1.5},
         {"source_url": "docs/b.md", "relpath": "b.md", "bytes": 4096, "job_id": "j2", "waited_s": 120.0},
     ]
+    all_stages = [
+        {"stage": name, "status": "succeeded", "message": ""}
+        for name in (
+            "CHUNK", "COMMIT", "CONTRACT", "DEDUP", "EMBED", "EXTRACT", "INGEST",
+            "NORMALIZE", "VALIDATE",
+        )
+    ]
     statuses = {
-        # stage=INGEST при succeeded ⇒ пайплайн встал после INGEST (документ не менялся)
-        "j1": {"status": "succeeded", "stage": "INGEST", "error": None},
-        "j2": {"status": "succeeded", "stage": "COMMIT", "error": None},
+        # no-op:journal полон, последняя стадия COMMIT, отличает только сигнал
+        "j1": {
+            "status": "succeeded",
+            "stage": "COMMIT",
+            "error": None,
+            "signals": {"ingest_noop": "INGEST"},
+            "stages": all_stages,
+        },
+        "j2": {
+            "status": "succeeded",
+            "stage": "COMMIT",
+            "error": None,
+            "signals": {},
+            "stages": all_stages,
+        },
     }
 
     report = _run_eval.build_ingest_report(submitted, statuses)
@@ -359,6 +429,7 @@ def test_manifest_records_golden_coverage_and_tree_state(monkeypatch: Any) -> No
         started_at="2026-01-01T00:00:00Z",
         domain="it",
         revision="rev-fake",
+        revision_source=_run_eval.REVISION_SOURCE_REPORTED,
         datasets=["q.jsonl"],
         mode_arg="both",
         corpus="/repo/docs",
@@ -412,6 +483,8 @@ def _run_main(
     pipeline_factory: Any = None,
     dataset: Path | None = None,
     mode: str = "both",
+    ingestion: bool = False,
+    revision_read: Any = None,
 ) -> Path:
     dataset_path = dataset if dataset is not None else _write_dataset(tmp_path)
     monkeypatch.setattr(
@@ -429,12 +502,133 @@ def _run_main(
     )
     factory = pipeline_factory or (lambda: _FakePipeline())
     monkeypatch.setattr(_run_eval, "build_eval_pipeline", factory)
-    monkeypatch.setattr(_run_eval, "fetch_revision", lambda domain: "rev-fake")
+    monkeypatch.setattr(
+        _run_eval,
+        "observe_domain_revision",
+        revision_read
+        or (lambda domain: (REV_FAKE, _run_eval.REVISION_SOURCE_REPORTED)),
+    )
+    if ingestion:
+        # Один документ как будто загружен: этого достаточно, чтобы состав корпуса был
+        # известен прибору, и покрытие считалось как измеренное.
+        monkeypatch.setattr(
+            _run_eval,
+            "ingest_corpus",
+            lambda *a, **k: [
+                {
+                    "job_id": "j-one",
+                    "source_url": "src://doc.md",
+                    "relpath": "doc.md",
+                    "bytes": 14,
+                    "submitted_at": time.time(),
+                }
+            ],
+        )
+        monkeypatch.setattr(
+            _run_eval,
+            "wait_jobs",
+            lambda *a, **k: {
+                "j-one": {
+                    "status": "succeeded",
+                    "stage": "COMMIT",
+                    "error": None,
+                    "signals": {},
+                    "attempts": 1,
+                    "waited_s": 0.1,
+                }
+            },
+        )
     monkeypatch.setattr(_run_eval, "code_commit", lambda: "abc1234")
     monkeypatch.setenv("LLM_ADAPTER", "fake")
     monkeypatch.setenv("EVAL_LLM_ADAPTER", "fake")
     _run_eval.main()
     return tmp_path / "out"
+
+
+def _run_main_with_lost_layer(monkeypatch: Any, tmp_path: Path) -> Path:
+    """main() целиком, где ингест потерял LLM-слой на одном документе.
+
+    Проверяется сквозной путь, а не только `build_ingest_quality`: правило
+    «потеря инвалидирует прогон» держится на том, что отчёт ingest строится ДО
+    подсчёта вердикта. Переставьте эти два шага — и все юнит-тесты останутся зелёными,
+    а прогон будет объявлять `pass` по заведомо смещённым числам.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "doc.md").write_text("текст документа", encoding="utf-8")
+    dataset = _write_dataset(tmp_path, [_question("loss-01")])
+
+    monkeypatch.setattr(
+        _run_eval,
+        "ingest_corpus",
+        lambda *a, **k: [
+            {
+                "job_id": "j-loss",
+                "source_url": "src://doc.md",
+                "relpath": "doc.md",
+                "bytes": 14,
+                "submitted_at": time.time(),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _run_eval,
+        "wait_jobs",
+        lambda *a, **k: {
+            "j-loss": {
+                "status": "succeeded",
+                "stage": "COMMIT",
+                "error": None,
+                "signals": {
+                    "enrichment_degraded": "EXTRACT",
+                    "llm_layer_dropped": "EXTRACT",
+                },
+                "enrichment": {
+                    "cause": "model_error",
+                    "lost_entities": 77,
+                    "lost_edges": 12,
+                    "llm_records": 77,
+                    "llm_edges": 12,
+                },
+                "stages": [
+                    {"stage": "EXTRACT", "status": "succeeded", "message": "enrichment_degraded: relation unknown"}
+                ],
+            }
+        },
+    )
+    return _run_main(monkeypatch, tmp_path, "--corpus", str(corpus), dataset=dataset)
+
+
+def test_main_invalidates_verdict_when_ingest_lost_llm_layer(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Сквозная гарантия: потеря слоя на ингесте даёт `invalid`, а не `pass`."""
+    out = _run_main_with_lost_layer(monkeypatch, tmp_path)
+
+    report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
+    assert report["verdict"] == "invalid"
+    assert report["ingest_quality"]["loss"] is True
+    assert report["ingest_quality"]["llm_layer_lost_entities"] == 77
+    assert any("потерян LLM-слой" in r for r in report["verdict_reasons"])
+    # причина обязана быть видна в артефактах, которые читает человек
+    passport = (out / "PASSPORT.md").read_text(encoding="utf-8")
+    assert "вердикт непригоден" in passport
+    lift = (out / "lift_report.md").read_text(encoding="utf-8")
+    assert "потерян LLM-слой" in lift
+
+
+def test_main_writes_ingest_report_before_verdict(monkeypatch: Any, tmp_path: Path) -> None:
+    """Отчёт ingest обязан попасть на диск: иначе причину вердикта нечем подтвердить.
+
+    Причина вердикта ссылается на числа из `ingest_report.json`; если файла нет, то
+    либо вердикт неправ, либо потеря случилась не там, где думали.
+    """
+    out = _run_main_with_lost_layer(monkeypatch, tmp_path)
+
+    ingest = json.loads((out / "ingest_report.json").read_text(encoding="utf-8"))
+    assert ingest["llm_layer_dropped_documents"] == 1
+    assert ingest["llm_layer_lost_entities"] == 77
+    assert ingest["enrichment_causes"] == {"model_error": 1}
 
 
 def test_main_writes_passport_command_and_qa_review(monkeypatch: Any, tmp_path: Path) -> None:
@@ -453,6 +647,66 @@ def test_main_writes_passport_command_and_qa_review(monkeypatch: Any, tmp_path: 
     review = (out / "qa_review.md").read_text(encoding="utf-8")
     assert GRAPH_SOURCE in review
     assert "projection" in review
+
+
+def test_passport_reports_node_counters(monkeypatch: Any, tmp_path: Path) -> None:
+    """Паспорт обязан показывать, кто и сколько нод записал (ADR-049 п. 4).
+
+    «Нод ноль» должен быть отличим от «запись не состоялась», а вклад модели —
+    назван числом. Джоба собрана так, как её отдаёт сервис (`nodes_by_extractor`),
+    а не идентификаторами из кода: подделка проверяла бы не то, что видит прогон.
+    """
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "doc.md").write_text("текст документа", encoding="utf-8")
+    dataset = _write_dataset(tmp_path, [_question("nodes-01")])
+
+    monkeypatch.setattr(
+        _run_eval,
+        "ingest_corpus",
+        lambda *a, **k: [
+            {
+                "job_id": "j-nodes",
+                "source_url": "src://doc.md",
+                "relpath": "doc.md",
+                "bytes": 14,
+                "submitted_at": time.time(),
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        _run_eval,
+        "wait_jobs",
+        lambda *a, **k: {
+            "j-nodes": {
+                "status": "succeeded",
+                "stage": "COMMIT",
+                "error": None,
+                "signals": {"enrichment_degraded": "EXTRACT"},
+                "enrichment": {
+                    "cause": "model_error",
+                    "lost_entities": 3,
+                    "lost_edges": 1,
+                    "llm_records": 80,
+                    "llm_edges": 10,
+                },
+                "nodes_by_extractor": {
+                    "by_extractor_version": {"llm:it@1:cafe": 77, "user:manual": 5},
+                    "graph_projection_status": "ready",
+                },
+                "stages": [
+                    {"stage": "EXTRACT", "status": "succeeded", "message": "enrichment_degraded: x"}
+                ],
+            }
+        },
+    )
+    out = _run_main(monkeypatch, tmp_path, "--corpus", str(corpus), dataset=dataset)
+
+    passport = (out / "PASSPORT.md").read_text(encoding="utf-8")
+    assert "записано нод" in passport
+    assert "llm:it@1:cafe=77" in passport
+    assert "user:manual=5" in passport
+    assert "model_error" in passport
 
 
 def test_main_writes_empty_failures_file_on_clean_run(
@@ -491,7 +745,17 @@ def test_main_records_failed_question_and_completes(
 
 
 def test_main_revision_mismatch_still_aborts(monkeypatch: Any, tmp_path: Path) -> None:
-    class _WrongRevisionPipeline(_BoomPipeline):
+    """Смена проекции посреди прогона останавливает измерение.
+
+    Сигнал берётся из `ProjectionStateStore`, то есть независим от того, что eval передал
+    в пайплайн: прежняя проверка сравнивала эхо аргумента и не могла сработать.
+    """
+
+    class _DriftingProjectionPipeline(_FakePipeline):
+        def __init__(self) -> None:
+            self._calls = 0
+            super().__init__()
+
         def run(
             self,
             query: str,
@@ -501,29 +765,217 @@ def test_main_revision_mismatch_still_aborts(monkeypatch: Any, tmp_path: Path) -
             generate: bool = True,
             trace: bool = False,
         ) -> dict[str, Any]:
-            raise RuntimeError("revision mismatch: expected 'rev-fake', got 'other'")
+            done = super().run(query, domain, emit, revision, generate, trace)
+            self._calls += 1
+            done["projection_revision"] = f"proj-{self._calls}"
+            return done
 
-    with pytest.raises(RuntimeError, match="revision mismatch"):
+    dataset = _write_dataset(tmp_path, [_question("obs-01"), _question("obs-02")])
+
+    with pytest.raises(RuntimeError, match="projection revision changed"):
         _run_main(
             monkeypatch,
             tmp_path,
-            pipeline_factory=lambda: _WrongRevisionPipeline(),
+            pipeline_factory=_DriftingProjectionPipeline,
+            dataset=dataset,
         )
+
+
+def test_main_survives_missing_revision_contour(monkeypatch: Any, tmp_path: Path) -> None:
+    """Контур без ревизии не валит прогон — но и не выдаётся за замеренный граф."""
+    out = _run_main(
+        monkeypatch,
+        tmp_path,
+        revision_read=lambda domain: (None, _run_eval.REVISION_SOURCE_UNAVAILABLE),
+    )
+
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["revision"] is None
+    assert manifest["revision_source"] == _run_eval.REVISION_SOURCE_UNAVAILABLE
+    # Гард, который не исполнился, не должен выглядеть как гард, который прошёл.
+    assert manifest["parity"]["revision"] == _run_eval.PARITY_UNAVAILABLE
+    report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
+    assert report["revision"] is None
+
+
+def test_main_revision_none_skips_reading(monkeypatch: Any, tmp_path: Path) -> None:
+    def _boom(domain: str) -> tuple[str | None, str]:
+        raise AssertionError("--revision none не должен читать ревизию")
+
+    out = _run_main(monkeypatch, tmp_path, "--revision", "none", revision_read=_boom)
+
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["revision"] is None
+    assert manifest["revision_source"] == _run_eval.REVISION_SOURCE_SKIPPED
+    # Флаг в манифесте: прогон «только вектор» не должен выглядеть как обычный.
+    assert "--revision=none" in manifest["flags"]
+
+
+def test_main_invalidates_verdict_when_revision_changed_mid_run(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Ревизия разошлась внутри прогона — числа нельзя предъявлять как вклад графа."""
+    # Ровно два чтения за прогон: одно до измерения, одно после.
+    readings = [
+        (REV_FAKE, _run_eval.REVISION_SOURCE_REPORTED),
+        ("rev-other", _run_eval.REVISION_SOURCE_REPORTED),
+    ]
+
+    def _read(domain: str) -> tuple[str | None, str]:
+        return readings.pop(0) if readings else ("rev-other", _run_eval.REVISION_SOURCE_REPORTED)
+
+    out = _run_main(monkeypatch, tmp_path, revision_read=_read)
+
+    report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
+    assert report["verdict"] == "invalid"
+    assert any("разошлась" in reason for reason in report["verdict_reasons"])
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["parity"]["revision"] == _run_eval.PARITY_CHANGED
+    # Причина обязана быть и в паспорте: вердикт без причины читают как «что-то сломалось».
+    assert "разошлась" in (out / "PASSPORT.md").read_text(encoding="utf-8")
+
+
+def test_main_manifest_names_run_boundaries(monkeypatch: Any, tmp_path: Path) -> None:
+    out = _run_main(monkeypatch, tmp_path)
+
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["started_at"]
+    assert manifest["finished_at"]
+    assert manifest["revision_source"] == _run_eval.REVISION_SOURCE_REPORTED
+    assert manifest["parity"]["revision"] == _run_eval.PARITY_STABLE
+    state = json.loads((out / "run_state.json").read_text(encoding="utf-8"))
+    assert state["finished_at"] == manifest["finished_at"]
 
 
 def test_main_passport_warns_when_golden_coverage_low(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
-    # Один вопрос, эталонного источника в корпусе нет ⇒ recall не интерпретируется.
+    # Загрузка была, эталонного источника в ней нет ⇒ recall не интерпретируется.
     dataset = _write_dataset(tmp_path, [_question("obs-01", ["docs/missing.md"])])
+    corpus = _corpus(tmp_path, ["doc.md"])
 
-    out = _run_main(monkeypatch, tmp_path, dataset=dataset)
+    out = _run_main(
+        monkeypatch,
+        tmp_path,
+        "--corpus",
+        str(corpus),
+        "--documents",
+        "doc.md",
+        dataset=dataset,
+        ingestion=True,
+    )
 
     manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["golden_coverage"]["mode"] == _run_eval.COVERAGE_MODE_MEASURED
     assert manifest["golden_coverage"]["fully_covered"] == 0
     passport = (out / "PASSPORT.md").read_text(encoding="utf-8")
     assert "golden_coverage" in passport
     assert "не** характеризуют" in passport or "не характеризуют" in passport
+
+
+def test_main_passport_says_coverage_not_measured_without_ingest(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Демо-стенд: загрузок в прогоне нет, и покрытие обязано молчать, а не врать нулём."""
+    dataset = _write_dataset(tmp_path, [_question("obs-01")])
+
+    out = _run_main(monkeypatch, tmp_path, dataset=dataset)
+
+    manifest = json.loads((out / "run_manifest.json").read_text(encoding="utf-8"))
+    coverage = manifest["golden_coverage"]
+    assert coverage["mode"] == _run_eval.COVERAGE_MODE_UNKNOWN
+    assert coverage["questions_total"] == 1
+    assert coverage["fully_covered"] is None
+    passport = (out / "PASSPORT.md").read_text(encoding="utf-8")
+    assert "не измерено" in passport
+    # Предупреждение о низком покрытии здесь неуместно: покрытие не измеряли.
+    assert "не характеризуют" not in passport
+
+
+class _PartialGraphPipeline(_FakePipeline):
+    """Имитация частично наполненного корпуса: один источник слеп, другой известен оси.
+
+    `graph_knowledge` приходит из пайплайна, и раннер обязан разнести их по вопросу, иначе
+    `necessity = 0` на слепом эталоне читается как «граф не помог» — ровно тот вывод,
+    который поправка ADR-046 2026-10-16 отменяет.
+    """
+
+    def run(
+        self,
+        query: str,
+        domain: str | None = None,
+        emit: Any = None,
+        revision: str | None = None,
+        generate: bool = True,
+        trace: bool = False,
+    ) -> dict[str, Any]:
+        done = super().run(query, domain, emit, revision, generate, trace)
+        done["sources"] = [
+            {**GRAPH_SOURCE_HIT, "axis": "graph", "graph_knowledge": "contributed"},
+            {
+                "source_url": VECTOR_SOURCE,
+                "relevance": 0.8,
+                "axis": "vector",
+                "graph_knowledge": "blind",
+                "graph_knowledge_reason": None,
+                "graph_linked_chunks": 0,
+            },
+        ]
+        return done
+
+
+GRAPH_SOURCE_HIT = {"source_url": GRAPH_SOURCE, "relevance": 1.0}
+
+
+def test_blind_golden_source_is_reported_per_question(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Вопрос с эталоном, которого ось не видела, обязан сказать об этом поимённо.
+
+    Проверяется сквозной путь, а не только `eval_question`: счётчики считаются там, теряются
+    по дороге в агрегат, и гейт этого не ловит.
+    """
+    dataset = _write_dataset(tmp_path, [_question("obs-blind", [VECTOR_SOURCE])])
+
+    out = _run_main(
+        monkeypatch,
+        tmp_path,
+        pipeline_factory=_PartialGraphPipeline,
+        dataset=dataset,
+    )
+
+    row = json.loads((out / "qa_log.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["blind_golden"] == [VECTOR_SOURCE]
+    assert row["linked_golden"] == []
+    assert row["blind_golden_count"] == 1
+    report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
+    contribution = report["target"]["graph_contribution"]
+    assert contribution["questions_with_blind_golden"] == 1
+    assert contribution["questions_with_blind_golden_ids"] == ["obs-blind"]
+    assert contribution["per_question"][0]["blind_golden"] == [VECTOR_SOURCE]
+
+
+def test_passport_separates_blind_zero_from_measured_zero(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """Ноль при слепом эталоне и ноль без слепых — разные выводы, и паспорт это различает."""
+    blind = _write_dataset(tmp_path, [_question("obs-blind", [VECTOR_SOURCE])])
+    blind_out = _run_main(
+        monkeypatch, tmp_path, pipeline_factory=_PartialGraphPipeline, dataset=blind
+    )
+    # Паспорт читается ДО второго прогона: оба пишут в один out-каталог, и иначе первый
+    # артефакт просто перезаписан вторым — тест проверял бы сам себя.
+    blind_passport = (blind_out / "PASSPORT.md").read_text(encoding="utf-8")
+
+    seen = _write_dataset(tmp_path / "seen", [_question("obs-seen", [GRAPH_SOURCE])])
+    seen_out = _run_main(
+        monkeypatch, tmp_path, pipeline_factory=_PartialGraphPipeline, dataset=seen
+    )
+    seen_passport = (seen_out / "PASSPORT.md").read_text(encoding="utf-8")
+
+    assert "слепым золотым источником" in blind_passport
+    assert "слепым золотым источником" not in seen_passport
+    assert "Вклад графа по вопросам" in blind_passport
 
 
 def _vector_only_pipeline() -> _FakePipeline:
@@ -538,3 +990,107 @@ def test_main_passport_flags_inactive_graph_axis(monkeypatch: Any, tmp_path: Pat
     assert "graph_axis_active" in passport
     report = json.loads((out / "lift_report.json").read_text(encoding="utf-8"))
     assert report["target"]["graph_axis_active"] is False
+
+
+def _passport_ingest(
+    degraded: int,
+    dropped: int = 0,
+    *,
+    lost_entities: int = 0,
+    lost_edges: int = 0,
+    causes: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    return {
+        "documents_total": 3,
+        "cold_documents": 2,
+        "noop_documents": 1,
+        "total_wall_time_s": 12.0,
+        "cold_wall_time_mean_s": 6.0,
+        "enrichment_degraded_documents": degraded,
+        "llm_layer_dropped_documents": dropped,
+        "llm_layer_lost_entities": lost_entities,
+        "llm_layer_lost_edges": lost_edges,
+        "enrichment_causes": causes or {},
+    }
+
+
+def _write_passport_text(
+    tmp_path: Path,
+    degraded: int,
+    dropped: int = 0,
+    *,
+    lost_entities: int = 0,
+    lost_edges: int = 0,
+    causes: dict[str, int] | None = None,
+) -> str:
+    path = _run_eval.write_passport(
+        _manifest(),
+        {"verdict": "n/a"},
+        tmp_path / "out",
+        ingest=_passport_ingest(
+            degraded, dropped, lost_entities=lost_entities, lost_edges=lost_edges, causes=causes
+        ),
+        failures=0,
+        argv=["run_eval.py", "--retrieval-only"],
+    )
+    return path.read_text(encoding="utf-8")
+
+
+def test_passport_warns_only_about_real_layer_loss(tmp_path: Path) -> None:
+    """Деградация без потери слоя не должна выглядеть как потеря.
+
+    Счётчик деградации — umbrella: он складывает «профиль не загрузился» (ничего не
+    потеряно) и «исключение в экстракции» (потерян весь слой). Читать его как потерю
+    нельзя, поэтому потеря считается отдельно, и предупреждение ставится по ней.
+    """
+    passport = _write_passport_text(tmp_path, degraded=2, dropped=0)
+
+    assert "документов с деградацией optional-ингеста: 2" in passport
+    assert "документов, потерявших LLM-слой целиком: 0" in passport
+    # Проверяется именно блок потери слоя, а не символ «⚠️» вообще: в паспорте есть и
+    # другие штатные предупреждения (verdict n/a, судья не запускался).
+    assert "потеряли LLM-слой целиком" not in passport
+    assert "ADR-032" not in passport
+
+
+def test_passport_warns_when_documents_lost_llm_layer(tmp_path: Path) -> None:
+    """Потерянный LLM-слой обязан быть виден в паспорте, а не только в JSON."""
+    passport = _write_passport_text(
+        tmp_path,
+        degraded=2,
+        dropped=1,
+        lost_entities=412,
+        lost_edges=63,
+        causes={"model_error": 1, "profile_unavailable": 1},
+    )
+
+    assert "документов, потерявших LLM-слой целиком: 1" in passport
+    assert "ADR-032" in passport
+    assert "⚠️" in passport
+    # Сколько именно исчезло: по одному счётчику документов стоимость потери не
+    # оценить, а решение принимается именно по ней.
+    assert "записей сущностей потеряно: 412 (рёбер: 63)" in passport
+    # Причины поимённо: «деградация 2» не говорит, чинить ли профиль или модель.
+    assert "model_error=1" in passport
+    assert "profile_unavailable=1" in passport
+
+
+def test_passport_reports_cause_even_when_nothing_was_lost(tmp_path: Path) -> None:
+    """Деградация без потери — тоже диагноз, и он обязан быть назван.
+
+    Раньше паспорт молчал: предупреждение ставилось только при потере слоя, поэтому
+    «профиль не грузится на каждом документе» выглядело как чистый прогон. Причина
+    называется, даже когда терять нечего.
+    """
+    passport = _write_passport_text(tmp_path, degraded=3, dropped=0, causes={"profile_unavailable": 3})
+
+    assert "ADR-032" not in passport
+    assert "причины деградации: profile_unavailable=3" in passport
+
+
+def test_passport_has_no_degradation_warning_when_clean(tmp_path: Path) -> None:
+    """Обратный случай: предупреждение не должно появляться на чистом прогоне."""
+    passport = _write_passport_text(tmp_path, degraded=0, dropped=0)
+
+    assert "документов с деградацией optional-ингеста: 0" in passport
+    assert "ADR-032" not in passport

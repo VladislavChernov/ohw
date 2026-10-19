@@ -33,12 +33,19 @@ ContextEdge {
   edge_id: opaque id,
   from_id: ContextNode.tag_id,
   to_id: ContextNode.tag_id,
-  kind: parent | related | mentions,
+  kind: вид, заданный экстракцией; пишется как есть,
   origin: user | ai | system,
   confidence: number | null,
   source_ids: list[string]
 }
 ```
+
+> **Исправлено 2026-09-26.** Раньше здесь было `kind: parent | related | mentions`. Это описание
+> не соответствовало ни рантайму, ни остальным документам: `parent`/`related` были только
+> фильтром обхода, а виды рёбер приходят из промпта экстракции (`REQUIRES_CONSTRAINT`,
+> `CONTRADICTS`, `SIMILAR_TO`, `REFERENCES`), а технические — `CONTAINS` (Source → Chunk) и
+> `MENTIONS` (Chunk → ContextNode). Ни один production-путь не писал `parent`. Подробности и
+> история дефекта: `docs/data_model.md` §3 и §3.1, инвариант `L3-02a`.
 
 `canonical_name` не является глобальным unique key. Один смысловой термин получает стабильный
 `tag_id`; `canonical_name` и aliases являются его представлениями. Glossary/alias map связывает
@@ -87,16 +94,35 @@ tag cloud and adapters; a graph tag is not a global cross-domain node.
 1. Execute vector search with the request embedding and domain/revision.
 2. Collect `context_ids`/`tag_ids` from returned chunk metadata.
 3. Ask the graph adapter for bounded expansion from those seeds. The default policy follows
-   parent direction; related edges are opt-in and bounded.
+3. Ask the graph adapter for bounded expansion from those seeds. Traversal is not restricted by
+   edge kind: by default it walks any relationship type in both directions and reports the actual
+   kind of the last hop per row. `direction` is `both` (default), `out` or `in`; the earlier
+   values `parent` and `related` are kept as synonyms for `out` and `in`. An optional
+   `retrieval.expansion_kinds` narrows traversal to an explicit set of kinds.
 4. Merge expanded context into candidates, preserving seed chunk, path, depth, edge kind and
    confidence.
-5. Apply a configurable boost and context budget; graph evidence is attributable.
+5. Apply the context budget and, only when `retrieval.graph_boost` is set, a boost; graph
+   evidence is attributable.
 6. Return graph provenance and expansion trace.
 
 The graph adapter must support a semantic operation such as `expand(context_ids, direction,
-max_depth, max_fanout, max_nodes)` rather than making the core construct vendor-specific Cypher.
-Neo4j, lightweight embedded graph, and other adapters implement the same contract. Graph
-unavailable, stale or incomplete is a degraded baseline, never a silent successful experiment.
+kinds, max_depth, max_fanout, max_nodes)` rather than making the core construct vendor-specific
+Cypher. Neo4j, lightweight embedded graph, and other adapters implement the same contract, and
+normalise `direction` and `kinds` identically, so the same profile yields the same traversal
+regardless of backend. Graph unavailable, stale or incomplete is a degraded baseline, never a
+silent successful experiment.
+
+Traversal depth is bounded by a shared cap (`MAX_EXPANSION_DEPTH = 3`) enforced by every
+adapter. A profile may request more; the clamp is reported in the expansion trace as
+`requested_depth`, `effective_depth` and `depth_clamped` rather than applied silently.
+
+`retrieval.graph_boost` defaults to `0.0`, and no domain profile sets it, so by default the graph
+contributes context and provenance but does not reorder vector chunks. Two properties of the
+boost are worth stating because they limit what it can prove: it is added to the **reranker
+score**, not to a similarity, so its magnitude is adapter-dependent; and it is applied at
+`source_url` granularity, so every chunk of a document that contributed any context node is
+boosted equally. It also does not affect the `necessity` and `delta_recall` metrics, which
+compare retrieved source sets per axis and are therefore measurable at the default.
 
 ## 5. Eval
 

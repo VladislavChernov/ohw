@@ -16,6 +16,11 @@ RUN uv sync --no-dev --frozen
 RUN uv pip install --python /app/.venv/bin/python --no-cache-dir \
     torch sentence-transformers
 
+# Как и в основном Dockerfile: compose монтирует исходник каждому сервису, поэтому
+# запечённая копия не используется, но без монтирования образ молчал бы работал на коде
+# времени сборки. Единственный источник - монтирование.
+RUN rm -rf /app/src
+
 ENV DOMAIN_PROFILES_DIR=/app/domain_profiles \
     CONFIG_DB_PATH=/app/runtime/config.db
 

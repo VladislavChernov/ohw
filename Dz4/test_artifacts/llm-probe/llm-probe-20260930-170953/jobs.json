@@ -1,0 +1,26 @@
+[
+  {
+    "source_url": "docs/01_ontology_and_domain_profile.md",
+    "chars": 10582,
+    "job_id": "0fefc45e-619c-4bc7-aff1-fa299ef96606",
+    "status": "failed",
+    "error": "embeddings-service недоступен: HTTPConnectionPool(host='embeddings-service', port=8004): Read timed out. (read timeout=300.0)",
+    "enrichment": {},
+    "degraded": false
+  },
+  {
+    "source_url": "docs/plans/cosine-dedup.md",
+    "chars": 2762,
+    "job_id": "5b9a901f-70cc-4875-9bc3-94092188813c",
+    "status": "succeeded",
+    "error": null,
+    "enrichment": {
+      "cause": null,
+      "lost_entities": 0,
+      "lost_edges": 0,
+      "llm_records": 17,
+      "llm_edges": 7
+    },
+    "degraded": false
+  }
+]
