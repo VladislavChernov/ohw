@@ -53,11 +53,14 @@ areas:
     # `test_runtime_compose_env.py` — про согласованность двух сервисов МЕЖДУ СОБОЙ,
     # а не про чтение compose демо-скриптами, поэтому он не часть парности, но область
     # та же: файл, который он сторожит, уже здесь.
+    #
+    # Шаблоны, а не список имён: имя в списке переживает удаление файла. Совпадение
+    # шаблона с диском проверяет `test_gate_selectors.py`; шаблон без путей падает так же,
+    # как имя без файла. Перечень имён уже дал дыру — `Demo/ingest*.ps1` не были
+    # перечислены вовсе.
     match:
-      - "Dz4/Demo/demo.sh"
-      - "Dz4/Demo/demo.ps1"
-      - "Dz4/Demo/demo-cpu.sh"
-      - "Dz4/Demo/demo-cpu.ps1"
+      - "Dz4/Demo/*.sh"
+      - "Dz4/Demo/*.ps1"
       - "Dz4/Demo/README.md"
       - "Dz4/prototype/infra/compose.runtime.yaml"
       - "Dz4/prototype/infra/compose.runtime-gpu.yaml"

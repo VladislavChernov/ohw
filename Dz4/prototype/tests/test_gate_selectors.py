@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -52,6 +53,20 @@ def test_every_declared_test_path_exists() -> None:
     assert not missing, f"в селекторе пути, которых нет на диске: {missing}"
 
 
+def test_every_match_pattern_resolves_to_a_path() -> None:
+    """Шаблон без совпадений молчит так же, как имя удалённого файла."""
+    # `match` пишется от корня git-репозитория (`Dz4/...`), а тест живёт внутри проекта,
+    # который на хосте лежит в `Dz4/`, а в контейнере смонтирован как `/repo`.
+    project = PROTO.parent
+    missing = [
+        f"{area}: {pattern}"
+        for area, spec in _spec()["areas"].items()
+        for pattern in spec["match"]
+        if not any(project.glob(pattern.removeprefix("Dz4/")))
+    ]
+    assert not missing, f"шаблоны селектора не совпали ни с одним путём: {missing}"
+
+
 def test_every_area_declares_match_and_tests() -> None:
     areas = _spec()["areas"]
     empty = [name for name, spec in areas.items() if not spec.get("match") or not spec.get("tests")]
@@ -62,6 +77,43 @@ def test_gate_script_declares_full_and_changed_modes() -> None:
     script = (PROTO / "infra" / "scripts" / "gate.sh").read_text(encoding="utf-8")
     assert "full)" in script, "в gate.sh нет режима full"
     assert "changed" in script, "в gate.sh нет режима changed"
+
+
+def _gate_case_areas() -> set[str]:
+    """Области, которые `case "$MODE" in` принимает как режим."""
+    script = (PROTO / "infra" / "scripts" / "gate.sh").read_text(encoding="utf-8")
+    match = re.search(r'case "\$MODE" in\n(.*?)\nesac', script, re.DOTALL)
+    assert match, "в gate.sh нет разбора режима через case"
+    areas: set[str] = set()
+    for line in match.group(1).splitlines():
+        head = line.strip()
+        # Ветка `case` — это строка вида `docs | adapters)`; тело ветки содержит
+        # команды и тоже заканчивается на `)`, поэтому форму головы проверяем целиком.
+        if not re.fullmatch(r"[A-Za-z_*-]+(?:\s*\|\s*[A-Za-z_*-]+)*\)", head):
+            continue
+        for token in head[:-1].split("|"):
+            token = token.strip()
+            if token and token not in {"full", "changed", "*"}:
+                areas.add(token)
+    return areas
+
+
+def test_gate_script_accepts_every_selector_area() -> None:
+    """`case` в `gate.sh` и `gate_selectors.yaml` — один список областей, не два.
+
+    Область, объявленная в селекторе, но не принятая `case`, заканчивается кодом 2
+    «режим неизвестен», то есть гейт по ней не запускается вовсе. Обратное — мёртвая
+    ветка, которая принимает режим, не проверяя ничего. Именно это расхождение и было:
+    `case` знал пять областей, селектор — семь (`demo_ui`, `query_service`).
+    """
+    declared = set(_spec()["areas"])
+    accepted = _gate_case_areas()
+    assert not accepted - declared, (
+        f"gate.sh принимает области, которых нет в селекторе: {sorted(accepted - declared)}"
+    )
+    assert not declared - accepted, (
+        f"селектор объявляет области, которые gate.sh не принимает: {sorted(declared - accepted)}"
+    )
 
 
 def test_gate_script_does_not_inherit_image_pythonpath() -> None:
