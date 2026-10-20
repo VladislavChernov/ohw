@@ -20,13 +20,25 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "infra" / "
 
 from run_eval import _is_ingest_excluded, select_corpus_files
 
+from tests.gitignore_filter import is_ignored
+
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DOCS = REPO_ROOT / "docs"
 DATASETS = ("it", "library", "cinema")
 
 
 def _selected() -> set[str]:
-    return {rel for _path, rel in select_corpus_files(DOCS)}
+    """Отобранные документы, которые действительно входят в репозиторий.
+
+    `select_corpus_files` читает рабочее дерево и видит локальные
+    `docs/defense_notes_*.md`, исключённые через `.gitignore`. На чистом checkout
+    их нет, поэтому счётчик без фильтра измерял машину, а не состав корпуса.
+    """
+    return {
+        rel
+        for path, rel in select_corpus_files(DOCS)
+        if not is_ignored(REPO_ROOT, path)
+    }
 
 
 def test_marker_excludes_declared_directories() -> None:
@@ -53,11 +65,12 @@ def test_corpus_has_exactly_the_live_documents() -> None:
     """Явное число, чтобы «потерялось шесть файлов» не выглядело как успех. При добавлении
     нормативного документа число меняется — и это должно быть сделано руками, а не молча.
 
-    Было 30, стало 31 при добавлении `docs/plugins_guide.md` (гайд по адаптерам и
-    плагинам, 2026-10-16). Число намеренно стоит здесь руками: оно одновременно фиксирует
-    состав корпуса, поэтому его смена — это решение о том, что система будет есть.
+    Считаются только документы, входящие в репозиторий. Прежнее число 31 включало три
+    локальных `defense_notes_*.md`, которых нет в git: на чистом checkout их не было, и
+    гейт падал только в CI. Число намеренно стоит здесь руками: оно фиксирует состав
+    корпуса, поэтому его смена — это решение о том, что система будет есть.
     """
-    assert len(_selected()) == 31, sorted(_selected())[:5]
+    assert len(_selected()) == 28, sorted(_selected())[:5]
 
 
 def _questions(domain: str) -> list[dict]:
