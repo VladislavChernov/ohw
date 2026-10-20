@@ -2,76 +2,100 @@
 
 ## ADDED Requirements
 
-### Requirement: Структуры данных агента соответствуют схеме БД
+### Requirement: Protective mechanisms for Fixed Agent (preset 5)
 
-Структуры `User` и `PersonalData` ДОЛЖНЫ повторять таблицы `users` и
-`personal_data` из `infra/db/init.sql` 1:1 (имена полей, типы, связи
-`personal_data.user_id → users.id`).
+Protective mechanisms `User` and `PersonalData` in SQLite DB are described via DDL in
+`infra/db/init.sql` 1:1 (foreign key `personal_data.user_id → users.id`).
 
-#### Scenario: Совпадение со схемой
+#### Scenario: Create user and personal data
 
-- **WHEN** схема `init.sql` меняется (новая колонка)
-- **THEN** структуры в `models.go` обновляются синхронно (иначе spec нарушен)
+- **WHEN** script `init.sql` is applied to a clean DB
+- **THEN** `models.go` creates models with fields per spec (tables `users`, `personal_data`)
 
-#### Scenario: API-контракт ответа чата
+#### Scenario: API agent gets DB access
 
-- **WHEN** агент обрабатывает `POST /chat`
-- **THEN** в JSON-ответе поле `reply` содержит финальный текст,
-  `preset` — номер конфигурации 1–4, `tool_calls` — список выполненных
-  запросов `db_query` (пустой, если tool не вызывался)
+- **WHEN** agent receives `POST /chat` request
+- **THEN** JSON response field `reply` contains Russian text, `preset` — preset number
+  1–4, `tool_calls` — list of `db_query` invocations (SELECT, INSERT/UPDATE/DELETE
+  subject to policy check)
 
-### Requirement: HTTP-контракт агента
+### Requirement: HTTP agent on port :8080
 
-Агент ДОЛЖЕН слушать `:8080` и предоставлять:
+Agent listens on `:8080` and accepts:
 
-- `GET /healthz` → `200 ok` (liveness для compose-healthcheck и смоука).
-- `POST /chat` с JSON `{"message": "<текст>"}` → JSON
-  `{"reply": "<ответ>", "preset": "<n>", "tool_calls": [...]}`.
+- `GET /healthz` → `200 ok` (liveness for compose healthcheck)
+- `POST /chat` with JSON `{"message": "<text>"}` → JSON
+  `{"reply": "<response>", "preset": "<n>", "tool_calls": [...]}`
 
 #### Scenario: Healthcheck
 
-- **WHEN** сервис `agent` поднят
-- **THEN** `GET /healthz` возвращает `200 ok`
+- **WHEN** container `agent` is running
+- **THEN** `GET /healthz` returns `200 ok`
 
-#### Scenario: Легитимный чат
+#### Scenario: Legitimate DB question
 
-- **WHEN** пресет 1 получает `{"message": "Покажи пользователей"}`
-- **THEN** агент выполняет `db_query(SELECT ...)` и возвращает строки в `reply`
+- **WHEN** user sends `{"message": "How many users are in the database?"}`
+- **THEN** agent performs `db_query(SELECT ...)` and returns answer in `reply`
 
-### Requirement: Tool db_query read-only по умолчанию
+### Requirement: Tool db_query — read-only only
 
-`db_query` ДОЛЖЕН принимать только `SELECT` (allow-list по первому ключевому
-слову, регистронезависимо). `INSERT/UPDATE/DELETE/DROP/ALTER/...` ДОЛЖНЫ
-отклоняться с ошибкой, если `ALLOW_WRITES != 1`.
+`db_query` supports only `SELECT` (allow-list for known tables:
+`users`, `personal_data`, `clients`, `orders`, `secrets`, `documents`).
+`INSERT/UPDATE/DELETE/DROP/ALTER/...` are rejected unless `ALLOW_WRITES=1`.
 
-#### Scenario: Отклонение модификации по умолчанию
+#### Scenario: Block destructive SQL
 
-- **WHEN** агент в режиме по умолчанию получает `DROP TABLE users`
-- **THEN** `db_query` возвращает ошибку, таблица не изменяется
+- **WHEN** agent receives request for `DROP TABLE users`
+- **THEN** `db_query` rejects the request, SQL is not executed
 
-#### Scenario: Модификация в режиме демонстрации
+#### Scenario: Allow writes when ALLOW_WRITES=1
 
-- **WHEN** `ALLOW_WRITES=1` и агент выполняет `DELETE FROM users`
-- **THEN** операция исполняется (демо LLM03), состояние возвращается через
+- **WHEN** `ALLOW_WRITES=1` and agent sends `DELETE FROM users`
+- **THEN** executes with journal entry (LLM03 demo), response includes flag
   `db-restore`
 
-### Requirement: Матрица 4 пресетов через env
+### Requirement: Preset matrix (4 presets from env flags)
 
-Поведение агента ДОЛЖНО определяться двумя флагами:
-
-| `BUILTIN_GUARDS` | `EXTERNAL_GUARD` | Пресет |
+| `BUILTIN_GUARDS` | `EXTERNAL_GUARD` | Preset |
 |---|---|---|
 | `off` | `off` | 1 Baseline |
-| `on` | `off` | 2 Только встроенная |
-| `off` | `on` | 3 Только внешняя (через `security-wall`, веха 4) |
+| `on` | `off` | 2 Builtin Guards |
+| `off` | `on` | 3 External Wall (security-wall, port 5000) |
 | `on` | `on` | 4 Full Defense |
 
-`BUILTIN_GUARDS=off` → системный промпт `prompts/minimal.txt`;
-`on` → `prompts/guarded.txt`. `EXTERNAL_GUARD=on` → клиент LLM ходит в
-`WALL_BASE_URL` вместо `OLLAMA_BASE_URL` (в вехе 3 wall отсутствует —
-значение `on` без wall ДОЛЖНО возвращать понятную ошибку).
+`BUILTIN_GUARDS=off` → `prompts/minimal.txt`; `on` → `prompts/guarded.txt`.
+`EXTERNAL_GUARD=on` → LLM via `WALL_BASE_URL` instead of `OLLAMA_BASE_URL`
+(in preset 3/4 wall is intermediary; `BLOCK_ON_FAIL=on` on violation).
 
-#### Scenario: Переключение промпта
+#### Scenario: Activate builtin guards
 
 - **WHEN** `BUILTIN_GUARDS=on`
-- **THEN** агент стартует с `prompts/guarded.txt` (видно в логе старта)
+- **THEN** agent reads `prompts/guarded.txt` with prompt isolation instructions
+
+### Requirement: Preset 5 — Fixed Agent (agent-fixed)
+
+Fixed Agent (`agent-fixed/`) — separate protected version with:
+
+- Prompt isolation: `<<POLICY>>` / `<<USER>>` / `<<DATA>>` in `prompts/fixed.txt`
+- Input/output validation via built-in regex guards
+- Tool whitelist: only `SELECT`, writes blocked without `ALLOW_WRITES=1`
+- `GET /status` — JSON with protection status
+- `GET /ui` — HTML page with toggles for `BUILTIN_GUARDS`, `EXTERNAL_GUARD`, `ALLOW_WRITES`
+- `agent-fixed/Dockerfile` — `golang:1.26-alpine` → `scratch`, image `agent-fixed:local`
+- `agent-fixed/main.go` — built-in guards: input/output validation, tool policy
+- `agent-fixed/prompts/fixed.txt` — protected prompt with isolation
+- `agent-fixed/go.mod` — dependency `modernc.org/sqlite`
+- `scripts/test_security.py` (MIT) — 15+ payloads: encodings, paraphrase, multi-step injections
+- `scripts/augustus/` (Apache 2.0) — requests to Augustus for OWASP LLM Top 10 2026
+- `README.md` (dz5/) — run, licenses, UI instructions
+- `reports/red-team.md` — manual red-team report (6+ attacks, OWASP classes)
+
+## Framework licenses (MIT/Apache)
+
+- `Augustus` (OWASP LLM Top 10 2026): Apache 2.0 (https://github.com/praetorian-inc/augustus). Tests in `scripts/augustus/`.
+- `pytest` (security auto-tests): MIT (https://github.com/pytest-dev/pytest). In `scripts/test_security.py`.
+- `guardrails-ai` (external wall protection): MIT (https://github.com/guardrails-ai/guardrails). `security-wall/`.
+- `FastAPI` + `Uvicorn`: MIT (https://github.com/tiangolo/fastapi). `security-wall/`.
+- `ollama` client: MIT (https://github.com/ollama/ollama). `agent`, `security-wall`.
+- `modernc.org/sqlite`: MIT (https://github.com/mattn/go-sqlite3). `agent`.
+- `OWASP LLM Top 10 2026`: MIT (https://github.com/OWASP/AI-Security-Guide). Attack map in `scripts/owasp/`.

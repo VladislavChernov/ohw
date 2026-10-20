@@ -11,7 +11,7 @@ name: dz5-stand
 #   - db      (SQLite + seed/restore)    add-db-service       ✅
 #   - agent   (drujensen @ pinned tag)   add-agent-core
 #   - wall    (Guardrails AI proxy)      add-external-defense
-#   - attacker(garak + runner)           add-attack-harness
+#   - attacker(augustus + runner)        add-attack-harness
 #
 # Two protection presets are toggled by env (see project.md):
 #   BUILTIN_GUARDS, EXTERNAL_GUARD. L3 (resource limits) is always on.
@@ -147,6 +147,44 @@ services:
         condition: service_healthy
     # L3 (Unbounded Consumption / LLM06): cap memory so a runaway generation
     # or resource-exhaustion attack cannot take down the host.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 60s
+    networks:
+      - ib-network
+
+  # Stand Fixed Agent (preset 5): separate protected build with built-in guards,
+  # prompt isolation, input/output validation, tool whitelist. Defaults to
+  # BUILTIN_GUARDS=on, EXTERNAL_GUARD=off, ALLOW_WRITES=off.
+  agent-fixed:
+    build:
+      context: ../agent/fixed
+      dockerfile: Dockerfile
+    image: dz5-agent-fixed:local
+    container_name: dz5-agent-fixed
+    ports:
+      - "8081:8080"
+    environment:
+      AGENT_ADDR: ":8080"
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-huihui_ai/llama3.2-abliterate:3b}
+      DB_PATH: /data/db.sqlite
+      BUILTIN_GUARDS: "on"
+      EXTERNAL_GUARD: "off"
+      ALLOW_WRITES: "off"
+    volumes:
+      - db_data:/data:ro
+    depends_on:
+      ollama:
+        condition: service_healthy
     deploy:
       resources:
         limits:

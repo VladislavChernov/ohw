@@ -1,98 +1,108 @@
 # Spec: add-external-defense (security-wall)
 
-## Цель
-Внешний контур защиты LLM-агента: `security-wall` — Ollama-совместимый прокси
-на FastAPI + Guardrails AI (`guardrails-ai`), стоящий между агентом и локальной
-abliterated-моделью. Валидирует входящий prompt (prompt injection, токсичность)
-и исходящий ответ (PII, утечка данных), блокирует или маскирует при нарушении.
+## Goal
+External defense contour for LLM agent: `security-wall` — Ollama-compatible proxy
+on FastAPI + Guardrails AI (`guardrails-ai`), standing between the agent and local
+abliterated model. Validates incoming prompt (prompt injection, toxicity)
+and outgoing response (PII, data leak), blocks or masks on violation.
 
-## Интеграция с агентом
-Агент (Go) уже поддерживает `EXTERNAL_GUARD=on`: в этом режиме `LLMBaseURL`
-берётся из `WALL_BASE_URL` (`http://wall:5000`) и все запросы `/api/chat`
-проксируются через wall. Агент не меняется — wall принимает тот же Ollama-контракт.
+## Integration with agent
+Agent (Go) already supports `EXTERNAL_GUARD=on`: in this mode `LLMBaseURL`
+is taken from `WALL_BASE_URL` (`http://wall:5000`) and all `/api/chat` requests
+are proxied through wall. Agent does not change — wall accepts the same Ollama contract.
 
-## Эндпоинты security-wall
+## security-wall endpoints
 
 ### `GET /healthz` → `ok`
-Смоук-проверка что wall жив и Ollama доступен.
+Smoke check that wall is alive and Ollama is accessible.
 
-### `POST /api/chat` (Ollama-совместимый)
-Принимает тело запроса Ollama `/api/chat` (`model`, `messages`, `stream`),
-сканирует `content` сообщений, проксирует в Ollama, сканирует ответ.
+### `POST /api/chat` (Ollama-compatible)
+Accepts Ollama `/api/chat` request body (`model`, `messages`, `stream`),
+scans message `content`, proxies to Ollama, scans response.
 
-| Поведение | Условие |
-|-----------|---------|
-| Блокировка input | `SCAN_INPUT=on` и любой сканер input вернул violation |
-| Блокировка output | `SCAN_OUTPUT=on` и сканер output вернул violation |
-| Прокси без изменений | Оба флага off, либо сканирование прошло |
-| Ответ на блок | JSON `{"error":"blocked by security-wall","reason":...}` с HTTP 403 |
+| Behavior | Condition |
+|----------|-----------|
+| Input blocking | `SCAN_INPUT=on` and any input scanner returned violation |
+| Output blocking | `SCAN_OUTPUT=on` and output scanner returned violation |
+| Proxy unchanged | Both flags off, or scanning passed |
+| Block response | JSON `{"error":"blocked by security-wall","reason":...}` with HTTP 403 |
 
-## Валидаторы Guardrails AI
-- Input: `DetectPromptInjection` (prompt injection, jailbreak) — при отсутствии пакета валидатор пропускается (passthrough)
-- Output: `DetectPII` (PII — имена, email, телефоны, адреса) — при отсутствии пакета валидатор пропускается (passthrough)
+## Guardrails AI validators
+- Input: `DetectPromptInjection` (prompt injection, jailbreak) — if package missing, validator is skipped (passthrough)
+- Output: `DetectPII` (PII — names, email, phones, addresses) — if package missing, validator is skipped (passthrough)
 
-### Установка пакетов валидаторов (обязательно для блокировки угроз)
+### Validator package installation (required for threat blocking)
 
-Базовый пакет `guardrails-ai` содержит только ядро `Guard`. Специализированные
-валидаторы — отдельные пакеты, берутся из **PyPI** (https://pypi.org):
+Base package `guardrails-ai` contains only core `Guard`. Specialized
+validators — separate packages, taken from **PyPI** (https://pypi.org):
 
-| Угроза | Валидатор | Пакет на PyPI | Команда |
-|--------|-----------|---------------|---------|
+| Threat | Validator | PyPI package | Command |
+|--------|-----------|--------------|---------|
 | Prompt injection / jailbreak | `DetectPromptInjection` | `guardrails-ai-detect-prompt-injection` | `pip install guardrails-ai-detect-prompt-injection` |
-| PII (имена, email, телефоны, адреса) | `DetectPII` | `guardrails-ai-detect-pii` | `pip install guardrails-ai-detect-pii` |
+| PII (names, email, phones, addresses) | `DetectPII` | `guardrails-ai-detect-pii` | `pip install guardrails-ai-detect-pii` |
 
-Без этих пакетов `security-wall` работает в режиме **passthrough** (прокси без
-блокировки). Чтобы блокировка заработала, установите оба пакета в окружении/образе `wall`:
+Without these packages `security-wall` works in **passthrough** mode (proxy without
+blocking). To make blocking work, install both packages in wall environment/image:
 
 ```bash
-# локально / в контейнере wall
+# locally / in wall container
 pip install guardrails-ai-detect-prompt-injection guardrails-ai-detect-pii
 ```
 
-В `dz5/security-wall/Dockerfile` зависимости ставятся из `requirements.txt`
-(`pip install --no-cache-dir -r requirements.txt`), поэтому достаточно добавить
-оба пакета в `requirements.txt` и пересобрать образ:
+In `dz5/security-wall/Dockerfile` dependencies are installed from `requirements.txt`
+(`pip install --no-cache-dir -r requirements.txt`), so it's enough to add both
+packages to `requirements.txt` and rebuild the image:
 
 ```bash
 cd dz5/security-wall
 DOCKER_BUILDKIT=1 docker build -t dz5-security-wall:local .
 ```
 
-## Конфигурация (env)
-| Переменная | По умолчанию | Назначение |
-|------------|--------------|------------|
-| `OLLAMA_BASE_URL` | `http://ollama:11434` | Куда проксировать чат |
-| `WALL_LISTEN` | `:5000` | Порт wall |
-| `SCAN_INPUT` | `on` | Сканировать входящий промпт |
-| `SCAN_OUTPUT` | `on` | Сканировать ответ LLM |
-| `BLOCK_ON_FAIL` | `on` | Блокировать при violation (иначе — предупреждение в теле ответа) |
+## Configuration (env)
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `OLLAMA_BASE_URL` | `http://ollama:11434` | Where to proxy chat to |
+| `WALL_LISTEN` | `:5000` | Wall port |
+| `SCAN_INPUT` | `on` | Scan incoming prompt |
+| `SCAN_OUTPUT` | `on` | Scan LLM response |
+| `BLOCK_ON_FAIL` | `on` | Block on violation (otherwise warning in response body) |
 
-## Образ
-База: `python:3.12-slim` (локально проверен; `ohw-python:3.13` из Dz4 не
-извлекается из-за ошибки Docker-слоя `0xc000013a` на этой машине).
-Зависимости: `fastapi`, `uvicorn`, `guardrails-ai`, `httpx`. Сборка:
-`dz5/security-wall/Dockerfile`, образ `dz5-security-wall:local`.
+## Image
+Base: `python:3.12-slim` (locally verified; `ohw-python:3.13` from Dz4 not
+extracted due to Docker layer error `0xc000013a` on this machine).
+Dependencies: `fastapi`, `uvicorn`, `guardrails-ai`, `httpx`. Build:
+`dz5/security-wall/Dockerfile`, image `dz5-security-wall:local`.
 
-## Состав сервиса в compose (`dz5/infra/compose.yaml`)
-- Сервис `wall`, контейнер `dz5-wall`, порт `5000`, `depends_on: ollama`
+## Service composition in compose (`dz5/infra/compose.yaml`)
+- Service `wall`, container `dz5-wall`, port `5000`, `depends_on: ollama`
   (condition: service_healthy), env `OLLAMA_BASE_URL=http://ollama:11434`,
   `SCAN_INPUT=on`, `SCAN_OUTPUT=on`, `BLOCK_ON_FAIL=on`.
-- L3-лимиты: `deploy.resources.limits.memory: 1024M`.
-- Сеть `ib-network`.
+- L3 limits: `deploy.resources.limits.memory: 1024M`.
+- Network `ib-network`.
 
-## Preset matrix (project.md §Архитектура защиты)
-| Пресет | BUILTIN_GUARDS | EXTERNAL_GUARD | Агент ходит |
-|--------|----------------|----------------|-------------|
-| 1 Baseline | off | off | Прямо в Ollama |
-| 2 Встроенная | on | off | Прямо в Ollama |
-| 3 Только внешняя | off | on | Через wall:5000 |
-| 4 Full Defense | on | on | Через wall:5000 |
+## Preset matrix (project.md §Protection architecture)
+| Preset | BUILTIN_GUARDS | EXTERNAL_GUARD | Agent routes |
+|--------|----------------|----------------|--------------|
+| 1 Baseline | off | off | Direct to Ollama |
+| 2 Builtin Guards | on | off | Direct to Ollama |
+| 3 External Wall only | off | on | Via wall:5000 |
+| 4 Full Defense | on | on | Via wall:5000 |
 
 ## Definition of done
-- [x] Spec written (этот файл)
-- [ ] `dz5/security-wall/` — FastAPI + Guardrails AI, `/api/chat` прокси, `/healthz`
-- [ ] `dz5/security-wall/Dockerfile` на `ohw-python:3.13`, сборка зелёная
-- [ ] Сервис `wall` в `dz5/infra/compose.yaml`, поднимается через `docker compose up -d wall`
-- [ ] `EXTERNAL_GUARD=on` агент ходит через wall и получает ответ
-- [ ] Wall блокирует инъекцию в input (пример: `Ignore previous instructions`)
-- [ ] tasks.md галочки зелёные; коммит только в `dz5/`
+- [x] Spec written (this file)
+- [ ] `dz5/security-wall/` — FastAPI + Guardrails AI, `/api/chat` proxy, `/healthz`
+- [ ] `dz5/security-wall/Dockerfile` on `ohw-python:3.13`, build green
+- [ ] Service `wall` in `dz5/infra/compose.yaml`, comes up via `docker compose up -d wall`
+- [ ] `EXTERNAL_GUARD=on` agent routes through wall and gets a response
+- [ ] Wall blocks injection in input (example: `Ignore previous instructions`)
+- [ ] tasks.md checkboxes green; commit only in `dz5/`
+
+## Framework licenses (MIT/Apache)
+
+- `Augustus` (OWASP LLM Top 10 2026): Apache 2.0 (https://github.com/praetorian-inc/augustus). Auto-attack tests in `scripts/augustus/`.
+- `pytest` (security auto-tests): MIT (https://github.com/pytest-dev/pytest). In `scripts/test_security.py`.
+- `guardrails-ai` (external wall protection): MIT (https://github.com/guardrails-ai/guardrails). `security-wall/`.
+- `FastAPI` + `Uvicorn`: MIT (https://github.com/tiangolo/fastapi). `security-wall/`.
+- `ollama` client: MIT (https://github.com/ollama/ollama). `agent`, `security-wall`.
+- `modernc.org/sqlite`: MIT (https://github.com/mattn/go-sqlite3). `agent`.
+- `OWASP LLM Top 10 2026`: MIT (https://github.com/OWASP/AI-Security-Guide). Attack map in `scripts/owasp/`.

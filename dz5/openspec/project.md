@@ -28,7 +28,7 @@
   таблица с секретами и «чужими» строками.
 - **Внешняя защита:** `security-wall` — FastAPI + `Guardrails AI` (прокси между
   агентом и LLM), на базовом образе `ohw-python:3.13`.
-- **Атака:** `attack-runner` — `garak` + собственный раннер сценариев (Python).
+- **Атака:** `attack-runner` — `Augustus` + собственный раннер сценариев (Python).
 - **Инфраструктура стенда:** своя `dz5/infra/` (compose, Dockerfile'ы, `.env`).
   Переиспользуется только общий базовый образ `ohw-python:3.13`.
 - **Отчёты:** каталог `dz5/reports/` (см. ниже).
@@ -102,7 +102,7 @@
    (read-only по умолчанию / tool-abuse за флагом), конфиг промпта.
 4. `add-external-defense` — FastAPI + Guardrails AI (внешний контур). 🔄 в работе
 5. `add-defense-modes` / L3 — 4 пресета через env + compose-лимиты ресурсов.
-6. `add-attack-harness` — garak + свой раннер: OWASP Top-10 2026 × 4 пресета +
+6. `add-attack-harness` — Augustus + свой раннер: OWASP Top-10 2026 × 4 пресета +
    DoS (LLM06); сравнительный отчёт.
 7. `add-reports` — структура `reports/<run-id>/` + сводный `reports/latest.md`.
 8. `add-demo-scripts` — `infra/scripts/demo.{sh,ps1}`: поднять стенд → смоук →
