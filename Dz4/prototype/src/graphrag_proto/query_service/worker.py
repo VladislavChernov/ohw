@@ -7,6 +7,11 @@
 `TOPOLOGY_URL` воркер стартует на карте топологии, затем опрашивает revision
 интервалом `TOPOLOGY_POLL_INTERVAL` (дефолт 5 с; 0 — без hot-reload) и, при
 изменении, пересобирает QueryPipeline без рестарта контейнера.
+
+Ревизия данных домена читается из **опубликованной проекции** (`ProjectionState.data_revision`,
+ADR-026, поправка 2026-10-19), а не запрашивается у ингеста: версия, по которой ключуется кэш
+запроса, обязана меняться в одной публикации с данными, которые запрос видит. Ингеста для
+этого быть поднятым не нужно.
 """
 
 from __future__ import annotations
@@ -18,11 +23,15 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from graphrag_proto.query_service.revision_client import RevisionClient
+from graphrag_proto.ingestion_service.projection import ProjectionStateStore
 from graphrag_proto.query_service.store import TERMINAL, TaskStore
 from graphrag_proto.query_service.task_queue import TaskQueue
 from graphrag_proto.retrieval.adapters.topology_client import TopologyClient
-from graphrag_proto.retrieval.pipeline import QueryPipeline
+from graphrag_proto.retrieval.pipeline import (
+    REVISION_SOURCE_REPORTED,
+    REVISION_SOURCE_UNAVAILABLE,
+    QueryPipeline,
+)
 
 _LOG = logging.getLogger("graphrag_proto.query_service.worker")
 
@@ -43,7 +52,7 @@ class QueryWorker:
         worker_id: str = "worker-1",
         poll_interval_s: float = 5.0,
         pipeline_rebuilder: Callable[[], None] | None = None,
-        revisions: RevisionClient | None = None,
+        projections: ProjectionStateStore | None = None,
         backoff_base_s: float = 1.0,
         backoff_max_s: float = 30.0,
         reclaim_timeout_s: float = 60.0,
@@ -56,7 +65,10 @@ class QueryWorker:
         self._worker_id = worker_id
         self._poll_interval_s = max(0.0, poll_interval_s)
         self._pipeline_rebuilder = pipeline_rebuilder if self._poll_interval_s > 0 else None
-        self._revisions = revisions
+        self._projections = projections
+        # Счётчик ошибок ЧТЕНИЯ проекции. Не «ноль и молчание»: сбой открытия/чтения базы
+        # увеличивает его, а отсутствие строки — не ошибка, а `unavailable` (см. `_data_revision`).
+        self._projection_read_errors_total = 0
         self._backoff_base_s = max(0.1, backoff_base_s)
         self._backoff_max_s = max(self._backoff_base_s, backoff_max_s)
         self._reclaim_timeout_s = max(1.0, reclaim_timeout_s, _llm_budget_s() + 30.0)
@@ -74,6 +86,35 @@ class QueryWorker:
         shutdown = getattr(old, "shutdown", None)
         if callable(shutdown):
             shutdown()
+
+    def _data_revision(self, domain: str) -> tuple[str | None, str]:
+        """Ревизия домена из опубликованной проекции (ADR-026, поправка 2026-10-19).
+
+        Строка состояния и публикация — не одно и то же: `claim()` пишет новую
+        `data_revision` со статусом `pending` до того, как данные станут видимы, а снятие
+        документа — со статусом `stale`. Опубликованной считается только строка `ready`;
+        иначе epoch кэша обогнал бы видимый индекс.
+
+        Три исхода, а не два: опубликованная непустая строка есть → значение и `reported`;
+        её нет (нет вовсе, статус не `ready` или пустая ревизия) → `None` и `unavailable` —
+        это факт, а не ошибка;
+        чтение упало → `None`, `unavailable` и счётчик, потому что деградация обязана быть
+        видна в логе и в снапшоте, а не только в том, что ответ собрался по векторной оси.
+        """
+        if self._projections is None:
+            return None, REVISION_SOURCE_UNAVAILABLE
+        try:
+            state = self._projections.get(domain)
+        except Exception:  # noqa: BLE001 - сбой открытия/чтения базы, а не логики запроса
+            self._projection_read_errors_total += 1
+            _LOG.warning(
+                "projection state read failed for domain %s: revision unavailable", domain,
+                exc_info=True,
+            )
+            return None, REVISION_SOURCE_UNAVAILABLE
+        if state is None or state.status != "ready" or not state.data_revision:
+            return None, REVISION_SOURCE_UNAVAILABLE
+        return state.data_revision, REVISION_SOURCE_REPORTED
 
     def process_one(self, idle_sleep_s: float = 0.2) -> bool:
         """Обработка одной задачи; False — очередь пуста (воркер может ждать)."""
@@ -98,11 +139,7 @@ class QueryWorker:
 
         try:
             active_domain = task.domain or self._pipeline.active_domain()
-            revision = (
-                self._revisions.revision(active_domain)
-                if self._revisions is not None
-                else None
-            )
+            revision, revision_source = self._data_revision(active_domain)
             # Глубина из запроса доезжает в конвейер как есть, вместе с проверкой и
             # зажимом: воркер не решает за пользователя, что ему «хватит и двух».
             request_depth = (task.metadata or {}).get("max_depth")
@@ -113,6 +150,7 @@ class QueryWorker:
                 active_domain,
                 emit,
                 revision=revision,
+                revision_source=revision_source,
                 max_depth=request_depth,
                 max_graph_nodes=request_max_graph_nodes,
             )
@@ -189,11 +227,12 @@ class QueryWorker:
             "domain": "*",
             "topology_poll_errors_total": topology_poll_errors_total,
         }
-        if self._revisions is not None:
-            # S6/ревью №7: ошибки поллера ревизий не молчат; оператор видит
-            # свежесть данных (известные ревизии доменов).
-            payload["revision_poll_errors_total"] = self._revisions.revision_poll_errors_total
-            payload["revisions"] = self._revisions.known_revisions()
+        if self._projections is not None:
+            payload["projection_read_errors_total"] = self._projection_read_errors_total
+        else:
+            # Стор не собран — измерять нечем. `null`, а не `0`: «ошибок чтения не было» и
+            # «читать было нечего» — разные результаты, и уверенный ноль выдал бы первое.
+            payload["projection_read_errors_total"] = None
         try:
             payload["queue_depth"] = self._queue.depth()
         except Exception:  # noqa: BLE001 - снапшот не роняет воркер
@@ -240,6 +279,7 @@ def _topology_rebuilder(
 def main() -> None:
     from graphrag_proto.query_service.runtime import (
         build_pipeline,
+        build_projection_state_store,
         build_queue,
         build_semantic_cache,
         build_store,
@@ -257,11 +297,17 @@ def main() -> None:
 
     client = TopologyClient.from_env()
     initial_map = client.adapters_map() if client is not None else None
-    pipeline = build_pipeline(adapter_map=initial_map, semantic_cache=semantic_cache)
 
-    # Ревизии данных (ADR-026): fail-open, окно REVISION_POLL_INTERVAL_S;
-    # переживает hot-reload — живёт на воркере, не на пайплайне.
-    revisions = RevisionClient.from_env()
+    # Состояние проекции собирается ОДИН раз и уходит и пайплайну, и воркеру: ревизию воркер
+    # читает из того же файла, по которому пайплайн проверяет готовность графа (ADR-026,
+    # поправка 2026-10-19). Две независимые сборки одного пути дали бы два взгляда на один и
+    # тот же вопрос, и расхождение между ними выглядело бы как дефект данных.
+    projection_state = build_projection_state_store()
+    pipeline = build_pipeline(
+        adapter_map=initial_map,
+        semantic_cache=semantic_cache,
+        projection_state_store=projection_state,
+    )
 
     poll_interval_s = float(os.environ.get("TOPOLOGY_POLL_INTERVAL", "5"))
     worker = QueryWorker(
@@ -270,7 +316,7 @@ def main() -> None:
         pipeline=pipeline,
         worker_id=worker_id,
         poll_interval_s=poll_interval_s,
-        revisions=revisions,
+        projections=projection_state,
         backoff_base_s=float(os.environ.get("WORKER_BACKOFF_BASE_S", "1")),
         backoff_max_s=float(os.environ.get("WORKER_BACKOFF_MAX_S", "30")),
         reclaim_timeout_s=float(os.environ.get("TASK_RECLAIM_TIMEOUT_S", "60")),
@@ -279,7 +325,11 @@ def main() -> None:
         pipeline_rebuilder=_topology_rebuilder(
             client,
             on_reload=lambda adapter_map: worker.set_pipeline(
-                build_pipeline(adapter_map=adapter_map, semantic_cache=semantic_cache)
+                build_pipeline(
+                    adapter_map=adapter_map,
+                    semantic_cache=semantic_cache,
+                    projection_state_store=projection_state,
+                )
             ),
         )
         if client is not None and poll_interval_s > 0

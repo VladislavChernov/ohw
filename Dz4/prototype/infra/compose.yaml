@@ -371,11 +371,8 @@ services:
       QUERY_REDIS_URL: ${QUERY_REDIS_URL:-}
       QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
       RETRIEVAL_GRAPH_ENABLED: ${RETRIEVAL_GRAPH_ENABLED:-true}
-      # Читаются `revision_client.from_env`; без проброса на стенде всегда дефолты 5.0/3.0,
-      # и заявленная в бандле настройка интервала поллинга недостижима.
-      REVISION_POLL_INTERVAL_S: ${REVISION_POLL_INTERVAL_S:-5.0}
-      REVISION_TIMEOUT_S: ${REVISION_TIMEOUT_S:-3.0}
-      INGESTION_URL: ${INGESTION_URL:-http://ingestion-api:8002}
+      # Ревизия читается из `projection.db` (ADR-026, поправка 2026-10-19): HTTP-поллера к
+      # ингесту нет, поэтому ни его адрес, ни интервал поллинга воркеру не передаются.
       SEMANTIC_CACHE_ENABLED: ${SEMANTIC_CACHE_ENABLED:-}
       SEMANTIC_CACHE_MODE: ${SEMANTIC_CACHE_MODE:-redis}
       SEMANTIC_CACHE_THRESHOLD: ${SEMANTIC_CACHE_THRESHOLD:-0.85}

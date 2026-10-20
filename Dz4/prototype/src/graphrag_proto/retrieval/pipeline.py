@@ -8,11 +8,13 @@
 4. rerank (NoOp) → status: rerank
 5. Context Assembly (context.py, L3-03/L3-04)
 6. LLM streaming (OpenAICompatibleAdapter / FakeLLM) → status: llm, token*
-7. done — {text, sources, generation_time_s, retrieval_time_s, total_time_s, revision[, cache_hit, cache_lookup_s]}
+7. done — {text, sources, generation_time_s, retrieval_time_s, total_time_s, revision, revision_source[, cache_hit, cache_lookup_s]}
 
 emit(event_type, payload) — обратный вызов воркера (публикует события конверта ADR-016).
 `revision` — fingerprint ревизии данных домена (ADR-026): в любом исходе (в т.ч.
 cache-hit и при генерации) — «по каким данным собран ответ», срез для Eval (ADR-015).
+`revision_source` — откуда она взята (`reported` | `unavailable`); `null` без него означал бы
+два разных исхода («прочли и не было» и «не смотрели»).
 """
 
 from __future__ import annotations
@@ -89,6 +91,20 @@ GRAPH_REASON_TRUNCATED_BY_LIMITS = "truncated_by_limits"
 # Источник достигнут обходом, но кандидата не дал: обход принёс сущности, а читать
 # нечего. Раньше такое состояние выражалось как `contributed`, то есть «принёс».
 GRAPH_REASON_NO_CANDIDATE = "no_candidate"
+
+#: Откуда в ответе взялась ревизия (ADR-026, поправка 2026-10-19). Два значения, и они
+#: не сводятся к одному: `reported` — строку состояния проекции прочли, `unavailable` —
+#: данных для домена нет либо чтение не удалось. Имена совпадают с прибором
+#: (`infra/eval/run_eval.py:106-108`), иначе одно и то же в ответе и в манифесте
+#: читалось бы как разное.
+REVISION_SOURCE_REPORTED = "reported"
+REVISION_SOURCE_UNAVAILABLE = "unavailable"
+
+#: Эпоха кэша при неизвестной ревизии. Именованная константа, а не подставляемый по месту
+#: литерал: «неизвестно» обязано быть отличимо от любой реальной ревизии (`sha256`-hex), и
+#: записи этой эпохи не должны читаться как записи известной. Значение намеренно оставлено
+#: прежним (`default`): смена значения перевела бы разом все живые записи в мусор.
+CACHE_EPOCH_WHEN_REVISION_UNKNOWN = "default"
 
 #: Потолок лимита строк обхода (ADR-069). Не отвергается на входе запроса, а зажимается
 #: здесь, и урезание объявляется в ответе. Значение взято с запасом относительно типичных
@@ -653,6 +669,7 @@ class QueryPipeline:
         domain: str | None = None,
         emit: Emit | None = None,
         revision: str | None = None,
+        revision_source: str | None = None,
         generate: bool = True,
         trace: bool = False,
         max_depth: int | None = None,
@@ -675,6 +692,11 @@ class QueryPipeline:
         fingerprint среза для Eval (ADR-015). Hit эпохи `revision` означает, что
         ответ собран по данным именно этой ревизии — одна ревизия в одном ответе.
 
+        `revision_source` — откуда ревизия взялась (`reported` | `unavailable`, ADR-026,
+        поправка 2026-10-19): без него `null` в `done` неотличим от «не смотрели». Не задан —
+        выводится из `revision`, чтобы прямой вызов пайплайна не публиковал третий, пустой
+        источник; воркер задаёт его явно.
+
         `generate=False` — retrieval-only (design.md §6): Context Assembly есть,
         LLM не вызывается, `text=""` и `generation_time_s=0`.
 
@@ -683,6 +705,12 @@ class QueryPipeline:
         пишутся независимо (без `trace` поле отсутствует — контракт не меняется).
         """
         emit = emit or _noop_emit
+        if revision_source is None:
+            revision_source = (
+                REVISION_SOURCE_REPORTED
+                if revision is not None
+                else REVISION_SOURCE_UNAVAILABLE
+            )
         if self._closed:
             raise RuntimeError("QueryPipeline закрыт")
         # Проверяем ДО эмбеддинга: негодная глубина не должна стоить обращения к модели.
@@ -910,7 +938,8 @@ class QueryPipeline:
         )
         cache_allowed = True
         cache_revision = (
-            f"{revision or 'default'}:{'graph' if graph_cache_ready else 'vector'}:"
+            f"{revision or CACHE_EPOCH_WHEN_REVISION_UNKNOWN}:"
+            f"{'graph' if graph_cache_ready else 'vector'}:"
             f"{projection_revision if graph_cache_ready else 'none'}"
         )
 
@@ -934,6 +963,7 @@ class QueryPipeline:
                     "retrieval_time_s": 0.0,
                     "total_time_s": round(time.monotonic() - total_started, 3),
                     "revision": revision,
+                    "revision_source": revision_source,
                     "graph_degraded": graph_degraded,
                     "projection_status": projection_status,
                     "projection_revision": projection_revision,
@@ -1491,6 +1521,7 @@ class QueryPipeline:
             "retrieval_time_s": retrieval_s,
             "total_time_s": round(time.monotonic() - total_started, 3),
             "revision": revision,
+            "revision_source": revision_source,
             "graph_degraded": graph_degraded,
             "projection_status": projection_status,
             "projection_revision": projection_revision,

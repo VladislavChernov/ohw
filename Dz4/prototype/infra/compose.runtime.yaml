@@ -2,12 +2,15 @@
 #
 # Зачем отдельный файл. В `compose.yaml` ingestion-api и query-api живут рядом, и чтобы
 # «просто убрать ингест», надо было гасить сервисы руками. Здесь ингеста нет вовсе, и
-# вопрос «нужен ли он для запросов» снят: `revision_client.py` объявлен fail-open, без
-# ingestion-api он отдаёт `revision = None`, и ответы всё равно формируются.
+# вопрос «нужен ли он для запросов» снят.
 #
-# Что теряется без ingestion-api ровно одно — гарантия актуальности ревизии: нельзя
-# отличить «ответ по свежему корпусу» от «ответ по устаревшему». Это видимый счётчик
-# `revision_poll_errors_total`, а не молчание.
+# Ревизия у ингеста не запрашивается (ADR-026, поправка 2026-10-19): воркер читает её из
+# `projection.db` — тот же том `projection`, который смонтирован ниже. Опубликованной
+# считается только строка `ready`: `pending`/`stale` несут новую ревизию до того, как
+# данные стали видимы. Ингесту быть поднятым для этого не нужно, он пишет тот же файл.
+#
+# Отсутствие опубликованной строки — это `revision = null` и `revision_source = unavailable`,
+# а не `0`: «не измерено» и «ноль» обязаны различаться и в ответе, и в манифесте.
 #
 # ДВА НАБОРА ВНЕШНИХ ТОМОВ. Имя тома собирается из `VOL`, поэтому один и тот же файл
 # поднимает и пустую базу, и заполненную — различается только значение `VOL`.
@@ -231,8 +234,7 @@ services:
 
   # -------------------------------------------------------------- query-api
   # Отличия от compose.yaml: `EMBEDDER` по умолчанию `bge_m3_service` (в исходном файле
-  # `deterministic`, то есть вектора фиктивные - для просмотра UI это не годится),
-  # `INGESTION_URL` оставлен, потому что revision_client читает его из окружения, и
+  # `deterministic`, то есть вектора фиктивные - для просмотра UI это не годится), и
   # `SEMANTIC_CACHE_ENABLED` выключен: кэш без ingestion-api нечего инвалидировать.
   query-api:
     build:
@@ -287,7 +289,6 @@ services:
       QUERY_QUEUE: redis
       QUERY_REDIS_URL: redis://valkey:6379/0
       QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
-      INGESTION_URL: ${INGESTION_URL:-http://ingestion-api:8002}
       SEMANTIC_CACHE_ENABLED: "false"
       # Флаг оси графа обязателен и здесь, а не только у `query-worker`. Сегодня api
       # отдаёт задание воркеру (`QUERY_QUEUE: redis`) и пайплайн не исполняет, поэтому
@@ -377,9 +378,8 @@ services:
       QUERY_REDIS_URL: redis://valkey:6379/0
       QUERY_TASK_DB_PATH: /data/query_tasks.sqlite
       RETRIEVAL_GRAPH_ENABLED: ${RETRIEVAL_GRAPH_ENABLED:-true}
-      REVISION_POLL_INTERVAL_S: ${REVISION_POLL_INTERVAL_S:-5.0}
-      REVISION_TIMEOUT_S: ${REVISION_TIMEOUT_S:-3.0}
-      INGESTION_URL: ${INGESTION_URL:-http://ingestion-api:8002}
+      # Ревизия читается из смонтированного `projection.db` (ADR-026, поправка 2026-10-19),
+      # HTTP-поллера к ингесту нет, поэтому его адрес и интервал воркеру не передаются.
       TOPOLOGY_URL: ${TOPOLOGY_URL:-http://topology-orchestrator:8005}
       TOPOLOGY_POLL_INTERVAL: ${TOPOLOGY_POLL_INTERVAL:-5}
       PROJECTION_STATE_DB_PATH: /var/lib/graphrag/projection/projection.db

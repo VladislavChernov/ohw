@@ -781,6 +781,34 @@ def test_query_pipeline_blocks_graph_until_projection_is_ready() -> None:
     assert graph.expansion_calls == [["tag:it:seed"], ["tag:it:seed"]]
 
 
+def test_query_pipeline_reports_missing_when_state_absent_and_revision_unknown() -> None:
+    """Пустая проекция — это `missing`, а не `revision_unknown` (ADR-026, поправка 2026-10-19).
+
+    Воркер без опубликованной строки передаёт `revision=None` и `revision_source=unavailable`.
+    Раньше такая пара означала «ревизию не донесли» и давала `revision_unknown`; теперь
+    отсутствие ревизии — следствие отсутствия строки, и приоритет обязан быть у `missing`:
+    иначе «проекцию не публиковали» и «публиковали, но ревизию не донесли» слились бы в одну
+    метку, и разница между ними пропала бы из ответа.
+    """
+    pipeline = QueryPipeline(
+        embedder=DeterministicEmbedder(),
+        graph_store=_CountingGraphStore(),
+        vector_store=InMemoryVectorStore(),
+        reranker=NoOpRerankerAdapter(),
+        llm=FakeLLM(text="ответ"),
+        profile_loader=_ProfileLoader(),
+        projection_state_store=InMemoryProjectionStateStore(),
+        projection_config_fingerprint="config-1",
+    )
+
+    done = pipeline.run("seed", domain="it", revision=None, generate=False, trace=True)
+
+    assert done["projection_status"] == "missing"
+    assert done["graph_degraded"] is True
+    assert done["revision"] is None
+    assert done["revision_source"] == "unavailable"
+
+
 def test_query_pipeline_uses_vector_cache_when_projection_is_missing() -> None:
     state_store = InMemoryProjectionStateStore()
     cache = InMemorySemanticCache(threshold=0.8, ttl_s=0)

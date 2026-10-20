@@ -82,6 +82,16 @@ def build_semantic_cache() -> SemanticCache | None:
     raise ValueError(f"SEMANTIC_CACHE_MODE={mode!r}: допустимо inmemory|redis")
 
 
+def build_projection_state_store() -> ProjectionStateStore | None:
+    """Состояние проекции для чтения ревизии — тем же путём, что у пайплайна (ADR-026).
+
+    `None` (нет или нечитаемый `PROJECTION_STATE_DB_PATH`) — не ошибка сборки: пайплайн
+    тогда объявляет `state_store_unavailable`, а воркер отдаёт `revision_source=unavailable`.
+    Собирается один раз в `worker.main()` и передаётся и пайплайну, и воркеру.
+    """
+    return try_build_projection_state_store()
+
+
 def build_pipeline(
     adapter_map: Mapping[str, str] | None = None,
     semantic_cache: SemanticCache | None = None,

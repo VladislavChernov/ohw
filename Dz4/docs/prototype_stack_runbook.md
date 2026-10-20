@@ -387,8 +387,9 @@ docker compose exec valkey redis-cli DEL "query:sc:it"
 docker compose exec valkey sh -c 'redis-cli --scan --pattern "query:sc:*" | xargs -r redis-cli del'
 ```
 
-Инвалидация по ревизии данных реализована epoch-bump `query:sc:<rev>:<domain>` через
-`RevisionClient`; COMMIT индексации кэш напрямую не чистит.
+Инвалидация по ревизии данных реализована epoch-bump `query:sc:<rev>:<domain>`; ревизия
+берётся из опубликованной проекции (`ProjectionState.data_revision`, ADR-026, поправка
+2026-10-19). COMMIT индексации кэш напрямую не чистит.
 
 ## Ограничения демо (до M3)
 

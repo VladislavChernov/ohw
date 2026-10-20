@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
-import requests
 from fastapi.testclient import TestClient
 
-from graphrag_proto.query_service import revision_client
+from graphrag_proto.ingestion_service.projection import (
+    InMemoryProjectionStateStore,
+    ProjectionState,
+)
 from graphrag_proto.query_service.app import create_app
 from graphrag_proto.query_service.models import Task
-from graphrag_proto.query_service.revision_client import RevisionClient
 from graphrag_proto.query_service.store import STATUS_CANCELLED, STATUS_QUEUED, TaskStore
 from graphrag_proto.query_service.task_queue import InMemoryTaskQueue
 from graphrag_proto.query_service.worker import QueryWorker
@@ -207,43 +209,52 @@ def test_inmemory_stale_ack_after_reclaim_ignored() -> None:
     assert queue.depth() == 0
 
 
-class _StubRevisions:
-    """Дубль RevisionClient: фиксированные ревизии и счётчик сбоев поллера."""
+def _projection_store(
+    domain: str,
+    data_revision: str,
+    *,
+    status: str = "ready",
+    config_fingerprint: str = "default",
+) -> InMemoryProjectionStateStore:
+    """Настоящий стор с опубликованной строкой: ревизию читают оттуда же, где она живёт."""
+    store = InMemoryProjectionStateStore()
+    store.put(
+        ProjectionState(
+            domain=domain,
+            data_revision=data_revision,
+            projection_revision=f"projection-for-{data_revision}",
+            config_fingerprint=config_fingerprint,
+            status=status,
+        )
+    )
+    return store
 
-    def __init__(self) -> None:
-        self.revision_poll_errors_total = 0
-        self._known = {"it": "revA", "cpp": "revB"}
 
-    def revision(self, domain: str) -> str | None:
-        return self._known.get(domain)
+class _FailingProjectionStore(InMemoryProjectionStateStore):
+    """Стор, чтение которого падает.
 
-    def known_revisions(self) -> dict[str, str | None]:
-        return dict(self._known)
+    Дубль именно такой формы, потому что воспроизвести надо не поведение sqlite, а **отказ**
+    чтения (закрытая или повреждённая база), и проверить границу гарантии: задача не падает,
+    деградация видна.
+    """
+
+    def get(self, domain: str) -> ProjectionState | None:
+        raise sqlite3.OperationalError("database is locked")
 
 
-def test_worker_survives_unreachable_ingestion(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_worker_survives_projection_read_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Недоступный ingestion не роняет обработку: fail-open проверяется на реальном клиенте.
+    """Сбой чтения состояния проекции не роняет задачу и не молчит (ADR-026, поправка).
 
-    Все прочие тесты воркера подставляют `_StubRevisions` с фиксированным ответом, то есть
-    ни один не проходит путь «transport упал». А это и есть граница гарантии из design.md
-    («fail-open ровно как TopologyClient»): если бы `_fetch` перестал ловить
-    `requests.RequestException`, задача начала бы падать в `pipeline_error`, и заметить это
-    можно было бы только на стенде с убитым ingestion.
-
-    Дубль здесь не нужен и был бы вреден: дубль повторил бы поведение клиента, а не
-    гарантию. Поэтому поднимается настоящий `RevisionClient` с транспортом, который всегда
-    отказывает, и проверяется весь путь от `requests.get` до `done` воркера.
+    Проверяется граница гарантии, а не логика стора: если бы `_data_revision` перестал
+    ловить исключение, задача падала бы в `pipeline_error`, и заметить это можно было бы
+    только на стенде с недоступной базой проекции. Сбой обязан быть виден в трёх местах —
+    лог, счётчик и ответ (`revision_source = unavailable`).
     """
     queue = InMemoryTaskQueue()
     store = TaskStore(tmp_path / "unreachable.sqlite")
-    seen: dict[str, str | None] = {}
-
-    def _refuse(*args: object, **kwargs: object):
-        raise requests.ConnectionError("ingestion недоступен")
-
-    monkeypatch.setattr(revision_client.requests, "get", _refuse)
+    seen: dict[str, object] = {}
 
     class CapturingPipeline:
         def active_domain(self) -> str:
@@ -255,34 +266,38 @@ def test_worker_survives_unreachable_ingestion(
             domain: str | None,
             emit,
             revision: str | None = None,
+            revision_source: str | None = None,
             max_depth: int | None = None,
             max_graph_nodes: int | None = None,
         ):
             seen["revision"] = revision
+            seen["revision_source"] = revision_source
             return {"text": "ok", "revision": revision}
 
-    client = RevisionClient("http://ingestion-api:8002", poll_interval_s=5.0)
     store.create("q_down", "it", "вопрос")
     queue.submit(Task(task_id="q_down", domain="it", query="вопрос"))
     worker = QueryWorker(
         queue=queue,
         store=store,
         pipeline=CapturingPipeline(),  # type: ignore[arg-type]
-        revisions=client,
+        projections=_FailingProjectionStore(),
     )
-    assert worker.process_one() is True
+    with caplog.at_level("WARNING", logger="graphrag_proto.query_service.worker"):
+        assert worker.process_one() is True
     assert store.get("q_down")["status"] == "succeeded"
-    assert seen == {"revision": None}
-    # Сбой не молчит: счётчик поллера обязан вырасти, иначе деградация невидима оператору.
-    assert client.revision_poll_errors_total == 1
-    assert client.known_revisions() == {}
+    assert seen == {"revision": None, "revision_source": "unavailable"}
+    # Сбой не молчит: счётчик чтения проекции обязан вырасти, иначе деградация невидима.
+    assert worker._projection_read_errors_total == 1
+    assert any(
+        "projection state read failed" in record.getMessage() for record in caplog.records
+    )
 
 
-def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
-    """Воркер запрашивает `revisions.revision(task.domain)` и передаёт в run()."""
+def test_worker_passes_projection_revision_to_pipeline(tmp_path: Path) -> None:
+    """Воркер читает `data_revision` из проекции и передаёт её в run() с источником."""
     queue = InMemoryTaskQueue()
     store = TaskStore(tmp_path / "rev.sqlite")
-    seen: dict[str, str | None] = {}
+    seen: dict[str, object] = {}
 
     class CapturingPipeline:
         def active_domain(self) -> str:
@@ -294,10 +309,12 @@ def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
             domain: str | None,
             emit,
             revision: str | None = None,
+            revision_source: str | None = None,
             max_depth: int | None = None,
             max_graph_nodes: int | None = None,
         ):
             seen["revision"] = revision
+            seen["revision_source"] = revision_source
             seen["max_depth"] = max_depth
             return {"text": "ok", "revision": revision}
 
@@ -307,13 +324,119 @@ def test_worker_passes_revision_to_pipeline(tmp_path: Path) -> None:
         queue=queue,
         store=store,
         pipeline=CapturingPipeline(),  # type: ignore[arg-type]
-        revisions=_StubRevisions(),
+        projections=_projection_store("it", "data-rev-A"),
     )
     assert worker.process_one() is True
     assert store.get("q_rev")["status"] == "succeeded"
     # `max_depth: None` - тоже утверждение: запрос не задавал глубину, значит воркер обязан
     # передать None, и решает цепочка конфигурации (ADR-025).
-    assert seen == {"revision": "revA", "max_depth": None}
+    assert seen == {
+        "revision": "data-rev-A",
+        "revision_source": "reported",
+        "max_depth": None,
+    }
+
+
+def test_worker_reports_revision_unavailable_without_inventing_a_value(tmp_path: Path) -> None:
+    """Строки проекции нет — `null` и `unavailable`, а не `""`, `0` или константа.
+
+    Отсутствие данных и нулевое значение — разные результаты: подставленный `""` или `0`
+    читался бы как измеренная ревизия и склеился бы с реальной эпохой кэша.
+    """
+    queue = InMemoryTaskQueue()
+    store = TaskStore(tmp_path / "no-rev.sqlite")
+    seen: dict[str, object] = {}
+
+    class CapturingPipeline:
+        def active_domain(self) -> str:
+            return "it"
+
+        def run(
+            self,
+            query: str,
+            domain: str | None,
+            emit,
+            revision: str | None = None,
+            revision_source: str | None = None,
+            max_depth: int | None = None,
+            max_graph_nodes: int | None = None,
+        ):
+            seen["revision"] = revision
+            seen["revision_source"] = revision_source
+            return {"text": "ok", "revision": revision}
+
+    store.create("q_none", "it", "вопрос")
+    queue.submit(Task(task_id="q_none", domain="it", query="вопрос"))
+    worker = QueryWorker(
+        queue=queue,
+        store=store,
+        pipeline=CapturingPipeline(),  # type: ignore[arg-type]
+        projections=InMemoryProjectionStateStore(),  # домен ничего не публиковал
+    )
+    assert worker.process_one() is True
+    assert store.get("q_none")["status"] == "succeeded"
+    assert seen["revision"] is None
+    assert seen["revision_source"] == "unavailable"
+    assert seen["revision"] != "" and seen["revision"] != 0
+    # Отсутствие строки — не ошибка чтения: счётчик обязан остаться нулём, иначе «не публиковали»
+    # выглядело бы как сломанная база.
+    assert worker._projection_read_errors_total == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "data_revision"),
+    [
+        ("pending", "data-rev-not-published"),
+        ("stale", "data-rev-not-published"),
+        ("degraded", "data-rev-not-published"),
+        ("failed", "data-rev-not-published"),
+        ("ready", ""),
+    ],
+)
+def test_worker_does_not_take_unpublished_or_empty_revision(
+    tmp_path: Path, status: str, data_revision: str
+) -> None:
+    """Строка без опубликованной ревизии не даёт значения — даже `ready` с пустой строкой.
+
+    `claim()` пишет `data_revision` до публикации, а снятие документа — со статусом
+    `stale`. Если читать ревизию у любой строки, epoch кэша обгонит видимый индекс:
+    записи, положенные до готовности, будут считаться записями новой ревизии. Пустая
+    строка — тот же случай: `""` не должно стать известной ревизией и слипться с `default`.
+    """
+    queue = InMemoryTaskQueue()
+    store = TaskStore(tmp_path / f"unpublished-{status}.sqlite")
+    seen: dict[str, object] = {}
+
+    class CapturingPipeline:
+        def active_domain(self) -> str:
+            return "it"
+
+        def run(
+            self,
+            query: str,
+            domain: str | None,
+            emit,
+            revision: str | None = None,
+            revision_source: str | None = None,
+            max_depth: int | None = None,
+            max_graph_nodes: int | None = None,
+        ):
+            seen["revision"] = revision
+            seen["revision_source"] = revision_source
+            return {"text": "ok", "revision": revision}
+
+    store.create("q_unpublished", "it", "вопрос")
+    queue.submit(Task(task_id="q_unpublished", domain="it", query="вопрос"))
+    worker = QueryWorker(
+        queue=queue,
+        store=store,
+        pipeline=CapturingPipeline(),  # type: ignore[arg-type]
+        projections=_projection_store("it", data_revision, status=status),
+    )
+    assert worker.process_one() is True
+    assert seen["revision"] is None
+    assert seen["revision_source"] == "unavailable"
+    assert worker._projection_read_errors_total == 0
 
 
 def test_worker_resolves_active_domain_before_revision_lookup(tmp_path: Path) -> None:
@@ -331,11 +454,13 @@ def test_worker_resolves_active_domain_before_revision_lookup(tmp_path: Path) ->
             domain: str | None,
             emit,
             revision: str | None = None,
+            revision_source: str | None = None,
             max_depth: int | None = None,
             max_graph_nodes: int | None = None,
         ):
             seen["domain"] = domain
             seen["revision"] = revision
+            seen["revision_source"] = revision_source
             seen["max_depth"] = max_depth
             seen["max_graph_nodes"] = max_graph_nodes
             return {"text": "ok", "revision": revision}
@@ -346,31 +471,70 @@ def test_worker_resolves_active_domain_before_revision_lookup(tmp_path: Path) ->
         queue=queue,
         store=store,
         pipeline=CapturingPipeline(),
-        revisions=_StubRevisions(),
+        projections=_projection_store("it", "data-rev-A"),
     )
     assert worker.process_one() is True
     assert seen == {
         "domain": "it",
-        "revision": "revA",
+        "revision": "data-rev-A",
+        "revision_source": "reported",
         "max_depth": None,
         "max_graph_nodes": None,
     }
 
-def test_worker_metrics_snapshot_includes_revisions(tmp_path: Path, caplog) -> None:
+
+def test_worker_does_not_ask_ingestion_for_revision() -> None:
+    """Воркер не делает HTTP-запросов к ингесту за ревизией (ADR-026, поправка).
+
+    Гард по исходнику модуля: снятый клиент не должен вернуться ни импортом, ни вызовом —
+    `requests` в воркере не остаётся ни для чего, а имя `RevisionClient` там больше не живёт.
+    """
+    import inspect
+
+    from graphrag_proto.query_service import worker as worker_module
+
+    source = inspect.getsource(worker_module)
+    assert "RevisionClient" not in source
+    assert "revision_client" not in source
+    assert "revision_poll_errors_total" not in source
+    assert "requests" not in source
+
+
+def test_worker_metrics_snapshot_reports_projection_read_errors(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     queue = InMemoryTaskQueue()
     store = TaskStore(tmp_path / "m.sqlite")
     worker = QueryWorker(
         queue=queue,
         store=store,
         pipeline=make_worker(queue, store)._pipeline,
-        revisions=_StubRevisions(),
+        projections=_projection_store("it", "data-rev-A"),
     )
     with caplog.at_level("INFO"):
         worker._log_metrics_snapshot(topology_poll_errors_total=2)
     snapshot = caplog.messages[-1]
     assert '"topology_poll_errors_total": 2' in snapshot
-    assert '"revision_poll_errors_total": 0' in snapshot
-    assert '"revisions": {"it": "revA", "cpp": "revB"}' in snapshot
+    assert '"projection_read_errors_total": 0' in snapshot
+    assert "revision_poll_errors_total" not in snapshot
+    assert '"revisions"' not in snapshot
+
+
+def test_worker_metrics_snapshot_says_unknown_without_projection_store(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Стор не собран — измерять нечем, и в снапшоте стоит `null`, а не `0`."""
+    queue = InMemoryTaskQueue()
+    store = TaskStore(tmp_path / "m2.sqlite")
+    worker = QueryWorker(
+        queue=queue,
+        store=store,
+        pipeline=make_worker(queue, store)._pipeline,
+    )
+    with caplog.at_level("INFO"):
+        worker._log_metrics_snapshot(topology_poll_errors_total=0)
+    snapshot = caplog.messages[-1]
+    assert '"projection_read_errors_total": null' in snapshot
 
 
 def test_submit_accepts_max_depth_and_rides_to_the_task(tmp_path: Path) -> None:
