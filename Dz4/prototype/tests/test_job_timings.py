@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from graphrag_proto.ingestion_service.app import create_app
+from graphrag_proto.ingestion_service.storage.registry import JobStore
 from tests.job_wait import wait_until
 
 API_KEY = "changeme"
@@ -71,26 +72,29 @@ def test_total_duration_is_the_sum_of_stages(tmp_path: Path) -> None:
 def test_stage_durations_are_not_mistaken_for_zero(tmp_path: Path) -> None:
     """Пустая длительность значит «стадия не измерялась», а не «стадия заняла 0 мс».
 
-    Проверяется на джобе, которая ещё не отработала: у неё строк нет вовсе.
+    Состояние строится, а не выигрывается у конвейера (ADR-073): POST запускает `_run`
+    в фоновом потоке до ответа `202`, поэтому «прочитать сразу после POST» проверяло
+    скорость потока, а не контракт ответа, и падало в полном прогоне с `assert 23 == 0`.
+    Строка джобы без строк длительностей — это и есть «ещё не начиналась».
     """
+    db_path = tmp_path / "ingestion.db"
     with _AuthedClient(_app(tmp_path)) as client:
-        resp = client.post(
-            "/api/v1/ingestion/documents",
-            json={
-                "source_url": "src://algo.txt",
-                "domain": "it",
-                "doc_type": "txt",
-                "content": TEXT,
-            },
+        JobStore(db_path).create(
+            "job-not-started",
+            source_url="src://algo.txt",
+            domain="it",
+            doc_type="txt",
         )
-        job_id = resp.json()["job_id"]
-        body = client.get(f"/api/v1/ingestion/jobs/{job_id}").json()
+        body = client.get("/api/v1/ingestion/jobs/job-not-started").json()
 
-    assert "stage_durations_ms" in body
-    assert isinstance(body["stage_durations_ms"], dict)
+    assert body["status"] == "queued"
+    assert body["stage_durations_ms"] == {}
     assert body["total_duration_ms"] == 0, (
         "у ещё не начавшейся джобы сумма равна нулю - и это ноль измеренного, "
         "а не замер стадии"
+    )
+    assert "INGEST" not in body["stage_durations_ms"], (
+        "стадия не должна выглядеть измеренной, пока её длительности нет"
     )
 
 
