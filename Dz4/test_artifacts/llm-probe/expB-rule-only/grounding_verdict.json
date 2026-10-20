@@ -47,7 +47,7 @@
       "source_url": "cosine-dedup.md",
       "chunk_id": "chk:b381f36436e0",
       "doc_matched": true,
-      "doc_path": "/repo/docs/plans/cosine-dedup.md",
+      "doc_path": "docs/plans/cosine-dedup.md",
       "chunk_tail_in_doc": true,
       "names": {
         "distinct": 10,

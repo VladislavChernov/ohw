@@ -47,7 +47,7 @@
       "source_url": "docs/01_ontology_and_domain_profile.md",
       "chunk_id": "chk:bf72929b829a",
       "doc_matched": true,
-      "doc_path": "/repo/docs/01_ontology_and_domain_profile.md",
+      "doc_path": "docs/01_ontology_and_domain_profile.md",
       "chunk_tail_in_doc": true,
       "names": {
         "distinct": 6,
@@ -119,7 +119,7 @@
       "source_url": "docs/01_ontology_and_domain_profile.md",
       "chunk_id": "chk:e47c6f97e4aa",
       "doc_matched": true,
-      "doc_path": "/repo/docs/01_ontology_and_domain_profile.md",
+      "doc_path": "docs/01_ontology_and_domain_profile.md",
       "chunk_tail_in_doc": true,
       "names": {
         "distinct": 0,
@@ -191,7 +191,7 @@
       "source_url": "docs/01_ontology_and_domain_profile.md",
       "chunk_id": "chk:b23dbe2d1b7d",
       "doc_matched": true,
-      "doc_path": "/repo/docs/01_ontology_and_domain_profile.md",
+      "doc_path": "docs/01_ontology_and_domain_profile.md",
       "chunk_tail_in_doc": true,
       "names": {
         "distinct": 7,
@@ -263,7 +263,7 @@
       "source_url": "docs/01_ontology_and_domain_profile.md",
       "chunk_id": "chk:a51265c5b90a",
       "doc_matched": true,
-      "doc_path": "/repo/docs/01_ontology_and_domain_profile.md",
+      "doc_path": "docs/01_ontology_and_domain_profile.md",
       "chunk_tail_in_doc": true,
       "names": {
         "distinct": 3,
@@ -345,7 +345,7 @@
       "source_url": "docs/plans/cosine-dedup.md",
       "chunk_id": "chk:daa34cdf7ee7",
       "doc_matched": true,
-      "doc_path": "/repo/docs/plans/cosine-dedup.md",
+      "doc_path": "docs/plans/cosine-dedup.md",
       "chunk_tail_in_doc": true,
       "names": {
         "distinct": 8,

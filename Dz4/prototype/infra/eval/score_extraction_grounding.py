@@ -406,7 +406,7 @@ def _verdict_for(exchange: Path, documents: dict[str, Path]) -> list[dict[str, A
                 "source_url": source_url,
                 "chunk_id": labels.get("chunk_id"),
                 "doc_matched": document is not None,
-                "doc_path": str(document) if document else None,
+                "doc_path": str(document.relative_to(_DZ4)) if document else None,
                 "chunk_tail_in_doc": bool(document) and tail in text,
                 "names": {
                     "distinct": len(best_names),

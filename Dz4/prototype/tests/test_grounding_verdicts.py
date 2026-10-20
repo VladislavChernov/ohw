@@ -110,6 +110,29 @@ def test_verdict_files_match_recomputation(tool: Any, verdicts: dict[str, list[d
         assert on_disk["summary"] == records, f"{run}: значения на диске разошлись с пересчётом"
 
 
+def test_verdict_paths_stay_portable(tool: Any) -> None:
+    """`doc_path` в артефакте относителен `Dz4`, а не корню машины.
+
+    Артефакты лежат в репозитории и переживают машину, где сделаны. CI клонирует проект
+    в другой корень, и сверка с пересчётом падала только там: в файлах был `/repo/...`.
+    Проверяется переносимость, а не конкретный корень.
+    """
+    import json
+
+    for directory in sorted(p for p in tool._PROBE.iterdir() if p.is_dir()):
+        target = directory / "grounding_verdict.json"
+        if not target.exists():
+            continue
+        payload = json.loads(target.read_text(encoding="utf-8"))
+        for record in payload["summary"]:
+            doc_path = record["doc_path"]
+            if doc_path is None:
+                continue
+            path = Path(doc_path)
+            assert not path.is_absolute(), f"{directory.name}: абсолютный путь {doc_path}"
+            assert (tool._DZ4 / path).is_file(), f"{directory.name}: {doc_path} не разрешается"
+
+
 def test_id_is_not_a_name_source(tool: Any) -> None:
     """`id` не признаётся именем. Это контракт, а не наблюдение.
 
