@@ -29,7 +29,10 @@
 
 ## Гарды
 
-- [x] Строка есть: `revision == state.data_revision`, `revision_source == reported`
+- [x] Опубликованная строка есть — `ready` и непустая: `revision == state.data_revision`,
+      `revision_source == reported`
+- [x] `ready`-строка с пустой `data_revision` — не публикация: `revision=None`,
+      `unavailable`; тест параметризован на `pending`/`stale`/`degraded`/`failed`/`ready+""`
 - [x] Строки нет: `revision is None`, `revision_source == unavailable`, ответ не падает
 - [x] Отсутствие ревизии не превращается в `""`/`0` (проверка типом и значением)
 - [x] Счётчик ошибок чтения растёт на сбое чтения и не растёт на отсутствии строки

@@ -4,20 +4,24 @@
 
 Ревизия домена в query-контуре — `ProjectionState.data_revision` из `projection.db`
 (том `projection`, смонтированный в воркер). Опубликованной считается только строка в
-статусе `ready`: `pending`/`stale`/`degraded` уже несут новую `data_revision`, но данные
-этой ревизии ещё не видимы, поэтому она не выдаётся за ответ.
+статусе `ready` с непустой `data_revision`: `pending`/`stale`/`degraded` уже несут новую
+`data_revision`, но данные этой ревизии ещё не видимы, поэтому она не выдаётся за ответ.
+Пустая строка — тот же случай: `""` не становится известной ревизией и не слипается с
+эпохой `default`.
 
 HTTP-эндпоинт `GET /api/v1/ingestion/revision` продолжает существовать для клиентов ингеста
 и для прибора; query-воркер его не опрашивает.
 
 #### Scenario: проекция опубликована
 
-- **WHEN** для домена есть строка состояния проекции в статусе `ready`
+- **WHEN** для домена есть строка состояния проекции в статусе `ready` с непустой
+  `data_revision`
 - **THEN** `revision` равен `data_revision` этой строки, `revision_source = reported`
 
 #### Scenario: строка есть, публикации нет
 
-- **WHEN** строка состояния есть, но её статус `pending`, `stale`, `degraded` или `failed`
+- **WHEN** строка состояния есть, но её статус `pending`, `stale`, `degraded` или `failed`,
+  либо `data_revision` пустая
 - **THEN** `revision = null`, `revision_source = unavailable`; ответ формируется по тому,
   что видно, и ревизия новой публикации за него не выдаётся
 
