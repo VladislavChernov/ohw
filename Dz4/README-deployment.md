@@ -80,8 +80,9 @@ docker compose -p $project -f $compose down
 
 Зачем отдельный файл: в `compose.yaml` ingestion-api и query-api живут рядом, и чтобы «просто
 убрать ингест», надо было гасить сервисы руками. Здесь ингеста нет вовсе, и вопрос «нужен ли
-он для запросов» снят: `revision_client.py` объявлен fail-open, без ingestion-api он отдаёт
-`revision = None`, и ответы всё равно формируются.
+он для запросов» снят: воркер читает ревизию из опубликованной строки проекции
+(`projection.db`), а если готовой строки нет — отдаёт `revision = null` и
+`revision_source = unavailable`, и ответ всё равно формируется.
 
 **Что здесь принято, а что нет.** ADR-058 фиксирует намерение разделить приём документов и
 извлечение и отдельно требует **двух наборов внешних томов** — пустого и заполненного, «иначе
@@ -95,9 +96,12 @@ docker compose -p $project -f $compose down
 `reranker`, `configurator-ui`, которых в runtime нет. Требование двух наборов томов этот файл
 выполняет, а вопрос «как правильно разделить контуры в принципе» — остаётся открытым.
 
-Что теряется без ingestion-api ровно одно — гарантия актуальности ревизии: нельзя отличить
-«ответ по свежему корпусу» от «ответ по устаревшему». Это видимый счётчик
-`revision_poll_errors_total`, а не молчание.
+Что теряется без ingestion-api: свежую ревизию публиковать нечем — но связь здесь не
+HTTP, а файловая: воркер читает `data_revision` **опубликованной проекции**
+(`projection.db`, ADR-026, поправка 2026-10-19), и доступность ингеста на это не влияет.
+Без строки состояния проекции ответ несёт `revision = null`, `revision_source = unavailable`,
+а сбой чтения базы считается в `projection_read_errors_total`. Это видимые поля ответа и
+снапшота, а не молчание.
 
 ### 3.1 Видеокарта или процессор (ADR-060)
 
@@ -105,13 +109,16 @@ Runtime-стенд поднимается **и без видеокарты**: м
 Бронь устройства выдаёт compose, и в базовом `compose.runtime.yaml` её нет ни у одного
 сервиса — иначе на машине без драйвера NVIDIA стенд не поднимется вообще.
 
-| | GPU-вариант | CPU-вариант |
-|---|---|---|
-| скрипты | `Demo/demo.sh`, `Demo/demo.ps1` | `Demo/demo-cpu.sh`, `Demo/demo-cpu.ps1` |
-| compose-файлы | `compose.runtime.yaml` + `compose.runtime-gpu.yaml` | только `compose.runtime.yaml` |
-| требуется | видеокарта NVIDIA | ничего, кроме Docker |
-| `LLM_NGPU_LAYERS` | 99 (вся модель) | 0 |
-| скорость ответа | минуты | десятки минут |
+| | Windows, видеокарта | Windows, процессор | Linux/macOS |
+|---|---|---|---|
+| скрипты | `Demo/demo.ps1` | `Demo/demo-cpu.ps1` | `Demo/demo.sh` |
+| compose-файлы | `compose.runtime.yaml` + `compose.runtime-gpu.yaml` | только `compose.runtime.yaml` | только `compose.runtime.yaml` |
+| требуется | видеокарта NVIDIA | ничего, кроме Docker | ничего, кроме Docker |
+| `LLM_NGPU_LAYERS` | 99 (вся модель) | 0 | 0 |
+| скорость ответа | минуты | десятки минут | десятки минут |
+
+На Linux и macOS поставляется только процессорный вариант: GPU-скрипта нет, кто хочет
+видеокарту — собирает команду compose сам (ADR-065, пересмотр 2026-10-19).
 
 Перекрыть бронь сверху нельзя: проверено, что ни `devices: []`, ни `devices: null` её не
 снимают — она приходит через YAML-merge базового файла. Тот же приём в общем слое:
@@ -266,7 +273,7 @@ docker compose -f prototype/infra/compose.runtime.yaml `
   --profile ingest --profile eval up -d --wait --wait-timeout 300
 
 # Прогон среза золотого набора: без загрузки, без судьи.
-# Домен `it` — под ним наполнен набор `ready` (`Demo/demo.sh load --domain it`).
+# Домен `it` — под ним наполнен набор `ready` (`Demo/ingest.sh load --path ./docs --domain it`).
 docker compose -f prototype/infra/compose.runtime.yaml `
   -f prototype/infra/compose.ingest.yaml -f prototype/infra/compose.eval-runtime.yaml `
   --profile ingest --profile eval run --rm eval-runner python /app/infra/eval/run_eval.py `

@@ -56,7 +56,7 @@ demo-cpu.ps1 up       -Set empty|ready
     demo-cpu.ps1 export   -Set ready [-Out ФАЙЛ]
 
 ИНГЕСТА ЗДЕСЬ НЕТ, и это не ограничение, а решение (ADR-065): он в отдельном скрипте
-`Demo/ingest.ps1`. Наполненный том - общий, поэтому после `ingest.ps1 down` база
+`Demo/ingest-cpu.ps1`. Наполненный том - общий, поэтому после `ingest-cpu.ps1 down` база
 остаётся на месте, а готовый набор восстанавливается без ингеста: `demo-cpu.ps1 restore`.
 
 Наборы:
@@ -139,7 +139,7 @@ switch ($Command) {
         Set-CommonEnv
         if ($Set -eq 'ready' -and -not (Test-Volume 'ohw-runtime_ready_neo4j')) {
             Write-Warning 'том набора ready не создан. Поднимется ПУСТАЯ база с именем ready.'
-            Write-Warning 'Чтобы получить наполненный набор: demo.ps1 restore'
+            Write-Warning 'Чтобы получить наполненный набор: demo-cpu.ps1 restore'
         }
         Invoke-Compose @('up', '-d', '--wait', '--wait-timeout', $WaitTimeoutSec)
         Write-Host "Набор '$Set' поднят."

@@ -1,8 +1,16 @@
 """Гард: скрипты демо не должны разойтись между собой и не должны врать.
 
-Четыре файла — две пары с одной логикой: стенд (`demo.sh` / `demo.ps1`, плюс вариант на
-процессоре) и наполнение базы (`ingest.sh` / `ingest.ps1`). Разведённые наборы команд у
-пар — не опечатка, а решение ADR-065.
+Шесть файлов, и это не «две пары с одной логикой», а матрица вариантов (ADR-065): на
+Windows два вида счёта для каждого режима, на Unix и macOS - один, на процессоре.
+
+    режим                    Windows (видеокарта)   Windows (процессор)   Linux/macOS
+    стенд                    demo.ps1               demo-cpu.ps1          demo.sh
+    наполнение базы          ingest.ps1             ingest-cpu.ps1        ingest.sh
+
+Парность поэтому считается не «`.sh` против `.ps1`» (это разные варианты!), а по
+инвариантам, которые обязаны держаться на каждом файле матрицы: набор команд по режиму,
+один и тот же пароль и ключ во всех шести, объявленный набор compose-файлов, вид счёта
+(ноль слоёв GPU у варианта на процессоре, оверлей видеокарты - только у варианта на GPU).
 
 Проверяем не текст, а то, что действительно ломает работу при расхождении:
 
@@ -10,13 +18,14 @@
 - учётные данные (разные пароль или ключ означают: один из них не поднимет стенд);
 - перечень compose-файлов;
 - набор томов и имён контейнеров, к которым идут обращения;
+- подсказка стенда называет ингест ТОГО ЖЕ вида счёта;
 - **поведение shell-вариантов**: подкоманда обязана дойти до `docker compose`.
 
 Последнее - не украшение. Сравнением текста этот дефект пропускается: оба файла были
-сломаны одинаково, а значит одинаковы (см. `test_sh_passes_the_subcommand_to_compose`).
+сломаны одинаково, а значит одинаковы (см. `test_sh_passes_the_up_subcommand_to_compose`).
 
-Положительный контраст: «оба файла задают одинаковые учётные данные и одинаковый набор
-команд», а не «в файле нет такой-то строки».
+Положительный контраст: «каждый файл матрицы задаёт одинаковые учётные данные и набор
+команд, положенный его режиму», а не «в файле нет такой-то строки».
 """
 
 from __future__ import annotations
@@ -27,6 +36,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,11 +46,9 @@ import yaml
 DEMO_DIR = Path(__file__).resolve().parents[2] / "Demo"
 SH = DEMO_DIR / "demo.sh"
 PS1 = DEMO_DIR / "demo.ps1"
-SH_CPU = DEMO_DIR / "demo-cpu.sh"
 PS1_CPU = DEMO_DIR / "demo-cpu.ps1"
 SH_INGEST = DEMO_DIR / "ingest.sh"
 PS1_INGEST = DEMO_DIR / "ingest.ps1"
-SH_INGEST_CPU = DEMO_DIR / "ingest-cpu.sh"
 PS1_INGEST_CPU = DEMO_DIR / "ingest-cpu.ps1"
 INFRA = DEMO_DIR.parent / "prototype" / "infra"
 
@@ -55,36 +63,74 @@ COMMANDS = STAND_COMMANDS | INGEST_COMMANDS
 # восстановить. Остальные тома создаёт compose, и скриптам их знать незачем.
 NAMED_VOLUME_SUFFIXES = ("neo4j", "ingestion")
 
-# Пары файлов, которые обязаны вести себя одинаково, и ожидаемый набор compose-файлов
-# у каждой. Видеокарту выдаёт compose сам, поэтому GPU-вариант подкладывает оверлей, а
-# CPU-вариант обходится базовым файлом: на этом различии и держится всё разделение.
-# Оверлей реранкера подключается по флагу и потому назван во всех скриптах, но
-# включается только по требованию: сам факт упоминания не обязан его поднимать.
 RERANKER_OVERLAY = "compose.runtime-reranker.yaml"
-
-PAIRS = (
-    pytest.param(
-        SH, PS1,
-        {
-            "compose.runtime.yaml",
-            "compose.runtime-gpu.yaml",
-            RERANKER_OVERLAY,
-        },
-        id="gpu",
-    ),
-    pytest.param(
-        SH_CPU, PS1_CPU,
-        {"compose.runtime.yaml", RERANKER_OVERLAY},
-        id="cpu",
-    ),
-)
-
 GPU_OVERLAY = "compose.runtime-gpu.yaml"
+INGEST_OVERLAY = "compose.ingest.yaml"
+BASE_OVERLAY = "compose.runtime.yaml"
+
+
+@dataclass(frozen=True)
+class Script:
+    """Файл матрицы: что он делает (`kind`) и на чём считает (`device`).
+
+    Ожидаемый набор compose-файлов выведен из этих двух полей, а не вписан рядом
+    списком: разойтись они не могут, потому что второе определено через первое.
+    """
+
+    path: Path
+    kind: str  # "stand" | "ingest"
+    device: str  # "cpu" | "gpu"
+
+    @property
+    def compose(self) -> frozenset[str]:
+        files = {BASE_OVERLAY}
+        if self.kind == "ingest":
+            # Оверлей ингеста подключается ВСЕГДА: без него `ingestion-api` не существует.
+            files.add(INGEST_OVERLAY)
+        else:
+            # Оверлей реранкера назван во всех скриптах стенда, но включается по флагу:
+            # сам факт упоминания не обязан его поднимать.
+            files.add(RERANKER_OVERLAY)
+        if self.device == "gpu":
+            files.add(GPU_OVERLAY)
+        return frozenset(files)
+
+
+# Матрица - источник для всех проверок ниже. Unix и macOS дают ровно один вариант на
+# режим, и он на процессоре: файлов `demo-gpu.sh` / `ingest-gpu.sh` нет намеренно.
+STAND_MATRIX = (
+    Script(SH, kind="stand", device="cpu"),
+    Script(PS1, kind="stand", device="gpu"),
+    Script(PS1_CPU, kind="stand", device="cpu"),
+)
+INGEST_MATRIX = (
+    Script(SH_INGEST, kind="ingest", device="cpu"),
+    Script(PS1_INGEST, kind="ingest", device="gpu"),
+    Script(PS1_INGEST_CPU, kind="ingest", device="cpu"),
+)
+MATRIX = STAND_MATRIX + INGEST_MATRIX
+
+MATRIX_PARAMS = tuple(pytest.param(s, id=s.path.name) for s in MATRIX)
+STAND_PARAMS = tuple(pytest.param(s, id=s.path.name) for s in STAND_MATRIX)
+INGEST_PARAMS = tuple(pytest.param(s, id=s.path.name) for s in INGEST_MATRIX)
+
+SH_SCRIPTS = (SH, SH_INGEST)
+POWERSHELL_SCRIPTS = (PS1, PS1_CPU, PS1_INGEST, PS1_INGEST_CPU)
+INGEST_PATHS = (SH_INGEST, PS1_INGEST, PS1_INGEST_CPU)
+
+# Подсказка стенда обязана звать ингест того же вида счёта: `demo-cpu.ps1` когда-то отсылал
+# к GPU-ингесту, то есть человек на машине без карты шёл запускать неподходящий скрипт.
+# Второй элемент - файл того же вида, но другого счёта: его в подсказке быть не должно.
+STAND_INGEST_COMPANION: dict[Path, tuple[str, str | None]] = {
+    SH: ("ingest.sh", None),
+    PS1: ("ingest.ps1", "ingest-cpu.ps1"),
+    PS1_CPU: ("ingest-cpu.ps1", "ingest.ps1"),
+}
 
 
 def _read(path: Path) -> str:
     if not path.is_file():
-        pytest.fail(f"нет файла {path.name}: Demo без него не запускается ни на одной системе")
+        pytest.fail(f"нет файла {path.name}: Demo без него не запускается на этой системе")
     return path.read_text(encoding="utf-8-sig")
 
 
@@ -120,14 +166,14 @@ def _compose_files_in(path: Path) -> set[str]:
 def _password(text: str) -> str:
     match = re.search(r"DEMO_PASSWORD\s*=\s*'([^']+)'", text)
     if match is None:
-        pytest.fail("DEMO_PASSWORD не найден: пароль базы обязан быть задан в обоих файлах")
+        pytest.fail("DEMO_PASSWORD не найден: пароль базы обязан быть задан в скрипте")
     return match.group(1)
 
 
 def _api_key(text: str) -> str:
     match = re.search(r"DEMO_API_KEY\s*=\s*'([^']+)'", text)
     if match is None:
-        pytest.fail("DEMO_API_KEY не найден: ключ API обязан быть задан в обоих файлах")
+        pytest.fail("DEMO_API_KEY не найден: ключ API обязан быть задан в скрипте")
     return match.group(1)
 
 
@@ -139,14 +185,37 @@ def _commands(text: str) -> set[str]:
     return found & COMMANDS
 
 
+def test_matrix_matches_the_declared_files() -> None:
+    """Набор скриптов на диске равен объявленной матрице - целиком, без лишних файлов.
+
+    Контракт положительный: «на диске ровно то, что описано». Появление `demo-gpu.sh`
+    (варианта, которого на Unix не должно быть) или пропажа `ingest-cpu.ps1` ломает не
+    текст, а матрицу, и тогда инструкция в документации начинает звать несуществующее
+    или умалчивать о существующем. Поэтому отказ называет и лишние, и недостающие файлы.
+    """
+    declared = {script.path.name for script in MATRIX}
+    on_disk = {
+        path.name
+        for path in DEMO_DIR.iterdir()
+        if path.is_file() and path.suffix in (".sh", ".ps1")
+    }
+    extra = sorted(on_disk - declared)
+    missing = sorted(declared - on_disk)
+    assert on_disk == declared, (
+        f"набор скриптов разошёлся с матрицей (ADR-065). Лишние: {extra}. "
+        f"Недостающие: {missing}. Матрица: Windows - demo.ps1/ingest.ps1 (видеокарта) и "
+        "demo-cpu.ps1/ingest-cpu.ps1 (процессор); Unix и macOS - demo.sh/ingest.sh "
+        "(процессор)."
+    )
+
+
 def test_gpu_layers_variable_is_single_named() -> None:
     """Имя переменной слоёв должно быть одно на все стенды.
 
     Два имени для одного параметра - это расхождение, которое обнаруживается только по
     скорости: переменная задана, а на стенд не действует.
     """
-    infra = DEMO_DIR.parent / "prototype" / "infra"
-    compose_files = sorted(infra.glob("compose*.yaml"))
+    compose_files = sorted(INFRA.glob("compose*.yaml"))
     assert compose_files, "не найдено ни одного compose-файла"
 
     legacy = "RUNTIME_LLM_GPU_LAYERS"
@@ -159,27 +228,32 @@ def test_gpu_layers_variable_is_single_named() -> None:
             "второе имя означает, что переменная молча не действует."
         )
 
-    for path in (SH, PS1, SH_CPU, PS1_CPU):
-        assert legacy not in _read(path), f"{path.name} ссылается на устаревшее {legacy}"
-
-
-def test_cpu_variant_zeroes_gpu_layers() -> None:
-    """Вариант на процессоре обязан сам ставить ноль слоёв.
-
-    Без видеокарты значение 99 бессмысленно. Рассчитывать на то, что llama.cpp сам
-    перейдёт на CPU, нельзя: молчаливое решение за ресурс выглядит как «тормозит».
-    """
-    for path in (SH_CPU, PS1_CPU):
-        code = "\n".join(_code_lines(path))
-        assert re.search(r"LLM_NGPU_LAYERS\s*=\s*['\"]?0", code), (
-            f"{path.name} обязан задавать LLM_NGPU_LAYERS=0: без видеокарты слои некуда "
-            "выгружать."
+    for script in MATRIX:
+        assert legacy not in _read(script.path), (
+            f"{script.path.name} ссылается на устаревшее {legacy}"
         )
-    for path in (SH, PS1):
-        code = "\n".join(_code_lines(path))
-        assert not re.search(r"LLM_NGPU_LAYERS\s*=\s*['\"]?0", code), (
-            f"{path.name} не должен обнулять слои: это вариант на видеокарте, где модель "
-            "должна выгружаться целиком."
+
+
+@pytest.mark.parametrize("script", MATRIX_PARAMS)
+def test_device_variant_sets_gpu_layers_explicitly(script: Script) -> None:
+    """Вид счёта задан явно: вариант на процессоре ставит ноль слоёв, вариант на GPU - нет.
+
+    Без видеокарты значение 99 бессмысленно, но рассчитывать на то, что llama.cpp сам
+    перейдёт на CPU, нельзя: молчаливое решение за ресурс выглядит как «тормозит».
+    Обратная ошибка не лучше: обнуление слоёв у варианта на видеокарте тихо уводит стенд
+    на процессор, и это видно только по времени ответа.
+    """
+    code = "\n".join(_code_lines(script.path))
+    zeroes = re.search(r"LLM_NGPU_LAYERS\s*=\s*['\"]?0", code)
+    if script.device == "cpu":
+        assert zeroes, (
+            f"{script.path.name} - вариант на процессоре и обязан задавать "
+            "LLM_NGPU_LAYERS=0: без видеокарты слои некуда выгружать."
+        )
+    else:
+        assert not zeroes, (
+            f"{script.path.name} - вариант на видеокарте и не должен обнулять слои: "
+            "иначе LLM молча считает на процессоре."
         )
 
 
@@ -195,9 +269,8 @@ def test_gpu_overlay_reserves_only_real_gpu_consumers() -> None:
     сервис по умолчанию считает на GPU». Отрицание «в оверлее не должно быть N сервисов»
     было бы замороженным списком и завтра начало бы врать.
     """
-    infra = DEMO_DIR.parent / "prototype" / "infra"
-    overlay = infra / GPU_OVERLAY
-    runtime = infra / "compose.runtime.yaml"
+    overlay = INFRA / GPU_OVERLAY
+    runtime = INFRA / BASE_OVERLAY
     for path in (overlay, runtime):
         if not path.is_file():
             pytest.fail(f"нет файла {path.name}")
@@ -355,37 +428,158 @@ def test_eval_runner_authenticates_with_the_same_key_as_the_contours() -> None:
         )
 
 
-@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), PAIRS)
-def test_commands_match(sh: Path, ps1: Path, expected_compose: set[str]) -> None:
-    sh_commands = _commands(_read(sh))
-    ps_commands = _commands(_read(ps1))
-    assert sh_commands, f"в {sh.name} не найдено ни одной команды"
-    assert ps_commands, f"в {ps1.name} не найдено ни одной команды"
-    assert sh_commands == ps_commands == STAND_COMMANDS, (
-        f"наборы команд разошлись: {sh.name}={sorted(sh_commands)}, "
-        f"{ps1.name}={sorted(ps_commands)}, ожидалось {sorted(STAND_COMMANDS)}"
+def test_credentials_are_the_same_in_every_script() -> None:
+    """Пароль базы и ключ API обязаны совпадать во всех шести файлах.
+
+    Том набора создан один раз, а ингест и стенд работают с ним по очереди: разные
+    значения означают, что один из скриптов не поднимет базу или получит 401. Проверка
+    идёт по множеству значений - «у всех одно», а не «у пары совпало»: пара исчезла
+    вместе с прежней матрицей (ADR-065).
+    """
+    passwords = {_password(_read(script.path)) for script in MATRIX}
+    assert len(passwords) == 1, (
+        f"пароль базы разный в файлах матрицы: {sorted(passwords)}. Том один, и стенд "
+        "поднимется только с тем значением, которое совпадает с базой."
+    )
+    keys = {_api_key(_read(script.path)) for script in MATRIX}
+    assert len(keys) == 1, (
+        f"ключ API разный в файлах матрицы: {sorted(keys)}: запросы будут уходить с ним и "
+        "получать 401."
     )
 
 
-@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), PAIRS)
-def test_credentials_match(sh: Path, ps1: Path, expected_compose: set[str]) -> None:
-    sh_text, ps_text = _read(sh), _read(ps1)
-    assert _password(sh_text) == _password(ps_text), (
-        "пароль базы в .sh и .ps1 разный. Том создан один раз, и стенд поднимется только "
-        "с тем значением, которое совпадает с базой."
-    )
-    assert _api_key(sh_text) == _api_key(ps_text), (
-        "ключ API в .sh и .ps1 разный: запросы будут уходить с ним и получать 401."
+@pytest.mark.parametrize("script", MATRIX_PARAMS)
+def test_compose_files_match_the_declared_set(script: Script) -> None:
+    """Каждый файл называет ровно те compose-файлы, что положены его режиму и виду счёта.
+
+    Набор выведен из `Script.compose`, то есть из тех же двух полей, что задают матрицу.
+    Лишний оверлей означает лишний шаг подъёма; пропавший - молча выключенное устройство
+    (оверлей GPU) или несуществующий сервис (оверлей ингеста).
+    """
+    found = _compose_files_in(script.path)
+    assert found == set(script.compose), (
+        f"{script.path.name} ссылается на {sorted(found)}, ожидалось "
+        f"{sorted(script.compose)}. Файл относится к режиму '{script.kind}' и варианту "
+        f"'{script.device}'."
     )
 
 
-@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), PAIRS)
-def test_compose_files_match(sh: Path, ps1: Path, expected_compose: set[str]) -> None:
-    for path in (sh, ps1):
-        found = _compose_files_in(path)
-        assert found == expected_compose, (
-            f"{path.name} ссылается на {sorted(found)}, ожидалось {sorted(expected_compose)}. "
-            "Набор compose-файлов должен быть одинаковым в парных скриптах."
+@pytest.mark.parametrize("script", STAND_PARAMS)
+def test_stand_scripts_expose_only_stand_commands(script: Script) -> None:
+    """Стенд умеет возить том, но не умеет грузить документы.
+
+    Набор проверяется поштучно, а не сравнением с соседним файлом: иначе можно добавить
+    команду во все файлы сразу и сохранить равенство между ними.
+    """
+    commands = _commands(_read(script.path))
+    assert commands == STAND_COMMANDS, (
+        f"{script.path.name}: команды {sorted(commands)}, ожидалось {sorted(STAND_COMMANDS)}"
+    )
+
+
+@pytest.mark.parametrize("script", INGEST_PARAMS)
+def test_ingest_scripts_expose_only_ingest_commands(script: Script) -> None:
+    """Скрипт ингеста не умеет ни выгружать, ни восстанавливать том.
+
+    Набор проверяется поштучно, а не сравнением с набором соседних скриптов: иначе
+    можно добавить команду в оба варианта и сохранить равенство.
+    """
+    commands = _commands(_read(script.path))
+    assert commands == INGEST_COMMANDS, (
+        f"{script.path.name}: команды {sorted(commands)}, ожидалось {sorted(INGEST_COMMANDS)}"
+    )
+
+
+@pytest.mark.parametrize("script", INGEST_PARAMS)
+def test_ingest_scripts_always_carry_the_ingest_overlay(script: Script) -> None:
+    """Оверлей ингеста подключается ВСЕГДА, а не по флагу.
+
+    Без него `ingestion-api` не существует и грузить нечем, то есть скрипт молча
+    ничего бы не сделал.
+    """
+    assert INGEST_OVERLAY in _compose_files_in(script.path), (
+        f"{script.path.name} не подкладывает {INGEST_OVERLAY}"
+    )
+    assert "--profile" in _read(script.path), (
+        f"{script.path.name} подкладывает оверлей, но не включает профиль `ingest`: "
+        "сервис останется выключенным."
+    )
+
+
+@pytest.mark.parametrize("script", INGEST_PARAMS)
+def test_ingest_scripts_name_the_container_they_upload_into(script: Script) -> None:
+    """Контейнер, в который идёт загрузка, назван в каждом варианте ингеста.
+
+    Загрузка идёт через `docker cp` в контейнер ингеста, и имя контейнера обязано быть
+    в коде каждого варианта: иначе один из них загрузит «куда-то».
+    """
+    assert "ohw-runtime-ingestion" in _read(script.path), (
+        f"{script.path.name} не знает контейнер ингеста, а грузить ему нужно именно туда"
+    )
+
+
+@pytest.mark.parametrize("script", MATRIX_PARAMS)
+def test_containers_and_volumes_match(script: Script) -> None:
+    """Контракт - правило по режиму, а не замороженный перечень имён.
+
+    Перечислять «правильные» имена контейнеров здесь нельзя: такой список завтра устареет и
+    начнёт врать. Правило: стенд знает Neo4j и не знает ингеста (ADR-058/065), ингест
+    знает оба.
+    """
+    text = _read(script.path)
+    containers = set(re.findall(r"ohw-runtime-[a-z0-9-]+", text))
+    assert "ohw-runtime-neo4j" in containers, (
+        f"{script.path.name} не обращается к neo4j по имени"
+    )
+    if script.kind == "stand":
+        assert "ohw-runtime-ingestion" not in containers, (
+            f"{script.path.name} знает контейнер ингеста. Ингест вынесен в отдельный скрипт "
+            "(ADR-065), и упоминание здесь означало бы, что разделение снова срослось."
+        )
+    else:
+        assert "ohw-runtime-ingestion" in containers, (
+            f"{script.path.name} не знает контейнер ингеста, а грузить ему нужно туда"
+        )
+
+    for suffix in NAMED_VOLUME_SUFFIXES:
+        assert suffix in text, f"{script.path.name} не упоминает том с суффиксом {suffix}"
+
+
+@pytest.mark.parametrize("script", STAND_PARAMS)
+def test_stand_hint_names_the_ingest_of_the_same_device(script: Script) -> None:
+    """Подсказка стенда обязана звать ингест ТОГО ЖЕ вида счёта.
+
+    Было: `demo-cpu.ps1` отсылал к `Demo/ingest.ps1`, то есть человек на машине без
+    видеокарты шёл запускать скрипт, который требует GPU. Стенд и ингест должны
+    называться одним вариантом, иначе матрица распадается на «что написали в справке» и
+    «что существует на самом деле».
+    """
+    expected, wrong = STAND_INGEST_COMPANION[script.path]
+    text = _read(script.path)
+    assert expected in text, (
+        f"{script.path.name} не называет ингест того же вида счёта ({expected}): стенд "
+        f"варианта '{script.device}' обязан отсылать к ингесту варианта '{script.device}'."
+    )
+    if wrong is not None:
+        assert wrong not in text, (
+            f"{script.path.name} называет {wrong} - ингест ДРУГОГО вида счёта. Стенд "
+            f"варианта '{script.device}' и наполнение обязаны совпадать по виду счёта."
+        )
+
+
+def test_no_script_switches_the_variant_by_flag() -> None:
+    """Флаг переключения вида счёта запрещён: два способа дают два разных скрипта.
+
+    `-Cpu` в `ingest.ps1` и отдельный `ingest-cpu.ps1` описывали бы одно и то же, и со
+    временем разошлись бы. Различие обязано быть именем файла - и это правило должно
+    держаться на всех шести файлах, а не только на shell-вариантах: прежний гард смотрел
+    только `.sh`, поэтому `-Cpu` в `ingest.ps1` прожил незамеченным.
+    """
+    for script in MATRIX:
+        code = "\n".join(_code_lines(script.path))
+        assert "--cpu" not in code and "-Cpu" not in code, (
+            f"{script.path.name} переключает вид счёта флагом. Отдельный файл понятнее: "
+            "две точки выбора означают два места, которые надо держать одинаковыми."
         )
 
 
@@ -403,11 +597,6 @@ def _powershell_is_runnable() -> bool:
     return shutil.which("powershell") is not None
 
 
-POWERSHELL_SCRIPTS = (PS1, PS1_CPU, PS1_INGEST)
-
-INGEST_SCRIPTS = (SH_INGEST, SH_INGEST_CPU, PS1_INGEST)
-
-
 def test_ingest_scripts_fail_on_lost_llm_layer() -> None:
     """Скрипт ингеста обязан падать, когда LLM-слой потерян, даже при `succeeded`.
 
@@ -419,7 +608,7 @@ def test_ingest_scripts_fail_on_lost_llm_layer() -> None:
     Проверка живёт в скрипте загрузки, а не в коде сервиса: сервис уже отдаёт `enrichment`
     в ответе джобы, и читать его обязан тот, кто загружает.
     """
-    for path in INGEST_SCRIPTS:
+    for path in INGEST_PATHS:
         code = _read(path)
         assert "lost_entities" in code and "lost_edges" in code, (
             f"{path.name} не читает потери LLM-слоя из ответа джобы"
@@ -437,7 +626,7 @@ def test_ingest_scripts_turn_loss_into_a_nonzero_exit() -> None:
     варианте отказа. Поэтому сравнение «больше нуля», иначе потеря станет предупреждением,
     которым можно пренебречь.
     """
-    for path in INGEST_SCRIPTS:
+    for path in INGEST_PATHS:
         code = _read(path)
         assert "if lost_entities or lost_edges:" in code or (
             "$lostEntities -or $lostEdges" in code
@@ -451,7 +640,7 @@ def test_ingest_scripts_say_reload_of_the_same_hash_will_not_help() -> None:
     (ADR-032). Без этой оговорки человек перезапустит загрузку, получит «уже загружен» и
     решит, что починил.
     """
-    for path in INGEST_SCRIPTS:
+    for path in INGEST_PATHS:
         assert "no-op" in _read(path), (
             f"{path.name} не предупреждает, что повторная загрузка того же content_hash - no-op"
         )
@@ -464,7 +653,7 @@ def test_ingest_scripts_keep_the_total_node_check() -> None:
     где LLM не сбой, а выключен. Убрать вторую, добавив первую, значит вернуть молчащий
     vector-only.
     """
-    for path in INGEST_SCRIPTS:
+    for path in INGEST_PATHS:
         assert "ContextNode" in _read(path), (
             f"{path.name} перестал проверять, что граф вообще наполнен"
         )
@@ -547,7 +736,7 @@ def _compose_arguments_seen_by_stub(script: Path, arguments: list[str]) -> list[
 
 
 @pytest.mark.skipif(not _sh_is_runnable(SH), reason="нет POSIX-оболочки")
-@pytest.mark.parametrize("script", (SH, SH_CPU, SH_INGEST, SH_INGEST_CPU))
+@pytest.mark.parametrize("script", SH_SCRIPTS)
 def test_sh_passes_the_up_subcommand_to_compose(script: Path) -> None:
     """Подкоманда `up` с её флагами обязана дойти до compose.
 
@@ -572,7 +761,7 @@ def test_sh_passes_the_up_subcommand_to_compose(script: Path) -> None:
 
 
 @pytest.mark.skipif(not _sh_is_runnable(SH), reason="нет POSIX-оболочки")
-@pytest.mark.parametrize("script", (SH, SH_CPU, SH_INGEST, SH_INGEST_CPU))
+@pytest.mark.parametrize("script", SH_SCRIPTS)
 def test_sh_passes_the_down_subcommand_to_compose(script: Path) -> None:
     """Подкоманда `down` обязана быть последним аргументом compose."""
     seen = _compose_arguments_seen_by_stub(script, ["down", "--set", "empty"])
@@ -581,89 +770,36 @@ def test_sh_passes_the_down_subcommand_to_compose(script: Path) -> None:
     )
 
 
-def test_ingest_cpu_variant_is_unix_only_and_says_where_windows_is_described() -> None:
-    """Варианта ингеста на процессоре для Windows нет намеренно, и это записано.
-
-    Решение владельца 2026-10-18: скрипт только для Unix и macOS, а для Windows в системные
-    требования. Гард сторожит именно границу: появившийся `ingest-cpu.ps1` сделал бы
-    требования неправдой, и человек пошёл бы искать описание того, что уже есть в коде.
-    """
-    if not SH_INGEST_CPU.is_file():
-        pytest.fail(f"нет файла {SH_INGEST_CPU.name}: вариант ингеста на процессоре обязателен")
-    text = _read(SH_INGEST_CPU)
-    assert "Linux" in text and "macOS" in text, (
-        f"{SH_INGEST_CPU.name} не называет, где он работает"
-    )
-    assert "prototype_requirements" in text, (
-        f"{SH_INGEST_CPU.name} не ссылается на документ с требованиями для Windows"
-    )
-    assert not PS1_INGEST_CPU.exists(), (
-        f"{PS1_INGEST_CPU.name} существует, но Windows-вариант описан в требованиях. "
-        "Либо удалите скрипт, либо перепишите требования - держать оба нельзя."
-    )
-
-
-def test_ingest_cpu_variant_does_not_grant_a_gpu() -> None:
-    """Вариант на процессоре не должен подкладывать оверлей видеокарты.
-
-    Иначе на машине без NVIDIA он не поднимется, а ошибка будет выглядеть как проблема
-    драйвера, а не как неверный скрипт.
-    """
-    assert GPU_OVERLAY not in _compose_files_in(SH_INGEST_CPU), (
-        f"{SH_INGEST_CPU.name} подкладывает {GPU_OVERLAY}: вариант на процессоре обходится "
-        "базовым файлом."
-    )
-    assert "compose.ingest.yaml" in _compose_files_in(SH_INGEST_CPU), (
-        f"{SH_INGEST_CPU.name} обязан подкладывать оверлей ингеста"
-    )
-
-
-def test_ingest_variants_do_not_reach_the_same_result_two_ways() -> None:
-    """Флаг переключения вида счита запрещён: два способа дают два разных скрипта.
-
-    `--cpu` в `ingest.sh` и отдельный `ingest-cpu.sh` описывали бы одно и то же, и со
-    временем разошлись бы. Различие обязано быть именем файла.
-    """
-    for path in (SH_INGEST, SH_CPU, SH):
-        code = "\n".join(_code_lines(path))
-        assert "--cpu" not in code and "-Cpu" not in code, (
-            f"{path.name} переключает вид вычислений флагом. Отдельный скрипт понятнее: "
-            "две точки выбора означают два места, которые надо держать одинаковыми."
-        )
-
-
 @pytest.mark.skipif(not _sh_is_runnable(SH), reason="нет POSIX-оболочки")
 def test_ingest_overlay_is_absent_from_stand_and_present_in_ingest() -> None:
-    """Оверлей ингеста есть в одном скрипте и отсутствует в другом (ADR-065).
+    """Оверлей ингеста есть в скрипте ингеста и отсутствует в стенде (ADR-065).
 
     Проверяется тем же прогоном с подменой `docker`, что и выше, потому что оверлей —
     это тоже поведение, а не текст.
     """
     stand = _compose_arguments_seen_by_stub(SH, ["up", "--set", "empty"])
-    assert not any("compose.ingest.yaml" in token for token in stand), (
+    assert not any(INGEST_OVERLAY in token for token in stand), (
         f"стенд подкладывает оверлей ингеста: {stand}"
     )
     ingest = _compose_arguments_seen_by_stub(SH_INGEST, ["up", "--set", "empty"])
-    assert any("compose.ingest.yaml" in token for token in ingest), (
+    assert any(INGEST_OVERLAY in token for token in ingest), (
         f"скрипт ингеста не подкладывает оверлей: {ingest}"
     )
     assert "ingest" in ingest, f"скрипт ингеста не включил профиль ingest: {ingest}"
-    """Различие между вариантами обязано быть ровно одно: оверлей GPU.
 
-    Если оверлей появится у CPU-варианта, тот начнёт требовать драйвер NVIDIA и не
-    поднимется там, где собирались считать на процессоре. Если исчезнет у GPU-варианта,
-    стенд потихоньку уйдёт на процессор - и отвечать будет в разы дольше, что выглядит
-    как «тормозит», а не как «не включилась видеокарта».
+
+@pytest.mark.skipif(not _sh_is_runnable(SH), reason="нет POSIX-оболочки")
+def test_unix_stand_and_ingest_run_on_the_processor() -> None:
+    """Shell-варианты не подкладывают оверлей видеокарты.
+
+    Иначе на машине без NVIDIA они не поднимутся, а ошибка будет выглядеть как проблема
+    драйвера, а не как неверный скрипт. Видеокарта на Unix и macOS не выдаётся намеренно
+    (ADR-065): вариант там один, и он считает на процессоре.
     """
-    for path in (SH_CPU, PS1_CPU):
-        assert GPU_OVERLAY not in _compose_files_in(path), (
-            f"{path.name} не должен подкладывать {GPU_OVERLAY}: вариант на процессоре "
-            "обходится базовым файлом."
-        )
-    for path in (SH, PS1):
-        assert GPU_OVERLAY in _compose_files_in(path), (
-            f"{path.name} обязан подкладывать {GPU_OVERLAY}, иначе LLM считает "
-            "на процессоре вместо видеокарты."
+    for script in (SH, SH_INGEST):
+        assert GPU_OVERLAY not in _compose_files_in(script), (
+            f"{script.name} подкладывает {GPU_OVERLAY}: на Unix и macOS вариант один, и он "
+            "считает на процессоре."
         )
 
 
@@ -674,8 +810,8 @@ def test_gpu_is_granted_only_by_overlay() -> None:
     снимают, потому что в базовом файле она пришла через YAML-merge. Значит бронь можно
     убрать только в базовом файле, и гард обязан следить именно за этим.
     """
-    runtime = DEMO_DIR.parent / "prototype" / "infra" / "compose.runtime.yaml"
-    overlay = DEMO_DIR.parent / "prototype" / "infra" / GPU_OVERLAY
+    runtime = INFRA / BASE_OVERLAY
+    overlay = INFRA / GPU_OVERLAY
     for path in (runtime, overlay):
         if not path.is_file():
             pytest.fail(f"нет файла {path.name}")
@@ -692,99 +828,10 @@ def test_gpu_is_granted_only_by_overlay() -> None:
     )
 
 
-@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), PAIRS)
-def test_containers_and_volumes_match(sh: Path, ps1: Path, expected_compose: set[str]) -> None:
-    """Контракт - равенство двух файлов, а не замороженный перечень имён.
-
-    Перечислять «правильные» имена контейнеров здесь нельзя: такой список завтра устареет и
-    начнёт врать, а расхождение между файлами - это то, что ломает работу по-настоящему.
-    """
-    sh_containers = set(re.findall(r"ohw-runtime-[a-z0-9-]+", _read(sh)))
-    ps_containers = set(re.findall(r"ohw-runtime-[a-z0-9-]+", _read(ps1)))
-    assert sh_containers == ps_containers, (
-        f"скрипты обращаются к разным контейнерам: {sh.name}={sorted(sh_containers)}, "
-        f"{ps1.name}={sorted(ps_containers)}. Один из них обратится не туда."
-    )
-# Контейнер, о котором стенд обязан знать по имени. ingestion-api в него не входит
-    # (ADR-058), и упоминать его в стенде после разделения (ADR-065) нечего.
-    assert "ohw-runtime-neo4j" in sh_containers, "ни один из скриптов не обращается к neo4j"
-    assert "ohw-runtime-ingestion" not in sh_containers, (
-        f"{sh.name} знает контейнер ингеста. Ингест вынесен в отдельный скрипт (ADR-065), "
-        "и упоминание здесь означало бы, что разделение снова срослось."
-    )
-
-    for suffix in NAMED_VOLUME_SUFFIXES:
-        for path in (sh, ps1):
-            assert suffix in _read(path), f"{path.name} не упоминает том с суффиксом {suffix}"
-
-
-INGEST_PAIR = pytest.param(
-    SH_INGEST, PS1_INGEST,
-    {
-        "compose.runtime.yaml",
-        "compose.ingest.yaml",
-        "compose.runtime-gpu.yaml",
-    },
-    id="ingest",
-)
-
-
-@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), (INGEST_PAIR,))
-def test_ingest_scripts_expose_only_ingest_commands(
-    sh: Path, ps1: Path, expected_compose: set[str]
-) -> None:
-    """Скрипт ингеста не умеет ни выгружать, ни восстанавливать том.
-
-    Набор проверяется поштучно, а не сравнением с набором соседних скриптов: иначе
-    можно добавить команду в оба варианта и сохранить равенство.
-    """
-    for path in (sh, ps1):
-        commands = _commands(_read(path))
-        assert commands == INGEST_COMMANDS, (
-            f"{path.name}: команды {sorted(commands)}, ожидалось {sorted(INGEST_COMMANDS)}"
-        )
-
-
-@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), (INGEST_PAIR,))
-def test_ingest_scripts_always_carry_the_ingest_overlay(
-    sh: Path, ps1: Path, expected_compose: set[str]
-) -> None:
-    """Оверлей ингеста подключается ВСЕГДА, а не по флагу.
-
-    Без него `ingestion-api` не существует и грузить нечем, то есть скрипт молча
-    ничего бы не сделал.
-    """
-    for path in (sh, ps1):
-        assert "compose.ingest.yaml" in _compose_files_in(path), (
-            f"{path.name} не подкладывает compose.ingest.yaml"
-        )
-        assert "--profile" in _read(path), (
-            f"{path.name} подкладывает оверлей, но не включает профиль `ingest`: "
-            "сервис останется выключенным."
-        )
-
-
-@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), (INGEST_PAIR,))
-def test_ingest_scripts_name_the_container_they_upload_into(
-    sh: Path, ps1: Path, expected_compose: set[str]
-) -> None:
-    """Контейнер, в который идёт загрузка, назван в обоих вариантах.
-
-    Загрузка идёт через `docker cp` в контейнер ингеста, и имя контейнера обязано быть
-    в коде обоих вариантов: иначе один из них загрузит «куда-то».
-    """
-    for path in (sh, ps1):
-        assert "ohw-runtime-ingestion" in _read(path), (
-            f"{path.name} не знает контейнер ингеста, а грузить ему нужно именно туда"
-        )
-
-
-@pytest.mark.parametrize(("sh", "ps1", "expected_compose"), PAIRS)
-def test_sh_has_no_bash_only_constructs(
-    sh: Path, ps1: Path, expected_compose: set[str]
-) -> None:
-    """`demo.sh` объявлен как POSIX sh, поэтому конструкций bash в нём быть не должно."""
-    text = _read(sh)
+@pytest.mark.parametrize("script", SH_SCRIPTS)
+def test_sh_has_no_bash_only_constructs(script: Path) -> None:
+    """Shell-варианты объявлены как POSIX sh, поэтому конструкций bash в них быть не должно."""
+    text = _read(script)
     for marker, why in (
         (r"\[\[", "двойные скобки [[ ]] — это bash, а не POSIX sh"),
         (r"\bfunction\s+\w+\s*\(\)", "объявление function — это bash"),
@@ -792,23 +839,24 @@ def test_sh_has_no_bash_only_constructs(
         (r"\$\{[A-Za-z_][A-Za-z0-9_]*\[[^}]*\]\}", "косвенное расширение ${a[b]} — это bash"),
         (r"<<-", "heredoc с табами — это bash"),
     ):
-        assert not re.search(marker, text), f"{why}: {marker} в {sh.name}"
+        assert not re.search(marker, text), f"{why}: {marker} в {script.name}"
 
-def test_reranker_overlay_is_reachable_from_every_demo_script() -> None:
-    """Реранкерный запуск обязан существовать во всех скриптах Демо.
+
+@pytest.mark.parametrize("script", STAND_PARAMS)
+def test_reranker_overlay_is_reachable_from_every_stand_script(script: Script) -> None:
+    """Реранкерный запуск обязан существовать во всех скриптах стенда.
 
     Отдельный запуск с реранкером — это оверлей плюс флаг. Если флаг есть хотя бы в
     одном скрипте, стенд ведёт себя по-разному в зависимости от того, на какой системе
     его запустили, и это обнаружится замерами, а не чтением.
     """
-    infra = DEMO_DIR.parent / "prototype" / "infra"
-    overlay = infra / RERANKER_OVERLAY
-    assert overlay.is_file(), f"нет оверлея {RERANKER_OVERLAY}: запуск с реранкером недостижим"
-    for path in (SH, PS1, SH_CPU, PS1_CPU):
-        assert RERANKER_OVERLAY in _read(path), (
-            f"{path.name} не умеет подключить {RERANKER_OVERLAY}: запуск с реранкером "
-            "существует только на части систем"
-        )
+    assert (INFRA / RERANKER_OVERLAY).is_file(), (
+        f"нет оверлея {RERANKER_OVERLAY}: запуск с реранкером недостижим"
+    )
+    assert RERANKER_OVERLAY in _read(script.path), (
+        f"{script.path.name} не умеет подключить {RERANKER_OVERLAY}: запуск с реранкером "
+        "существует только на части систем"
+    )
 
 
 def test_reranker_overlay_enables_slot_on_both_pipeline_services() -> None:
@@ -819,10 +867,7 @@ def test_reranker_overlay_enables_slot_on_both_pipeline_services() -> None:
     пайплайн с дефолтом профиля, то есть ось переранжирования оказалась бы выключенной при
     включённой настройке. Проверяется положительный инвариант: оба сервиса объявляют слот.
     """
-    import yaml
-
-    infra = DEMO_DIR.parent / "prototype" / "infra"
-    document = yaml.safe_load((infra / RERANKER_OVERLAY).read_text(encoding="utf-8"))
+    document = yaml.safe_load((INFRA / RERANKER_OVERLAY).read_text(encoding="utf-8"))
     services = document.get("services") or {}
     for service in ("query-api", "query-worker"):
         environment = (services.get(service) or {}).get("environment") or {}
@@ -842,8 +887,7 @@ def test_reranker_stays_off_in_plain_demo_run() -> None:
     запуске нет, - то есть поведение станет зависеть от того, переопределил ли кто-то
     переменную окружения.
     """
-    infra = DEMO_DIR.parent / "prototype" / "infra"
-    base = (infra / "compose.runtime.yaml").read_text(encoding="utf-8")
+    base = (INFRA / BASE_OVERLAY).read_text(encoding="utf-8")
     assert "bge_reranker" not in base, (
         "базовый runtime-контур включает bge_reranker: штатный запуск Демо начнёт "
         "обращаться к сервису реранкера, которого в нём нет"

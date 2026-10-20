@@ -1,9 +1,10 @@
 #!/usr/bin/env sh
-# Наполнение базы демо-стенда. Отдельный скрипт: стенду ингест не нужен.
+# Наполнение базы демо-стенда НА ПРОЦЕССОРЕ. Отдельный скрипт: стенду ингест не нужен.
 #
 # Стенд (Demo/demo.sh) поднимает девять сервисов и НЕ поднимает ingestion-api: запросы идут
 # и без него. Это разделение сделано в инфраструктуре (ADR-058) и оформлено здесь, в виде
-# отдельной пары скриптов. На Windows без bash: Demo/ingest.ps1
+# отдельной пары скриптов. На Windows без bash: Demo/ingest-cpu.ps1 (процессор) и
+# Demo/ingest.ps1 (видеокарта). Матрица целиком - ADR-065.
 #
 # Почему это не мешает: тома наборов общие. Ингест пишет в тот же Neo4j, который читает
 # стенд, и после остановки оверлея база остаётся на месте. Стенду нужен наполненный том,
@@ -20,8 +21,8 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INFRA_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../prototype/infra" 2>/dev/null && pwd || echo "")
 COMPOSE_RUNTIME="$INFRA_DIR/compose.runtime.yaml"
 COMPOSE_INGEST="$INFRA_DIR/compose.ingest.yaml"
-# Подкладывается ВСЕГДА: именно этот файл выдаёт контейнерам видеокарту.
-COMPOSE_GPU="$INFRA_DIR/compose.runtime-gpu.yaml"
+# Оверлей видеокарты НЕ подкладывается: на Unix и macOS вариант один и считает на
+# процессоре (ADR-065).
 
 NEO4J_CONTAINER='ohw-runtime-neo4j'
 INGEST_CONTAINER='ohw-runtime-ingestion'
@@ -47,11 +48,13 @@ Demo/demo.ps1 (Windows).
 `load` принимает и файл, и папку: в папке берутся `*.md` и `*.txt`, по алфавиту.
 
 Наполнение занимает часы, а не минуты: на одном документе измерено около 33 с на чанк
-(см. Demo/measured-load-time.md). Для быстрой демонстрации набор `ready` выгружается
-архивом и восстанавливается без ингеста: Demo/demo.sh export / restore.
+(см. Demo/measured-load-time.md), а извлечение на процессоре медленнее ещё. Для быстрой
+демонстрации набор `ready` выгружается архивом и восстанавливается без ингеста:
+Demo/demo.sh export / restore.
 
-Варианта на процессоре здесь нет намеренно: это другой скрипт, `ingest-cpu.sh`, чтобы один и
-тот же результат нельзя было получить двумя способами. Он тоже только для Linux и macOS.
+На Unix и macOS вариант один, и он считает на процессоре: видеокарты здесь не выдаёт ни
+этот скрипт, ни `demo.sh`. Скрипта `ingest-gpu.sh` нет намеренно - на Windows тот же
+выбор делают файлы `ingest.ps1` (видеокарта) и `ingest-cpu.ps1` (процессор).
 USAGE
 }
 
@@ -74,7 +77,7 @@ compose_cmd() {
     # Раскрытие `$_compose_tail` без кавычек здесь безопасно: токены compose
     # (подкоманда, `-d`, `--wait`, `--wait-timeout`, число) пробелов не содержат.
     _compose_tail=$*
-    set -- --project-directory "$INFRA_DIR" --file "$COMPOSE_RUNTIME" --file "$COMPOSE_GPU"
+    set -- --project-directory "$INFRA_DIR" --file "$COMPOSE_RUNTIME"
     set -- "$@" --file "$COMPOSE_INGEST" --profile ingest
     # shellcheck disable=SC2086
     docker compose "$@" $_compose_tail
@@ -92,7 +95,11 @@ set_common_env() {
     VOL="$SET"
     NEO4J_PASSWORD="$DEMO_PASSWORD"
     GRAPH_AUTH_API_KEY="$DEMO_API_KEY"
-    export VOL NEO4J_PASSWORD GRAPH_AUTH_API_KEY
+    # Ноль слоёв на GPU. Без видеокарты значение 99 бессмысленно, но полагаться на то,
+    # что llama.cpp сам перейдёт на процессор, нельзя: молчаливое решение за ресурс
+    # выглядело бы как «тормозит», а не как «считает не там». Ноль говорит прямо.
+    LLM_NGPU_LAYERS=0
+    export VOL NEO4J_PASSWORD GRAPH_AUTH_API_KEY LLM_NGPU_LAYERS
 }
 
 upload_doc() {

@@ -85,13 +85,16 @@
 Видеокарта в демо — **вариант, а не требование**. Стенд поднимается на машине без
 драйвера NVIDIA; модель тогда считает на процессоре.
 
-| | GPU-вариант | CPU-вариант |
-|---|---|---|
-| скрипты | `Demo/demo.sh`, `Demo/demo.ps1` | `Demo/demo-cpu.sh`, `Demo/demo-cpu.ps1` |
-| compose-файлы | `compose.runtime.yaml` + `compose.runtime-gpu.yaml` | только `compose.runtime.yaml` |
-| требуется | видеокарта NVIDIA | ничего, кроме Docker |
-| `LLM_NGPU_LAYERS` | 99 (вся модель) | 0 |
-| скорость ответа | минуты | десятки минут |
+| | Windows, видеокарта | Windows, процессор | Linux/macOS |
+|---|---|---|---|
+| скрипты | `Demo/demo.ps1` | `Demo/demo-cpu.ps1` | `Demo/demo.sh` |
+| compose-файлы | `compose.runtime.yaml` + `compose.runtime-gpu.yaml` | только `compose.runtime.yaml` | только `compose.runtime.yaml` |
+| требуется | видеокарта NVIDIA | ничего, кроме Docker | ничего, кроме Docker |
+| `LLM_NGPU_LAYERS` | 99 (вся модель) | 0 | 0 |
+| скорость ответа | минуты | десятки минут | десятки минут |
+
+На Linux и macOS поставляется только процессорный вариант: GPU-скрипта нет, кто хочет
+видеокарту — собирает команду compose сам (ADR-065, пересмотр 2026-10-19).
 
 **Бронь устройства выдаёт compose, поэтому она живёт в отдельном файле.** В
 `compose.runtime.yaml` её нет ни у одного сервиса: иначе на машине без NVIDIA Docker

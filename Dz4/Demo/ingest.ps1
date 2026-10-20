@@ -30,7 +30,6 @@ param(
     [ValidateSet('empty', 'ready')]
     [string]$Set = 'empty',
 
-    [switch]$Cpu,
     [int]$WaitTimeoutSec = 300,
     [string]$Path,
     [string]$Domain = 'it'
@@ -57,7 +56,7 @@ function Write-Usage {
 Наполнение базы демо-стенда. Стенд поднимается отдельно: Demo/demo.ps1 (Windows),
 Demo/demo.sh (Linux, macOS).
 
-    ingest.ps1 up      -Set empty|ready [-Cpu]
+    ingest.ps1 up      -Set empty|ready
     ingest.ps1 load    -Path ФАЙЛ|ПАПКА [-Domain it]
     ingest.ps1 down    -Set empty|ready
     ingest.ps1 status  -Set empty|ready
@@ -71,8 +70,9 @@ Demo/demo.sh (Linux, macOS).
 (см. Demo/measured-load-time.md). Для быстрой демонстрации набор `ready` выгружается
 архивом и восстанавливается без ингеста: Demo/demo.ps1 export / restore.
 
-Вариант `-Cpu` существует для машин без видеокарты. Извлечение на процессоре занимает
-часы на документ, поэтому для наполнения демо он практически непригоден.
+Этот файл запускает LLM на видеокарте. На машине без NVIDIA есть отдельный скрипт
+`Demo/ingest-cpu.ps1`: извлечение на процессоре занимает часы на документ, поэтому для
+наполнения демо он практически непригоден.
 '@ | Write-Host
 }
 
@@ -88,10 +88,8 @@ function Get-ComposeArguments {
     # Оверлей ингеста подключается ВСЕГДА: это и есть назначение скрипта. Без него
     # ingestion-api не существует и грузить нечем.
     $args = @('--project-directory', $infraDir, '--file', $composeRuntime)
-    if (-not $Cpu) {
-        # Порядок важен: оверлей GPU идёт сразу за базовым, иначе его `deploy` перепишется.
-        $args += @('--file', $composeGpu)
-    }
+    # Порядок важен: оверлей GPU идёт сразу за базовым, иначе его `deploy` перепишется.
+    $args += @('--file', $composeGpu)
     $args += @('--file', $composeIngest, '--profile', 'ingest')
     return $args
 }

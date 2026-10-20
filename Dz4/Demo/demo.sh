@@ -1,6 +1,10 @@
 #!/usr/bin/env sh
-# Демонстрационный стенд. Работает на Linux, macOS и в Windows через Git Bash / WSL.
-# Тот же сценарий на чистом Windows без bash: Demo/demo.ps1
+# Демонстрационный стенд НА ПРОЦЕССОРЕ. Работает на Linux, macOS и в Windows через
+# Git Bash / WSL.
+#
+# Видеокарты этот скрипт не выдаёт намеренно: на Unix и macOS вариант ровно один, и он
+# считает на процессоре. На чистом Windows вариантов два - Demo/demo.ps1 (видеокарта) и
+# Demo/demo-cpu.ps1 (процессор). Матрица целиком - ADR-065.
 #
 # Учётные данные заданы здесь и больше нигде. Пароль базы менять нельзя: том набора
 # `ready` создан один раз, Neo4j применяет NEO4J_AUTH только при первом старте, и смена
@@ -17,9 +21,6 @@ INFRA_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../prototype/infra" 2>/dev/null && pwd ||
 COMPOSE_RUNTIME="$INFRA_DIR/compose.runtime.yaml"
 # Оверлей реранкера: подключается только по флагу --with-reranker.
 COMPOSE_RERANKER="$INFRA_DIR/compose.runtime-reranker.yaml"
-# Подкладывается ВСЕГДА: именно этот файл выдаёт контейнерам видеокарту. Без него LLM
-# считает на процессоре - это не ошибка, а вариант `demo-cpu.sh`.
-COMPOSE_GPU="$INFRA_DIR/compose.runtime-gpu.yaml"
 FIXTURES_DIR="$SCRIPT_DIR/fixtures"
 
 NEO4J_CONTAINER='ohw-runtime-neo4j'
@@ -33,9 +34,10 @@ demo.sh up       [--set empty|ready]
     demo.sh export   [--set ready] [--out ФАЙЛ]
 
 ИНГЕСТА ЗДЕСЬ НЕТ, и это не ограничение, а решение (ADR-065): он в отдельном скрипте.
-Наполнение базы - `ingest.sh` (Linux, macOS) и `ingest.ps1` (Windows). Тома наборов
-общие, поэтому наполненная база остаётся после `ingest.sh down`, а готовый набор
-выгружается архивом и восстанавливается без ингеста: `demo.sh export` / `restore`.
+Наполнение базы - `ingest.sh` (Linux, macOS) и, на Windows, `ingest.ps1` (видеокарта)
+или `ingest-cpu.ps1` (процессор). Тома наборов общие, поэтому наполненная база
+остаётся после `ingest.sh down`, а готовый набор выгружается архивом и восстанавливается
+без ингеста: `demo.sh export` / `restore`.
 
 Наборы:
   empty - пустая система, тома создаются заново.
@@ -63,8 +65,7 @@ compose_cmd() {
     # Раскрытие `$_compose_tail` без кавычек здесь безопасно: токены compose (подкоманда,
     # `-d`, `--wait`, `--wait-timeout`, число) пробелов не содержат.
     _compose_tail=$*
-    # Порядок важен: оверлей GPU идёт сразу за базовым, иначе его `deploy` перепишется.
-    set -- --project-directory "$INFRA_DIR" --file "$COMPOSE_RUNTIME" --file "$COMPOSE_GPU"
+    set -- --project-directory "$INFRA_DIR" --file "$COMPOSE_RUNTIME"
     # Оверлей реранкера идёт после остальных: он переопределяет слот `RERANKER`.
     if [ "${WITH_RERANKER:-0}" = "1" ]; then
         set -- "$@" --file "$COMPOSE_RERANKER"
@@ -77,7 +78,11 @@ set_common_env() {
     VOL="$SET"
     NEO4J_PASSWORD="$DEMO_PASSWORD"
     GRAPH_AUTH_API_KEY="$DEMO_API_KEY"
-    export VOL NEO4J_PASSWORD GRAPH_AUTH_API_KEY
+    # Ноль слоёв на GPU. Без видеокарты значение 99 бессмысленно, но полагаться на то,
+    # что llama.cpp сам перейдёт на процессор, нельзя: молчаливое решение за ресурс
+    # выглядело бы как «тормозит», а не как «считает не там». Ноль говорит прямо.
+    LLM_NGPU_LAYERS=0
+    export VOL NEO4J_PASSWORD GRAPH_AUTH_API_KEY LLM_NGPU_LAYERS
 }
 
 cmd_up() {
