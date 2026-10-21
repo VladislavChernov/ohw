@@ -462,6 +462,22 @@ def _render_effective_depth(done: dict[str, Any]) -> None:
         )
 
 
+def _render_graph_contribution(done: dict[str, Any]) -> None:
+    """Показать, что граф добавил сверх векторной оси, в чанках (ADR-072, ADR-075)."""
+    summary = graph_contribution(done)
+    st.markdown("**Вклад графа**")
+    for line in graph_contribution_lines(summary):
+        st.write(line)
+    st.caption(
+        "graph-only — чанки, которые граф добавил сверх векторной оси. "
+        "«Материализовано» — текст чанка был собран; «доехало в контекст» — он реально "
+        "вошёл в промпт модели. Это разные утверждения."
+    )
+    rows = graph_only_chunk_rows(summary)
+    if rows:
+        st.dataframe(rows, hide_index=True)
+
+
 def _render_queries(client: DemoClient, domains: list[str]) -> None:
     st.subheader("Запросы к графу")
     domain = st.selectbox("Домен вопроса", options=domains, key="query_domain")
@@ -526,6 +542,7 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                     st.markdown("### Ответ")
                     st.markdown(str(done.get("text", "")) or "_пусто_")
                     _render_effective_depth(done)
+                    _render_graph_contribution(done)
                     caption = f"task {task_id} · e2e {elapsed:.1f} с"
                     retrieval_s = done.get("retrieval_time_s")
                     total_s = done.get("total_time_s")
@@ -546,17 +563,15 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                     st.caption(caption)
                     sources = done.get("sources")
                     if isinstance(sources, list) and sources:
-                        rows: list[dict[str, Any]] = []
-                        for source in sources:
-                            if isinstance(source, dict):
-                                rows.append(
-                                    {
-                                        "source_url": str(source.get("source_url", "")),
-                                        "relevance": source.get("relevance", ""),
-                                    }
-                                )
+                        rows = source_rows(sources)
                         st.markdown("**Источники**")
                         st.dataframe(rows, hide_index=True)
+                        st.caption(
+                            "axis: «вектор» — документ найден векторной осью, «граф» — "
+                            "графом. graph_knowledge: «граф дал текст» — чанк вошёл в "
+                            "контекст; «граф дошёл, текст не взят» — связь есть, текст не "
+                            "попал; «граф не знает источник» — документ не был в графе."
+                        )
                 elif error is not None:
                     for record in st.session_state["demo_query_history"]:
                         if record["task_id"] == task_id:
@@ -594,6 +609,194 @@ def _render_queries(client: DemoClient, domains: list[str]) -> None:
                         if record["task_id"] == task_id:
                             record["status"] = "cancelled"
                     st.success(f"Задача {task_id} отменена.")
+
+
+GRAPH_AXIS_LABELS = {
+    "vector": "вектор",
+    "graph": "граф",
+}
+
+GRAPH_KNOWLEDGE_LABELS = {
+    "contributed": "граф дал текст",
+    "reachable_unused": "граф дошёл, текст не взят",
+    "blind": "граф не знает источник",
+    "unknown": "не измерено",
+}
+
+
+def graph_contribution(done: dict[str, Any]) -> dict[str, Any]:
+    """Сводка вклада графа на уровне чанков (ADR-072, ADR-075).
+
+    Документная `necessity` здесь не ответ: при одном размеченном документе она равна
+    нулю по построению. Три состояния обязаны остаться разными: граф выключен,
+    измеренный ноль и «не измерено». Кэш-попадание не отдаёт `effective_retrieval`, и
+    превращать его в ноль нельзя.
+    """
+    effective = done.get("effective_retrieval")
+    if not isinstance(effective, dict):
+        return {"status": "unknown", "reason": "в ответе нет effective_retrieval"}
+    if not effective.get("graph_search_enabled"):
+        return {"status": "disabled", "reason": "graph_search_enabled=false"}
+
+    raw_ids = effective.get("graph_only_chunk_ids")
+    if not isinstance(raw_ids, list):
+        return {"status": "unknown", "reason": "graph_only_chunk_ids отсутствует"}
+    chunk_ids = [str(chunk_id) for chunk_id in raw_ids if chunk_id is not None]
+
+    raw_materialized = effective.get("graph_materialized_chunk_ids")
+    materialized: set[str] | None = None
+    if isinstance(raw_materialized, list):
+        materialized = {str(chunk_id) for chunk_id in raw_materialized if chunk_id is not None}
+
+    source_map: dict[str, str] = {}
+    raw_sources = effective.get("graph_only_chunk_sources")
+    if isinstance(raw_sources, dict):
+        source_map = {
+            str(chunk_id): str(source_url)
+            for chunk_id, source_url in raw_sources.items()
+            if chunk_id is not None and source_url
+        }
+
+    context = done.get("context")
+    raw_body_ids = context.get("body_chunk_ids") if isinstance(context, dict) else None
+    body_ids: set[str] | None = None
+    if isinstance(raw_body_ids, list):
+        body_ids = {str(chunk_id) for chunk_id in raw_body_ids if chunk_id is not None}
+
+    rows: list[dict[str, Any]] = []
+    adr_graph_only = 0
+    adr_in_context = 0
+    for chunk_id in chunk_ids:
+        source_url = source_map.get(chunk_id, "")
+        in_context = chunk_id in body_ids if body_ids is not None else None
+        is_adr = source_url.replace("\\", "/").rsplit("/", 1)[-1] == "05_adr_log.md"
+        if is_adr:
+            adr_graph_only += 1
+            if in_context is True:
+                adr_in_context += 1
+        rows.append(
+            {
+                "chunk_id": chunk_id,
+                "source_url": source_url,
+                "in_context": in_context,
+                "materialized": (
+                    chunk_id in materialized if materialized is not None else None
+                ),
+            }
+        )
+
+    in_context_count = (
+        sum(1 for row in rows if row["in_context"] is True) if body_ids is not None else None
+    )
+    materialized_count = (
+        sum(1 for row in rows if row["materialized"] is True)
+        if materialized is not None
+        else None
+    )
+    return {
+        "status": "measured",
+        "graph_only": len(rows),
+        "materialized": materialized_count,
+        "in_context": in_context_count,
+        "adr_graph_only": adr_graph_only,
+        "adr_in_context": adr_in_context if body_ids is not None else None,
+        "rows": rows,
+    }
+
+
+def graph_contribution_lines(summary: dict[str, Any]) -> list[str]:
+    """Тексты блока «Вклад графа» — без Streamlit, чтобы их можно было проверить."""
+    status = summary.get("status")
+    if status == "disabled":
+        return [
+            "Граф выключен: вклад не измерялся. Это не нулевой вклад, а выключенная ось."
+        ]
+    if status != "measured":
+        return ["Вклад графа не измерен: в ответе нет данных для этой проверки."]
+
+    graph_only = summary.get("graph_only")
+    if not isinstance(graph_only, int) or graph_only == 0:
+        return ["Граф не добавил ни одного чанка сверх векторной оси."]
+
+    lines = [f"Граф добавил чанков сверх векторной оси: {graph_only}."]
+    materialized = summary.get("materialized")
+    if isinstance(materialized, int):
+        lines.append(f"Материализовано в текст: {materialized}.")
+    in_context = summary.get("in_context")
+    if isinstance(in_context, int):
+        if in_context == 0:
+            lines.append("Ни один из них не доехал в текст, который получила модель.")
+        else:
+            lines.append(f"Доехало в контекст: {in_context}.")
+    else:
+        lines.append("Попадание в контекст: не измерено.")
+
+    adr_graph_only = summary.get("adr_graph_only")
+    adr_in_context = summary.get("adr_in_context")
+    if isinstance(adr_graph_only, int) and adr_graph_only:
+        if isinstance(adr_in_context, int):
+            lines.append(
+                f"Из 05_adr_log.md: {adr_graph_only}; доехало в контекст: {adr_in_context}."
+            )
+        else:
+            lines.append(f"Из 05_adr_log.md: {adr_graph_only}; попадание в контекст: не измерено.")
+    return lines
+
+
+def graph_only_chunk_rows(summary: dict[str, Any]) -> list[dict[str, str]]:
+    """Строки таблицы graph-only чанков. Пустой список — только когда измерять нечего."""
+    if summary.get("status") != "measured":
+        return []
+    raw_rows = summary.get("rows")
+    if not isinstance(raw_rows, list):
+        return []
+    rows: list[dict[str, str]] = []
+    for row in raw_rows:
+        if not isinstance(row, dict):
+            continue
+        materialized = row.get("materialized")
+        in_context = row.get("in_context")
+        if materialized is False:
+            fate = "не материализован"
+        elif in_context is True:
+            fate = "да"
+        elif in_context is False:
+            fate = "нет"
+        else:
+            fate = "не измерено"
+        rows.append(
+            {
+                "chunk_id": str(row.get("chunk_id", "")),
+                "source_url": str(row.get("source_url", "")) or "источник не указан",
+                "в контексте": fate,
+            }
+        )
+    return rows
+
+
+def source_rows(sources: Any) -> list[dict[str, str]]:
+    """Таблица источников с осью и меткой вклада графа (ADR-075)."""
+    if not isinstance(sources, list):
+        return []
+    rows: list[dict[str, str]] = []
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        axis_raw = str(source.get("axis") or "")
+        knowledge_raw = str(source.get("graph_knowledge") or "")
+        relevance = source.get("relevance")
+        rows.append(
+            {
+                "source_url": str(source.get("source_url", "")),
+                "axis": GRAPH_AXIS_LABELS.get(axis_raw, axis_raw or "—"),
+                "graph_knowledge": (
+                    GRAPH_KNOWLEDGE_LABELS.get(knowledge_raw, knowledge_raw or "не измерено")
+                ),
+                "relevance": "—" if relevance is None else str(relevance),
+                "graph_knowledge_reason": str(source.get("graph_knowledge_reason") or "—"),
+            }
+        )
+    return rows
 
 
 def maintenance_preview(domain: str) -> str:

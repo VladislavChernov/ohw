@@ -92,9 +92,11 @@ areas:
     # `test_demo_ui_maintenance.py` здесь же: он сторожит ту же разметку, что и новый гард.
     match:
       - "Dz4/prototype/src/graphrag_proto/demo_ui/*"
+      - "Dz4/prototype/tests/test_demo_ui_graph_contribution.py"
       - "Dz4/prototype/tests/test_demo_ui_ingest_loss.py"
       - "Dz4/prototype/tests/test_demo_ui_maintenance.py"
     tests:
+      - "tests/test_demo_ui_graph_contribution.py"
       - "tests/test_demo_ui_ingest_loss.py"
       - "tests/test_demo_ui_maintenance.py"
 
