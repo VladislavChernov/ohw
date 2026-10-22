@@ -145,6 +145,7 @@ services:
       ALLOW_WRITES: ${ALLOW_WRITES:-off}
       GUARDRAILS_BASE_URL: http://wall:8000
       INPUT_GUARD_NAME: input-defense
+      WRITE_GUARD_NAME: write-defense
       OUTPUT_GUARD_NAME: output-privacy
       GUARDRAILS_TIMEOUT: 60s
       BLOCK_ON_FAIL: ${BLOCK_ON_FAIL:-on}

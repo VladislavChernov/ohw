@@ -17,8 +17,9 @@ payload'ов без оркестратора), `scripts/augustus/augustus.config
 ## What changes
 
 - Python-раннер `attack-runner/` с CLI и YAML-сценариями.
-- 16 сценариев, покрывающих все 10 категорий OWASP LLM 2026 (см.
-  `reports/red-team.md`).
+- 16 базовых сценариев, покрывающих все 10 категорий OWASP LLM 2026 (см.
+  `reports/red-team.md`), плюс два Poison RAG сценария из
+  `docs/STANDARD_SECURITY_CHECKS.md`.
 - Матрица целей: preset 1–4 (`agent:8080`), preset 5
   (`agent-fixed:8080`).
 - `n>=3` по умолчанию; агрегация по каждому сценарию × пресету.
@@ -58,7 +59,7 @@ payload'ов без оркестратора), `scripts/augustus/augustus.config
 
 - `attack-runner` запускается одной командой и делает прогон по выбранному
   пресету.
-- 16 сценариев, `n>=3`, сырые ответы сохранены.
+- 16 базовых сценариев + Poison RAG, `n>=3`, сырые ответы сохранены.
 - `manifest.json` содержит модель, commit, образы, preset, время.
 - Вердикты не путают `unknown`/`error` с `blocked`.
 - БД восстанавливается после деструктивных сценариев.

@@ -22,12 +22,16 @@ user ──> agent (Go, :8080)
            │
            ├──> Ollama (:11434) /api/chat
            │
+           ├──> wall (:8000) POST /guards/write-defense/validate
+           │       └── DetectPromptInjection (только не-SELECT при ALLOW_WRITES=on)
+           │
            └──> wall (:8000) POST /guards/output-privacy/validate
                    └── DetectPII
 ```
 
 - В пресетах 3/4 (`EXTERNAL_GUARD=on`) агент обязан проверить вход **до**
-  вызова LLM и выход **после** него.
+  вызова LLM и выход **после** него; при `ALLOW_WRITES=on` ещё и write-SQL
+  **до** выполнения в БД.
 - Стена не знает про Ollama и не зависит от неё.
 - При недоступности стены агент работает **fail-closed**: `503`, запрос не
   уходит в LLM. Это важнее «доступности любой ценой» для ИБ-стенда.
@@ -37,26 +41,41 @@ user ──> agent (Go, :8080)
 ## Guards (`security-wall/config.py`)
 
 ```python
+import guardrails_ai.detect_pii.main as _detect_pii
 from guardrails import Guard, OnFailAction
 from guardrails_ai.detect_prompt_injection import DetectPromptInjection
 from guardrails_ai.detect_pii import DetectPII
+
+_shared_analyzer = _detect_pii.AnalyzerEngine()
+_shared_anonymizer = _detect_pii.AnonymizerEngine()
+_detect_pii.AnalyzerEngine = lambda: _shared_analyzer
+_detect_pii.AnonymizerEngine = lambda: _shared_anonymizer
 
 input_guard = Guard(id="input-defense", name="input-defense").use(
     DetectPromptInjection(check_vector=False, on_fail=OnFailAction.NOOP),
 )
 
+write_guard = Guard(id="write-defense", name="write-defense").use(
+    DetectPromptInjection(check_vector=False, on_fail=OnFailAction.NOOP),
+)
+
 output_guard = Guard(id="output-privacy", name="output-privacy").use(
     DetectPII(
-        pii_entities=["EMAIL_ADDRESS", "PHONE_NUMBER", "PERSON", "CREDIT_CARD"],
+        pii_entities=["EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD"],
         on_fail=OnFailAction.FIX,
     ),
 )
 ```
 
-Имена guards (`input-defense`, `output-privacy`) — контракт с агентом; они
-задаются также в env агента (`INPUT_GUARD_NAME`, `OUTPUT_GUARD_NAME`), чтобы
-переименование не требовало пересборки Go-кода. В URL используется `id`
-guard'а; `Guard` без явного `id` получает UUID, поэтому `id` задаётся явно.
+Общие `AnalyzerEngine`/`AnonymizerEngine` обязательны для стенда: без них
+`DetectPII` создаёт engine на каждый вызов, теряет ~300 MiB и упирается в
+лимит памяти. `PERSON` исключён: spaCy NER на именах в этом стенде уходит в
+>500% CPU. Имена guards (`input-defense`, `write-defense`, `output-privacy`) —
+контракт с агентом; они задаются также в env агента (`INPUT_GUARD_NAME`,
+`WRITE_GUARD_NAME`, `OUTPUT_GUARD_NAME`), чтобы переименование не требовало
+пересборки Go-кода.
+В URL используется `id` guard'а; `Guard` без явного `id` получает UUID,
+поэтому `id` задаётся явно.
 
 `on_fail=NOOP` для входа означает: сервер отвечает HTTP 200 с
 `validationPassed=false`, а агент сам применяет fail-closed политику (`403`).
@@ -123,6 +142,18 @@ HTTP-ошибки.
    LLM не вызывать.
 4. HTTP 5xx, таймаут, ошибка соединения → `503` (fail-closed), LLM не вызывать.
 
+### Запись
+
+1. При `EXTERNAL_GUARD=on` и `ALLOW_WRITES=on` перед выполнением SQL, который
+   не является одиночным `SELECT`, агент вызывает
+   `POST .../guards/{WRITE_GUARD_NAME}/validate` с `{"llm_output": stmt}`.
+2. HTTP 2xx + `validationPassed=true` → выполнить SQL через `QueryDB`.
+3. HTTP 2xx + `validationPassed=false` или HTTP 4xx → `403`, SQL не выполнять.
+4. HTTP 5xx/таймаут → `503` (fail-closed), SQL не выполнять.
+
+Проверяется вся SQL-строка как текст: встроенный `DetectPromptInjection` ловит
+явные инструкции, но не заменяет SQL-парсер, read-only и allow-list таблиц.
+
 ### Выход
 
 1. `POST .../guards/{OUTPUT_GUARD_NAME}/validate` с `{"llm_output": reply}`.
@@ -142,6 +173,7 @@ HTTP-ошибки.
 | `EXTERNAL_GUARD` | `off` | Включает внешний контур |
 | `GUARDRAILS_BASE_URL` | `http://wall:8000` | Адрес Guardrails Server |
 | `INPUT_GUARD_NAME` | `input-defense` | Guard для входа |
+| `WRITE_GUARD_NAME` | `write-defense` | Guard для write-SQL перед выполнением |
 | `OUTPUT_GUARD_NAME` | `output-privacy` | Guard для выхода |
 | `GUARDRAILS_TIMEOUT` | `60s` | Таймаут HTTP-запроса к стене (PII cold start ~36s) |
 | `BLOCK_ON_FAIL` | `on` | Блокировать при нарушении выхода |
@@ -208,13 +240,16 @@ CMD ["uvicorn", "--factory", "guardrails_api.app:create_app", \
 ## Definition of done
 
 - [x] Решение о Guardrails Server зафиксировано (этот файл).
-- [ ] `security-wall/config.py` с `input-defense` и `output-privacy`.
+- [ ] `security-wall/config.py` с `input-defense`, `write-defense` и
+      `output-privacy`.
 - [ ] `security-wall/requirements.txt` с проверенными версиями; `pip check` чистый.
 - [ ] `security-wall/Dockerfile` собирается; entry point существует.
 - [ ] `docker compose up -d wall`; `GET /health-check` → 200.
-- [ ] `GET /guards` содержит оба guard.
+- [ ] `GET /guards` содержит все три guard'а.
 - [ ] Агент с `EXTERNAL_GUARD=on` проверяет вход и выход; легитимный `/chat` проходит.
 - [ ] Инъекция `Ignore previous instructions` → `403` (или `validationPassed=false`).
+- [ ] При `ALLOW_WRITES=on` write-SQL с инъекцией → `403`, БД не изменена;
+      обычный `INSERT` проходит.
 - [ ] PII на выходе → маскируется или блокируется согласно `BLOCK_ON_FAIL`.
 - [ ] Стена остановлена → агент возвращает `503`, LLM не вызывается.
 - [ ] Пресеты 3/4 не ломаются; тест контракта зелёный.

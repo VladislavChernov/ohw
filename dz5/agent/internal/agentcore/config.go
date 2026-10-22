@@ -17,6 +17,7 @@ type Config struct {
 
 	WallBaseURL     string
 	InputGuardName  string
+	WriteGuardName  string
 	OutputGuardName string
 	WallTimeout     time.Duration
 	BlockOnFail     bool
@@ -73,6 +74,7 @@ func LoadConfig() Config {
 		DBPath:              getenv("DB_PATH", "/data/db.sqlite"),
 		WallBaseURL:         strings.TrimRight(getenv("GUARDRAILS_BASE_URL", "http://wall:8000"), "/"),
 		InputGuardName:      getenv("INPUT_GUARD_NAME", "input-defense"),
+		WriteGuardName:      getenv("WRITE_GUARD_NAME", "write-defense"),
 		OutputGuardName:     getenv("OUTPUT_GUARD_NAME", "output-privacy"),
 		WallTimeout:         durationEnv("GUARDRAILS_TIMEOUT", 60*time.Second),
 		BlockOnFail:         !strings.EqualFold(getenv("BLOCK_ON_FAIL", "on"), "off"),

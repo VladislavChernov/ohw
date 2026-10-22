@@ -28,6 +28,16 @@ input_guard = Guard(id="input-defense", name="input-defense").use(
     )
 )
 
+# Write guard: the same built-in detector, applied to SQL that the agent is
+# about to execute with ALLOW_WRITES=on. The agent calls this only for
+# non-SELECT statements and blocks the write on validationPassed=false.
+write_guard = Guard(id="write-defense", name="write-defense").use(
+    DetectPromptInjection(
+        check_vector=False,
+        on_fail=OnFailAction.NOOP,
+    )
+)
+
 # Output guard: PII is fixed (masked) by the validator. The agent compares
 # validatedOutput with rawLlmOutput to detect that a redaction happened.
 # PERSON is intentionally excluded: Presidio/spaCy NER on user/name-heavy text

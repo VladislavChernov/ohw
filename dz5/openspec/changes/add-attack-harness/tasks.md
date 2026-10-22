@@ -20,7 +20,8 @@
 
 ## 3. Сценарии
 
-- [ ] 16 YAML-сценариев (LLM01–LLM10), ids стабильны.
+- [ ] 16 базовых YAML-сценариев (LLM01–LLM10), ids стабильны.
+- [ ] Poison RAG: `llm01-poison-rag-read` и `llm03-poison-rag-ddl`.
 - [ ] Для destructive — `setup`/`teardown` и `db-restore`.
 - [ ] Валидация схемы сценариев (pydantic/dataclass).
 - [ ] Проверить, что все 10 категорий покрыты.

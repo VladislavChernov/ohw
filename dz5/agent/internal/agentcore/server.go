@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -26,6 +27,8 @@ type ChatResponse struct {
 	Preset    int        `json:"preset"`
 	ToolCalls []ToolCall `json:"tool_calls"`
 }
+
+var errWriteBlocked = errors.New("blocked by external wall (write)")
 
 type Mode struct {
 	AgentName       string
@@ -136,6 +139,15 @@ func (e *Engine) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	reply, calls, err := e.runToolLoop(r.Context(), req.Message, settings)
 	if err != nil {
+		switch {
+		case errors.Is(err, errWriteBlocked):
+			e.writeBlocked(w, "write", WallResult{})
+			return
+		case errors.Is(err, ErrWallUnavailable):
+			e.log.Printf("write wall error: %v", err)
+			e.writeWallError(w, err)
+			return
+		}
 		e.log.Printf("chat error: %v", err)
 		http.Error(w, "llm/db error: "+err.Error(), http.StatusBadGateway)
 		return
@@ -202,6 +214,9 @@ func (e *Engine) runToolLoop(ctx context.Context, userMsg string, settings Runti
 				return follow, calls, nil
 			}
 		}
+		if err := e.validateWrite(ctx, stmt, settings); err != nil {
+			return "", calls, err
+		}
 		result, n, err := QueryDB(ctx, e.db, stmt, settings.AllowWrites)
 		if err != nil {
 			follow, ferr := e.llm.Chat(ctx, prompt,
@@ -220,6 +235,23 @@ func (e *Engine) runToolLoop(ctx context.Context, userMsg string, settings Runti
 		reply = follow
 	}
 	return reply, calls, nil
+}
+
+func (e *Engine) validateWrite(ctx context.Context, stmt string, settings RuntimeSettings) error {
+	if !settings.ExternalGuard || !settings.AllowWrites || IsReadQuery(stmt) {
+		return nil
+	}
+	if e.wall == nil {
+		return fmt.Errorf("%w: wall client is not configured", ErrWallUnavailable)
+	}
+	res, err := e.wall.Validate(ctx, e.cfg.WriteGuardName, stmt)
+	if err != nil {
+		return err
+	}
+	if !res.Passed {
+		return errWriteBlocked
+	}
+	return nil
 }
 
 func (e *Engine) StatusPayload(settings RuntimeSettings) map[string]interface{} {
