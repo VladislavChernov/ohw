@@ -246,6 +246,58 @@ services:
   # The agent validates prompts/replies via /guards/{id}/validate; it never
   # proxies LLM traffic through the wall and does not depend on wall uptime for
   # its own liveness (fail-closed on /chat when EXTERNAL_GUARD=on).
+  # One-shot OWASP LLM attack runner. It writes reports/<run-id>/ and can
+  # restore the SQLite volume before/after destructive scenarios.
+  attack-runner:
+    build:
+      context: ..
+      dockerfile: attack-runner/Dockerfile
+    image: dz5-attack-runner:local
+    container_name: dz5-attack-runner
+    environment:
+      TARGET: ${TARGET:-http://agent:8080}
+      PRESET: ${PRESET:-1}
+      RUNS: ${RUNS:-3}
+      AUGUSTUS: ${AUGUSTUS:-off}
+      GIT_COMMIT: ${GIT_COMMIT:-unknown}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-huihui_ai/llama3.2-abliterate:3b}
+      ALLOW_WRITES: ${ALLOW_WRITES:-off}
+      BUILTIN_GUARDS: ${BUILTIN_GUARDS:-off}
+      EXTERNAL_GUARD: ${EXTERNAL_GUARD:-off}
+      BLOCK_ON_FAIL: ${BLOCK_ON_FAIL:-on}
+      ALLOW_RUNTIME_TOGGLES: ${ALLOW_RUNTIME_TOGGLES:-on}
+      DB_PATH: /data/db.sqlite
+      DB_SCRIPTS_DIR: /db
+      REPORTS_DIR: /reports
+      TIMEOUT: ${TIMEOUT:-60}
+    volumes:
+      - ../reports:/reports
+      - db_data:/data
+      - ./db:/db:ro
+    depends_on:
+      agent:
+        condition: service_healthy
+      agent-fixed:
+        condition: service_healthy
+      wall:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    restart: "no"
+    profiles: ["attack"]
+    networks:
+      - ib-network
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        exec python -m attack_runner run
+        --target "$${TARGET}"
+        --preset "$${PRESET}"
+        --runs "$${RUNS}"
+        --augustus "$${AUGUSTUS}"
+
   wall:
     build:
       context: ../security-wall

@@ -413,6 +413,8 @@ Content-Type: application/json
 | `validatedOutput` | Текст после возможного исправления/маскировки. |
 | `rawLlmOutput` | Исходный текст до исправления. |
 
+Полный словарь терминов и аббревиатур: `docs/GLOSSARY.md`.
+
 ## 12. Где смотреть дальше
 
 - `docs/GUARDRAILS_ARCHITECTURE.md` — сравнение подходов и пример интеграции.

@@ -27,6 +27,15 @@ abliterated-моделью и SQLite-БД; защиты включаются п�
 - **`scripts/`** — security-тесты и конфиг Augustus.
 - **`reports/`** — артефакты прогонов (целевая структура — `reports/<run-id>/`).
 
+## Документация
+
+- `docs/GLOSSARY.md` — единый словарь терминов и аббревиатур: PII, RAG, DDL,
+  LLM01–LLM10, P1–P5, вердикты, артефакты прогонов.
+- `docs/STANDARD_SECURITY_CHECKS.md` — проверки S01–S15 и Poison RAG.
+- `docs/GUARDRAILS_CONFIG.md` — guards, `on_fail`, `BLOCK_ON_FAIL`, лимиты.
+- `docs/GUARDRAILS_ARCHITECTURE.md` — архитектура и сравнение подходов.
+- `docs/llm_security_architecture.md` — обзор классов атак и защиты LLM.
+
 ## Чем `agent` отличается от `agent-fixed`
 
 | | `agent` (baseline) | `agent-fixed` (preset 5) |
