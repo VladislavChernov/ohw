@@ -1,0 +1,4 @@
+guardrails-api==0.4.4
+guardrails-ai==0.11.0
+guardrails-ai-detect-prompt-injection==0.2.1a1
+guardrails-ai-detect-pii==0.1.1a1

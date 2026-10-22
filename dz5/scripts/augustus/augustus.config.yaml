@@ -1,0 +1,23 @@
+# Augustus configuration for dz5 security stand
+# Apache 2.0 License
+# https://github.com/praetorian-inc/augustus
+
+# Target: local Ollama instance (what the agent talks to)
+provider: ollama.Ollama
+model: huihui_ai/llama3.2-abliterate:3b
+base_url: http://localhost:11434
+
+# Probes mapped from garak categories to Augustus probe names
+# See: `augustus list` for full probe catalog
+probes:
+  - injection.InstructionOverride
+  - jailbreak.DAN
+  - encoding.Base64
+  - pii.PIIExfiltration
+
+output:
+  format: json
+  path: reports/<run-id>/augustus/
+
+# Optional: target the Go agent directly via REST endpoint
+# augustus scan rest.REST --endpoint http://localhost:8080/chat --probe injection.InstructionOverride
