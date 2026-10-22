@@ -281,7 +281,7 @@ pre { background:#f5f5f5; padding:0.5rem; border-radius:4px; overflow-x:auto; }
 </div>
 <div class="card">
 <h3>Ask the agent</h3>
-<textarea id="chatInput" rows="4" style="width:100%; box-sizing:border-box;" placeholder="Type your question..."></textarea>
+<textarea id="chatInput" rows="4" style="width:100%; box-sizing:border-box;" placeholder="Type your question... (Enter to send, Shift+Enter for newline)"></textarea>
 <button id="sendBtn">Send</button>
 <div id="chatOutput" style="margin-top:0.5rem; white-space:pre-wrap; background:#fafafa; padding:0.5rem; border-radius:4px; min-height:1rem;"></div>
 </div>
@@ -357,17 +357,35 @@ const update = async () => {
 };
 ['builtinGuard', 'externalGuard', 'allowWrites'].forEach(id => $(id).addEventListener('change', update));
 $('agentSelect').addEventListener('change', refresh);
-$('sendBtn').onclick = async () => {
-  const msg = $('chatInput').value;
-  const r = await fetch(api('/chat'), {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({message: msg})
-  });
-  const j = await parse(r);
-  $('chatOutput').textContent = JSON.stringify(j, null, 2);
+const sendChat = async () => {
+  const msg = $('chatInput').value.trim();
+  if (!msg) return;
   $('chatInput').value = '';
+  $('sendBtn').disabled = true;
+  $('chatOutput').textContent = 'You:\n' + msg + '\n\nAgent:\nThinking...';
+  try {
+    const r = await fetch(api('/chat'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg})
+    });
+    const j = await parse(r);
+    const answer = j.reply || j.error || JSON.stringify(j, null, 2);
+    $('chatOutput').textContent = 'You:\n' + msg + '\n\nAgent:\n' + answer;
+  } catch (e) {
+    $('chatOutput').textContent = 'You:\n' + msg + '\n\nAgent:\nRequest failed: ' + e;
+  } finally {
+    $('sendBtn').disabled = false;
+    $('chatInput').focus();
+  }
 };
+$('sendBtn').onclick = sendChat;
+$('chatInput').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    sendChat();
+  }
+});
 loadAgents();
 </script>
 </body>

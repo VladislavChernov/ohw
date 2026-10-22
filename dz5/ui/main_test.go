@@ -91,6 +91,23 @@ func TestProxyUnknownAgent(t *testing.T) {
 	}
 }
 
+func TestUIChatKeyboardAndTranscript(t *testing.T) {
+	reg := Registry{"baseline": {ID: "baseline", BaseURL: "http://agent:8080"}}
+	rr := httptest.NewRecorder()
+	NewServer(reg, nil).Mux().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/", nil))
+	body := rr.Body.String()
+	for _, want := range []string{
+		"e.key === 'Enter' && !e.shiftKey",
+		"You:\\n",
+		"Agent:\\n",
+		"const answer = j.reply || j.error",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("UI missing %q", want)
+		}
+	}
+}
+
 func TestUIAndHealth(t *testing.T) {
 	reg := Registry{"baseline": {ID: "baseline", BaseURL: "http://agent:8080"}}
 	h := NewServer(reg, nil).Mux()
