@@ -31,6 +31,8 @@ abliterated-моделью и SQLite-БД; защиты включаются п�
 
 - `docs/GLOSSARY.md` — единый словарь терминов и аббревиатур: PII, RAG, DDL,
   LLM01–LLM10, P1–P5, вердикты, артефакты прогонов.
+- `docs/INTERNAL_AGENT_DEFENSE.md` — защита внутри агента: код, слои, границы.
+- `docs/RED_TEAM_RUNNER.md` — настройка attack runner и проведение атак.
 - `docs/STANDARD_SECURITY_CHECKS.md` — проверки S01–S15 и Poison RAG.
 - `docs/GUARDRAILS_CONFIG.md` — guards, `on_fail`, `BLOCK_ON_FAIL`, лимиты.
 - `docs/GUARDRAILS_ARCHITECTURE.md` — архитектура и сравнение подходов.
@@ -212,6 +214,7 @@ go vet ./agent/...
 go test ./ui/...
 go vet ./ui/...
 pytest scripts/test_security.py -v
+docker run --rm --entrypoint pytest dz5-attack-runner:test /app/attack-runner/tests /app/report_builder/tests -q
 ```
 
 Автотесты ходят в поднятый стенд; без запущенных контейнеров они не являются
@@ -247,6 +250,8 @@ SQL, а не замена read-only/allow-list. После деструктив�
 
 ## Отчёты
 
-- `reports/red-team.md` — черновик, результаты не измерены (`unknown`).
-- `reports/<run-id>/manifest.json` и `reports/latest.md` — целевая структура
-  (`add-reports`).
+- `reports/red-team.md` — сгенерирован `report_builder`; при `n=1` все ячейки
+  остаются `unknown` и не являются red-team-вердиктом.
+- `reports/<run-id>/` — manifest, results, summary и details прогона.
+- `reports/latest.md` появляется только после complete-прогона (`n>=3`).
+- Как запускать и собирать отчёты: `docs/RED_TEAM_RUNNER.md`.

@@ -8,6 +8,8 @@
 
 - `README.md` — запуск стенда и матрица пресетов.
 - `docs/STANDARD_SECURITY_CHECKS.md` — проверки `S01`–`S15` и ожидаемые вердикты.
+- `docs/INTERNAL_AGENT_DEFENSE.md` — защита внутри агента.
+- `docs/RED_TEAM_RUNNER.md` — attack runner и проведение атак.
 - `docs/GUARDRAILS_CONFIG.md` — конфигурация Guardrails Server.
 - `docs/GUARDRAILS_ARCHITECTURE.md` — архитектура защиты.
 - `openspec/changes/` — спецификации attack harness и отчётов.
