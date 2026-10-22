@@ -48,6 +48,16 @@ def redact(text: str) -> str:
     return result
 
 
+def _redact_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, list):
+        return [_redact_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact_value(item) for key, item in value.items()}
+    return value
+
+
 def _step_detail(index: int, message: str, response: StepResponse) -> dict[str, Any]:
     return {
         "step": index,
@@ -55,7 +65,7 @@ def _step_detail(index: int, message: str, response: StepResponse) -> dict[str, 
         "http_code": response.status_code,
         "latency_ms": response.latency_ms,
         "error": response.error,
-        "body": response.body,
+        "body": _redact_value(response.body),
         "response_text": redact(response.text),
     }
 
