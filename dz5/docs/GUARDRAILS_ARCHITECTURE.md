@@ -16,8 +16,8 @@
   * **Связанность кода:** При добавлении нового валидатора (например, проверки токсичности) вам нужно заново переписывать код эндпоинтов, менять Pydantic-схемы запросов FastAPI и пересобирать контейнер.
   * **Повторное изобретение велосипеда:** Вы тратите время на написание обёток, обработку HTTP-ошибок, сериализацию ответов и логирование, хотя сам фреймворк уже умеет это делать из коробки.
 
-### Подход Б: Использование Guardrails Server + SDK (Индустриальный стандарт с версии 0.5.0)
-Начиная с мажорных обновлений, Guardrails AI умеет запускаться как **готовый стандартизированный микросервис** (Guardrails Server). Вы не пишете код на FastAPI вручную. Вы просто описываете правила защиты (Guards) в конфигурационном файле `config.py`, а сам контейнер запускается встроенной командой `guardrails start`. Для общения с этим контейнером ИИ-Агент использует легковесный клиент `guardrails-ai-sdk` (или общие HTTP-структуры, если агент написан на другом языке, например Go).
+### Подход Б: Использование Guardrails Server + SDK (Индустриальный стандарт)
+Guardrails AI умеет запускаться как **готовый стандартизированный микросервис** (Guardrails Server, пакет `guardrails-api`). Вы не пишете код на FastAPI вручную. Вы просто описываете правила защиты (Guards) в конфигурационном файле `config.py`, а сам контейнер запускается официальным сервером. Для общения с этим контейнером ИИ-Агент использует HTTP REST (SDK есть только для Python/TypeScript; Go-агент использует стандартный JSON).
 
 * **Плюсы:**
   * **Разделение ответственности:** Изменения в политиках безопасности (например, замена порогового значения чувствительности PII) происходят в конфигурационном файле шлюза и вообще не требуют изменения кода ИИ-Агента.
@@ -31,7 +31,7 @@
 | Критерий | Самописный REST-контейнер (FastAPI) | Guardrails Server + SDK (Рекомендуемый) |
 | :--- | :--- | :--- |
 | **Добавление нового валидатора** | Править код `main.py`, менять логику эндпоинта. | Добавить строчку в файл конфигурации `config.py`. |
-| **Код на стороне ИИ-Агента** | Ручные вызовы через `httpx.post()` с парсингом JSON. | Вызов стандартизированного эндпоинта `/v1/guards/.../payload`. |
+| **Код на стороне ИИ-Агента** | Ручные вызовы через `httpx.post()` с парсингом JSON. | Вызов стандартизированного эндпоинта `POST /guards/{id}/validate`. |
 | **Валидация JSON-схем (LLM10)** | Нужно писать ручную логику валидации внутри роута. | Из коробки через интеграцию с `Guard.for_pydantic()`. |
 | **Промышленная эксплуатация** | Требует ручной настройки воркеров Uvicorn и логирования. | Готов к Production, имеет стандартизированный API. |
 
@@ -45,20 +45,27 @@
 Вместо написания роутов FastAPI, мы просто регистрируем наши «рельсы» защиты в специальном файле конфигурации, который сервер считает автоматически:
 
 ```python
-from guardrails import Guard
+from guardrails import Guard, OnFailAction
 from guardrails_ai.detect_prompt_injection import DetectPromptInjection
 from guardrails_ai.detect_pii import DetectPII
 
-# Описываем и регистрируем входной контур защиты (Защита от Prompt Injection)
-input_guard = Guard(name="input_defense_stream").use(
-    DetectPromptInjection(on_fail="exception")
+# Входной контур: prompt injection / jailbreak. id обязателен: сервер
+# использует его в URL /guards/{id}/validate.
+input_guard = Guard(id="input-defense", name="input-defense").use(
+    DetectPromptInjection(check_vector=False, on_fail=OnFailAction.NOOP)
 )
 
-# Описываем выходной контур защиты (Защита от утечки персональных данных PII)
-output_guard = Guard(name="output_privacy_stream").use(
-    DetectPII(pii_entities=["EMAIL_ADDRESS", "PHONE_NUMBER"], on_fail="fix")
+# Выходной контур: PII (email, телефон, имя, карта).
+output_guard = Guard(id="output-privacy", name="output-privacy").use(
+    DetectPII(
+        pii_entities=["EMAIL_ADDRESS", "PHONE_NUMBER", "PERSON", "CREDIT_CARD"],
+        on_fail=OnFailAction.FIX,
+    )
 )
 ```
+
+Имена `input-defense` и `output-privacy` — контракт с агентом; они же
+задаются в `INPUT_GUARD_NAME` / `OUTPUT_GUARD_NAME`.
 
 ### Шаг 2. Обновление `security-wall/Dockerfile`
 Мы меняем команду запуска. Вместо ручного запуска uvicorn файла `main.py`, мы запускаем официальный сервер Guardrails, передавая ему наш файл конфигурации:
@@ -70,15 +77,19 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential gcc && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt && pip check
 
-# Скачиваем веса моделей на этапе сборки
+# Скачиваем веса моделей на этапе сборки (если нужно для выбранных валидаторов)
 RUN python -m guardrails_ai.detect_pii.post_install
 
-COPY . .
+COPY config.py .
+ENV GR_CONFIG_FILE_PATH=/app/config.py
+ENV GUARDRAILS_LOG_LEVEL=INFO
 
-# Запускаем стандартизированный сервер Guardrails AI на порту 8000
-CMD ["guardrails", "start", "--config", "config.py", "--host", "0.0.0.0", "--port", "8000"]
+# CLI `guardrails-api start` не принимает --host и слушает 127.0.0.1.
+# Официальный factory-запуск даёт 0.0.0.0 и доступен из других контейнеров.
+CMD ["uvicorn", "--factory", "guardrails_api.app:create_app", \
+     "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 ### Шаг 3. Интеграция с ИИ-Агентом на Go (Golang)
@@ -108,9 +119,8 @@ type GuardrailsRequest struct {
 }
 
 type GuardrailsResponse struct {
-	ValidationPassed bool   `json:"validation_passed"`
-	ValidatedOutput  string `json:"validated_output"`
-	Error            string `json:"error,omitempty"`
+	ValidationPassed bool   `json:"validationPassed"`
+	ValidatedOutput  string `json:"validatedOutput"`
 }
 
 // Универсальная функция обращения к шлюзу из Go
@@ -124,7 +134,7 @@ func validateTextViaGuardrails(guardName string, textToValidate string) (*Guardr
 	}
 
 	// Формируем стандартизированный URL Guardrails Server для валидации
-	url := fmt.Sprintf("%s/v1/guards/%s/payload", GuardrailsServerURL, guardName)
+	url := fmt.Sprintf("%s/guards/%s/validate", GuardrailsServerURL, guardName)
 	
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
@@ -160,7 +170,7 @@ func handleUserPrompt(userPrompt string) (string, error) {
 	log.Printf("[Go Agent] Получен запрос от пользователя: %s", userPrompt)
 
 	// --- ЭШЕЛОН 1: Внешняя защита (Prompt Injection) ---
-	inputVerdict, err := validateTextViaGuardrails("input_defense_stream", userPrompt)
+	inputVerdict, err := validateTextViaGuardrails("input-defense", userPrompt)
 	if err != nil {
 		return "", fmt.Errorf("security wall internal error: %w", err)
 	}
@@ -182,6 +192,12 @@ func main() {
 	fmt.Println("Ответ системы для пользователя:", response)
 }
 ```
+
+Важно: для выходного guard'а `on_fail=fix` (PII) сервер возвращает
+`validationPassed=true` и уже замаскированный `validatedOutput`. Поэтому
+агент дополнительно сравнивает `validatedOutput` с `rawLlmOutput`; различие
+означает срабатывание PII-фильтра. HTTP 4xx — это policy block, а 5xx/таймаут
+— fail-closed `503`, а не «пропустить без проверки».
 
 ---
 

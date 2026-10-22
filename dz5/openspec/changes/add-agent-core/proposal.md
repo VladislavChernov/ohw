@@ -19,8 +19,9 @@
 - Tool `db_query`: SQLite read-only по умолчанию (allow-list `SELECT`);
   режим tool-abuse (`ALLOW_WRITES=1`) — только для демонстрации LLM03.
 - 4 конфигурации через env `BUILTIN_GUARDS=on|off` (системный промпт:
-  минимальный vs защищённый) и `EXTERNAL_GUARD=on|off` (прямо в LLM vs через
-  `security-wall`, веха 4). Пресет 1 (Baseline, оба `off`) — первый шаг.
+  минимальный vs защищённый) и `EXTERNAL_GUARD=on|off` (прямо в LLM vs
+  `POST /guards/{name}/validate` в Guardrails Server, веха 4). Пресет 1
+  (Baseline, оба `off`) — первый шаг.
 - Сервис `agent` в `infra/compose.yaml`: контейнер `dz5-agent`, порт `8080`,
   зависимость от `ollama`, L3-лимиты памяти, restart-policy.
 - Промпты: `prompts/minimal.txt` (пресеты 1/3), `prompts/guarded.txt`

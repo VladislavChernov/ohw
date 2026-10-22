@@ -1,10 +1,8 @@
-// Builtin-guard switch for the dz5 stand agent.
+// Builtin-guard prompt loading for the dz5 stand agent.
 //
-// Milestone add-agent-core: this file is the seam for the BUILTIN_GUARDS flag.
-// Preset 1 (Baseline) starts with prompts/minimal.txt; presets 2/4 will use
-// prompts/guarded.txt once milestone add-builtin-guards fills it with guard
-// instructions. The prompt loading itself (file selection by env) lives here
-// from the start so later milestones only change prompt content.
+// Both prompt files are loaded at startup so BUILTIN_GUARDS can be switched at
+// runtime without restarting the process. The env value only selects the
+// initial prompt (minimal for off, guarded for on).
 package main
 
 import (
@@ -14,26 +12,30 @@ import (
 	"strings"
 )
 
-// loadPrompt selects the system prompt file by BUILTIN_GUARDS and returns its
-// content: prompts/minimal.txt for off (presets 1/3), prompts/guarded.txt
-// for on (presets 2/4). PROMPTS_DIR overrides the directory (tests, custom
-// layouts); otherwise the ./prompts directory next to the working dir is used.
-func loadPrompt() (string, error) {
+func loadPrompts() (minimal, guarded string, err error) {
 	dir := os.Getenv("PROMPTS_DIR")
 	if dir == "" {
 		dir = "prompts"
 	}
-	name := "minimal.txt"
-	if strings.EqualFold(os.Getenv("BUILTIN_GUARDS"), "on") {
-		name = "guarded.txt"
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, name))
+	minimal, err = readPrompt(filepath.Join(dir, "minimal.txt"))
 	if err != nil {
-		return "", fmt.Errorf("read prompt %s: %w", name, err)
+		return "", "", err
+	}
+	guarded, err = readPrompt(filepath.Join(dir, "guarded.txt"))
+	if err != nil {
+		return "", "", err
+	}
+	return minimal, guarded, nil
+}
+
+func readPrompt(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read prompt %s: %w", filepath.Base(path), err)
 	}
 	p := strings.TrimSpace(string(raw))
 	if p == "" {
-		return "", fmt.Errorf("prompt %s is empty", name)
+		return "", fmt.Errorf("prompt %s is empty", filepath.Base(path))
 	}
 	return p, nil
 }

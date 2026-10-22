@@ -17,7 +17,7 @@ probes:
 
 output:
   format: json
-  path: reports/augustus/
+  path: reports/<run-id>/augustus/
 
 # Optional: target the Go agent directly via REST endpoint
 # augustus scan rest.REST --endpoint http://localhost:8080/chat --probe injection.InstructionOverride

@@ -9,11 +9,11 @@ name: dz5-stand
 # Services are added incrementally as their bundles land:
 #   - ollama  (abliterated GPU target)    add-abliterated-llm  ✅
 #   - db      (SQLite + seed/restore)    add-db-service       ✅
-#   - agent   (drujensen @ pinned tag)   add-agent-core
-#   - wall    (Guardrails AI proxy)      add-external-defense
+#   - agent   (Go stand agent)           add-agent-core
+#   - wall    (Guardrails Server)        add-external-defense
 #   - attacker(augustus + runner)        add-attack-harness
 #
-# Two protection presets are toggled by env (see project.md):
+# Protection presets 1-4 are toggled by env (see project.md):
 #   BUILTIN_GUARDS, EXTERNAL_GUARD. L3 (resource limits) is always on.
 
 services:
@@ -120,9 +120,9 @@ services:
       - ib-network
     profiles: ["tools"]
 
-  # Stand Go agent (preset 1 / Baseline). Reads the SQLite DB through db_query,
-  # talks to the local abliterated LLM target. Protection presets switch via
-  # BUILTIN_GUARDS (prompt) and EXTERNAL_GUARD (direct vs wall, milestone 4);
+  # Stand Go agent (presets 1-4). Reads the SQLite DB through db_query, talks
+  # to the local abliterated LLM target. Protection presets switch via
+  # BUILTIN_GUARDS (prompt) and EXTERNAL_GUARD (Guardrails Server validation);
   # ALLOW_WRITES=1 opens the LLM03 tool-abuse demo (state via db-restore).
   agent:
     build:
@@ -140,8 +140,16 @@ services:
       BUILTIN_GUARDS: ${BUILTIN_GUARDS:-off}
       EXTERNAL_GUARD: ${EXTERNAL_GUARD:-off}
       ALLOW_WRITES: ${ALLOW_WRITES:-off}
+      GUARDRAILS_BASE_URL: http://wall:8000
+      INPUT_GUARD_NAME: input-defense
+      OUTPUT_GUARD_NAME: output-privacy
+      GUARDRAILS_TIMEOUT: 60s
+      BLOCK_ON_FAIL: ${BLOCK_ON_FAIL:-on}
+      ALLOW_RUNTIME_TOGGLES: ${ALLOW_RUNTIME_TOGGLES:-off}
+      AUDIT_LOG: /audit/audit.jsonl
     volumes:
       - db_data:/data:ro
+      - audit_data:/audit
     depends_on:
       ollama:
         condition: service_healthy
@@ -199,9 +207,10 @@ services:
     networks:
       - ib-network
 
-  # External LLM guard proxy (FastAPI + Guardrails AI) between agent and Ollama.
-  # Receives Ollama-compatible POST /api/chat, validates input/output, blocks on
-  # violation. Agent reaches it via EXTERNAL_GUARD=on + WALL_BASE_URL.
+  # External LLM guard service (Guardrails Server) between agent and Ollama.
+  # The agent validates prompts/replies via /guards/{id}/validate; it never
+  # proxies LLM traffic through the wall and does not depend on wall uptime for
+  # its own liveness (fail-closed on /chat when EXTERNAL_GUARD=on).
   wall:
     build:
       context: ../security-wall
@@ -209,28 +218,26 @@ services:
     image: dz5-security-wall:local
     container_name: dz5-wall
     ports:
-      # Published for local debugging; services reach it as wall:5000.
-      - "5000:5000"
+      # Published for local debugging; services reach it as wall:8000.
+      - "8000:8000"
     environment:
-      OLLAMA_BASE_URL: http://ollama:11434
-      SCAN_INPUT: "on"
-      SCAN_OUTPUT: "on"
-      BLOCK_ON_FAIL: "on"
-    depends_on:
-      ollama:
-        condition: service_healthy
-    # L3 (Unbounded Consumption / LLM06): cap memory.
+      GR_CONFIG_FILE_PATH: /app/config.py
+      SELF_ENDPOINT: http://wall:8000
+      GUARDRAILS_LOG_LEVEL: INFO
+    # L3 (Unbounded Consumption / LLM06): cap memory. Presidio/spaCy with a
+    # shared AnalyzerEngine/Anonymizer uses ~0.9-1.3 GiB RSS; 2048M keeps
+    # headroom. Without the shared engine DetectPII leaked ~300 MiB per call.
     deploy:
       resources:
         limits:
-          memory: 1024M
+          memory: 2048M
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:5000/healthz || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health-check', timeout=3)\""]
       interval: 10s
       timeout: 3s
       retries: 12
-      start_period: 30s
+      start_period: 60s
     networks:
       - ib-network
 
@@ -241,3 +248,4 @@ networks:
 volumes:
   ollama_data:
   db_data:
+  audit_data:

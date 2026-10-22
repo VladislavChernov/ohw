@@ -1,8 +1,9 @@
 // Ollama chat client for the dz5 stand agent.
 //
-// Talks to POST <base>/api/chat (the local abliterated target, or the
-// security-wall proxy in later milestones). No external SDK: plain net/http
-// with a bounded timeout so a runaway generation cannot hang the agent.
+// Talks to POST <base>/api/chat (the local abliterated target). The external
+// Guardrails Server is a validation sidecar, not an LLM proxy. No external SDK:
+// plain net/http with a bounded timeout so a runaway generation cannot hang the
+// agent.
 package main
 
 import (

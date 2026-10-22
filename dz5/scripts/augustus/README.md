@@ -42,17 +42,19 @@ augustus scan rest.REST \
 ## Covered OWASP LLM Top 10 2026 classes
 
 - LLM01: Prompt Injection
-- LLM02: Insecure Output Handling
-- LLM03: Training Data Poisoning (via tool abuse)
-- LLM04: Model Denial of Service
-- LLM05: Supply Chain Attacks
-- LLM06: Sensitive Information Disclosure (PII)
-- LLM07: Insecure Plugin Design
-- LLM08: Excessive Agency
-- LLM09: Overreliance
-- LLM10: Model Theft
+- LLM02: Sensitive Information Disclosure
+- LLM03: Excessive Agency
+- LLM04: Supply Chain
+- LLM05: Data and Model Poisoning
+- LLM06: Unbounded Consumption
+- LLM07: Misinformation
+- LLM08: Hidden Context Exposure
+- LLM09: Vector and Embedding Weaknesses
+- LLM10: Improper Output Handling
 
-Results are written to `reports/augustus/`.
+Результаты Augustus сохраняются в `reports/<run-id>/augustus/` и не подменяют
+собственные evaluator'ы раннера. Отсутствие бинарника/провайдера — `skipped`,
+а не доказательство защиты.
 
 ## License
 

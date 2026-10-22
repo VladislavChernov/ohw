@@ -1,4 +1,4 @@
-# Go agent for the dz5 security stand (preset 1 / Baseline).
+# Go agent for the dz5 security stand (runtime presets 1-4).
 #
 # Multi-stage: golang toolchain builds a static binary (CGO off, modernc
 # sqlite is pure Go), then a minimal alpine runtime ships only the binary and

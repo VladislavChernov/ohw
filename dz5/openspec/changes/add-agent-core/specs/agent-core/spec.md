@@ -2,9 +2,9 @@
 
 ## ADDED Requirements
 
-### Requirement: Protective mechanisms for Fixed Agent (preset 5)
+### Requirement: Data model
 
-Protective mechanisms `User` and `PersonalData` in SQLite DB are described via DDL in
+Модели `User` и `PersonalData` в SQLite DB описаны через DDL в
 `infra/db/init.sql` 1:1 (foreign key `personal_data.user_id → users.id`).
 
 #### Scenario: Create user and personal data
@@ -54,48 +54,47 @@ Agent listens on `:8080` and accepts:
 - **THEN** executes with journal entry (LLM03 demo), response includes flag
   `db-restore`
 
-### Requirement: Preset matrix (4 presets from env flags)
+### Requirement: Preset matrix (presets 1–4 from env flags)
 
 | `BUILTIN_GUARDS` | `EXTERNAL_GUARD` | Preset |
 |---|---|---|
 | `off` | `off` | 1 Baseline |
 | `on` | `off` | 2 Builtin Guards |
-| `off` | `on` | 3 External Wall (security-wall, port 5000) |
+| `off` | `on` | 3 External Guardrails Server |
 | `on` | `on` | 4 Full Defense |
 
 `BUILTIN_GUARDS=off` → `prompts/minimal.txt`; `on` → `prompts/guarded.txt`.
-`EXTERNAL_GUARD=on` → LLM via `WALL_BASE_URL` instead of `OLLAMA_BASE_URL`
-(in preset 3/4 wall is intermediary; `BLOCK_ON_FAIL=on` on violation).
+`EXTERNAL_GUARD=on` не меняет `LLMBaseURL`: агент всегда ходит в Ollama,
+а вход/выход валидирует через Guardrails Server (`GUARDRAILS_BASE_URL`,
+`http://wall:8000`, `POST /guards/{name}/validate`). При недоступной стене —
+fail-closed `503`.
+
+Пресеты 1–4 на старте задаются env; runtime-переключение через
+`POST /settings` реализовано в `add-defense-modes`. Preset 5 вынесен в отдельный
+бандл `add-fixed-agent` и не является комбинацией этих флагов.
 
 #### Scenario: Activate builtin guards
 
 - **WHEN** `BUILTIN_GUARDS=on`
 - **THEN** agent reads `prompts/guarded.txt` with prompt isolation instructions
 
-### Requirement: Preset 5 — Fixed Agent (agent-fixed)
+#### Scenario: External guard unavailable
 
-Fixed Agent (`agent-fixed/`) — separate protected version with:
+- **WHEN** `EXTERNAL_GUARD=on` and `GET /health-check` or `/validate` is unreachable
+- **THEN** agent returns `503` and does not call Ollama directly
 
-- Prompt isolation: `<<POLICY>>` / `<<USER>>` / `<<DATA>>` in `prompts/fixed.txt`
-- Input/output validation via built-in regex guards
-- Tool whitelist: only `SELECT`, writes blocked without `ALLOW_WRITES=1`
-- `GET /status` — JSON with protection status
-- `GET /ui` — HTML page with toggles for `BUILTIN_GUARDS`, `EXTERNAL_GUARD`, `ALLOW_WRITES`
-- `agent-fixed/Dockerfile` — `golang:1.26-alpine` → `scratch`, image `agent-fixed:local`
-- `agent-fixed/main.go` — built-in guards: input/output validation, tool policy
-- `agent-fixed/prompts/fixed.txt` — protected prompt with isolation
-- `agent-fixed/go.mod` — dependency `modernc.org/sqlite`
-- `scripts/test_security.py` (MIT) — 15+ payloads: encodings, paraphrase, multi-step injections
-- `scripts/augustus/` (Apache 2.0) — requests to Augustus for OWASP LLM Top 10 2026
-- `README.md` (dz5/) — run, licenses, UI instructions
-- `reports/red-team.md` — manual red-team report (6+ attacks, OWASP classes)
+### Requirement: Preset 5 — отдельный fixed agent
+
+Preset 5 не является комбинацией env-флагов и не входит в этот бандл.
+Fixed agent (`agent/fixed/`, порт `:8081`) описан в
+`openspec/changes/add-fixed-agent/`: prompt isolation, input/output guards,
+tool whitelist, UI-переключатели и реальный tool-loop с Ollama/БД.
 
 ## Framework licenses (MIT/Apache)
 
 - `Augustus` (OWASP LLM Top 10 2026): Apache 2.0 (https://github.com/praetorian-inc/augustus). Tests in `scripts/augustus/`.
 - `pytest` (security auto-tests): MIT (https://github.com/pytest-dev/pytest). In `scripts/test_security.py`.
-- `guardrails-ai` (external wall protection): MIT (https://github.com/guardrails-ai/guardrails). `security-wall/`.
-- `FastAPI` + `Uvicorn`: MIT (https://github.com/tiangolo/fastapi). `security-wall/`.
-- `ollama` client: MIT (https://github.com/ollama/ollama). `agent`, `security-wall`.
+- `guardrails-ai` / Guardrails Server (external defense): Apache 2.0 (https://github.com/guardrails-ai/guardrails). `security-wall/`.
+- `ollama` client: MIT (https://github.com/ollama/ollama). `agent`.
 - `modernc.org/sqlite`: MIT (https://github.com/mattn/go-sqlite3). `agent`.
 - `OWASP LLM Top 10 2026`: MIT (https://github.com/OWASP/AI-Security-Guide). Attack map in `scripts/owasp/`.
