@@ -2,28 +2,27 @@
 
 ## Why
 
-Сейчас `agent/fixed/` — echo-заглушка: `/chat` возвращает `fixed agent echo:
-<сообщение>`, не вызывает Ollama и не читает SQLite. При этом README и отчёты
-описывают preset 5 как полноценную защищённую конфигурацию. Это разрыв между
+`agent/fixed/` был echo-заглушкой: `/chat` возвращал `fixed agent echo:
+<сообщение>`, не вызывал Ollama и не читал SQLite. При этом README и отчёты
+описывали preset 5 как полноценную защищённую конфигурацию. Это разрыв между
 записью и кодом.
 
-Кроме того, UI-переключатели fixed agent только отображают env-состояние:
-изменение чекбокса ничего не меняет. Для демонстрации preset 5 нужен реальный
-tool-loop и работающие runtime-настройки.
+Кроме того, fixed-агент был отдельным Go-модулем с дублированным UI и не мог
+переиспользовать Ollama-клиент, SQLite и tool-loop baseline-агента.
 
 ## What changes
 
 - Реальный `/chat` в `agent/fixed/`: Ollama → `db_query` → Ollama, как в
-  основном агенте, с ответом `reply`, `preset=5`, `tool_calls`.
-- Prompt isolation: `<<POLICY>>`, `<<USER>>`, `<<DATA>>` в
-  `agent/fixed/prompts/fixed.txt`; данные БД не смешиваются с инструкциями.
-- Входные guards: инъекции, roleplay, попытки раскрыть промпт.
+  основном агенте, с ответом `reply`, `agent=fixed`, `preset=5`, `tool_calls`.
+- Prompt isolation: `agent/fixed/prompts/fixed.txt` без literal placeholder-ов;
+  данные БД передаются как untrusted data.
+- Входные guards: инъекции, roleplay, попытки раскрыть промпт, encoding, URL.
 - Выходные guards: секреты, PII, признаки утечки контекста.
-- Tool whitelist: только `SELECT` по известным таблицам; записи — только при
-  `ALLOW_WRITES=1` и подтверждении.
-- Runtime-настройки fixed agent: `POST /settings` с `builtinGuards`,
-  `externalGuard`, `allowWrites`; UI-переключатели реально меняют поведение.
-- `/status` отражает фактическое состояние, а не только env.
+- Tool whitelist: только `SELECT` по известным таблицам; writes запрещены
+  всегда; `SELECT *`, `UNION`, stacked statements и `sqlite_master` запрещены.
+- Immutable settings: `/status` показывает `preset=5`, `/settings` → `403`.
+- Общее ядро `agent/internal/agentcore/`; `agent/fixed/go.mod` удалён.
+- UI вынесен в отдельный сервис `ui/` (см. `add-agent-registry-ui`).
 - Тесты: unit на guards/tool policy, интеграционные на mock LLM/DB.
 
 ## Non-goals
@@ -31,24 +30,22 @@ tool-loop и работающие runtime-настройки.
 - Внешний Guardrails Server для preset 5: по матрице у fixed agent внешняя
   защита `n/a`.
 - Изменение пресетов 1–4 основного агента.
-- Замена общего `db_query`/Ollama-клиента, если удастся переиспользовать код
-  без дублирования.
+- Настраиваемый preset 5: fixed по определению immutable.
 
 ## Risks
 
-- Дублирование кода с `agent/`; при реализации вынести общие части в
-  `agent/internal/` (LLM-клиент, SQLite, policy), не ломая сборки.
-- Runtime-переключатели ослабляют защиту, если доступны снаружи. Для стенда
-  включать `ALLOW_RUNTIME_TOGGLES=on` только в демо-профиле; в остальных —
-  `off` и `403` на `/settings`.
-- Реальный LLM делает ответы недетерминированными; тесты не должны ожидать
-  конкретный текст, только инварианты (нет утечки, tool не выполнен).
+- Дублирование кода с `agent/`; решено общим пакетом
+  `agent/internal/agentcore/`.
+- Runtime-переключатели ослабляют защиту baseline, если доступны снаружи.
+  В compose для демо `ALLOW_RUNTIME_TOGGLES=on`; fixed всё равно immutable.
+- Реальный LLM делает ответы недетерминированными; тесты проверяют инварианты
+  (нет исполнения опасного SQL, нет PII), а не конкретный текст.
 
 ## Definition of done
 
 - `agent-fixed` отвечает реальной моделью, а не echo.
 - Входная инъекция блокируется; легитимный запрос проходит.
-- Попытка `DROP TABLE` не выполняется; `SELECT` работает.
-- UI-переключатель меняет поведение без перезапуска.
-- `go vet ./agent/fixed/...` и интеграционные тесты зелёные.
+- Попытка `DROP TABLE` не выполняется; `SELECT count(*)` работает.
+- `POST /settings` → `403`; состояние не меняется.
+- `go test ./agent/...`, `go vet ./agent/...` зелёные.
 - README/red-team не заявляют больше, чем подтверждено.

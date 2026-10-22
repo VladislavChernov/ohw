@@ -8,11 +8,12 @@
 
 ## 2. Конфигурация
 
-- [x] `RuntimeSettings` + `sync.RWMutex` в `agent/settings.go`.
+- [x] `RuntimeSettings` + `sync.RWMutex` в
+      `agent/internal/agentcore/settings.go`.
 - [x] Загрузить оба промпта при старте; выбор по `builtinGuards`
-      (`loadPrompts`, `Config.promptFor`).
-- [x] `presetOf(settings)` для 1–4.
-- [x] Env defaults + `ALLOW_RUNTIME_TOGGLES` (default `off`).
+      (`LoadPrompts`, `Config.PromptFor`).
+- [x] `PresetOf(settings)` для 1–4.
+- [x] Env defaults + `ALLOW_RUNTIME_TOGGLES` (core default `off`).
 - [x] `AUDIT_LOG` (default `/data/audit.jsonl`; в compose `/audit/audit.jsonl`).
 
 ## 3. API
@@ -26,15 +27,16 @@
 
 ## 4. UI
 
-- [x] Чекбоксы вызывают `/settings`.
+- [x] Чекбоксы вызывают `/settings` через UI-proxy.
 - [x] Показ preset и состояния guards.
 - [x] Confirm для `allowWrites`.
 - [x] Обработка `400/403/503`, перечитывание `/status`.
-- [x] Убрать дублирующиеся скрытые checkbox-элементы.
+- [x] UI вынесен в `ui/`; встроенный `/ui` удалён из агентов.
 
 ## 5. Compose / L3
 
-- [x] `ALLOW_RUNTIME_TOGGLES` в compose, default `off`; для демо — `on`.
+- [x] `ALLOW_RUNTIME_TOGGLES` в compose, default `on` для демо; `off` —
+      hardened-режим.
 - [x] `GUARDRAILS_BASE_URL`, `GUARDRAILS_TIMEOUT` в env агента.
 - [x] Memory limits и restart-policy (wall 2048M; общий AnalyzerEngine, без
       per-call утечки ~300 MiB).
@@ -49,7 +51,7 @@
 - [x] Integration (live): external → wall остановлена → `/chat` `503`.
 - [x] Integration (live): переключение без рестарта меняет маршрут
       (preset 3 → инъекция `403`; preset 1 → `/chat` 200).
-- [x] UI smoke (HTTP): `/ui` отдаёт JS с `/settings`, смена настроек обновляет
+- [x] UI smoke (HTTP): `ui`-сервис проксирует `/settings` и обновляет
       `/status`; браузерный клик не автоматизирован.
 
 ## 7. Живая проверка
@@ -69,4 +71,4 @@
 
 - [ ] Все проверки зелёные; галочки по факту.
 - [x] README: runtime switching, ограничение `ALLOW_RUNTIME_TOGGLES`.
-- [ ] Коммит только `dz5/` после явной просьбы.
+- [x] Коммит только `dz5/` после явной просьбы.

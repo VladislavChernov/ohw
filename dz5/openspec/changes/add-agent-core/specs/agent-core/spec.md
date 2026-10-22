@@ -87,8 +87,8 @@ fail-closed `503`.
 
 Preset 5 не является комбинацией env-флагов и не входит в этот бандл.
 Fixed agent (`agent/fixed/`, порт `:8081`) описан в
-`openspec/changes/add-fixed-agent/`: prompt isolation, input/output guards,
-tool whitelist, UI-переключатели и реальный tool-loop с Ollama/БД.
+`openspec/changes/add-fixed-agent/`: strict prompt, input/output guards,
+read-only tool whitelist, immutable settings и реальный tool-loop с Ollama/БД.
 
 ## Framework licenses (MIT/Apache)
 

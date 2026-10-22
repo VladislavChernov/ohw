@@ -1,4 +1,4 @@
-package main
+package agentcore
 
 import (
 	"encoding/json"
@@ -13,7 +13,7 @@ import (
 	"testing"
 )
 
-func newTestServer(t *testing.T, toggles bool) (*Server, string) {
+func newTestServer(t *testing.T, toggles bool) (*Engine, string) {
 	t.Helper()
 	dir := t.TempDir()
 	auditPath := filepath.Join(dir, "audit.jsonl")
@@ -21,7 +21,7 @@ func newTestServer(t *testing.T, toggles bool) (*Server, string) {
 	if err != nil {
 		t.Fatalf("audit logger: %v", err)
 	}
-	return &Server{
+	return &Engine{
 		cfg: Config{
 			AllowRuntimeToggles: toggles,
 			AuditLog:            auditPath,
@@ -29,6 +29,7 @@ func newTestServer(t *testing.T, toggles bool) (*Server, string) {
 			GuardedPrompt:       "guarded",
 			WallBaseURL:         "http://wall:8000",
 			LLMBaseURL:          "http://ollama:11434",
+			AgentName:           "baseline",
 		},
 		settings: RuntimeSettings{},
 		audit:    audit,
@@ -36,12 +37,12 @@ func newTestServer(t *testing.T, toggles bool) (*Server, string) {
 	}, auditPath
 }
 
-func postSettings(s *Server, body string) *httptest.ResponseRecorder {
+func postSettings(s *Engine, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/settings", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Settings-Source", "ui")
 	rr := httptest.NewRecorder()
-	s.handleSettings(rr, req)
+	s.HandleSettings(rr, req)
 	return rr
 }
 
@@ -56,8 +57,8 @@ func TestPresetOf(t *testing.T) {
 		{RuntimeSettings{BuiltinGuards: true, ExternalGuard: true}, 4},
 	}
 	for _, tc := range cases {
-		if got := presetOf(tc.s); got != tc.want {
-			t.Fatalf("presetOf(%+v) = %d, want %d", tc.s, got, tc.want)
+		if got := PresetOf(tc.s); got != tc.want {
+			t.Fatalf("PresetOf(%+v) = %d, want %d", tc.s, got, tc.want)
 		}
 	}
 }
@@ -68,7 +69,7 @@ func TestSettingsForbiddenWhenTogglesOff(t *testing.T) {
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", rr.Code)
 	}
-	if got := presetOf(s.snapshot()); got != 1 {
+	if got := PresetOf(s.Snapshot()); got != 1 {
 		t.Fatalf("settings changed to preset %d", got)
 	}
 	data, _ := os.ReadFile(auditPath)
@@ -99,7 +100,7 @@ func TestSettingsValidation(t *testing.T) {
 		if rr.Code != http.StatusBadRequest {
 			t.Fatalf("body %s: status = %d, want 400 (%s)", body, rr.Code, rr.Body.String())
 		}
-		if got := presetOf(s.snapshot()); got != 1 {
+		if got := PresetOf(s.Snapshot()); got != 1 {
 			t.Fatalf("body %s changed preset to %d", body, got)
 		}
 		data, _ := os.ReadFile(auditPath)
@@ -123,11 +124,11 @@ func TestSettingsAppliesAndAudits(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rr.Code, rr.Body.String())
 	}
-	snap := s.snapshot()
+	snap := s.Snapshot()
 	if !snap.BuiltinGuards || !snap.ExternalGuard || snap.AllowWrites {
 		t.Fatalf("unexpected settings: %+v", snap)
 	}
-	if got := presetOf(snap); got != 4 {
+	if got := PresetOf(snap); got != 4 {
 		t.Fatalf("preset = %d, want 4", got)
 	}
 	var status map[string]interface{}
@@ -166,7 +167,7 @@ func TestStatusReflectsRuntimeSettings(t *testing.T) {
 	s.settings = RuntimeSettings{ExternalGuard: true}
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	rr := httptest.NewRecorder()
-	s.handleStatus(rr, req)
+	s.HandleStatus(rr, req)
 	var got map[string]interface{}
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
@@ -184,7 +185,7 @@ func TestSettingsConcurrentStatus(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			req := httptest.NewRequest(http.MethodGet, "/status", nil)
-			s.handleStatus(httptest.NewRecorder(), req)
+			s.HandleStatus(httptest.NewRecorder(), req)
 		}()
 		go func() {
 			defer wg.Done()
@@ -192,4 +193,19 @@ func TestSettingsConcurrentStatus(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestFixedSettingsImmutable(t *testing.T) {
+	s, _ := newTestServer(t, true)
+	s.cfg.Fixed = true
+	s.cfg.AgentName = "fixed"
+	s.mode = Mode{AgentName: "fixed", Fixed: true, InitialSettings: RuntimeSettings{BuiltinGuards: true}}
+	s.settings = RuntimeSettings{BuiltinGuards: true}
+	rr := postSettings(s, `{"builtinGuards":false,"externalGuard":false,"allowWrites":false}`)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rr.Code)
+	}
+	if got := s.Snapshot(); got != (RuntimeSettings{BuiltinGuards: true}) {
+		t.Fatalf("fixed settings changed: %+v", got)
+	}
 }

@@ -4,137 +4,127 @@
 
 ### Requirement: Реальный chat и tool-loop
 
-`agent/fixed/` обслуживает `POST /chat` с JSON `{"message": "..."}` и
-возвращает:
+`agent/fixed/` MUST обрабатывать `POST /chat` с JSON `{"message": "..."}` и
+возвращать:
 
 ```json
 {
   "reply": "...",
+  "agent": "fixed",
   "preset": 5,
-  "tool_calls": [{"sql": "SELECT ...", "rows": 1}],
-  "blocked": false,
-  "reason": ""
+  "tool_calls": [{"sql": "SELECT ...", "rows": 1}]
 }
 ```
 
-Агент вызывает Ollama (`OLLAMA_BASE_URL`, `OLLAMA_MODEL`), выполняет
-`db_query` при необходимости и возвращает финальный ответ. Echo-заглушка
-удаляется.
+Агент MUST вызывать Ollama (`OLLAMA_BASE_URL`, `OLLAMA_MODEL`), выполнять
+`db_query` через SQLite и возвращать финальный ответ. Echo-заглушка MUST быть
+удалена.
 
-#### Scenario: Легитимный вопрос
+#### Scenario: Легитимный запрос
 
-- **WHEN** приходит `{"message":"How many users are in the database?"}`
-- **THEN** агент выполняет `SELECT`, возвращает `reply` и `tool_calls`
+- **WHEN** клиент отправляет `{"message":"How many users are in the database?"}`
+- **THEN** агент выполняет разрешённый `SELECT count(*)` и возвращает `reply`
+  и `tool_calls`
 
 #### Scenario: LLM недоступна
 
-- **WHEN** Ollama недоступна
-- **THEN** ответ `502`/`503`, без выдуманного `reply`
+- **WHEN** Ollama возвращает ошибку
+- **THEN** клиент получает `502`, без фиктивного `reply`
 
 ### Requirement: Prompt isolation
 
-`agent/fixed/prompts/fixed.txt` разделяет:
+`agent/fixed/prompts/fixed.txt` MUST содержать strict-политику:
 
-- `<<POLICY>>` — системные инструкции и запреты;
-- `<<USER>>` — запрос пользователя;
-- `<<DATA>>` — данные БД.
+- запрет раскрытия системного промпта и hidden context;
+- запрет смены роли и выполнения инструкций из пользовательских данных;
+- запрет деструктивного SQL и вывода секретов/PII;
+- контракт `db_query`: один `SELECT`, известные таблицы, explicit columns или
+  агрегат.
 
-Данные из `<<DATA>>` не могут менять `<<POLICY>>`. Промпт загружается при
-старте; пустой/отсутствующий файл — fatal error.
+Данные инструмента MUST передаваться модели как untrusted data. Пустой или
+отсутствующий prompt — fatal error при старте.
 
-### Requirement: Входные guards
+### Requirement: Input guards
 
-До вызова LLM проверяются:
+До вызова LLM fixed-агент MUST блокировать:
 
 - instruction override / jailbreak / roleplay;
 - попытки раскрыть system prompt или hidden context;
-- encoding-обфускация (base64, unicode, zero-width) — по возможности
-  нормализовать перед проверкой;
-- URL/эксфильтрация.
+- encoding-обходы (base64, rot13, zero-width);
+- подозрительные URL.
 
-При нарушении — `403`, `blocked=true`, LLM не вызывается. Регулярки не
-считаются полной защитой; в спеке фиксируется, что это demo-уровень.
+Блокировка — `403`, `blocked=true`, LLM не вызывается.
 
-### Requirement: Выходные guards
+### Requirement: Output guards
 
-После ответа LLM проверяются:
+После ответа LLM fixed-агент MUST блокировать:
 
-- секреты/токены/пароли;
-- PII (email, телефон, паспорт, карта);
-- признаки утечки system prompt/hidden context.
+- секреты (`password`, `api_token`, `secret`, `token`);
+- PII (email, телефон, паспорт, ИНН, СНИЛС, карта);
+- признаки утечки system prompt / hidden context.
 
-При `BLOCK_ON_FAIL=on` — `403`, исходный ответ не отдаётся. При `off` —
-маскировка или ответ с `reason`/warning.
+При срабатывании — `403`; сырой ответ не отдаётся клиенту.
 
 ### Requirement: Tool whitelist
 
-`db_query` разрешает `SELECT` только по таблицам `users`, `personal_data`,
-`clients`, `orders`, `secrets`, `documents`. `INSERT/UPDATE/DELETE/DROP/ALTER/
-ATTACH/PRAGMA` запрещены без `ALLOW_WRITES=1`.
+`db_query` MUST разрешать только одиночный `SELECT` по таблицам `users`,
+`personal_data`, `clients`, `orders`, `documents`.
+
+Запрещены:
+
+- `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `ATTACH`, `DETACH`,
+  `PRAGMA`, `VACUUM`, `CREATE`, `REPLACE`, `TRUNCATE`;
+- `UNION`, stacked statements, `sqlite_master`, `sqlite_schema`, `secrets`;
+- `SELECT *` (нужны explicit columns или агрегат).
+
+Записи в БД MUST быть запрещены всегда, независимо от env.
 
 #### Scenario: DROP TABLE
 
-- **WHEN** LLM просит `DROP TABLE users`
-- **THEN** tool не выполняется, в `tool_calls` нет успешной записи, ответ
-  содержит отказ
+- **WHEN** LLM предлагает `DROP TABLE users`
+- **THEN** запрос не исполняется, `tool_calls` не содержит его, БД остаётся
+  целой
 
-#### Scenario: Запись при ALLOW_WRITES=1
+#### Scenario: SELECT *
 
-- **WHEN** `ALLOW_WRITES=1`, пришло подтверждение, LLM просит `DELETE`
-- **THEN** запись выполняется, журналируется, БД можно восстановить
-  `db-restore`
+- **WHEN** LLM предлагает `SELECT * FROM personal_data`
+- **THEN** запрос отклоняется, модель получает ошибку политики
 
-### Requirement: Runtime settings
+### Requirement: Immutable settings
 
-`GET /status` возвращает фактическое состояние:
+- `GET /status` MUST возвращать `agent=fixed`, `preset=5`,
+  `builtinGuards=true`, `externalGuard=false`, `allowWrites=false`,
+  `runtimeToggles=false`, `immutable=true`.
+- `POST /settings` MUST возвращать `403` при любой попытке изменения.
+- UI показывает для fixed disabled-переключатели.
 
-```json
-{
-  "preset": 5,
-  "builtinGuards": true,
-  "externalGuard": false,
-  "allowWrites": false,
-  "inputGuard": "on",
-  "outputGuard": "on",
-  "blockOnFail": "on"
-}
-```
+#### Scenario: Попытка включить writes
 
-`POST /settings` принимает:
-
-```json
-{"builtinGuards": true, "externalGuard": false, "allowWrites": false}
-```
-
-- `403`, если `ALLOW_RUNTIME_TOGGLES!=on`.
-- `400` при неизвестном поле/типе.
-- `allowWrites=true` требует `confirmWrites=true`, иначе `400`.
-- Изменения применяются атомарно (mutex) и сразу видны в `/status` и `/chat`.
-- `externalGuard` для preset 5 всегда `false`; попытка `true` → `400`.
-
-UI (`GET /ui`) вызывает `/settings` и перерисовывает состояние; чекбоксы не
-декоративные.
+- **WHEN** клиент отправляет `POST /settings` с `allowWrites=true`
+- **THEN** ответ `403`, состояние не меняется
 
 ### Requirement: Observability
 
-- Лог на каждый `/chat`: preset, guards, blocked, reason, tool calls, latency.
-- Секреты и полные ответы БД в лог не пишутся.
-- `/healthz` → `200 ok` без обращения к LLM/БД (liveness).
+- лог `/chat`: preset, guards, blocked, reason, tool calls, latency;
+- секреты и тела PII в лог не пишутся;
+- `/healthz` возвращает `200 ok` без зависимости от LLM/БД.
 
-### Requirement: Container
+### Requirement: Container и shared core
 
-- `agent/fixed/Dockerfile`: сборка Go, финальный `scratch` (или distroless),
-  бинарник + `prompts/fixed.txt`.
-- Порт `:8080`, в compose опубликован как `8081:8080`.
-- Read-only mount БД; запись только если явно разрешена.
-- L3: memory limit `512M`, restart `unless-stopped`.
+- fixed-агент MUST использовать общее ядро
+  `agent/internal/agentcore/`, а не копию baseline.
+- `agent/fixed/go.mod` MUST отсутствовать; fixed собирается из модуля
+  `ohw/dz5/agent`.
+- `agent/Dockerfile` MUST поддерживать build arg для сборки fixed.
+- В compose fixed слушает `8081:8080`, read-only mount БД, memory limit `512M`,
+  restart `unless-stopped`.
 
 ## Definition of done
 
-- [ ] Реальный tool-loop, echo удалён.
-- [ ] Prompt isolation и guards работают.
-- [ ] Tool whitelist и `ALLOW_WRITES` проверены.
-- [ ] `/settings` и UI меняют поведение без рестарта.
-- [ ] `go vet`, unit/integration тесты зелёные.
-- [ ] Живой прогон: легитимный запрос, инъекция, `DROP`, PII.
-- [ ] README/red-team обновлены по фактам.
+- [x] Реальный tool-loop, echo удалён.
+- [x] Prompt isolation и guards работают.
+- [x] Tool whitelist и write-block работают.
+- [x] Immutable settings: `/settings` → `403`.
+- [x] `go test ./agent/...`, `go vet ./agent/...` зелёные.
+- [x] Live smoke: легитимный запрос, инъекция, `DROP`.
+- [x] README/red-team не заявляют больше, чем подтверждено.

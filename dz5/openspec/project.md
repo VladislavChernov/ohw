@@ -14,11 +14,15 @@ Applications 2026**.
 ## Стек
 
 - **Агент (Go):** собственный HTTP-агент в `agent/` (порт `:8080`), а не
-  сторонний фреймворк. Эндпоинты `/healthz`, `/status`, `/ui`, `/chat`;
+  сторонний фреймворк. Эндпоинты `/healthz`, `/status`, `/settings`, `/chat`;
   инструмент `db_query` для чтения SQLite. Пресеты 1–4.
 - **Fixed agent (Go):** отдельный защищённый агент в `agent/fixed/` (порт
-  `:8081`, preset 5): prompt isolation, input/output validation, tool whitelist,
-  UI-переключатели.
+  `:8081`, preset 5): strict prompt, immutable settings, input/output guards,
+  read-only tool whitelist. Использует общее ядро
+  `agent/internal/agentcore/`, а не копию baseline.
+- **UI (Go):** отдельный сервис `ui/` (порт `:8090`) с реестром агентов и
+  reverse-proxy к `/status`, `/settings`, `/chat`. Встроенный `/ui` в агентах
+  удалён.
 - **Инференс (LLM):** локальный автономный `ollama/ollama:0.40.4` с моделью
   `huihui_ai/llama3.2-abliterate:3b` — **genuine abliterated** (refusal снят
   техникой abliteration; ~2 ГБ, Q4_K_M). Снятая цензура нужна специально, чтобы
@@ -46,7 +50,9 @@ Applications 2026**.
 Пресеты 1–4 переключаются флагами `BUILTIN_GUARDS=on|off`,
 `EXTERNAL_GUARD=on|off` и **на лету** через `POST /settings`/UI
 (`add-defense-modes`). Env задаёт начальное состояние; изменения применяются
-атомарно и пишутся в audit JSONL. `ALLOW_RUNTIME_TOGGLES=off` по умолчанию.
+атомарно и пишутся в audit JSONL. В compose для демо
+`ALLOW_RUNTIME_TOGGLES=on`; при прямом запуске агента значение по умолчанию
+`off`.
 
 `L3` (Runtime-контроль) — предохранитель стенда, присутствует во всех режимах.
 
@@ -61,6 +67,10 @@ Applications 2026**.
 `L3` реализован на уровне compose-лимитов (`deploy.resources.limits`: mem/CPU),
 таймаутов и restart-policy. Концепция и обоснование —
 в `docs/llm_security_architecture.md`.
+
+Preset 5 — не «все галочки включены», а отдельная политика: strict prompt,
+immutable settings, read-only tool whitelist. Preset 4 остаётся baseline-агентом
+с включёнными builtin/external защитами.
 
 ## Покрытие атак: OWASP Top 10 for LLM 2026
 
@@ -104,8 +114,9 @@ latency + CPU/RAM»). Сейчас есть только черновик `repor
 
 ## Структура
 
-- `agent/` — основной Go-агент (пресеты 1–4).
-- `agent/fixed/` — fixed agent (preset 5).
+- `agent/` — общий Go-модуль: baseline-агент (пресеты 1–4), fixed agent
+  (preset 5) и `internal/agentcore/`.
+- `ui/` — отдельный Go-сервис реестра агентов и reverse-proxy.
 - `security-wall/` — `config.py` и Dockerfile для Guardrails Server.
 - `docs/` — design-заметки (архитектура защиты; SSOT авторитет — в `openspec/`).
 - `openspec/` — спеки изменений (по вехам).
@@ -129,9 +140,12 @@ latency + CPU/RAM»). Сейчас есть только черновик `repor
    Сборка, `go test`, `go vet` зелёные; live smoke пресетов 1/2/4 есть.
    `ALLOW_WRITES` проверен unit-тестом; live-модель не выдала исполняемый SQL,
    `db-restore` выполнен.
-4. `add-fixed-agent` — отдельный fixed agent (preset 5): реальный tool-loop,
-   prompt isolation, input/output guards, tool whitelist, UI-переключатели.
-   Сейчас echo-заглушка; сборка падает на `HandleStatus`/`HandleUI`, в работе.
+4. `add-fixed-agent` + `add-agent-registry-ui` — отдельный fixed agent
+   (preset 5) на общем ядре: реальный tool-loop, strict prompt,
+   input/output guards, read-only tool whitelist, immutable settings.
+   UI вынесен в сервис `ui` с реестром агентов. ✅ Реализовано и проверено
+   live: fixed SELECT/chat, блокировка injection/DROP, `403` на settings,
+   UI proxy для baseline/fixed. PII output guard проверен unit-тестами.
 5. `add-external-defense` — Guardrails Server (`guardrails-api`) в отдельном
    контейнере, guards в `config.py`, REST-контракт с агентом. ✅ Реализовано
    и проверено вживую: `/health-check`, `/guards`, легитимный `/chat` 3/4,

@@ -14,21 +14,21 @@
 - `POST /settings` с `{builtinGuards, externalGuard, allowWrites}`:
   валидация, применение, пересчёт пресета 1–4.
 - `allowWrites=true` требует явного `confirmWrites=true`; иначе `400`.
-- `ALLOW_RUNTIME_TOGGLES=on` включает endpoint; иначе `403`. В демо-профиле
-  compose — `on`, по умолчанию — `off`.
+- `ALLOW_RUNTIME_TOGGLES=on` включает endpoint; иначе `403`. В compose для
+  демо — `on`; при прямом запуске агента default — `off`.
 - Динамический выбор промпта: `minimal.txt` / `guarded.txt` загружаются при
   старте, выбор — по текущему `builtinGuards`.
 - Внешняя защита: при `externalGuard=true` вход/выход идут через Guardrails
   Server; при недоступной стене — fail-closed `503`.
-- UI вызывает `/settings`, показывает текущий preset и ошибки; чекбоксы
-  становятся рабочими.
+- UI вызывает `/settings` через отдельный `ui`-сервис, показывает текущий
+  preset и ошибки; чекбоксы становятся рабочими.
 - Audit-log JSONL: время, старое/новое состояние, preset, источник, результат.
 - L3: compose-лимиты памяти/CPU, таймауты, restart-policy; без
   context-cancellation чужого кода.
 
 ## Non-goals
 
-- Preset 5: отдельный бандл `add-fixed-agent`.
+- Preset 5 и UI-реестр: бандлы `add-fixed-agent` и `add-agent-registry-ui`.
 - Сохранение runtime-настроек между рестартами (пока in-memory; env — дефолт).
 - Аутентификация UI/API: стенд локальный; для внешнего доступа нужен reverse
   proxy с auth (вне ДЗ).
@@ -47,7 +47,7 @@
 ## Definition of done
 
 - `POST /settings` меняет preset 1–4 без рестарта.
-- `/status` и `/ui` отражают фактическое состояние.
+- `/status` и UI-сервис отражают фактическое состояние.
 - При `externalGuard=true` и остановленной стене `/chat` → `503`.
 - `allowWrites` без подтверждения → `400`; с подтверждением — работает.
 - Audit-log содержит переходы.

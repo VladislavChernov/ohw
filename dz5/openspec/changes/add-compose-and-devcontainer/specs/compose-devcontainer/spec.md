@@ -13,6 +13,7 @@
 | `db-query` | — | `tools` | ручной SELECT |
 | `agent` | `8080` | default | пресеты 1–4 |
 | `agent-fixed` | `8081` | default | preset 5 |
+| `ui` | `8090` | default | реестр агентов + proxy |
 | `wall` | `8000` | default | Guardrails Server |
 | `attack-runner` | — | `attack` | прогон атак |
 
@@ -29,7 +30,8 @@
 |--------|----------|
 | `ollama` | `ollama show "$OLLAMA_MODEL"` |
 | `agent` | `wget -qO- http://localhost:8080/healthz` (alpine) |
-| `agent-fixed` | runtime с shell/healthcheck-бинарником; **не** `wget` в `scratch` |
+| `agent-fixed` | `wget -qO- http://localhost:8081/healthz` (alpine) |
+| `ui` | `wget -qO- http://localhost:8090/healthz` (alpine) |
 | `wall` | `python -c` urllib или `curl` (установить в образ) на `/health-check` |
 
 - Интервалы: 10s, timeout 3s, retries 12–60, start_period с учётом загрузки
@@ -45,11 +47,11 @@ OLLAMA_MODEL=huihui_ai/llama3.2-abliterate:3b
 BUILTIN_GUARDS=off
 EXTERNAL_GUARD=off
 ALLOW_WRITES=off
-ALLOW_RUNTIME_TOGGLES=off
+ALLOW_RUNTIME_TOGGLES=on
 GUARDRAILS_BASE_URL=http://wall:8000
 INPUT_GUARD_NAME=input-defense
 OUTPUT_GUARD_NAME=output-privacy
-GUARDRAILS_TIMEOUT=10s
+GUARDRAILS_TIMEOUT=60s
 ```
 
 - Секретов в примере нет.
@@ -94,6 +96,9 @@ services:
     port: 8081
     health: /healthz
     preset: 5
+  ui:
+    port: 8090
+    health: /healthz
   wall:
     port: 8000
     health: /health-check
@@ -113,10 +118,11 @@ services:
 
 ## Definition of done
 
-- [ ] `docker compose config` валиден.
-- [ ] `docker compose up -d --build` — все healthchecks зелёные.
-- [ ] `agent-fixed` healthcheck реально работает.
-- [ ] `wall` healthcheck реально работает.
+- [x] `docker compose config` валиден.
+- [x] `docker compose up -d --build` — все healthchecks зелёные.
+- [x] `agent-fixed` healthcheck реально работает.
+- [x] `wall` healthcheck реально работает.
+- [x] `ui` healthcheck реально работает.
 - [ ] `docker compose --profile tools run --rm db-seed` работает.
 - [ ] `docker compose --profile attack run --rm attack-runner` работает.
 - [ ] `.devcontainer` собирается; `go`, `python`, `docker` доступны.

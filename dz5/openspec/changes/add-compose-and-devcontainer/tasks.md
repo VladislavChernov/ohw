@@ -12,8 +12,8 @@
 - [ ] `infra/compose.yaml`: сервисы/порты/профили по спеке.
 - [x] `wall`: порт `8000`, healthcheck `/health-check`, без `depends_on: ollama`.
 - [x] `agent`: env Guardrails (`GUARDRAILS_BASE_URL`, guard names, timeout).
-- [ ] `agent-fixed`: исправить healthcheck (alpine runtime или бинарник);
-      сейчас также падает сборка на `HandleStatus`/`HandleUI`.
+- [x] `agent-fixed`: alpine runtime, healthcheck `/healthz`, сборка из общего
+      модуля через `TARGET_PKG=./fixed`.
 - [ ] `attack-runner`: профиль `attack`, volume `reports/`, зависимости.
 - [x] L3 limits и restart-policy (wall `2048M`, agent/ollama лимиты, restart).
 - [x] Убрать `WALL_BASE_URL`/`5000`, обновить комментарии.
@@ -24,7 +24,7 @@
 
 - [x] `ollama` — модель загружена (контейнер `healthy`).
 - [x] `agent` — `/healthz` (контейнер `healthy`).
-- [ ] `agent-fixed` — проверить в реальном runtime, не на бумаге.
+- [x] `agent-fixed` — проверен в runtime, контейнер `healthy`.
 - [x] `wall` — Python/urllib, без внешнего `curl`/`wget` (контейнер `healthy`).
 - [ ] Start periods достаточны для первой загрузки модели.
 - [ ] Healthcheck не требует секретов.
@@ -47,10 +47,10 @@
 
 ## 6. Проверка
 
-- [ ] `docker compose build` — все образы (agent/wall/db/ollama зелёные;
-      agent-fixed падает).
-- [ ] `docker compose up -d` — все healthy (сейчас только
-      `ollama` + `agent` + `wall`).
+- [x] `docker compose build` — образы `agent`, `agent-fixed`, `ui`, `wall`
+      собираются.
+- [x] `docker compose up -d` — `ollama` + `agent` + `agent-fixed` + `ui` +
+      `wall` healthy.
 - [x] `db-seed` и smoke `/chat` (users=5, preset 1 ответил 200).
 - [ ] `attack-runner` smoke (профиль `attack`).
 - [ ] `docker compose down` без удаления volumes.

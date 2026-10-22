@@ -1,10 +1,4 @@
-// Guardrails Server client for the dz5 stand agent.
-//
-// The wall is a validation service, not an LLM proxy: the agent sends text to
-// POST /guards/{name}/validate and receives a ValidationOutcome. HTTP 4xx is a
-// policy block; transport errors and 5xx are fail-closed (the caller returns
-// 503 and never calls the LLM).
-package main
+package agentcore
 
 import (
 	"bytes"
@@ -17,23 +11,19 @@ import (
 	"time"
 )
 
-// ErrWallUnavailable marks transport/5xx failures from the external wall.
 var ErrWallUnavailable = errors.New("external wall unavailable")
 
-// WallClient is a minimal Guardrails Server validate client.
 type WallClient struct {
 	base   string
 	client *http.Client
 }
 
-// WallResult is the normalized subset of ValidationOutcome the agent uses.
 type WallResult struct {
 	Passed    bool
 	Validated string
 	Raw       string
 }
 
-// NewWallClient builds a client for base (e.g. http://wall:8000).
 func NewWallClient(base string, timeout time.Duration) *WallClient {
 	return &WallClient{
 		base:   base,
@@ -51,8 +41,6 @@ type wallResponse struct {
 	RawLlmOutput     string `json:"rawLlmOutput"`
 }
 
-// Validate runs one guard over text. A 4xx response means "blocked"; a 5xx or
-// transport failure returns ErrWallUnavailable so callers fail closed.
 func (w *WallClient) Validate(ctx context.Context, guard, text string) (WallResult, error) {
 	body, err := json.Marshal(wallRequest{LLMOutput: text})
 	if err != nil {

@@ -1,10 +1,4 @@
-// Ollama chat client for the dz5 stand agent.
-//
-// Talks to POST <base>/api/chat (the local abliterated target). The external
-// Guardrails Server is a validation sidecar, not an LLM proxy. No external SDK:
-// plain net/http with a bounded timeout so a runaway generation cannot hang the
-// agent.
-package main
+package agentcore
 
 import (
 	"bytes"
@@ -15,14 +9,12 @@ import (
 	"time"
 )
 
-// OllamaClient is a minimal /api/chat client.
 type OllamaClient struct {
 	base   string
 	model  string
 	client *http.Client
 }
 
-// NewOllamaClient builds a client for base (e.g. http://ollama:11434).
 func NewOllamaClient(base, model string) *OllamaClient {
 	return &OllamaClient{
 		base:  base,
@@ -48,7 +40,6 @@ type chatResponse struct {
 	Message chatMessage `json:"message"`
 }
 
-// Chat sends system+user messages and returns the assistant text.
 func (c *OllamaClient) Chat(ctx context.Context, system, user string) (string, error) {
 	body, err := json.Marshal(chatRequest{
 		Model: c.model,

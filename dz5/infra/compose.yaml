@@ -10,6 +10,8 @@ name: dz5-stand
 #   - ollama  (abliterated GPU target)    add-abliterated-llm  ✅
 #   - db      (SQLite + seed/restore)    add-db-service       ✅
 #   - agent   (Go stand agent)           add-agent-core
+#   - agent-fixed (preset 5)             add-fixed-agent
+#   - ui      (agent registry/proxy)     add-agent-registry-ui
 #   - wall    (Guardrails Server)        add-external-defense
 #   - attacker(augustus + runner)        add-attack-harness
 #
@@ -134,6 +136,7 @@ services:
       - "8080:8080"
     environment:
       AGENT_ADDR: ":8080"
+      PROMPTS_DIR: /app/prompts
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-huihui_ai/llama3.2-abliterate:3b}
       DB_PATH: /data/db.sqlite
@@ -145,7 +148,7 @@ services:
       OUTPUT_GUARD_NAME: output-privacy
       GUARDRAILS_TIMEOUT: 60s
       BLOCK_ON_FAIL: ${BLOCK_ON_FAIL:-on}
-      ALLOW_RUNTIME_TOGGLES: ${ALLOW_RUNTIME_TOGGLES:-off}
+      ALLOW_RUNTIME_TOGGLES: ${ALLOW_RUNTIME_TOGGLES:-on}
       AUDIT_LOG: /audit/audit.jsonl
     volumes:
       - db_data:/data:ro
@@ -174,20 +177,20 @@ services:
   # BUILTIN_GUARDS=on, EXTERNAL_GUARD=off, ALLOW_WRITES=off.
   agent-fixed:
     build:
-      context: ../agent/fixed
+      context: ../agent
       dockerfile: Dockerfile
+      args:
+        TARGET_PKG: ./fixed
     image: dz5-agent-fixed:local
     container_name: dz5-agent-fixed
     ports:
       - "8081:8080"
     environment:
       AGENT_ADDR: ":8080"
+      PROMPTS_DIR: /app/fixed-prompts
       OLLAMA_BASE_URL: http://ollama:11434
       OLLAMA_MODEL: ${OLLAMA_MODEL:-huihui_ai/llama3.2-abliterate:3b}
       DB_PATH: /data/db.sqlite
-      BUILTIN_GUARDS: "on"
-      EXTERNAL_GUARD: "off"
-      ALLOW_WRITES: "off"
     volumes:
       - db_data:/data:ro
     depends_on:
@@ -204,6 +207,37 @@ services:
       timeout: 3s
       retries: 12
       start_period: 60s
+    networks:
+      - ib-network
+
+  # Agent registry + reverse proxy. The browser only talks to this service.
+  ui:
+    build:
+      context: ../ui
+      dockerfile: Dockerfile
+    image: dz5-ui:local
+    container_name: dz5-ui
+    ports:
+      - "8090:8090"
+    environment:
+      UI_ADDR: ":8090"
+      AGENT_REGISTRY: "baseline=http://agent:8080,fixed=http://agent-fixed:8080"
+    depends_on:
+      agent:
+        condition: service_started
+      agent-fixed:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8090/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
     networks:
       - ib-network
 

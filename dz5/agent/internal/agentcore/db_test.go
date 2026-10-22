@@ -1,4 +1,4 @@
-package main
+package agentcore
 
 import (
 	"context"
@@ -10,29 +10,29 @@ import (
 
 func TestExtractSQLTaggableFence(t *testing.T) {
 	reply := "Here is the query:\n```sql\nSELECT username FROM users;\n```"
-	if got, want := extractSQL(reply), "SELECT username FROM users;"; got != want {
-		t.Fatalf("extractSQL() = %q, want %q", got, want)
+	if got, want := ExtractSQL(reply), "SELECT username FROM users;"; got != want {
+		t.Fatalf("ExtractSQL() = %q, want %q", got, want)
 	}
 }
 
 func TestExtractSQLGenericFence(t *testing.T) {
 	reply := "```\nUPDATE users SET role='admin' WHERE id=2;\n```"
-	if got, want := extractSQL(reply), "UPDATE users SET role='admin' WHERE id=2;"; got != want {
-		t.Fatalf("extractSQL() = %q, want %q", got, want)
+	if got, want := ExtractSQL(reply), "UPDATE users SET role='admin' WHERE id=2;"; got != want {
+		t.Fatalf("ExtractSQL() = %q, want %q", got, want)
 	}
 }
 
 func TestExtractSQLIgnoresNonSQLFence(t *testing.T) {
 	reply := "```json\n{\"reply\":\"ok\"}\n```"
-	if got := extractSQL(reply); got != "" {
-		t.Fatalf("extractSQL() = %q, want empty", got)
+	if got := ExtractSQL(reply); got != "" {
+		t.Fatalf("ExtractSQL() = %q, want empty", got)
 	}
 }
 
 func TestExtractSQLRawPrefix(t *testing.T) {
 	reply := "  SELECT count(*) FROM users;  "
-	if got, want := extractSQL(reply), "SELECT count(*) FROM users;"; got != want {
-		t.Fatalf("extractSQL() = %q, want %q", got, want)
+	if got, want := ExtractSQL(reply), "SELECT count(*) FROM users;"; got != want {
+		t.Fatalf("ExtractSQL() = %q, want %q", got, want)
 	}
 }
 

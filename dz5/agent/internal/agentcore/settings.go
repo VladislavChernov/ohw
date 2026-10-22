@@ -1,4 +1,4 @@
-package main
+package agentcore
 
 import (
 	"encoding/json"
@@ -10,14 +10,12 @@ import (
 	"time"
 )
 
-// RuntimeSettings is the mutable protection matrix of presets 1-4.
 type RuntimeSettings struct {
 	BuiltinGuards bool `json:"builtinGuards"`
 	ExternalGuard bool `json:"externalGuard"`
 	AllowWrites   bool `json:"allowWrites"`
 }
 
-// SettingsRequest uses pointers to distinguish "missing" from false.
 type SettingsRequest struct {
 	BuiltinGuards *bool `json:"builtinGuards"`
 	ExternalGuard *bool `json:"externalGuard"`
@@ -25,7 +23,6 @@ type SettingsRequest struct {
 	ConfirmWrites bool  `json:"confirmWrites"`
 }
 
-// AuditEvent is one JSONL line written for an applied settings change.
 type AuditEvent struct {
 	TS     string          `json:"ts"`
 	Event  string          `json:"event"`
@@ -36,14 +33,11 @@ type AuditEvent struct {
 	Result string          `json:"result"`
 }
 
-// AuditLogger appends events to AUDIT_LOG. A short open/append/close keeps the
-// file usable across container restarts and avoids holding an fd forever.
 type AuditLogger struct {
 	path string
 	mu   sync.Mutex
 }
 
-// NewAuditLogger validates that path is writable and creates the parent dir.
 func NewAuditLogger(path string) (*AuditLogger, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -64,7 +58,6 @@ func NewAuditLogger(path string) (*AuditLogger, error) {
 	return &AuditLogger{path: path}, nil
 }
 
-// Log appends one JSONL event.
 func (a *AuditLogger) Log(ev AuditEvent) error {
 	if a == nil {
 		return fmt.Errorf("audit logger is nil")
@@ -92,7 +85,7 @@ func (a *AuditLogger) Log(ev AuditEvent) error {
 	return nil
 }
 
-func presetOf(s RuntimeSettings) int {
+func PresetOf(s RuntimeSettings) int {
 	switch {
 	case s.BuiltinGuards && s.ExternalGuard:
 		return 4

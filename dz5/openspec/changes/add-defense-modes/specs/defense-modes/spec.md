@@ -117,17 +117,18 @@ type RuntimeSettings struct {
 
 ### Requirement: UI
 
-`GET /ui`:
+UI вынесен в отдельный сервис `ui/` (`add-agent-registry-ui`):
 
 - показывает `preset`, состояние guards и предупреждение, если
   `runtimeToggles=false`;
-- чекбоксы вызывают `POST /settings`;
+- чекбоксы вызывают `POST /api/agents/{id}/settings`;
 - при `400/403/503` показывает ошибку и перечитывает `/status`;
 - отдельный confirm для `allowWrites=true`.
 
 ### Requirement: L3
 
-- Compose limits: agent `512M`, wall `2048M`, ollama `4000M`.
+- Compose limits: agent `512M`, agent-fixed `512M`, ui `128M`, wall `2048M`,
+  ollama `4000M`.
 - Таймауты: HTTP-клиент стены `GUARDRAILS_TIMEOUT=60s`.
 - Wall использует один общий `AnalyzerEngine`/`AnonymizerEngine`; без этого
   `DetectPII` создавал новый spaCy-analyzer на каждый validate и терял
