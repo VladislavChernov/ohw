@@ -1,10 +1,12 @@
 #!/usr/bin/env sh
 # Cross-platform POSIX shell launcher for the dz5 red-team run.
 # Works on Linux, macOS, WSL and Git Bash. Native Windows: run-red-team.ps1.
+# Default is GPU; use --cpu on a machine without an NVIDIA GPU.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 COMPOSE_FILE="$ROOT/infra/compose.yaml"
+GPU_FILE="$ROOT/infra/compose.gpu.yaml"
 REPORTS_DIR="$ROOT/reports"
 
 preset=1
@@ -12,6 +14,7 @@ runs=3
 timeout=120
 target=
 augustus=off
+cpu=0
 no_up=0
 no_build=0
 no_report=0
@@ -31,6 +34,8 @@ Options:
   --timeout SECONDS   HTTP timeout (default: 120)
   --target URL        Agent base URL (default: agent for P1-P4, agent-fixed for P5)
   --augustus          Also run Augustus probes
+  --cpu               Run ollama on CPU (no NVIDIA GPU required)
+  --gpu               Run ollama on GPU (default)
   --no-up             Do not start/update compose services
   --no-build          Do not rebuild the attack-runner image
   --no-report         Skip report_builder
@@ -76,6 +81,14 @@ while [ "$#" -gt 0 ]; do
       augustus=on
       shift
       ;;
+    --cpu)
+      cpu=1
+      shift
+      ;;
+    --gpu)
+      cpu=0
+      shift
+      ;;
     --no-up)
       no_up=1
       shift
@@ -111,6 +124,9 @@ case "$runs" in
 esac
 [ "$runs" -ge 1 ] || fail "--runs must be at least 1"
 [ -n "$timeout" ] || fail "--timeout is required"
+if [ "$cpu" -eq 0 ] && [ ! -f "$GPU_FILE" ]; then
+  fail "GPU overlay not found: $GPU_FILE"
+fi
 
 if [ -z "$target" ]; then
   if [ "$preset" -eq 5 ]; then
@@ -150,7 +166,11 @@ run_cmd() {
 }
 
 compose() {
-  run_cmd docker compose -f "$COMPOSE_FILE" --profile attack "$@"
+  if [ "$cpu" -eq 1 ]; then
+    run_cmd docker compose -f "$COMPOSE_FILE" --profile attack "$@"
+  else
+    run_cmd docker compose -f "$COMPOSE_FILE" -f "$GPU_FILE" --profile attack "$@"
+  fi
 }
 
 list_runs() {

@@ -26,7 +26,9 @@ Invoke-RestMethod -Uri http://localhost:8081/healthz
 Если агент не отвечает:
 
 ```powershell
-docker compose -f infra/compose.yaml up -d --build ollama db agent agent-fixed wall ui
+# GPU
+docker compose -f infra/compose.yaml -f infra/compose.gpu.yaml up -d --build ollama db agent agent-fixed wall ui
+# CPU: уберите второй -f
 ```
 
 Первый запуск может быть долгим: скачивается модель. Дождись health, а не

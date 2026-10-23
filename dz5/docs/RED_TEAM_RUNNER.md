@@ -589,8 +589,10 @@ docker run --rm --entrypoint pytest dz5-attack-runner:test `
 | `attack-runner/attack_runner/db.py` | restore, snapshot, setup/teardown |
 | `attack-runner/attack_runner/client.py` | HTTP-клиент и target allow-list |
 | `attack-runner/scenarios/*.yaml` | 18 сценариев |
-| `run-red-team.sh` | POSIX-запуск стека, прогона и отчёта |
-| `run-red-team.ps1` | PowerShell-запуск стека, прогона и отчёта |
+| `run-red-team.sh` | POSIX-запуск стека, прогона и отчёта; GPU по умолчанию, `--cpu` — CPU |
+| `run-red-team.ps1` | PowerShell-запуск стека, прогона и отчёта; GPU по умолчанию, `-Cpu` — CPU |
+| `run-red-team-gpu.sh` / `.ps1` | явный GPU-вариант launcher'а |
+| `run-red-team-cpu.sh` / `.ps1` | явный CPU-вариант launcher'а |
 | `seed-db.sh` | POSIX: засевка/восстановление SQLite |
 | `seed-db.ps1` | PowerShell: засевка/восстановление SQLite |
 | `infra/db/admin.sh` | внутренний HTTP-сервис `db-admin` для UI-кнопки Restore DB |
@@ -600,3 +602,4 @@ docker run --rm --entrypoint pytest dz5-attack-runner:test `
 | `report_builder/aggregate.py` | агрегация и complete |
 | `report_builder/render.py` | `summary.md`, `latest.md`, `red-team.md` |
 | `infra/compose.yaml` | сервис `attack-runner`, volumes, env |
+| `infra/compose.gpu.yaml` | GPU-оверлей для `ollama`; без него CPU |

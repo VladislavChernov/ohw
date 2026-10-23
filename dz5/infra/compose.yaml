@@ -7,7 +7,7 @@ name: dz5-stand
 # isolated from the shared model volume used by other homeworks.
 #
 # Services are added incrementally as their bundles land:
-#   - ollama  (abliterated GPU target)    add-abliterated-llm  ✅
+#   - ollama  (abliterated LLM target)    add-abliterated-llm  ✅
 #   - db      (SQLite + seed/restore)    add-db-service       ✅
 #   - agent   (Go stand agent)           add-agent-core
 #   - agent-fixed (preset 5)             add-fixed-agent
@@ -19,7 +19,7 @@ name: dz5-stand
 #   BUILTIN_GUARDS, EXTERNAL_GUARD. L3 (resource limits) is always on.
 
 services:
-  # Abliterated local LLM (GPU target). Safety alignment stripped on purpose so
+  # Abliterated local LLM target. Safety alignment stripped on purpose so
   # the baseline preset can honestly show vulnerabilities.
   ollama:
     build:
@@ -37,16 +37,12 @@ services:
       - "11434:11434"
     # L3 (Unbounded Consumption / LLM06): cap memory so a runaway generation
     # or resource-exhaustion attack cannot take down the host.
-    # GPU access (verified locally on Docker Desktop + NVIDIA, ollama 0.40.4).
+    # GPU access is opt-in via compose.gpu.yaml; without that overlay Ollama
+    # runs on the CPU.
     deploy:
       resources:
         limits:
           memory: 4000M
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     healthcheck:
       test: ["CMD-SHELL", "ollama show \"$$OLLAMA_MODEL\" >/dev/null 2>&1"]
       interval: 10s

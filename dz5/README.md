@@ -25,10 +25,12 @@ abliterated-моделью и SQLite-БД; защиты включаются п�
   Guards `input-defense`, `write-defense` и `output-privacy` описаны в
   `config.py`; агент вызывает REST `/guards/{id}/validate`. Ручной
   FastAPI-прокси `/api/chat` не используется.
-- **`infra/`** — compose, Dockerfile'ы, seed/restore SQLite и внутренний `db-admin`.
+- **`infra/`** — compose, GPU-оверлей, Dockerfile'ы, seed/restore SQLite и
+  внутренний `db-admin`.
 - **`scripts/`** — security-тесты и конфиг Augustus (`rest.Rest` → agent).
 - **`run-red-team.sh` / `run-red-team.ps1`** — launcher'ы стенда и red-team
-  прогона. Лежат в корне проекта.
+  прогона. Лежат в корне проекта; GPU по умолчанию, CPU — через `--cpu`/`-Cpu`.
+- **`run-red-team-gpu.*` / `run-red-team-cpu.*`** — явные GPU/CPU-варианты.
 - **`seed-db.sh` / `seed-db.ps1`** — засевка и восстановление SQLite.
 - **`reports/`** — артефакты прогонов (целевая структура — `reports/<run-id>/`).
 
@@ -106,11 +108,27 @@ disabled). Preset 5 — отдельный контейнер, его полит
 
 ## Быстрый старт
 
+Сначала засейте БД:
+
 ```bash
 cd D:\Otus\ohw\dz5
 sh seed-db.sh   # Windows: .\seed-db.ps1
+```
+
+GPU-вариант (нужна NVIDIA GPU):
+
+```bash
+docker compose -f infra/compose.yaml -f infra/compose.gpu.yaml up -d --build ollama db agent agent-fixed wall ui db-admin
+```
+
+CPU-вариант (без GPU, модель считает на процессоре — медленно):
+
+```bash
 docker compose -f infra/compose.yaml up -d --build ollama db agent agent-fixed wall ui db-admin
 ```
+
+Для red-team-прогона те же варианты доступны как
+`run-red-team-gpu.*` и `run-red-team-cpu.*`; они сами поднимают стенд.
 
 Проверка живости:
 
@@ -239,48 +257,61 @@ UI-сервис сам проксирует запросы в `agent:8080` / `ag
 
 | Скрипт | Назначение |
 |---|---|
-| `run-red-team.sh` | POSIX: поднять стенд, выставить guard-флаги preset, прогнать 18 сценариев и собрать отчёт |
-| `run-red-team.ps1` | То же для Windows PowerShell 5.1+ |
+| `run-red-team.sh` / `run-red-team.ps1` | POSIX/Windows: поднять стенд, выставить guard-флаги preset, прогнать 18 сценариев и собрать отчёт. По умолчанию GPU, `--cpu`/`-Cpu` — CPU |
+| `run-red-team-gpu.sh` / `run-red-team-gpu.ps1` | Явный GPU-вариант (нужна NVIDIA GPU) |
+| `run-red-team-cpu.sh` / `run-red-team-cpu.ps1` | Явный CPU-вариант, без NVIDIA GPU; медленно |
 | `seed-db.sh` | Засеять SQLite (`db-seed`); `--restore` — восстановить после destructive-тестов |
 | `seed-db.ps1` | То же для Windows: `-Restore` |
 | `scripts/test_security.py` | pytest security suite, не launcher |
 
 ```bash
 sh seed-db.sh
-sh run-red-team.sh --preset 1 --runs 3
+sh run-red-team-gpu.sh --preset 1 --runs 3
+sh run-red-team-cpu.sh --preset 1 --runs 3
 ```
 
 ```powershell
 .\seed-db.ps1
-.\run-red-team.ps1 -Preset 1 -Runs 3
+.\run-red-team-gpu.ps1 -Preset 1 -Runs 3
+.\run-red-team-cpu.ps1 -Preset 1 -Runs 3
 ```
 
 `run-red-team.*` запускает **один** preset за раз. Для полной матрицы P1-P5
-нужно выполнить пять запусков. `seed-db.*` не входит в `run-red-team.*`:
-перед первым запуском засейте БД, после `ALLOW_WRITES=on` и destructive-тестов
-восстановите её. В UI для этого есть кнопка **Restore DB** (`POST /api/db/restore`),
-которая ходит во внутренний сервис `db-admin`.
+нужно выполнить пять запусков. `run-red-team.*` по умолчанию идёт через
+`compose.gpu.yaml`; `--cpu`/`-Cpu` убирает GPU-оверлей. `seed-db.*` не входит
+в `run-red-team.*`: перед первым запуском засейте БД, после `ALLOW_WRITES=on` и
+destructive-тестов восстановите её. В UI для этого есть кнопка **Restore DB**
+(`POST /api/db/restore`), которая ходит во внутренний сервис `db-admin`.
 
 ## Red-team
 
 Кросс-платформенный запуск без Python: POSIX shell для Linux/macOS/WSL/Git Bash
-и PowerShell 5.1+ для Windows. Оба скрипта принимают одинаковые настройки,
-поднимают стек, выставляют guard-флаги по preset, пересобирают `attack-runner`,
-запускают сценарии и собирают `reports/red-team.md`.
+и PowerShell 5.1+ для Windows. Варианты `*-gpu`/`*-cpu` принимают одинаковые
+настройки, поднимают стек, выставляют guard-флаги по preset, пересобирают
+`attack-runner`, запускают сценарии и собирают `reports/red-team.md`.
 
 ```bash
 # Linux/macOS/WSL/Git Bash
-sh run-red-team.sh --preset 1 --runs 3
+sh run-red-team-gpu.sh --preset 1 --runs 3
+sh run-red-team-cpu.sh --preset 1 --runs 3
+sh run-red-team.sh --preset 1 --runs 3          # GPU по умолчанию
+sh run-red-team.sh --preset 1 --runs 3 --cpu    # CPU
 sh run-red-team.sh --preset 5 --runs 3 --augustus
 sh run-red-team.sh --preset 1 --runs 1 --scenario llm01-ignore-previous
 ```
 
 ```powershell
 # Windows PowerShell
-.\run-red-team.ps1 -Preset 1 -Runs 3
+.\run-red-team-gpu.ps1 -Preset 1 -Runs 3
+.\run-red-team-cpu.ps1 -Preset 1 -Runs 3
+.\run-red-team.ps1 -Preset 1 -Runs 3            # GPU по умолчанию
+.\run-red-team.ps1 -Preset 1 -Runs 3 -Cpu       # CPU
 .\run-red-team.ps1 -Preset 5 -Runs 3 -Augustus
 .\run-red-team.ps1 -Preset 1 -Runs 1 -Scenario llm01-ignore-previous
 ```
+
+CPU-вариант не требует NVIDIA, но модель считает на процессоре: smoke-прогон
+может идти заметно дольше, а полная матрица на CPU — очень долго.
 
 Для P1–P4 target автоматически `http://agent:8080`, для P5 —
 `http://agent-fixed:8080`; переопределение: `--target` / `-Target`. P1–P4

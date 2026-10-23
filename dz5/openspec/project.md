@@ -26,9 +26,9 @@ Applications 2026**.
 - **Инференс (LLM):** локальный автономный `ollama/ollama:0.40.4` с моделью
   `huihui_ai/llama3.2-abliterate:3b` — **genuine abliterated** (refusal снят
   техникой abliteration; ~2 ГБ, Q4_K_M). Снятая цензура нужна специально, чтобы
-  baseline честно демонстрировал уязвимость. Работает на **NVIDIA GPU**
-  (проверено локально в Docker Desktop, `--gpus all`). **Не** общий
-  `infra/ollama`.
+  baseline честно демонстрировал уязвимость. Работает на **NVIDIA GPU** через
+  `infra/compose.gpu.yaml` (проверено локально в Docker Desktop, `--gpus all`);
+  без этого overlay — на CPU, медленно. **Не** общий `infra/ollama`.
   ⚠️ Проверено: теги `qwen2.5:1.5b-instruct-q8_0` и
   `huihui_ai/qwen2.5-abliterate:1.5b-instruct` — слишком слабые/тяжёлые для
   роли «жертвы» стенда; для стенда непригодны.

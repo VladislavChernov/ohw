@@ -1,5 +1,6 @@
 # Cross-platform PowerShell launcher for the dz5 red-team run.
 # Works on Windows PowerShell 5.1+ and PowerShell 7+ on Linux/macOS.
+# Default is GPU; use -Cpu on a machine without an NVIDIA GPU.
 param(
     [ValidateSet(1, 2, 3, 4, 5)]
     [int]$Preset = 1,
@@ -8,6 +9,7 @@ param(
     [double]$Timeout = 120,
     [string]$Target = "",
     [switch]$Augustus,
+    [switch]$Cpu,
     [switch]$NoUp,
     [switch]$NoBuild,
     [switch]$NoReport,
@@ -18,7 +20,12 @@ $ErrorActionPreference = "Stop"
 
 $Root = $PSScriptRoot
 $ComposeFile = Join-Path $Root "infra/compose.yaml"
+$GpuFile = Join-Path $Root "infra/compose.gpu.yaml"
 $ReportsDir = Join-Path $Root "reports"
+$ComposeFiles = @($ComposeFile)
+if (-not $Cpu) {
+    $ComposeFiles += $GpuFile
+}
 
 if ($Runs -lt 1) {
     [Console]::Error.WriteLine("error: -Runs must be at least 1")
@@ -26,6 +33,10 @@ if ($Runs -lt 1) {
 }
 if ($Timeout -le 0) {
     [Console]::Error.WriteLine("error: -Timeout must be positive")
+    exit 2
+}
+if (-not $Cpu -and -not (Test-Path -LiteralPath $GpuFile)) {
+    [Console]::Error.WriteLine("error: GPU overlay not found: $GpuFile")
     exit 2
 }
 
@@ -47,7 +58,12 @@ $script:GuardEnv = @{
 function Invoke-Compose {
     param([string[]]$Arguments)
 
-    $command = @("compose", "-f", $ComposeFile, "--profile", "attack") + $Arguments
+    $command = @("compose")
+    foreach ($file in $ComposeFiles) {
+        $command += @("-f", $file)
+    }
+    $command += @("--profile", "attack")
+    $command += $Arguments
     if ($DryRun) {
         Write-Host ("+ docker " + ($command -join " "))
         return 0

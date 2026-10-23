@@ -1,0 +1,15 @@
+# NVIDIA GPU overlay for the dz5 stand.
+#
+# The base compose file is CPU-only so it starts on machines without NVIDIA.
+# Add this overlay to give Ollama access to the GPU:
+#
+#   docker compose -f infra/compose.yaml -f infra/compose.gpu.yaml up -d ...
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
