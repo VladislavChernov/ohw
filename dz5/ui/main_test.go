@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -104,6 +106,81 @@ func TestUIChatKeyboardAndTranscript(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("UI missing %q", want)
+		}
+	}
+}
+
+func TestAugustusAPIAndReport(t *testing.T) {
+	reports := t.TempDir()
+	runID := "20261023T120000Z"
+	runDir := filepath.Join(reports, runID)
+	augustusDir := filepath.Join(runDir, "augustus")
+	if err := os.MkdirAll(augustusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := `{"preset":1,"runs":1,"target":"http://agent:8080",` +
+		`"started_at":"2026-10-23T12:00:00Z","finished_at":"2026-10-23T12:01:00Z",` +
+		`"augustus":{"status":"completed","target":"http://agent:8080",` +
+		`"returncode":0,"probes":["dan.DAN_Jailbreak"],"db_changed":false}}`
+	files := map[string]string{
+		filepath.Join(runDir, "manifest.json"):    manifest,
+		filepath.Join(augustusDir, "config.yaml"): "generators:\n  rest.Rest:\n    uri: http://agent:8080/chat\n",
+		filepath.Join(augustusDir, "report.html"): "<h1>Augustus Scan Report</h1>",
+	}
+	for path, body := range files {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv := NewServer(Registry{"baseline": {ID: "baseline", BaseURL: "http://agent:8080"}}, nil)
+	srv.reportsDir = reports
+	h := srv.Mux()
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/augustus/runs", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("runs status = %d", rr.Code)
+	}
+	var runs []AugustusRun
+	if err := json.Unmarshal(rr.Body.Bytes(), &runs); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].RunID != runID || !runs[0].ReportAvailable {
+		t.Fatalf("unexpected runs: %+v", runs)
+	}
+	if runs[0].Target != "http://agent:8080" || runs[0].Status != "completed" {
+		t.Fatalf("manifest not mapped: %+v", runs[0])
+	}
+
+	for name, want := range map[string]string{
+		"report.html": "Augustus Scan Report",
+		"config.yaml": "rest.Rest",
+	} {
+		rr = httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet,
+			"/api/augustus/runs/"+runID+"/"+name, nil))
+		if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), want) {
+			t.Fatalf("%s: status=%d body=%q", name, rr.Code, rr.Body.String())
+		}
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet,
+		"/api/augustus/runs/missing/report.html", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("missing run status = %d", rr.Code)
+	}
+}
+
+func TestAugustusUIPage(t *testing.T) {
+	rr := httptest.NewRecorder()
+	NewServer(Registry{"baseline": {ID: "baseline", BaseURL: "http://agent:8080"}}, nil).
+		Mux().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/augustus", nil))
+	body := rr.Body.String()
+	for _, want := range []string{"Augustus", "runSelect", "Effective config", "HTML report"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("Augustus UI missing %q", want)
 		}
 	}
 }

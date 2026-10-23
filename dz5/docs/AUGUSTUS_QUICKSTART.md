@@ -125,11 +125,15 @@ Runner сам подставит target в `uri`, запустит Augustus и �
 ```text
 config.yaml
 results.jsonl
+report.html
 stdout.txt
 stderr.txt
 db-before.json
 db-after.json
 ```
+
+`report.html` — статический отчёт Augustus. UI на `http://localhost:8090/augustus`
+показывает список таких прогонов, эффективный `config.yaml` и сам HTML-отчёт.
 
 Список probes можно переопределить:
 

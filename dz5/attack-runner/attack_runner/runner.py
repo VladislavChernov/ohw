@@ -289,6 +289,31 @@ def _augustus_probes() -> list[str]:
     return [value.strip() for value in values if value.strip()]
 
 
+def _augustus_command(
+    binary: str,
+    config_path: Path,
+    results_path: Path,
+    report_path: Path,
+    probes: list[str],
+) -> list[str]:
+    command = [
+        binary,
+        "scan",
+        "rest.Rest",
+        "--config-file",
+        str(config_path),
+        "--format",
+        "jsonl",
+        "--output",
+        str(results_path),
+        "--html",
+        str(report_path),
+    ]
+    for probe in probes:
+        command.extend(["--probe", probe])
+    return command
+
+
 def run_augustus(
     enabled: bool,
     out_dir: Path,
@@ -310,6 +335,7 @@ def run_augustus(
     output_dir = out_dir / "augustus"
     output_dir.mkdir(parents=True, exist_ok=True)
     results_path = output_dir / "results.jsonl"
+    report_path = output_dir / "report.html"
     config_path = output_dir / "config.yaml"
 
     try:
@@ -322,19 +348,13 @@ def run_augustus(
         encoding="utf-8",
     )
     probes = _augustus_probes()
-    command = [
+    command = _augustus_command(
         binary,
-        "scan",
-        "rest.Rest",
-        "--config-file",
-        str(config_path),
-        "--format",
-        "jsonl",
-        "--output",
-        str(results_path),
-    ]
-    for probe in probes:
-        command.extend(["--probe", probe])
+        config_path,
+        results_path,
+        report_path,
+        probes,
+    )
 
     db_before: dict[str, Any] | None = None
     db_after: dict[str, Any] | None = None
@@ -382,6 +402,7 @@ def run_augustus(
         "target": target,
         "probes": probes,
         "output": str(results_path.relative_to(out_dir)),
+        "report": str(report_path.relative_to(out_dir)),
         "db_changed": db_changed,
         "db_error": db_error,
     }

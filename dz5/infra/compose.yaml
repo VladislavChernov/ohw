@@ -224,6 +224,9 @@ services:
     environment:
       UI_ADDR: ":8090"
       AGENT_REGISTRY: "baseline=http://agent:8080,fixed=http://agent-fixed:8080"
+      REPORTS_DIR: /reports
+    volumes:
+      - ../reports:/reports:ro
     depends_on:
       agent:
         condition: service_started

@@ -1,6 +1,7 @@
 from attack_runner.manifest import build_manifest
 from attack_runner.runner import (
     DEFAULT_AUGUSTUS_PROBES,
+    _augustus_command,
     _augustus_probes,
     _augustus_scan_config,
     _redact_value,
@@ -82,6 +83,20 @@ def test_augustus_probes_use_defaults_or_csv(monkeypatch):
         "dan.DAN_Jailbreak",
         "goodside.PayloadSplitting",
     ]
+
+
+def test_augustus_command_writes_jsonl_and_html(tmp_path):
+    command = _augustus_command(
+        "augustus",
+        tmp_path / "config.yaml",
+        tmp_path / "results.jsonl",
+        tmp_path / "report.html",
+        ["dan.DAN_Jailbreak"],
+    )
+    assert command[:3] == ["augustus", "scan", "rest.Rest"]
+    assert command[command.index("--output") + 1] == str(tmp_path / "results.jsonl")
+    assert command[command.index("--html") + 1] == str(tmp_path / "report.html")
+    assert command[-2:] == ["--probe", "dan.DAN_Jailbreak"]
 
 
 def test_redact_value_walks_nested_body():

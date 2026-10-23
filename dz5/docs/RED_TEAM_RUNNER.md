@@ -406,10 +406,17 @@ reports/<run-id>/
 ├── results.jsonl
 ├── summary.json
 ├── summary.md
+├── augustus/              # если запускался с --augustus on
+│   ├── config.yaml
+│   ├── results.jsonl
+│   └── report.html
 └── details/
     └── <scenario>/
         └── run-<n>.json
 ```
+
+`manifest.json` Augustus-прогона содержит пути `output` и `report`; UI на
+`http://localhost:8090/augustus` читает `augustus/` только на чтение.
 
 `report_builder` дополнительно пишет:
 

@@ -74,8 +74,9 @@ docker compose -f infra/compose.yaml --profile attack run --rm --no-deps `
 ```
 
 Runner сам подставляет target в `uri`, пишет `reports/<run-id>/augustus/`:
-`config.yaml`, `results.jsonl`, `stdout.txt`, `stderr.txt`, `db-before.json`,
-`db-after.json`. Список probes задаётся `AUGUSTUS_PROBES` (CSV).
+`config.yaml`, `results.jsonl`, `report.html`, `stdout.txt`, `stderr.txt`,
+`db-before.json`, `db-after.json`. Список probes задаётся `AUGUSTUS_PROBES`
+(CSV). HTML-отчёт и настройки прогона доступны в UI: `http://localhost:8090/augustus`.
 
 ## Что Augustus видит, а что нет
 

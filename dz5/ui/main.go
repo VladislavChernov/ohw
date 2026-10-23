@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -22,6 +23,42 @@ type Agent struct {
 }
 
 type Registry map[string]Agent
+
+type AugustusRun struct {
+	RunID           string   `json:"run_id"`
+	Target          string   `json:"target,omitempty"`
+	Preset          int      `json:"preset,omitempty"`
+	Runs            int      `json:"runs,omitempty"`
+	Status          string   `json:"status,omitempty"`
+	Reason          string   `json:"reason,omitempty"`
+	ReturnCode      int      `json:"returncode"`
+	Probes          []string `json:"probes,omitempty"`
+	DBChanged       *bool    `json:"db_changed,omitempty"`
+	StartedAt       string   `json:"started_at,omitempty"`
+	FinishedAt      string   `json:"finished_at,omitempty"`
+	ReportAvailable bool     `json:"report_available"`
+	ConfigAvailable bool     `json:"config_available"`
+	ReportURL       string   `json:"report_url,omitempty"`
+	ConfigURL       string   `json:"config_url,omitempty"`
+}
+
+type augustusManifest struct {
+	Preset     int             `json:"preset"`
+	Runs       int             `json:"runs"`
+	Target     string          `json:"target"`
+	StartedAt  string          `json:"started_at"`
+	FinishedAt string          `json:"finished_at"`
+	Augustus   *augustusResult `json:"augustus"`
+}
+
+type augustusResult struct {
+	Status     string   `json:"status"`
+	Reason     string   `json:"reason"`
+	Target     string   `json:"target"`
+	ReturnCode int      `json:"returncode"`
+	Probes     []string `json:"probes"`
+	DBChanged  *bool    `json:"db_changed"`
+}
 
 func displayName(id string) string {
 	switch id {
@@ -86,9 +123,10 @@ func parseRegistry(raw string) (Registry, error) {
 }
 
 type Server struct {
-	registry Registry
-	client   *http.Client
-	log      *log.Logger
+	registry   Registry
+	client     *http.Client
+	log        *log.Logger
+	reportsDir string
 }
 
 func NewServer(reg Registry, logger *log.Logger) *Server {
@@ -96,9 +134,10 @@ func NewServer(reg Registry, logger *log.Logger) *Server {
 		logger = log.Default()
 	}
 	return &Server{
-		registry: reg,
-		client:   &http.Client{Timeout: 180 * time.Second},
-		log:      logger,
+		registry:   reg,
+		client:     &http.Client{Timeout: 180 * time.Second},
+		log:        logger,
+		reportsDir: env("REPORTS_DIR", "/reports"),
 	}
 }
 
@@ -110,6 +149,9 @@ func (s *Server) Mux() http.Handler {
 	})
 	mux.HandleFunc("/api/agents", s.handleAgents)
 	mux.HandleFunc("/api/agents/", s.handleAgentProxy)
+	mux.HandleFunc("/api/augustus/runs", s.handleAugustusRuns)
+	mux.HandleFunc("/api/augustus/runs/", s.handleAugustusRunFile)
+	mux.HandleFunc("/augustus", s.handleAugustusUI)
 	mux.HandleFunc("/", s.handleUI)
 	return mux
 }
@@ -192,6 +234,129 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, agent Agent, acti
 	_, _ = io.Copy(w, resp.Body)
 }
 
+func (s *Server) handleAugustusRuns(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.listAugustusRuns())
+}
+
+func (s *Server) listAugustusRuns() []AugustusRun {
+	entries, err := os.ReadDir(s.reportsDir)
+	if err != nil {
+		return []AugustusRun{}
+	}
+	runs := make([]AugustusRun, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || !validRunID(entry.Name()) {
+			continue
+		}
+		runID := entry.Name()
+		runDir := filepath.Join(s.reportsDir, runID)
+		augustusDir := filepath.Join(runDir, "augustus")
+		configPath := filepath.Join(augustusDir, "config.yaml")
+		reportPath := filepath.Join(augustusDir, "report.html")
+		if !regularFile(configPath) {
+			continue
+		}
+
+		run := AugustusRun{
+			RunID:           runID,
+			ConfigAvailable: true,
+			ConfigURL:       "/api/augustus/runs/" + url.PathEscape(runID) + "/config.yaml",
+		}
+		if regularFile(reportPath) {
+			run.ReportAvailable = true
+			run.ReportURL = "/api/augustus/runs/" + url.PathEscape(runID) + "/report.html"
+		}
+		if data, err := os.ReadFile(filepath.Join(runDir, "manifest.json")); err == nil {
+			var manifest augustusManifest
+			if json.Unmarshal(data, &manifest) == nil {
+				run.Preset = manifest.Preset
+				run.Runs = manifest.Runs
+				run.Target = manifest.Target
+				run.StartedAt = manifest.StartedAt
+				run.FinishedAt = manifest.FinishedAt
+				if manifest.Augustus != nil {
+					run.Status = manifest.Augustus.Status
+					run.Reason = manifest.Augustus.Reason
+					run.ReturnCode = manifest.Augustus.ReturnCode
+					run.Probes = manifest.Augustus.Probes
+					run.DBChanged = manifest.Augustus.DBChanged
+					if manifest.Augustus.Target != "" {
+						run.Target = manifest.Augustus.Target
+					}
+				}
+			}
+		}
+		runs = append(runs, run)
+	}
+	sort.Slice(runs, func(i, j int) bool {
+		return runs[i].RunID > runs[j].RunID
+	})
+	return runs
+}
+
+func (s *Server) handleAugustusRunFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/augustus/runs/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || !validRunID(parts[0]) {
+		http.NotFound(w, r)
+		return
+	}
+	contentTypes := map[string]string{
+		"report.html": "text/html; charset=utf-8",
+		"config.yaml": "text/plain; charset=utf-8",
+	}
+	contentType, ok := contentTypes[parts[1]]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	path := filepath.Join(s.reportsDir, parts[0], "augustus", parts[1])
+	if !regularFile(path) {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeFile(w, r, path)
+}
+
+func validRunID(id string) bool {
+	if id == "" || id == "." || id == ".." {
+		return false
+	}
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func regularFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
+}
+
+func (s *Server) handleAugustusUI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet || (r.URL.Path != "/augustus" && r.URL.Path != "/augustus/") {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(augustusHTML))
+}
+
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet || (r.URL.Path != "/" && r.URL.Path != "/ui") {
 		http.NotFound(w, r)
@@ -234,6 +399,9 @@ const uiHTML = `<!DOCTYPE html>
 <style>
 body { font-family: Arial, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }
 h1 { color: #1a73e8; }
+.tabs { display: flex; gap: .5rem; border-bottom: 1px solid #ddd; margin-bottom: 1rem; }
+.tabs a { padding: .5rem .9rem; color: #555; text-decoration: none; border-radius: 6px 6px 0 0; }
+.tabs a.active { background: #e8f0fe; color: #1a73e8; font-weight: bold; }
 .toolbar { display: flex; gap: .75rem; align-items: center; margin-bottom: 1rem; }
 select { padding: .35rem; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
@@ -254,6 +422,7 @@ pre { background:#f5f5f5; padding:0.5rem; border-radius:4px; overflow-x:auto; }
 </head>
 <body>
 <h1>Agent Security UI</h1>
+<nav class="tabs"><a class="active" href="/">Agents</a><a href="/augustus">Augustus</a></nav>
 <div class="toolbar">
   <label for="agentSelect">Agent:</label>
   <select id="agentSelect"></select>
@@ -387,6 +556,133 @@ $('chatInput').addEventListener('keydown', e => {
   }
 });
 loadAgents();
+</script>
+</body>
+</html>`
+
+const augustusHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Augustus - Agent Security UI</title>
+<style>
+body { font-family: Arial, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
+h1 { color: #1a73e8; }
+.tabs { display: flex; gap: .5rem; border-bottom: 1px solid #ddd; margin-bottom: 1rem; }
+.tabs a { padding: .5rem .9rem; color: #555; text-decoration: none; border-radius: 6px 6px 0 0; }
+.tabs a.active { background: #e8f0fe; color: #1a73e8; font-weight: bold; }
+.toolbar { display: flex; gap: .75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }
+select { padding: .35rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1rem; }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+.card h2, .card h3 { margin-top: 0; color: #333; }
+dl { display: grid; grid-template-columns: 130px 1fr; gap: .35rem .75rem; margin: 0; }
+dt { color: #666; }
+dd { margin: 0; overflow-wrap: anywhere; }
+.badge { display: inline-block; padding: .15rem .5rem; border-radius: 4px; background: #e8f0fe; color: #1a73e8; font-weight: bold; }
+.warn { color: #b26a00; background: #fff4e5; border: 1px solid #ffd8a8; padding: .5rem; border-radius: 4px; }
+pre { background: #f5f5f5; padding: .75rem; border-radius: 4px; overflow: auto; max-height: 420px; }
+iframe { width: 100%; height: 720px; border: 1px solid #ddd; border-radius: 4px; background: #fff; }
+code { background: #f5f5f5; padding: .1rem .3rem; border-radius: 3px; }
+</style>
+</head>
+<body>
+<h1>Augustus</h1>
+<nav class="tabs"><a href="/">Agents</a><a class="active" href="/augustus">Augustus</a></nav>
+<div class="toolbar">
+  <label for="runSelect">Run:</label>
+  <select id="runSelect"></select>
+  <span id="note" class="warn" style="display:none;"></span>
+</div>
+<div id="empty" class="warn" style="display:none;">
+  Augustus-отчётов пока нет. Запусти attack-runner с <code>--augustus on</code>.
+</div>
+<div class="grid">
+  <div class="card">
+    <h2>Settings</h2>
+    <dl>
+      <dt>Target</dt><dd id="metaTarget">-</dd>
+      <dt>Preset</dt><dd id="metaPreset">-</dd>
+      <dt>Runs</dt><dd id="metaRuns">-</dd>
+      <dt>Probes</dt><dd id="metaProbes">-</dd>
+      <dt>Time</dt><dd id="metaTime">-</dd>
+    </dl>
+  </div>
+  <div class="card">
+    <h2>Result</h2>
+    <dl>
+      <dt>Status</dt><dd><span id="metaStatus" class="badge">-</span></dd>
+      <dt>Return code</dt><dd id="metaReturn">-</dd>
+      <dt>DB changed</dt><dd id="metaDB">-</dd>
+    </dl>
+  </div>
+</div>
+<div class="card">
+  <h3>Effective config</h3>
+  <pre id="config">-</pre>
+</div>
+<div class="card">
+  <h3>HTML report <a id="reportLink" href="#" target="_blank" style="display:none;">open in new tab</a></h3>
+  <p id="reportNote">-</p>
+  <iframe id="reportFrame" style="display:none;" title="Augustus HTML report"></iframe>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let runs = [];
+const show = async () => {
+  const run = runs.find(item => item.run_id === $('runSelect').value);
+  if (!run) return;
+  $('metaTarget').textContent = run.target || '-';
+  $('metaPreset').textContent = run.preset || '-';
+  $('metaRuns').textContent = run.runs || '-';
+  $('metaProbes').textContent = (run.probes || []).join(', ') || '-';
+  $('metaTime').textContent = (run.started_at || '-') + ' / ' + (run.finished_at || '-');
+  $('metaStatus').textContent = run.status || 'unknown';
+  $('metaReturn').textContent = run.returncode === undefined ? '-' : run.returncode;
+  $('metaDB').textContent = run.db_changed === undefined || run.db_changed === null
+    ? '-' : (run.db_changed ? 'changed' : 'unchanged');
+  $('note').style.display = run.reason ? '' : 'none';
+  $('note').textContent = run.reason || '';
+
+  $('config').textContent = 'Loading...';
+  if (run.config_available) {
+    const response = await fetch(run.config_url);
+    $('config').textContent = await response.text();
+  } else {
+    $('config').textContent = 'config.yaml not found';
+  }
+
+  if (run.report_available) {
+    $('reportNote').textContent = '';
+    $('reportFrame').src = run.report_url;
+    $('reportFrame').style.display = 'block';
+    $('reportLink').href = run.report_url;
+    $('reportLink').style.display = 'inline';
+  } else {
+    $('reportNote').textContent = 'report.html not found for this run.';
+    $('reportFrame').style.display = 'none';
+    $('reportLink').style.display = 'none';
+  }
+};
+const load = async () => {
+  const response = await fetch('/api/augustus/runs');
+  runs = await response.json();
+  const select = $('runSelect');
+  select.innerHTML = '';
+  if (!runs.length) {
+    $('empty').style.display = '';
+    return;
+  }
+  for (const run of runs) {
+    const option = document.createElement('option');
+    option.value = run.run_id;
+    option.textContent = run.run_id + '  [' + (run.status || 'unknown') + ']';
+    select.appendChild(option);
+  }
+  await show();
+};
+$('runSelect').addEventListener('change', show);
+load();
 </script>
 </body>
 </html>`

@@ -199,11 +199,15 @@ read-only, SQL allow-list и `db-restore`. Прямой `INSERT` через `db`
 | Метод | Путь | Описание |
 |-------|------|----------|
 | GET | `/` или `/ui` | HTML UI с selector агентов |
+| GET | `/augustus` | HTML UI: Augustus-прогоны, настройки и отчёт |
 | GET | `/healthz` | Health check |
 | GET | `/api/agents` | Список агентов из реестра |
 | GET | `/api/agents/{id}/status` | Proxy к агенту |
 | POST | `/api/agents/{id}/settings` | Proxy к агенту |
 | POST | `/api/agents/{id}/chat` | Proxy к агенту |
+| GET | `/api/augustus/runs` | Список прогонов из `reports/` |
+| GET | `/api/augustus/runs/{run-id}/report.html` | HTML-отчёт Augustus |
+| GET | `/api/augustus/runs/{run-id}/config.yaml` | Эффективный конфиг прогона |
 
 Реестр задаётся в compose (`AGENT_REGISTRY`), браузер не знает внутренние URL:
 UI-сервис сам проксирует запросы в `agent:8080` / `agent-fixed:8080`.
@@ -246,6 +250,10 @@ docker run --rm --entrypoint pytest dz5-attack-runner:test /app/attack-runner/te
 - Fixed: статус и чат доступны, переключатели disabled (`runtimeToggles=false`).
 - Чат: `Enter` отправляет запрос, `Shift+Enter` вставляет перевод строки.
   В поле ответа выводится отправленный запрос (`You:`) и ответ модели (`Agent:`).
+- `http://localhost:8090/augustus` — read-only вкладка: список прогонов с
+  `augustus/report.html`, эффективный `config.yaml`, manifest-поля и сам отчёт.
+  `reports/` монтируется в UI как `/reports:ro`; запуск scan из браузера не
+  поддерживается.
 
 Переключатель `allowWrites` требует подтверждения и пишется в audit log.
 При `EXTERNAL_GUARD=on` write-SQL сначала проверяется `write-defense`: явная
