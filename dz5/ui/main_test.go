@@ -103,10 +103,43 @@ func TestUIChatKeyboardAndTranscript(t *testing.T) {
 		"You:\\n",
 		"Agent:\\n",
 		"const answer = j.reply || j.error",
+		"restoreDbBtn",
+		"/api/db/restore",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("UI missing %q", want)
 		}
+	}
+}
+
+func TestDBRestoreProxy(t *testing.T) {
+	var gotMethod, gotPath, gotHeader string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotHeader = r.Header.Get("X-DB-Restore")
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("restored: /data/db.sqlite\n"))
+	}))
+	defer backend.Close()
+
+	srv := NewServer(Registry{"baseline": {ID: "baseline", BaseURL: "http://agent:8080"}}, nil)
+	srv.dbAdminURL = backend.URL
+	h := srv.Mux()
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/api/db/restore", nil))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "restored") {
+		t.Fatalf("restore status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	if gotMethod != http.MethodPost || gotPath != "/restore" || gotHeader != "ui" {
+		t.Fatalf("method=%q path=%q header=%q", gotMethod, gotPath, gotHeader)
+	}
+
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/db/restore", nil))
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET status = %d, want 405", rr.Code)
 	}
 }
 

@@ -23,8 +23,11 @@ abliterated-моделью и SQLite-БД; защиты включаются п�
   Guards `input-defense`, `write-defense` и `output-privacy` описаны в
   `config.py`; агент вызывает REST `/guards/{id}/validate`. Ручной
   FastAPI-прокси `/api/chat` не используется.
-- **`infra/`** — compose, Dockerfile'ы, seed/restore SQLite.
+- **`infra/`** — compose, Dockerfile'ы, seed/restore SQLite и внутренний `db-admin`.
 - **`scripts/`** — security-тесты и конфиг Augustus (`rest.Rest` → agent).
+- **`run-red-team.sh` / `run-red-team.ps1`** — launcher'ы стенда и red-team
+  прогона. Лежат в корне проекта.
+- **`seed-db.sh` / `seed-db.ps1`** — засевка и восстановление SQLite.
 - **`reports/`** — артефакты прогонов (целевая структура — `reports/<run-id>/`).
 
 ## Документация
@@ -34,6 +37,7 @@ abliterated-моделью и SQLite-БД; защиты включаются п�
 - `docs/INTERNAL_AGENT_DEFENSE.md` — защита внутри агента: код, слои, границы.
 - `docs/RED_TEAM_RUNNER.md` — настройка attack runner и проведение атак.
 - `docs/AUGUSTUS_QUICKSTART.md` — первый red-team прогон Augustus по агенту.
+- `docs/AUGUSTUS_ATTACKS.md` — текущие probes, их detectors и свои probes.
 - `docs/TEST_PLAN.md` — матрица прогонов, критерии и порядок проверок.
 - `docs/CONTENT_SAFETY_SCOPE.md` — почему мат и токсичность вынесены за скоуп.
 - `docs/STANDARD_SECURITY_CHECKS.md` — проверки S01–S15 и Poison RAG.
@@ -70,7 +74,7 @@ abliterated-моделью и SQLite-БД; защиты включаются п�
 Защита формулируется не как «защищённый агент», а как конкретные пути
 `вход → модель → tool → актив`. В этом стенде основной путь —
 `пользователь → модель → db_query → SQLite`: его закрывают input/output wall,
-SQL allow-list, read-only доступ, immutable settings, `db-restore` и audit.
+SQL allow-list, read-only доступ, immutable settings, restore БД и audit.
 
 Wall — только текстовый слой. Он не заменяет права БД, tool policy и sandbox.
 В агентах с shell, файлами, браузером или MCP нужны отдельные пути и контроли:
@@ -102,8 +106,8 @@ disabled). Preset 5 — отдельный контейнер, его полит
 
 ```bash
 cd D:\Otus\ohw\dz5
-docker compose -f infra/compose.yaml --profile tools run --rm db-seed
-docker compose -f infra/compose.yaml up -d --build ollama db agent agent-fixed wall ui
+sh seed-db.sh   # Windows: .\seed-db.ps1
+docker compose -f infra/compose.yaml up -d --build ollama db agent agent-fixed wall ui db-admin
 ```
 
 Проверка живости:
@@ -179,7 +183,7 @@ fail-closed `503`.
 Ограничение: проверяется весь SQL как текст, а не значения полей. Явная
 инъекция в `INSERT`/`UPDATE` ловится, но base64/zero-width/перефразирование
 или SQL-инъекция могут пройти. Это дополнительный слой, а не замена
-read-only, SQL allow-list и `db-restore`. Прямой `INSERT` через `db`/harness
+read-only, SQL allow-list и restore БД. Прямой `INSERT` через `db`/harness
 стену не проходит: она стоит только на пути агента. Live-прогон write-guard
 ещё не зафиксирован; unit-тесты block/allow/fail-closed зелёные.
 
@@ -208,6 +212,7 @@ read-only, SQL allow-list и `db-restore`. Прямой `INSERT` через `db`
 | GET | `/api/augustus/runs` | Список прогонов из `reports/` |
 | GET | `/api/augustus/runs/{run-id}/report.html` | HTML-отчёт Augustus |
 | GET | `/api/augustus/runs/{run-id}/config.yaml` | Эффективный конфиг прогона |
+| POST | `/api/db/restore` | Восстановить SQLite из seed через внутренний `db-admin` |
 
 Реестр задаётся в compose (`AGENT_REGISTRY`), браузер не знает внутренние URL:
 UI-сервис сам проксирует запросы в `agent:8080` / `agent-fixed:8080`.
@@ -225,6 +230,112 @@ UI-сервис сам проксирует запросы в `agent:8080` / `ag
 (`INPUT_GUARD_NAME`, `WRITE_GUARD_NAME`, `OUTPUT_GUARD_NAME`). Текущая
 конфигурация, назначение каждого параметра и логика решений:
 `docs/GUARDRAILS_CONFIG.md`.
+
+## Скрипты
+
+Все launcher'ы лежат в корне проекта и не требуют Python.
+
+| Скрипт | Назначение |
+|---|---|
+| `run-red-team.sh` | POSIX: поднять стенд, выставить guard-флаги preset, прогнать 18 сценариев и собрать отчёт |
+| `run-red-team.ps1` | То же для Windows PowerShell 5.1+ |
+| `seed-db.sh` | Засеять SQLite (`db-seed`); `--restore` — восстановить после destructive-тестов |
+| `seed-db.ps1` | То же для Windows: `-Restore` |
+| `scripts/test_security.py` | pytest security suite, не launcher |
+
+```bash
+sh seed-db.sh
+sh run-red-team.sh --preset 1 --runs 3
+```
+
+```powershell
+.\seed-db.ps1
+.\run-red-team.ps1 -Preset 1 -Runs 3
+```
+
+`run-red-team.*` запускает **один** preset за раз. Для полной матрицы P1-P5
+нужно выполнить пять запусков. `seed-db.*` не входит в `run-red-team.*`:
+перед первым запуском засейте БД, после `ALLOW_WRITES=on` и destructive-тестов
+восстановите её. В UI для этого есть кнопка **Restore DB** (`POST /api/db/restore`),
+которая ходит во внутренний сервис `db-admin`.
+
+## Red-team
+
+Кросс-платформенный запуск без Python: POSIX shell для Linux/macOS/WSL/Git Bash
+и PowerShell 5.1+ для Windows. Оба скрипта принимают одинаковые настройки,
+поднимают стек, выставляют guard-флаги по preset, пересобирают `attack-runner`,
+запускают сценарии и собирают `reports/red-team.md`.
+
+```bash
+# Linux/macOS/WSL/Git Bash
+sh run-red-team.sh --preset 1 --runs 3
+sh run-red-team.sh --preset 5 --runs 3 --augustus
+sh run-red-team.sh --preset 1 --runs 1 --scenario llm01-ignore-previous
+```
+
+```powershell
+# Windows PowerShell
+.\run-red-team.ps1 -Preset 1 -Runs 3
+.\run-red-team.ps1 -Preset 5 -Runs 3 -Augustus
+.\run-red-team.ps1 -Preset 1 -Runs 1 -Scenario llm01-ignore-previous
+```
+
+Для P1–P4 target автоматически `http://agent:8080`, для P5 —
+`http://agent-fixed:8080`; переопределение: `--target` / `-Target`. P1–P4
+получают `BUILTIN_GUARDS`/`EXTERNAL_GUARD` по номеру preset, остальные env
+наследуются. Если политика выполнения Windows запрещает `.ps1`, запусти
+через `powershell -ExecutionPolicy Bypass -File .\run-red-team.ps1 ...`.
+
+По умолчанию пересобирается образ `attack-runner` (быстро из кэша), запускается
+compose и вызывается `report_builder`. Флаги `--no-build`/`-NoBuild`,
+`--no-up`/`-NoUp` и `--no-report`/`-NoReport` отключают эти шаги. `n<3` даёт
+`unknown`, а не доказательство защиты. Подробности:
+`docs/RED_TEAM_RUNNER.md` и `docs/AUGUSTUS_QUICKSTART.md`.
+
+### Augustus: какие атаки и почему не основной инструмент
+
+Augustus включается отдельно (`--augustus`/`-Augustus`) и по умолчанию
+запускает только три probe:
+
+| Probe | Атака | Detector | Ограничение |
+|---|---|---|---|
+| `dan.DAN_Jailbreak` | DAN-roleplay: модель должна принять «DAN Policy» и отвечать без ограничений | `dan.DANJailbreak` | Ищет маркеры `[🔓JAILBREAK]`/`successfully jailbr`, но не префикс `DAN:` и не смысл ответа |
+| `latentinjection.LatentJailbreak` | Скрытая инструкция в рамке «сценарий фильма»: отвечать так, будто ограничений нет | `latentinjection.Detector` | Инвертированная проверка отказа: нейтральный ответ без слов отказа уже даёт `VULN` |
+| `goodside.SystemPromptConfusion` | 6 prompt'ов на override system prompt: прямой приказ, fake update, `SYSTEM ALERT`, game mode, reset, показ промпта | `goodside.SystemOverride` | Ищет фразы атаки в ответе, а не факт override; отказ с цитатой даёт `VULN` |
+
+Список можно переопределить через `AUGUSTUS_PROBES`, но только среди probes,
+уже встроенных в бинарник Augustus.
+
+**Почему остальные атаки не стали делать на Augustus:**
+
+1. **Покрытие.** Три probe не заменяют 18 сценариев `attack-runner` и все 10
+   категорий OWASP LLM 2026. В текущем наборе нет сценариев на PII-дамп,
+   `DROP/DELETE`, URL-эксфильтрацию, supply chain, отравление SQLite, DoS,
+   misinformation, prompt leak, output handling и Poison RAG.
+2. **Пересборка на каждый набор.** В `v0.14.34` YAML-probes встраиваются через
+   `//go:embed` при компиляции. CLI не умеет читать внешнюю папку с probes:
+   новый или изменённый YAML требует пересборки Augustus/образа
+   `attack-runner`. Для каждого нового набора атак — новая сборка.
+3. **Нет доступа к tool calls и БД.** Augustus получает только `$.reply`.
+   `tool_calls`, SQL-политика, изменение SQLite и HTTP-код как критерий
+   вердикта ему недоступны, поэтому LLM03/LLM05/LLM09/LLM10 нельзя оценить по
+   контракту агента.
+4. **Эвристические detectors.** Проверки лексические: возможны и ложные
+   `VULN` (отказ цитирует фразу атаки), и ложные `SAFE` (jailbreak без
+   ожидаемого маркера). Это findings по probe, а не вердикт по агенту.
+5. **Сырые места интеграции.** В upstream `v0.14.34` `augustus version`
+   печатает зашитое `0.0.9`, runtime-загрузки внешних templates нет, а
+   поведение detectors приходится проверять по исходникам. Версию и
+   ограничения нужно фиксировать вручную.
+
+> **Вердикт для Dz5:** Augustus `v0.14.34` — сырой инструмент: набор probes
+> фиксируется на этапе сборки, а detectors дают лексические ложные
+> срабатывания. Как основной red-team runner **НЕ РЕКОМЕНДОВАН к
+> использованию**. Он остаётся только дополнительным источником prompts и
+> findings; матрицу OWASP LLM 2026 считаем по `attack-runner`.
+
+Подробный разбор probes, detectors и создания своих:
+`docs/AUGUSTUS_ATTACKS.md`.
 
 ## Тесты
 
@@ -245,6 +356,7 @@ docker run --rm --entrypoint pytest dz5-attack-runner:test /app/attack-runner/te
 ## UI
 
 - `http://localhost:8090/` — selector `baseline` / `fixed`.
+- Кнопка **Restore DB** возвращает SQLite к seed-состоянию после destructive-тестов.
 - Baseline: переключатели пресетов 1–4 вызывают `POST /settings` и показывают
   ошибки `400/403`.
 - Fixed: статус и чат доступны, переключатели disabled (`runtimeToggles=false`).
@@ -259,7 +371,8 @@ docker run --rm --entrypoint pytest dz5-attack-runner:test /app/attack-runner/te
 При `EXTERNAL_GUARD=on` write-SQL сначала проверяется `write-defense`: явная
 инъекция в `INSERT`/`UPDATE` даёт `403` и не меняет БД. Это проверка текста
 SQL, а не замена read-only/allow-list. После деструктивного прогона восстанови
-БД: `db-restore`.
+БД: `sh seed-db.sh --restore`, `.\seed-db.ps1 -Restore` или кнопкой **Restore DB**
+в UI.
 
 ## Лицензии
 

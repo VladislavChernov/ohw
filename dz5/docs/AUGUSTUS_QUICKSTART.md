@@ -119,6 +119,18 @@ docker compose -f infra/compose.yaml --profile attack run --rm --no-deps `
   --augustus on
 ```
 
+Быстрый вариант без длинной команды:
+
+```bash
+# Linux/macOS/WSL/Git Bash
+sh run-red-team.sh --preset 1 --runs 3 --augustus
+```
+
+```powershell
+# Windows PowerShell
+.\run-red-team.ps1 -Preset 1 -Runs 3 -Augustus
+```
+
 Runner сам подставит target в `uri`, запустит Augustus и положит результаты в
 `reports/<run-id>/augustus/`:
 
@@ -135,11 +147,16 @@ db-after.json
 `report.html` — статический отчёт Augustus. UI на `http://localhost:8090/augustus`
 показывает список таких прогонов, эффективный `config.yaml` и сам HTML-отчёт.
 
-Список probes можно переопределить:
+Список probes можно переопределить. В PowerShell:
 
 ```powershell
-AUGUSTUS_PROBES="dan.DAN_Jailbreak,goodside.SystemPromptConfusion" docker compose ...
+$env:AUGUSTUS_PROBES = "dan.DAN_Jailbreak,goodside.SystemPromptConfusion"
+.\run-red-team.ps1 -Preset 1 -Runs 3 -Augustus
+Remove-Item Env:AUGUSTUS_PROBES
 ```
+
+Что делает каждый из трёх probes, какие у них detectors и ограничения, а также
+как добавить свой probe: `docs/AUGUSTUS_ATTACKS.md`.
 
 ## 5. Как читать tool policy и БД
 

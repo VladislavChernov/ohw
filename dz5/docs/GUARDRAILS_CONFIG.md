@@ -173,7 +173,7 @@ output_guard = Guard(id="output-privacy", name="output-privacy").use(
 внутри `INSERT`/`UPDATE`, но не является SQL-парсером и не гарантирует
 защиту от обфускации или SQL-инъекции. Прямой `INSERT` через `db`/harness
 стену не проходит: она стоит только на пути агента. Read-only, allow-list
-таблиц и `db-restore` остаются обязательными.
+таблиц и restore БД (`seed-db.sh --restore`) остаются обязательными.
 
 ### 4.3. `output-privacy`: маскировка PII
 
@@ -361,7 +361,8 @@ Content-Type: application/json
 - Не гарантирует защиту от всех инъекций: regex-эвристика обходится
   перефразированием, кодированием и другими техниками.
 - `write-defense` не разбирает SQL и не проверяет значения полей: он смотрит
-  на всю строку. Это не замена read-only, allow-list таблиц и `db-restore`.
+  на всю строку. Это не замена read-only, allow-list таблиц и restore БД
+  (`seed-db.sh --restore`).
 
 ## 10. Как менять конфигурацию
 

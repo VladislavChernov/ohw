@@ -6,6 +6,7 @@ Augustus — Go-фреймворк для red-team LLM
 напрямую.
 
 Полный новичковый гайд: `docs/AUGUSTUS_QUICKSTART.md`.
+Разбор текущих probes и создание своих: `docs/AUGUSTUS_ATTACKS.md`.
 
 ## Куда целится
 

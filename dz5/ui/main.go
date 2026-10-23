@@ -127,6 +127,7 @@ type Server struct {
 	client     *http.Client
 	log        *log.Logger
 	reportsDir string
+	dbAdminURL string
 }
 
 func NewServer(reg Registry, logger *log.Logger) *Server {
@@ -138,6 +139,7 @@ func NewServer(reg Registry, logger *log.Logger) *Server {
 		client:     &http.Client{Timeout: 180 * time.Second},
 		log:        logger,
 		reportsDir: env("REPORTS_DIR", "/reports"),
+		dbAdminURL: env("DB_ADMIN_URL", "http://db-admin:8091"),
 	}
 }
 
@@ -151,6 +153,7 @@ func (s *Server) Mux() http.Handler {
 	mux.HandleFunc("/api/agents/", s.handleAgentProxy)
 	mux.HandleFunc("/api/augustus/runs", s.handleAugustusRuns)
 	mux.HandleFunc("/api/augustus/runs/", s.handleAugustusRunFile)
+	mux.HandleFunc("/api/db/restore", s.handleDBRestore)
 	mux.HandleFunc("/augustus", s.handleAugustusUI)
 	mux.HandleFunc("/", s.handleUI)
 	return mux
@@ -224,6 +227,31 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, agent Agent, acti
 	if err != nil {
 		s.log.Printf("proxy %s %s: %v", agent.ID, action, err)
 		http.Error(w, "bad gateway: agent unavailable", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		w.Header().Set("Content-Type", ct)
+	}
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func (s *Server) handleDBRestore(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.dbAdminURL+"/restore", nil)
+	if err != nil {
+		http.Error(w, "bad gateway: build request", http.StatusBadGateway)
+		return
+	}
+	req.Header.Set("X-DB-Restore", "ui")
+	resp, err := s.client.Do(req)
+	if err != nil {
+		s.log.Printf("db restore: %v", err)
+		http.Error(w, "bad gateway: db-admin unavailable", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -445,6 +473,12 @@ pre { background:#f5f5f5; padding:0.5rem; border-radius:4px; overflow-x:auto; }
   </div>
 </div>
 <div class="card">
+<h3>Database</h3>
+<p>Restore synthetic users and PII after destructive LLM03 tests.</p>
+<button id="restoreDbBtn">Restore DB</button>
+<div id="dbRestoreResult" style="margin-top:0.5rem; white-space:pre-wrap; background:#fafafa; padding:0.5rem; border-radius:4px; min-height:1rem;"></div>
+</div>
+<div class="card">
 <h3>Current policy</h3>
 <pre id="status">Loading...</pre>
 </div>
@@ -548,6 +582,22 @@ const sendChat = async () => {
     $('chatInput').focus();
   }
 };
+const restoreDb = async () => {
+  if (!confirm('Restore the SQLite database to the seed state?')) return;
+  const btn = $('restoreDbBtn');
+  btn.disabled = true;
+  $('dbRestoreResult').textContent = 'Restoring...';
+  try {
+    const r = await fetch('/api/db/restore', {method: 'POST'});
+    const text = await r.text();
+    $('dbRestoreResult').textContent = r.ok ? text : 'HTTP ' + r.status + ': ' + text;
+  } catch (e) {
+    $('dbRestoreResult').textContent = 'Request failed: ' + e;
+  } finally {
+    btn.disabled = false;
+  }
+};
+$('restoreDbBtn').onclick = restoreDb;
 $('sendBtn').onclick = sendChat;
 $('chatInput').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {

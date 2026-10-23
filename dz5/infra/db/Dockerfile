@@ -22,6 +22,7 @@ COPY init.sql /db/init.sql
 COPY seed.sh /db/seed.sh
 COPY restore.sh /db/restore.sh
 COPY query.sh /db/query.sh
+COPY admin.sh /db/admin.sh
 
 # Default DB path inside the container (backed by the db_data volume).
 ENV DB_PATH=/data/db.sqlite

@@ -96,7 +96,8 @@ Runner подставляет `--target` в `uri`, запускает probes и�
 Augustus видит только `$.reply`; `tool_calls` и SQL-политику он не проверяет.
 Поэтому его `VULN`/`SAFE` — findings по probes, а не вердикт по tool policy
 или БД. Для этих путей используй YAML-сценарии и evaluator'ы runner.
-Пошаговый гайд — `docs/AUGUSTUS_QUICKSTART.md`.
+Пошаговый гайд — `docs/AUGUSTUS_QUICKSTART.md`. Разбор текущих probes и
+создание своих — `docs/AUGUSTUS_ATTACKS.md`.
 
 ## 3. Конфигурация
 
@@ -435,6 +436,27 @@ reports/<run-id>/
 
 ## 9. Запуск
 
+### Быстрый запуск на любой ОС
+
+```bash
+# Linux/macOS/WSL/Git Bash
+sh run-red-team.sh --preset 1 --runs 3
+sh run-red-team.sh --preset 5 --runs 3 --augustus
+sh run-red-team.sh --preset 1 --runs 1 --scenario llm01-ignore-previous
+```
+
+```powershell
+# Windows PowerShell
+.\run-red-team.ps1 -Preset 1 -Runs 3
+.\run-red-team.ps1 -Preset 5 -Runs 3 -Augustus
+.\run-red-team.ps1 -Preset 1 -Runs 1 -Scenario llm01-ignore-previous
+```
+
+Скрипты поднимают стек, выставляют guard-флаги по preset, пересобирают
+`attack-runner`, запускают сценарии и вызывают `report_builder`. Нужен только
+Docker Compose; Python не требуется. Перед первым запуском засей БД:
+`sh seed-db.sh` (Windows: `.\seed-db.ps1`).
+
 ### Один сценарий, smoke
 
 ```powershell
@@ -475,9 +497,11 @@ docker compose -f infra/compose.yaml --profile attack run --rm --no-deps `
 
 ### Полный матрикс
 
-Для P1–P4 нужно перед каждым запуском привести `agent` к нужной
-конфигурации (например, через UI или `POST /settings`) и передать
-соответствующий `--preset`. Для P5 target — `agent-fixed`.
+При ручном запуске для P1–P4 нужно перед каждым прогоном привести `agent` к
+нужной конфигурации (например, через UI или `POST /settings`) и передать
+соответствующий `--preset`. Скрипты `run-red-team.sh`/`run-red-team.ps1`
+выставляют `BUILTIN_GUARDS` и `EXTERNAL_GUARD` сами. Для P5 target —
+`agent-fixed`.
 
 Полный прогон:
 
@@ -565,8 +589,14 @@ docker run --rm --entrypoint pytest dz5-attack-runner:test `
 | `attack-runner/attack_runner/db.py` | restore, snapshot, setup/teardown |
 | `attack-runner/attack_runner/client.py` | HTTP-клиент и target allow-list |
 | `attack-runner/scenarios/*.yaml` | 18 сценариев |
+| `run-red-team.sh` | POSIX-запуск стека, прогона и отчёта |
+| `run-red-team.ps1` | PowerShell-запуск стека, прогона и отчёта |
+| `seed-db.sh` | POSIX: засевка/восстановление SQLite |
+| `seed-db.ps1` | PowerShell: засевка/восстановление SQLite |
+| `infra/db/admin.sh` | внутренний HTTP-сервис `db-admin` для UI-кнопки Restore DB |
 | `scripts/augustus/augustus.config.yaml` | Augustus `rest.Rest` → agent `/chat` |
 | `docs/AUGUSTUS_QUICKSTART.md` | первый прогон Augustus по агенту |
+| `docs/AUGUSTUS_ATTACKS.md` | текущие probes и создание своих |
 | `report_builder/aggregate.py` | агрегация и complete |
 | `report_builder/render.py` | `summary.md`, `latest.md`, `red-team.md` |
 | `infra/compose.yaml` | сервис `attack-runner`, volumes, env |

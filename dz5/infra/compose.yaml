@@ -105,6 +105,34 @@ services:
       - ib-network
     profiles: ["tools"]
 
+  # Internal-only HTTP endpoint used by the UI "Restore DB" button. It has
+  # write access to the db_data volume; never publish this port to the host.
+  db-admin:
+    build:
+      context: ./db
+      dockerfile: Dockerfile
+    image: dz5-db:local
+    container_name: dz5-db-admin
+    environment:
+      DB_PATH: /data/db.sqlite
+    volumes:
+      - db_data:/data
+      - ./db:/db:ro
+    entrypoint: ["/bin/sh", "/db/admin.sh"]
+    networks:
+      - ib-network
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8091/healthz || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
   # One-shot: run an arbitrary read query for manual inspection / smoke.
   # Usage: docker compose run --rm db-query "SELECT username, role FROM users;"
   # The SQL is passed as the command argument; query.sh receives it as $1.
@@ -225,6 +253,7 @@ services:
       UI_ADDR: ":8090"
       AGENT_REGISTRY: "baseline=http://agent:8080,fixed=http://agent-fixed:8080"
       REPORTS_DIR: /reports
+      DB_ADMIN_URL: http://db-admin:8091
     volumes:
       - ../reports:/reports:ro
     depends_on:
@@ -232,6 +261,8 @@ services:
         condition: service_started
       agent-fixed:
         condition: service_started
+      db-admin:
+        condition: service_healthy
     deploy:
       resources:
         limits:
