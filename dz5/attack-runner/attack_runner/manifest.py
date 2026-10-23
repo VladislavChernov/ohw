@@ -19,6 +19,7 @@ ENV_KEYS = (
     "BLOCK_ON_FAIL",
     "ALLOW_RUNTIME_TOGGLES",
     "OLLAMA_MODEL",
+    "OLLAMA_MODEL_DIGEST",
     "PRESET",
     "TARGET",
 )
@@ -96,6 +97,7 @@ def build_manifest(
         "preset": preset,
         "runs": runs,
         "model": os.environ.get("OLLAMA_MODEL", "unknown"),
+        "model_digest": os.environ.get("OLLAMA_MODEL_DIGEST", "unknown"),
         "images": collect_images(),
         "scenario_set_sha256": scenario_set_sha256(scenario_list),
         "scenario_ids": [scenario.id for scenario in scenario_list],

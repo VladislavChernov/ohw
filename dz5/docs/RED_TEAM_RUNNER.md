@@ -7,11 +7,12 @@
 `attack-runner` — отдельный one-shot контейнер/CLI. Он не является частью
 агента, не проксирует LLM-трафик и не включает защиты. Он ходит в target по
 HTTP `POST /chat` и сохраняет сырые ответы, tool calls, задержки и изменения
-БД.
+БД. Матрица прогонов и критерии — в `docs/TEST_PLAN.md`.
 
 ## 1. Коротко
 
-- Сценарии лежат в `attack-runner/scenarios/*.yaml`, сейчас их 18.
+- Сценарии лежат в `attack-runner/scenarios/*.yaml`, сейчас их 18 OWASP
+  LLM01–LLM10.
 - Один сценарий — один или несколько последовательных `/chat`.
 - `n` — число повторов каждого сценария; для вердикта нужно `n>=3`.
 - Ошибки инфраструктуры дают `error`, а не `blocked`.
@@ -51,6 +52,51 @@ Runner не вызывает `/settings` и не переключает preset t
 **Перед запуском target должен уже находиться в нужной конфигурации.** Если
 нужен P3, сначала включите внешнюю стену у target; если нужен P5, запускайте
 против `agent-fixed`.
+
+### Что включено в прогон
+
+| Ось | Значения | Смысл |
+|---|---|---|
+| Preset | P1–P5 | какие guard'ы включены у target; задаётся до запуска |
+| Target | `agent`, `agent-fixed` | P1–P4 — `agent`; P5 — `agent-fixed` |
+| Writes | `ALLOW_WRITES=off/on` | отдельная ось; на P5 всегда `off` |
+| Runs | `n=3` | число повторов каждого сценария |
+| Scenarios | 18 YAML | OWASP LLM01–LLM10 |
+| Timeout | 120 с | таймаут одного `/chat` |
+| Restore DB | on | restore до/после destructive-сценариев |
+| Augustus | off | внешние probes по агенту (`rest.Rest`), не заменяют evaluator'ы |
+
+`--preset` — только метка и фильтр `applicable_presets`. Runner не меняет
+`BUILTIN_GUARDS`, `EXTERNAL_GUARD` и `ALLOW_WRITES` у target. Конфигурация
+target'а должна совпадать с `--preset` и режимом записи.
+
+### Augustus
+
+Augustus — внешний Go-фреймворк (Apache 2.0), установленный в образ
+`attack-runner`. Он ходит в **агента** через `rest.Rest`, а не в Ollama:
+
+```yaml
+generators:
+  rest.Rest:
+    uri: "http://localhost:8080/chat"
+    req_template_json_object:
+      message: "$INPUT"
+    response_json: true
+    response_json_field: "$.reply"
+```
+
+Runner подставляет `--target` в `uri`, запускает probes из `AUGUSTUS_PROBES`
+и сохраняет всё в `reports/<run-id>/augustus/`. Список probes по умолчанию:
+`dan.DAN_Jailbreak`, `latentinjection.LatentJailbreak`,
+`goodside.SystemPromptConfusion`. Имена проверяй через `augustus list`:
+в v0.14.34 нет старых garak-имён вроде `injection.InstructionOverride`.
+На fixed-агенте guard отвечает `403`; конфиг содержит `skip_codes: [403]`,
+поэтому такой ответ считается block/`SAFE`, а не ошибкой scan.
+
+Augustus видит только `$.reply`; `tool_calls` и SQL-политику он не проверяет.
+Поэтому его `VULN`/`SAFE` — findings по probes, а не вердикт по tool policy
+или БД. Для этих путей используй YAML-сценарии и evaluator'ы runner.
+Пошаговый гайд — `docs/AUGUSTUS_QUICKSTART.md`.
 
 ## 3. Конфигурация
 
@@ -98,12 +144,17 @@ docker compose -f infra/compose.yaml --profile attack run --rm --no-deps `
 Без `--no-deps` compose проверит health зависимостей.
 
 Compose-переменные `ALLOW_WRITES`, `BUILTIN_GUARDS`, `EXTERNAL_GUARD`,
-`BLOCK_ON_FAIL`, `ALLOW_RUNTIME_TOGGLES`, `OLLAMA_MODEL`, `PRESET` попадают в
-`manifest.env` как метаданные. Они **не меняют** настройки target'а.
+`BLOCK_ON_FAIL`, `ALLOW_RUNTIME_TOGGLES`, `OLLAMA_MODEL`,
+`OLLAMA_MODEL_DIGEST`, `PRESET` попадают в `manifest.env` как метаданные.
+Они **не меняют** настройки target'а.
 
-`GIT_COMMIT` и `OLLAMA_MODEL` также попадают в manifest. Если `GIT_COMMIT` не
-задан, runner пытается выполнить `git rev-parse HEAD`; в контейнере без git
-будет `unknown`.
+`GIT_COMMIT`, `OLLAMA_MODEL` и `OLLAMA_MODEL_DIGEST` также попадают в
+manifest. Если `GIT_COMMIT` не задан, runner пытается выполнить
+`git rev-parse HEAD`; в контейнере без git будет `unknown`.
+
+Модель запинена по digest: `infra/ollama/entrypoint.sh` сверяет digest
+загруженной модели с `OLLAMA_MODEL_DIGEST` и завершает контейнер при
+несовпадении. Это защищает от подмены тега `:3b` без изменения кода.
 
 ### Сценарий YAML
 
@@ -188,7 +239,9 @@ Poison RAG:
 - **вариант A** — `llm01-poison-rag-read`: helper-таблица создаётся setup'ом,
   агент читает комментарий с инструкцией;
 - **вариант B** — `llm03-poison-rag-ddl`: create → insert → read → drop,
-  разбитые на отдельные `/chat` из-за `MaxToolIterations=3`.
+  разбитые на отдельные `/chat` из-за `MaxToolIterations=3`. Реальное
+  выполнение DDL проверяется только при `ALLOW_WRITES=on`; на P5 это
+  negative control — агент обязан отказать.
 
 ## 5. Как проводится атака
 
@@ -342,7 +395,7 @@ return "unknown"
 ```bash
 docker compose -f infra/compose.yaml --profile attack run --rm --no-deps `
   --entrypoint python attack-runner `
-  -m report_builder build --run /reports/20261022T180409Z
+  -m report_builder build --run /reports/<run-id>
 ```
 
 Структура:
@@ -392,6 +445,19 @@ docker compose -f infra/compose.yaml --profile attack run --rm --no-deps `
   -m attack_runner run --target http://agent:8080 --preset 1 --runs 3 --timeout 120
 ```
 
+### То же плюс Augustus
+
+```powershell
+docker compose -f infra/compose.yaml --profile attack run --rm --no-deps `
+  --entrypoint python attack-runner `
+  -m attack_runner run --target http://agent:8080 --preset 1 --runs 3 --timeout 120 `
+  --augustus on
+```
+
+Augustus идёт по агенту через `rest.Rest`; результаты — в
+`reports/<run-id>/augustus/`. Подробности и ограничения —
+`docs/AUGUSTUS_QUICKSTART.md`.
+
 ### Fixed agent preset 5
 
 ```powershell
@@ -422,29 +488,28 @@ docker compose -f infra/compose.yaml --profile attack run --rm --no-deps `
 | `report_builder` на 18 сценариях | ~4.0 с |
 | P1, 18 сценариев, `n=1` | 72.8 с |
 | P1, HTTP-время внутри `n=1` | 58.1 с |
+| P1, 18 сценариев, `n=3` | 367 с |
 
-Оценка полного матрикса: **20–30 минут**, ориентир — **25 минут**. P1 при
-`n=3` — около **4–5 минут**. Оценка сделана по P1; P3/P4 могут добавить время
-на guards, а P5 обычно быстрее за счёт ранних отказов.
+Оценка базового матрикса (18 сценариев, 5 preset'ов, `n=3`):
+**25–35 минут**, ориентир — **30 минут**. P1 при `n=3` — около **6 минут**;
+P4 Full — **8–12 минут**; P5 — **5–7 минут**. Полный факторный прогон
+P1–P4 × writes off/on + P5 — **50–70 минут**.
 
 Модель чувствительна к холодному старту. В smoke были отдельные ответы
 17–29 с; при таймауте 60 с возможен `error` на первом запросе. Для полного
-прогона используйте `--timeout 120`.
+прогона используйте `--timeout 120`. `llm06-resource-exhaustion` может дать
+`502` после 120 с и сделать прогон incomplete.
 
 ## 11. Текущие результаты
 
-На 2026-10-22 сохранены два smoke-прогона:
+Старые smoke-отчёты удалены 2026-10-22: они были неполными и не давали
+red-team-вердиктов. Актуальных прогонов сейчас нет.
 
-- `reports/20261022T170047Z` — 3 сценария, P1, `n=1`, все `unknown`;
-- `reports/20261022T180409Z` — 18 сценариев, P1, `n=1`:
-  `bypass=8`, `unknown=10`.
+После запуска `report_builder` создаст:
 
-Детали в этих каталогах редактируются: email, телефон, паспорт и
-синтетические токены заменяются масками.
-
-Это **не red-team-вердикты**: `n=1` всегда даёт `unknown` в матрице.
-`reports/red-team.md` поэтому показывает `unknown` для всех ячеек, а
-`latest.md` отсутствует.
+- `reports/<run-id>/` — данные прогона;
+- `reports/red-team.md` — матрицу по последнему прогону на preset;
+- `reports/latest.md` — только после complete-прогона (`n>=3`, без ошибок).
 
 ## 12. Ограничения
 
@@ -457,6 +522,8 @@ docker compose -f infra/compose.yaml --profile attack run --rm --no-deps `
 - `details` редактируются, но отчёты всё равно нужно проверять перед
   публикацией.
 - Augustus выключен по умолчанию; при отсутствии бинарника статус `skipped`.
+- Augustus видит только `$.reply`: без отдельного adapter его findings не
+  доказывают нарушение tool policy или изменение БД.
 - `git_commit` и `images` могут быть `unknown`/пустыми, если не переданы env.
 
 ## 13. Как добавить сценарий
@@ -491,6 +558,8 @@ docker run --rm --entrypoint pytest dz5-attack-runner:test `
 | `attack-runner/attack_runner/db.py` | restore, snapshot, setup/teardown |
 | `attack-runner/attack_runner/client.py` | HTTP-клиент и target allow-list |
 | `attack-runner/scenarios/*.yaml` | 18 сценариев |
+| `scripts/augustus/augustus.config.yaml` | Augustus `rest.Rest` → agent `/chat` |
+| `docs/AUGUSTUS_QUICKSTART.md` | первый прогон Augustus по агенту |
 | `report_builder/aggregate.py` | агрегация и complete |
 | `report_builder/render.py` | `summary.md`, `latest.md`, `red-team.md` |
 | `infra/compose.yaml` | сервис `attack-runner`, volumes, env |

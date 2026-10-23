@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+import yaml
+
 from .aggregate import summarize_results
 from .client import AgentClient, StepResponse
 from .db import DBClient, DBError
@@ -240,34 +242,148 @@ def run_once(
     return result, details
 
 
-def run_augustus(enabled: bool, out_dir: Path, target: str) -> dict[str, Any]:
+DEFAULT_AUGUSTUS_PROBES = (
+    "dan.DAN_Jailbreak",
+    "latentinjection.LatentJailbreak",
+    "goodside.SystemPromptConfusion",
+)
+
+
+def _augustus_scan_config(
+    source: Path,
+    target: str,
+    output_path: Path,
+) -> dict[str, Any]:
+    with source.open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+    if not isinstance(config, dict):
+        raise ValueError("augustus config must be a YAML mapping")
+
+    generators = config.setdefault("generators", {})
+    if not isinstance(generators, dict):
+        raise ValueError("augustus generators must be a mapping")
+    generator = generators.setdefault("rest.Rest", {})
+    if not isinstance(generator, dict):
+        raise ValueError("augustus generators.rest.Rest must be a mapping")
+
+    generator["uri"] = f"{target.rstrip('/')}/chat"
+    generator.setdefault("method", "POST")
+    generator.setdefault(
+        "req_template_json_object",
+        {"message": "$INPUT"},
+    )
+    generator.setdefault("response_json", True)
+    generator.setdefault("response_json_field", "$.reply")
+
+    output = config.setdefault("output", {})
+    if not isinstance(output, dict):
+        raise ValueError("augustus output must be a mapping")
+    output["format"] = "jsonl"
+    output["path"] = str(output_path)
+    return config
+
+
+def _augustus_probes() -> list[str]:
+    raw = os.environ.get("AUGUSTUS_PROBES", "")
+    values = raw.split(",") if raw else DEFAULT_AUGUSTUS_PROBES
+    return [value.strip() for value in values if value.strip()]
+
+
+def run_augustus(
+    enabled: bool,
+    out_dir: Path,
+    target: str,
+    db: DBClient | None = None,
+) -> dict[str, Any]:
     if not enabled:
         return {"status": "skipped", "reason": "disabled"}
     binary = shutil.which("augustus")
     if binary is None:
         return {"status": "skipped", "reason": "augustus binary not found"}
-    config = os.environ.get(
-        "AUGUSTUS_CONFIG", "/app/scripts/augustus/augustus.config.yaml"
+
+    source = Path(
+        os.environ.get(
+            "AUGUSTUS_CONFIG",
+            "/app/scripts/augustus/augustus.config.yaml",
+        )
     )
     output_dir = out_dir / "augustus"
     output_dir.mkdir(parents=True, exist_ok=True)
+    results_path = output_dir / "results.jsonl"
+    config_path = output_dir / "config.yaml"
+
+    try:
+        scan_config = _augustus_scan_config(source, target, results_path)
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        return {"status": "error", "reason": f"config: {exc}"}
+
+    config_path.write_text(
+        yaml.safe_dump(scan_config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    probes = _augustus_probes()
+    command = [
+        binary,
+        "scan",
+        "rest.Rest",
+        "--config-file",
+        str(config_path),
+        "--format",
+        "jsonl",
+        "--output",
+        str(results_path),
+    ]
+    for probe in probes:
+        command.extend(["--probe", probe])
+
+    db_before: dict[str, Any] | None = None
+    db_after: dict[str, Any] | None = None
+    db_error: str | None = None
+    db_changed: bool | None = None
+    if db is not None:
+        try:
+            db_before = db.snapshot()
+        except DBError as exc:
+            db_error = str(exc)
+
     try:
         completed = subprocess.run(
-            [binary, "scan", "--config-file", config],
+            command,
             cwd=out_dir,
             check=False,
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=1800,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return {"status": "error", "reason": str(exc)}
+        return {"status": "error", "reason": str(exc), "probes": probes}
+    finally:
+        if db is not None:
+            try:
+                db_after = db.snapshot()
+            except DBError as exc:
+                db_error = db_error or str(exc)
+            if db_before is not None and db_after is not None:
+                db_changed = db_before != db_after
+
     (output_dir / "stdout.txt").write_text(completed.stdout, encoding="utf-8")
     (output_dir / "stderr.txt").write_text(completed.stderr, encoding="utf-8")
+    if db_before is not None:
+        write_json_atomic(output_dir / "db-before.json", db_before)
+    if db_after is not None:
+        write_json_atomic(output_dir / "db-after.json", db_after)
+
+    status = "completed" if completed.returncode == 0 else "error"
+    if status == "completed" and not results_path.is_file():
+        status = "error"
     return {
-        "status": "completed" if completed.returncode == 0 else "error",
+        "status": status,
         "returncode": completed.returncode,
         "target": target,
+        "probes": probes,
+        "output": str(results_path.relative_to(out_dir)),
+        "db_changed": db_changed,
+        "db_error": db_error,
     }
 
 
@@ -320,7 +436,7 @@ def execute(options: RunOptions, scenarios: Iterable[Scenario]) -> Path:
                 scenario_dir.mkdir(parents=True, exist_ok=True)
                 write_json_atomic(scenario_dir / f"run-{run}.json", details)
 
-    augustus = run_augustus(options.augustus, out_dir, options.target)
+    augustus = run_augustus(options.augustus, out_dir, options.target, db=db)
     completed = len(results) == len(scenario_list) * options.runs
     has_error = any(
         result.get("verdict") == "error" or result.get("cleanup_error")

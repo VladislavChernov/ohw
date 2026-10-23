@@ -24,7 +24,7 @@ abliterated-моделью и SQLite-БД; защиты включаются п�
   `config.py`; агент вызывает REST `/guards/{id}/validate`. Ручной
   FastAPI-прокси `/api/chat` не используется.
 - **`infra/`** — compose, Dockerfile'ы, seed/restore SQLite.
-- **`scripts/`** — security-тесты и конфиг Augustus.
+- **`scripts/`** — security-тесты и конфиг Augustus (`rest.Rest` → agent).
 - **`reports/`** — артефакты прогонов (целевая структура — `reports/<run-id>/`).
 
 ## Документация
@@ -33,6 +33,9 @@ abliterated-моделью и SQLite-БД; защиты включаются п�
   LLM01–LLM10, P1–P5, вердикты, артефакты прогонов.
 - `docs/INTERNAL_AGENT_DEFENSE.md` — защита внутри агента: код, слои, границы.
 - `docs/RED_TEAM_RUNNER.md` — настройка attack runner и проведение атак.
+- `docs/AUGUSTUS_QUICKSTART.md` — первый red-team прогон Augustus по агенту.
+- `docs/TEST_PLAN.md` — матрица прогонов, критерии и порядок проверок.
+- `docs/CONTENT_SAFETY_SCOPE.md` — почему мат и токсичность вынесены за скоуп.
 - `docs/STANDARD_SECURITY_CHECKS.md` — проверки S01–S15 и Poison RAG.
 - `docs/GUARDRAILS_CONFIG.md` — guards, `on_fail`, `BLOCK_ON_FAIL`, лимиты.
 - `docs/GUARDRAILS_ARCHITECTURE.md` — архитектура и сравнение подходов.
@@ -61,6 +64,19 @@ abliterated-моделью и SQLite-БД; защиты включаются п�
 Общая часть (Ollama-клиент, SQLite, `db_query`, audit, HTTP-контракт) вынесена
 в `agent/internal/agentcore/`. Baseline и fixed различаются политикой, а не
 копией кода.
+
+## Границы защиты
+
+Защита формулируется не как «защищённый агент», а как конкретные пути
+`вход → модель → tool → актив`. В этом стенде основной путь —
+`пользователь → модель → db_query → SQLite`: его закрывают input/output wall,
+SQL allow-list, read-only доступ, immutable settings, `db-restore` и audit.
+
+Wall — только текстовый слой. Он не заменяет права БД, tool policy и sandbox.
+В агентах с shell, файлами, браузером или MCP нужны отдельные пути и контроли:
+`shell → workspace`, `браузер → сессия`, `MCP → tool`. Комплексная защита —
+это инвентарь таких путей, контроль на каждом и доказательства проверки, а не
+один guard на всё.
 
 ## Матрица пресетов
 
@@ -250,8 +266,9 @@ SQL, а не замена read-only/allow-list. После деструктив�
 
 ## Отчёты
 
-- `reports/red-team.md` — сгенерирован `report_builder`; при `n=1` все ячейки
-  остаются `unknown` и не являются red-team-вердиктом.
+- `reports/red-team.md` — появляется после `report_builder`; при `n=1` все
+  ячейки остаются `unknown` и не являются red-team-вердиктом.
 - `reports/<run-id>/` — manifest, results, summary и details прогона.
 - `reports/latest.md` появляется только после complete-прогона (`n>=3`).
+- Старые smoke-отчёты удалены; актуальных прогонов пока нет.
 - Как запускать и собирать отчёты: `docs/RED_TEAM_RUNNER.md`.

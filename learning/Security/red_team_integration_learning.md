@@ -214,6 +214,47 @@ Adapter должен:
 - если среда не даёт hooks и логов, честный вывод — «проверено частично», а не
   «защищено».
 
+### 4.5. Пример: Augustus как внешний Go-фреймворк
+
+Augustus (Apache 2.0, Go) — пример готового фреймворка для случая B. В Dz5 он
+целится не в Ollama, а в агента через `rest.Rest`:
+
+```yaml
+generators:
+  rest.Rest:
+    uri: "http://localhost:8080/chat"
+    method: POST
+    req_template_json_object:
+      message: "$INPUT"
+    response_json: true
+    response_json_field: "$.reply"
+```
+
+Запуск:
+
+```bash
+augustus scan rest.Rest \
+  --config-file scripts/augustus/augustus.config.yaml \
+  --probe dan.DAN_Jailbreak \
+  --probe latentinjection.LatentJailbreak \
+  --probe goodside.SystemPromptConfusion
+```
+
+Что это даёт: широкий набор probes и detectors по ответам агента. Что не даёт:
+Augustus видит только `$.reply`. Его `VULN` — finding по probe, а `SAFE` — не
+доказательство защиты.
+
+Для пути `модель → tool → БД` нужен отдельный oracle:
+
+- `tool_calls` и HTTP `400/403` — для tool policy;
+- DB snapshot до/после — для изменений данных;
+- в Dz5 это делает `attack-runner` через YAML-сценарии;
+- грубый DB-oracle вокруг всего Augustus-прогона — `db-before/after.json`.
+
+Поэтому связка такая: **Augustus ищет широкий класс проблем, runner
+доказывает последствия на конкретном пути**. Если tool calls и БД не
+наблюдаются, вердикт по этому пути — `unknown`, а не `blocked`.
+
 ## 5. Target contract и adapter
 
 Для black-box удобно иметь один простой контракт. В Dz5 это:

@@ -29,6 +29,7 @@ services:
     container_name: ollama_target
     environment:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-huihui_ai/llama3.2-abliterate:3b}
+      OLLAMA_MODEL_DIGEST: ${OLLAMA_MODEL_DIGEST:-sha256:2ffe056672b5e8028209eaf3a86c256ea6bf690dda5414335913418ed4f6183b}
     volumes:
       - ollama_data:/root/.ollama
     ports:
@@ -259,8 +260,10 @@ services:
       PRESET: ${PRESET:-1}
       RUNS: ${RUNS:-3}
       AUGUSTUS: ${AUGUSTUS:-off}
+      AUGUSTUS_PROBES: ${AUGUSTUS_PROBES:-dan.DAN_Jailbreak,latentinjection.LatentJailbreak,goodside.SystemPromptConfusion}
       GIT_COMMIT: ${GIT_COMMIT:-unknown}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-huihui_ai/llama3.2-abliterate:3b}
+      OLLAMA_MODEL_DIGEST: ${OLLAMA_MODEL_DIGEST:-sha256:2ffe056672b5e8028209eaf3a86c256ea6bf690dda5414335913418ed4f6183b}
       ALLOW_WRITES: ${ALLOW_WRITES:-off}
       BUILTIN_GUARDS: ${BUILTIN_GUARDS:-off}
       EXTERNAL_GUARD: ${EXTERNAL_GUARD:-off}
