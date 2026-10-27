@@ -88,7 +88,7 @@ MATCH path=(a:ContextNode)-[*1..6]-(b:ContextNode)
 RETURN length(path) AS depth, count(*) AS n ORDER BY depth;
 ```
 
-## Что записать по结果ам
+## Что записать по результатам
 
 В этот же бандл, файлом `graph-findings.md`:
 
