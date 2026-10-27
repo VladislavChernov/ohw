@@ -1,0 +1,33 @@
+# Project compose: only the app. Shared components (ollama) come from the
+# infra catalog (../infra/). Start them first:
+#   ../infra/up.sh <this-dir>
+# or:  docker compose -f ../infra/compose.yaml --profile ollama up -d
+# The app joins the shared network `ohw_net` and reaches ollama as `ohw-ollama`.
+#
+#   docker compose build app
+#   docker compose run --rm app
+#
+# Use ./run.sh (Linux/macOS/WSL) or .\run.ps1 (Windows) to do all of the above.
+
+services:
+  app:
+    build: .
+    restart: "no"
+    environment:
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ohw-ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      # A 7B model on CPU can take minutes for the first (cold) completion.
+      OLLAMA_TIMEOUT: ${OLLAMA_TIMEOUT:-600}
+      INPUT_DIR: ${INPUT_DIR:-/data/input}
+      OUTPUT_DIR: ${OUTPUT_DIR:-/data/output}
+      REQUIREMENTS_PATH: ${REQUIREMENTS_PATH:-/data/requirements_with_priorities.md}
+    volumes:
+      - ./input:/data/input:ro
+      - ./output:/data/output
+    networks:
+      - ohw-net
+
+networks:
+  ohw-net:
+    external: true
+    name: ohw_net

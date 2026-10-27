@@ -1,0 +1,8 @@
+# Components of the shared infrastructure this project needs.
+# See D:\Otus\ohw\infra\up.sh and up.ps1 (component catalog).
+#
+#   .\up.ps1 -Project <local-path>     # start ollama (CPU)
+#   .\up.ps1 -Project <local-path> -Gpu # start ollama (NVIDIA GPU)
+#
+components:
+  - ollama

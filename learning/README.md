@@ -14,6 +14,7 @@
 |---|---|
 | [HybridRag/](HybridRag/) | RAG, кэширование, свежесть данных, консистентность, LLM-as-judge, испытания прототипа, личный harness |
 | [Security/](Security/) | встраивание security wall в агентские среды, red-team агентских сред |
+| [TestOptimization/](TestOptimization/) | ревью автотестов: процедура, чек-лист, метрики, LLM-ассистированное ревью |
 
 В проектных врезках используются статусы **Target**, **Runtime**, **Planned**,
 **Experiment**, **Superseded** и **Reference**: учебная теория не считается
@@ -47,6 +48,12 @@
 | [llm_as_judge_learning.md](HybridRag/llm_as_judge_learning.md) | **LLM-as-a-judge** | История, pointwise/pairwise-подходы, reference-based/reference-free groundedness и практика judge в RAG |
 | [judge_calibration_methods_learning.md](HybridRag/judge_calibration_methods_learning.md) | **Калибровка судьи** | Gold set, drift, детерминизм, Cohen κ/Spearman и протокол калибровки; отдельно отмечается, что часть процедур Dz4 ещё план |
 | [personal_harness.md](HybridRag/personal_harness.md) | **Личный harness** | Операционные правила владельца: как принимаются решения и чего ожидать от инструментов |
+
+## TestOptimization
+
+| Файл | Область | Что разбирает |
+|---|---|---|
+| [llm_autotest_optimization_learning.md](TestOptimization/llm_autotest_optimization_learning.md) | **Ревью автотестов** | Процедура из 7 шагов, чек-лист, метрики с знаменателями, разбор примера из ДЗ, LLM-ассистированное ревью, ограничения локальных моделей, процесс в команде |
 
 ---
 
