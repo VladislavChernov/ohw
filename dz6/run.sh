@@ -86,10 +86,18 @@ else
 fi
 
 echo ""
-echo "Done. Results in: $SCRIPT_DIR/output"
-if compgen -G "$SCRIPT_DIR/output/*" > /dev/null; then
-  ls -1 "$SCRIPT_DIR/output"
-else
-  echo "WARNING: output/ is empty — the run produced no artifacts." >&2
+latest=$(
+  ls -1d "$SCRIPT_DIR"/output/*/ 2>/dev/null \
+    | sed 's#.*/##' \
+    | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}-[0-9]{2}$' \
+    | sort -r \
+    | sed -n '1p' \
+    || true
+)
+if [[ -z "$latest" ]]; then
+  echo "output/ has no run directories — the run produced no artifacts." >&2
   exit 1
 fi
+echo "Done. Latest run: $latest"
+echo "Results in: $SCRIPT_DIR/output/$latest"
+ls -1 "$SCRIPT_DIR/output/$latest"

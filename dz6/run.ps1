@@ -72,9 +72,15 @@ Invoke-Docker $runArgs
 
 $outputDir = Join-Path $scriptDir 'output'
 Write-Host ''
-Write-Host "Done. Results in: $outputDir" -ForegroundColor Green
-$artifacts = @(Get-ChildItem -Path $outputDir -File -ErrorAction SilentlyContinue)
-if ($artifacts.Count -eq 0) {
-    throw 'output/ is empty — the run produced no artifacts.'
+$runs = @(
+    Get-ChildItem -Path $outputDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$' } |
+        Sort-Object Name -Descending
+)
+if ($runs.Count -eq 0) {
+    throw 'output/ has no run directories — the run produced no artifacts.'
 }
-$artifacts | Select-Object Name, Length | Format-Table -AutoSize
+$latest = $runs[0]
+Write-Host "Done. Latest run: $($latest.Name)" -ForegroundColor Green
+Write-Host "Results in: $($latest.FullName)"
+Get-ChildItem -Path $latest.FullName -File | Select-Object Name, Length | Format-Table -AutoSize

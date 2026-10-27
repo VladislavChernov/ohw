@@ -78,6 +78,12 @@ cd D:\Otus\ohw\dz6
 .\run.ps1
 ```
 
+Если PowerShell блокирует локальный скрипт (политика выполнения по умолчанию):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1
+```
+
 Linux / macOS / WSL:
 
 ```bash
@@ -85,10 +91,10 @@ cd /mnt/d/Otus/ohw/dz6
 ./run.sh
 ```
 
-Скрипт запуска поднимает общий `ohw-ollama` (`../infra/up.sh`), собирает образ
-приложения и запускает оптимизатор. Флаги: `--gpu` / `-Gpu` (NVIDIA),
-`--rebuild` / `-Rebuild`, `-i FOLDER` / `-InputFolder FOLDER` (другой каталог
-с тестами).
+Скрипт запуска поднимает общий `ohw-ollama` (через `../infra/up.sh` в bash и
+`../infra/compose.yaml` в PowerShell), собирает образ приложения и запускает
+оптимизатор. Флаги: `--gpu` / `-Gpu` (NVIDIA), `--rebuild` / `-Rebuild`,
+`-i FOLDER` / `-InputFolder FOLDER` (другой каталог с тестами).
 
 Запуск без Docker:
 
