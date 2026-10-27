@@ -1,26 +1,27 @@
 #!/usr/bin/env bash
-# dz6/run.sh — start the shared infra (ollama) and run the test optimizer.
+# dz6/run.sh — start the shared infra (ollama, CPU) and run the test optimizer.
 #
 #   ./run.sh                  # CPU ollama, input from ./input
-#   ./run.sh --gpu            # NVIDIA CUDA ollama
 #   ./run.sh --rebuild        # rebuild the app image without cache
 #   ./run.sh -i ./other/dir   # run against another directory of tests
+#
+# macOS / Linux only, CPU only. GPU mode (NVIDIA CUDA) is Windows-only and
+# lives in run.ps1: the shared infra overlay is `../infra/compose.gpu.yaml`,
+# not something this script can assume on a machine without an NVIDIA runtime.
 #
 # Requires Docker Desktop / Docker Engine with the compose plugin, and the
 # shared infra catalog at ../infra (see ../infra/README.md).
 set -euo pipefail
 
-GPU=0
 REBUILD=0
 INPUT_FOLDER=""
 
 usage() {
-  echo "usage: $0 [--gpu] [--rebuild] [-i|--input FOLDER]" >&2
+  echo "usage: $0 [--rebuild] [-i|--input FOLDER]   (CPU only)" >&2
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --gpu) GPU=1 ;;
     --rebuild) REBUILD=1 ;;
     -i|--input)
       [[ $# -ge 2 ]] || { usage; exit 2; }
@@ -47,10 +48,8 @@ if [[ -n "$INPUT_FOLDER" ]]; then
   INPUT_FOLDER="$(cd "$INPUT_FOLDER" && pwd)"
 fi
 
-echo "==> [1/3] starting shared infra (ollama)"
-INFRA_ARGS=("$SCRIPT_DIR")
-if [[ $GPU -eq 1 ]]; then INFRA_ARGS+=("--gpu"); fi
-bash "$INFRA_DIR/up.sh" "${INFRA_ARGS[@]}"
+echo "==> [1/3] starting shared infra (ollama, CPU)"
+bash "$INFRA_DIR/up.sh" "$SCRIPT_DIR"
 
 echo "==> waiting for ohw-ollama to become ready"
 status="missing"

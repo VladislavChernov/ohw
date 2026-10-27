@@ -71,7 +71,7 @@ dz6/
 ## Запуск
 
 Ollama — общий компонент каталога `D:\Otus\ohw\infra`; проект объявляет его в
-`infra.yaml`. Одна команда (Windows):
+`infra.yaml`. Одна команда (Windows), режим по умолчанию — CPU:
 
 ```powershell
 cd D:\Otus\ohw\dz6
@@ -84,17 +84,29 @@ cd D:\Otus\ohw\dz6
 powershell -ExecutionPolicy Bypass -File .\run.ps1
 ```
 
-Linux / macOS / WSL:
+Тот же стенд на NVIDIA GPU (CUDA-оверлей `../infra/compose.gpu.yaml`):
+
+```powershell
+.\run.ps1 -Gpu
+```
+
+`-Gpu` требует NVIDIA Container Toolkit и включённую GPU-поддержку в Docker
+Desktop. Скрипт проверяет наличие рантайма `nvidia` и, если его нет,
+останавливается до запуска контейнеров с подсказкой, что делать.
+
+Linux / macOS / WSL — только CPU:
 
 ```bash
-cd /mnt/d/Otus/ohw/dz6
+cd /path/to/ohw/dz6
 ./run.sh
 ```
 
 Скрипт запуска поднимает общий `ohw-ollama` (через `../infra/up.sh` в bash и
 `../infra/compose.yaml` в PowerShell), собирает образ приложения и запускает
-оптимизатор. Флаги: `--gpu` / `-Gpu` (NVIDIA), `--rebuild` / `-Rebuild`,
-`-i FOLDER` / `-InputFolder FOLDER` (другой каталог с тестами).
+оптимизатор. Флаги: `-Gpu` (только Windows, NVIDIA), `--rebuild` / `-Rebuild`,
+`-i FOLDER` / `-InputFolder FOLDER` (другой каталог с тестами). В `run.sh`
+GPU-режима нет: он рассчитан на машины, где наличие NVIDIA-рантайма не
+предполагается.
 
 Запуск без Docker:
 

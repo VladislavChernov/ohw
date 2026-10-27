@@ -86,7 +86,12 @@
   (компонент `ollama`, общая сеть `ohw_net`).
 - Проект объявляет зависимость в `infra.yaml`; `run.sh` / `run.ps1` вызывают
   `../infra/up.sh` и затем `compose.yaml` приложения.
-- Запуск: `.\run.ps1` (Windows) или `./run.sh` (Linux/WSL).
+- Запуск: `.\run.ps1` (Windows, CPU по умолчанию), `.\run.ps1 -Gpu` (Windows,
+  NVIDIA CUDA через `../infra/compose.gpu.yaml`) или `./run.sh` (Linux/macOS,
+  только CPU).
+- GPU-режим есть только в Windows-скрипте: `run.sh` не предполагает наличия
+  NVIDIA-рантайма на машине и оверлей не подключает. `run.ps1 -Gpu` до запуска
+  контейнеров проверяет, что в Docker зарегистрирован рантайм `nvidia`.
 
 ### 3.6. Отчёты (в корне проекта)
 - `TZ.md` — настоящее техническое задание.

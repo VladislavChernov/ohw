@@ -1,8 +1,11 @@
 # Components of the shared infrastructure this project needs.
-# See D:\Otus\ohw\infra\up.sh and up.ps1 (component catalog).
+# See D:\Otus\ohw\infra\README.md and ..\infra\up.sh (component catalog).
 #
-#   .\up.ps1 -Project <local-path>     # start ollama (CPU)
-#   .\up.ps1 -Project <local-path> -Gpu # start ollama (NVIDIA GPU)
+#   bash ../infra/up.sh .            # start ollama (CPU)
+#   bash ../infra/up.sh . --gpu      # start ollama (NVIDIA GPU)
+#
+# dz6/run.ps1 and dz6/run.sh read this file via the catalog and start ollama
+# themselves; the commands above are for starting it by hand.
 #
 components:
   - ollama

@@ -35,6 +35,14 @@ function Invoke-Docker {
 }
 
 Write-Host '==> [1/3] starting shared infra (ollama)' -ForegroundColor Cyan
+$mode = if ($Gpu) { 'NVIDIA GPU' } else { 'CPU' }
+Write-Host "    mode: $mode"
+if ($Gpu) {
+    $runtimes = & docker info --format '{{json .Runtimes}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or "$runtimes" -notmatch '"nvidia"') {
+        throw 'Docker has no NVIDIA runtime: install NVIDIA Container Toolkit and enable GPU support in Docker Desktop, or run without -Gpu.'
+    }
+}
 $infraArgs = @('compose', '-f', $infraCompose)
 if ($Gpu) { $infraArgs += @('-f', (Join-Path $infraDir 'compose.gpu.yaml')) }
 $infraArgs += @('--profile', 'ollama', 'up', '-d')
