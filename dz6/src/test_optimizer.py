@@ -15,21 +15,28 @@ test_optimizer.py — оптимизация автотестов с помощ�
 
 Требуется:
   - Python 3.9+
-  - Ollama запущен (по умолчанию http://localhost:11434), модель: codellama / deepseek-coder-v2 / llama3.
+  - Ollama запущен (по умолчанию http://localhost:11434), модель: qwen2.5:7b-instruct.
   - pip install -r requirements/requirements.txt
 
-Если Ollama недоступен — скрипт работает в демо-режиме (fallback), генерируя
-оптимизированный код и отчёт без вызова LLM, чтобы показать структуру результата.
+Если Ollama недоступен — скрипт работает в демо-режиме (fallback): берёт
+заранее написанный код и отчёт. Источник каждого артефакта (LLM или fallback)
+и причина указываются в отчёте оптимизации.
+
+Метрики, которые измерить нельзя (например, код не разбирается парсером или
+сопоставление тестов с требованиями не реализовано), печатаются как `unknown`,
+а не как ноль.
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import copy
 import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from string import Template
@@ -46,22 +53,57 @@ OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(ROOT / "output")))
 PROMPTS_DIR = Path(os.getenv("PROMPTS_DIR", str(ROOT / "prompts")))
 REQUIREMENTS_PATH = Path(os.getenv("REQUIREMENTS_PATH", str(ROOT / "requirements_with_priorities.md")))
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "codellama:7b-instruct")
+DEFAULT_OLLAMA_MODEL = "qwen2.5:7b-instruct"
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
 REQUEST_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "120"))
+
+# HTTP-методы, для которых таймаут в вызове считается осмысленным.
+HTTP_METHODS = frozenset(
+    {"get", "post", "put", "patch", "delete", "head", "options", "request"}
+)
 
 
 @dataclass
 class TestMetrics:
-    total_tests: int = 0
-    duplicate_tests: int = 0
-    near_duplicate_tests: int = 0
-    parametrized_tests: int = 0
-    tests_with_fixtures: int = 0
-    tests_with_docstrings: int = 0
-    hardcoded_urls: int = 0
-    missing_assertions: int = 0
-    readability_score: float = 0.0
-    requirements_coverage_pct: float = 0.0
+    """Метрики статического анализа.
+
+    `None` означает «не измерено» и печатается как `unknown`. Ноль означает
+    измеренный ноль: например, в коде действительно нет дублей.
+    """
+
+    total_tests: Optional[int] = None
+    duplicate_tests: Optional[int] = None
+    near_duplicate_tests: Optional[int] = None
+    parametrized_tests: Optional[int] = None
+    tests_with_fixtures: Optional[int] = None
+    tests_with_docstrings: Optional[int] = None
+    hardcoded_urls: Optional[int] = None
+    missing_assertions: Optional[int] = None
+    readability_score: Optional[float] = None
+    requirements_coverage_pct: Optional[float] = None
+
+
+@dataclass
+class CodeProfile:
+    """Измеренные по AST факты о файле с тестами."""
+
+    parses: bool
+    parse_error: Optional[str] = None
+    test_count: Optional[int] = None
+    duplicate_tests: Optional[int] = None
+    duplicate_group_sizes: List[int] = field(default_factory=list)
+    near_duplicate_pairs: Optional[int] = None
+    parametrized_tests: Optional[int] = None
+    fixtures: List[str] = field(default_factory=list)
+    tests_with_fixtures: Optional[int] = None
+    tests_with_docstrings: Optional[int] = None
+    tests_without_assertions: Optional[int] = None
+    hardcoded_urls: List[str] = field(default_factory=list)
+    env_url_defaults: List[str] = field(default_factory=list)
+    has_timeout: Optional[bool] = None
+    has_teardown: Optional[bool] = None
+    avg_test_length: Optional[float] = None
+    max_test_length: Optional[int] = None
 
 
 @dataclass
@@ -71,6 +113,28 @@ class ReviewIssue:
     description: str
     line: Optional[int] = None
     suggestion: Optional[str] = None
+
+
+@dataclass
+class Generation:
+    """Ответ LLM или fallback. Источник виден в отчёте, а не угадывается."""
+
+    text: str
+    source: str  # "llm" | "fallback"
+    reason: str = ""
+
+
+@dataclass
+class ValidationResult:
+    parses: bool
+    tests: Optional[int] = None
+    parse_error: Optional[str] = None
+    problems: List[str] = field(default_factory=list)
+    forbidden: List[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.parses and not self.problems and not self.forbidden
 
 
 # ---------------------------------------------------------------------------
@@ -117,98 +181,446 @@ def find_test_files(input_dir: Path, max_depth: Optional[int] = None) -> List[Pa
     return files
 
 
-def count_test_functions(code: str) -> int:
-    return len(re.findall(r"^\s*def test_\w+\s*\(", code, flags=re.MULTILINE))
+def parse_code(code: str) -> Tuple[Optional[ast.Module], Optional[str]]:
+    """Разбирает код и возвращает (дерево, текст ошибки). Не бросает исключений."""
+    try:
+        return ast.parse(code), None
+    except SyntaxError as exc:
+        where = f"строка {exc.lineno}" if exc.lineno else "строка неизвестна"
+        return None, f"{exc.msg} ({where})"
+
+
+def iter_test_functions(
+    code: str,
+) -> Tuple[List[Any], Optional[str]]:
+    """Возвращает test_*-функции по порядку и ошибку разбора (если есть)."""
+    tree, error = parse_code(code)
+    if tree is None:
+        return [], error
+    tests = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test_")
+    ]
+    tests.sort(key=lambda node: (node.lineno, node.col_offset))
+    return tests, None
+
+
+def count_test_functions(code: str) -> Optional[int]:
+    """Число test_*-функций; None, если код не разбирается."""
+    tests, error = iter_test_functions(code)
+    return None if error else len(tests)
+
+
+class _DataNeutralizer(ast.NodeTransformer):
+    """Заменяет тестовые данные, сохраняя структуру кода.
+
+    Нейтрализуются только строковые литералы-значения. Не трогаются:
+      * ключи словарей и срезы `body["name"]` — это структура, а не данные;
+      * строки внутри f-строк — обычно это путь эндпоинта;
+      * числа — это коды ответов, длины и пороги, а не тестовые данные.
+
+    Так `assert body["name"] == "Alice"` и `... == "Bob"` считаются одной
+    структурой, а `["name"]` и `["email"]` или `201` и `400` — разными.
+    """
+
+    def __init__(self, preserve: set[int]) -> None:
+        self._preserve = preserve
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        if id(node) in self._preserve:
+            return node
+        if isinstance(node.value, str):
+            return ast.copy_location(ast.Constant(value="STR"), node)
+        return node
+
+
+def _strings_to_preserve(node: Any) -> set[int]:
+    preserve: set[int] = set()
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Dict):
+            for key in sub.keys:
+                if key is None:
+                    continue
+                for inner in ast.walk(key):
+                    if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                        preserve.add(id(inner))
+        elif isinstance(sub, ast.Subscript):
+            for inner in ast.walk(sub.slice):
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                    preserve.add(id(inner))
+        elif isinstance(sub, ast.JoinedStr):
+            for inner in ast.walk(sub):
+                if isinstance(inner, ast.Constant) and isinstance(inner.value, str):
+                    preserve.add(id(inner))
+    return preserve
+
+
+def _normalized_body(node: Any) -> str:
+    body = copy.deepcopy(node.body)
+    module = ast.Module(body=body, type_ignores=[])
+    neutralized = _DataNeutralizer(_strings_to_preserve(module)).visit(module)
+    return ast.unparse(neutralized)
+
+
+def _function_source(node: Any, lines: List[str]) -> str:
+    """Исходный текст функции вместе с декораторами."""
+    start = min([d.lineno for d in node.decorator_list] + [node.lineno])
+    end = node.end_lineno or node.lineno
+    return "\n".join(lines[start - 1:end])
 
 
 def extract_test_blocks(code: str) -> List[Tuple[str, str, str]]:
-    """Возвращает список (имя_теста, тело_теста, нормализованное_тело)."""
-    blocks: List[Tuple[str, str, str]] = []
-    pattern = re.compile(
-        r"(def (test_\w+)\s*\([^)]*\)\s*:\s*(?:\n\s+.*)+)",
-        flags=re.MULTILINE,
-    )
-    for m in pattern.finditer(code):
-        full_block = m.group(1)
-        name = m.group(2)
-        normalized = re.sub(r'"[^"]*"', '"STR"', full_block)
-        normalized = re.sub(r"'[^']*'", "'STR'", normalized)
-        normalized = re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*\b", "VAR", normalized)
-        blocks.append((name, full_block, normalized))
-    return blocks
+    """Возвращает список (имя_теста, исходный_текст, нормализованное_тело).
+
+    Границы функции берутся у AST (`lineno`/`end_lineno`), поэтому блок одного
+    теста не «съедает» соседние. Нормализация заменяет строковые и числовые
+    литералы, чтобы тесты, различающиеся только данными, считались дублями.
+    """
+    tests, error = iter_test_functions(code)
+    if error:
+        return []
+    lines = code.splitlines()
+    return [
+        (node.name, _function_source(node, lines), _normalized_body(node))
+        for node in tests
+    ]
+
 
 # ---------------------------------------------------------------------------
 # Статический анализ (поиск проблем, дубликатов, метрик)
 # ---------------------------------------------------------------------------
-def static_analysis(code: str, metrics: TestMetrics, issues: List[ReviewIssue]) -> None:
-    metrics.total_tests = count_test_functions(code)
+def _decorator_name(decorator: ast.AST) -> str:
+    """Имя декоратора без аргументов: `pytest.mark.parametrize`, `pytest.fixture`."""
+    node: Any = decorator
+    if isinstance(node, ast.Call):
+        node = node.func
+    parts: List[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
 
+
+def _is_fixture(node: Any) -> bool:
+    return any(
+        _decorator_name(d) in {"pytest.fixture", "fixture"}
+        for d in node.decorator_list
+    )
+
+
+def _has_parametrize(node: Any) -> bool:
+    return any(
+        _decorator_name(d).endswith("parametrize") for d in node.decorator_list
+    )
+
+
+def _fixture_names(tree: ast.Module) -> List[str]:
+    names = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and _is_fixture(node)
+    ]
+    return sorted(names)
+
+
+def _argument_names(node: Any) -> List[str]:
+    args = node.args
+    names = [a.arg for a in getattr(args, "posonlyargs", []) + args.args]
+    names += [a.arg for a in args.kwonlyargs]
+    return [name for name in names if name not in {"self", "cls"}]
+
+
+def _called_name(node: Any) -> str:
+    """Полное имя вызываемого объекта для `pytest.raises(...)` и подобных."""
+    func = node.func if isinstance(node, ast.Call) else node
+    parts: List[str] = []
+    while isinstance(func, ast.Attribute):
+        parts.append(func.attr)
+        func = func.value
+    if isinstance(func, ast.Name):
+        parts.append(func.id)
+    return ".".join(reversed(parts))
+
+
+def _has_assertion(node: Any) -> bool:
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Assert):
+            return True
+        if isinstance(sub, ast.Call) and _called_name(sub) in {
+            "pytest.raises",
+            "pytest.fail",
+        }:
+            return True
+    return False
+
+
+def _collect_urls(tree: ast.Module) -> Tuple[List[str], List[str]]:
+    """URL в коде: (жёстко заданные, значения по умолчанию в os.getenv).
+
+    URL, переданный вторым аргументом `os.getenv(...)`, не считается хардкодом:
+    это документированное значение по умолчанию, которое переопределяется
+    окружением. Он возвращается отдельным списком, чтобы отчёт не скрывал его.
+    """
+    parents: Dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    hardcoded: List[str] = []
+    env_defaults: List[str] = []
+    url_re = re.compile(r"https?://[^\s'\"<>`]+")
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        urls = url_re.findall(node.value)
+        if not urls:
+            continue
+        parent = parents.get(id(node))
+        bucket = hardcoded
+        if isinstance(parent, ast.Call):
+            func = parent.func
+            is_getenv = (
+                isinstance(func, ast.Attribute) and func.attr == "getenv"
+            ) or (isinstance(func, ast.Name) and func.id == "getenv")
+            if is_getenv and node in parent.args[1:]:
+                bucket = env_defaults
+        bucket.extend(urls)
+    return sorted(set(hardcoded)), sorted(set(env_defaults))
+
+
+def _has_timeout(tree: ast.Module) -> bool:
+    """Есть ли таймаут в HTTP-вызовах (requests/клиент), а не в любом вызове."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        method = _called_name(node).split(".")[-1].lower()
+        if method not in HTTP_METHODS:
+            continue
+        if any(keyword.arg == "timeout" for keyword in node.keywords):
+            return True
+    return False
+
+
+def _contains_yield(block: List[ast.stmt]) -> bool:
+    return any(
+        isinstance(node, ast.Yield) for stmt in block for node in ast.walk(stmt)
+    )
+
+
+def _block_has_teardown(block: List[ast.stmt]) -> bool:
+    for index, stmt in enumerate(block):
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Yield):
+            if index < len(block) - 1:
+                return True
+        # try/finally: код в finally выполняется после yield из try.
+        if isinstance(stmt, ast.Try) and stmt.finalbody and _contains_yield(stmt.body):
+            return True
+        for attr in ("body", "orelse", "finalbody"):
+            inner = getattr(stmt, attr, None)
+            if isinstance(inner, list) and _block_has_teardown(inner):
+                return True
+        for handler in getattr(stmt, "handlers", []):
+            if _block_has_teardown(handler.body):
+                return True
+    return False
+
+
+def _uses_addfinalizer(node: Any) -> bool:
+    return any(
+        isinstance(sub, ast.Call) and _called_name(sub) == "request.addfinalizer"
+        for sub in ast.walk(node)
+    )
+
+
+def _has_teardown(tree: ast.Module) -> bool:
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not _is_fixture(node):
+            continue
+        if _block_has_teardown(node.body) or _uses_addfinalizer(node):
+            return True
+    return False
+
+
+def _has_autouse_fixture(tree: ast.Module) -> bool:
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            if not _decorator_name(decorator).endswith("fixture"):
+                continue
+            for keyword in decorator.keywords:
+                if keyword.arg == "autouse" and isinstance(
+                    keyword.value, ast.Constant
+                ) and keyword.value.value is True:
+                    return True
+    return False
+
+
+def analyze_code(code: str) -> CodeProfile:
+    """Считает всё, что можно измерить по AST, за один проход."""
+    tree, error = parse_code(code)
+    if tree is None:
+        return CodeProfile(parses=False, parse_error=error)
+
+    tests, _ = iter_test_functions(code)
+    fixtures = _fixture_names(tree)
+    fixture_set = set(fixtures)
     blocks = extract_test_blocks(code)
 
-    # Поиск точных и близких дублей
-    seen_normalized: Dict[str, List[str]] = {}
-    for name, _body, norm in blocks:
-        seen_normalized.setdefault(norm, []).append(name)
+    seen: Dict[str, List[str]] = {}
+    for name, _source, normalized in blocks:
+        seen.setdefault(normalized, []).append(name)
+    duplicate_groups = [names for names in seen.values() if len(names) > 1]
 
-    dup_groups = [names for names in seen_normalized.values() if len(names) > 1]
-    metrics.duplicate_tests = sum(len(g) - 1 for g in dup_groups)
+    near_pairs = 0
+    for i in range(len(blocks)):
+        for j in range(i + 1, len(blocks)):
+            if blocks[i][2] == blocks[j][2]:
+                continue
+            if _similarity(blocks[i][2], blocks[j][2]) > 0.7:
+                near_pairs += 1
 
-    for group in dup_groups:
+    test_lengths = [
+        ((node.end_lineno or node.lineno) - node.lineno + 1) for node in tests
+    ]
+    hardcoded, env_defaults = _collect_urls(tree)
+
+    return CodeProfile(
+        parses=True,
+        test_count=len(tests),
+        duplicate_tests=sum(len(group) - 1 for group in duplicate_groups),
+        duplicate_group_sizes=sorted((len(group) for group in duplicate_groups), reverse=True),
+        near_duplicate_pairs=near_pairs,
+        parametrized_tests=sum(1 for node in tests if _has_parametrize(node)),
+        fixtures=fixtures,
+        tests_with_fixtures=(
+            len(tests)
+            if _has_autouse_fixture(tree)
+            else sum(1 for node in tests if set(_argument_names(node)) & fixture_set)
+        ),
+        tests_with_docstrings=sum(
+            1 for node in tests if ast.get_docstring(node) is not None
+        ),
+        tests_without_assertions=sum(
+            1 for node in tests if not _has_assertion(node)
+        ),
+        hardcoded_urls=hardcoded,
+        env_url_defaults=env_defaults,
+        has_timeout=_has_timeout(tree),
+        has_teardown=_has_teardown(tree),
+        avg_test_length=(sum(test_lengths) / len(test_lengths) if test_lengths else 0.0),
+        max_test_length=max(test_lengths) if test_lengths else 0,
+    )
+
+
+def readability_score(profile: CodeProfile) -> Optional[float]:
+    """Оценка 1–10 по документированной формуле; None, если мерить нечего.
+
+    Формула измерима и повторяема:
+      * штраф 0.5 за каждую строку средней длины теста сверх 8;
+      * штраф 1.0, если самый длинный тест больше 30 строк;
+      * штраф до 3.0 за отсутствие docstrings (пропорционально доле тестов).
+
+    Это оценка стиля, а не качества набора: дубли, покрытие и изоляция
+    измеряются отдельными полями.
+    """
+    if not profile.parses or not profile.test_count:
+        return None
+    score = 10.0
+    if profile.avg_test_length:
+        score -= max(0.0, profile.avg_test_length - 8) * 0.5
+    if profile.max_test_length and profile.max_test_length > 30:
+        score -= 1.0
+    doc_ratio = (profile.tests_with_docstrings or 0) / profile.test_count
+    score -= 3.0 * (1.0 - doc_ratio)
+    return round(min(10.0, max(1.0, score)), 2)
+
+
+def static_analysis(
+    code: str, metrics: TestMetrics, issues: List[ReviewIssue]
+) -> CodeProfile:
+    """Заполняет метрики и список проблем; возвращает измеренный профиль."""
+    profile = analyze_code(code)
+
+    if not profile.parses:
         issues.append(
             ReviewIssue(
-                category="Дублирующие тесты",
-                severity="high",
+                category="Синтаксическая ошибка",
+                severity="critical",
                 description=(
-                    f"Тесты {', '.join(group)} имеют идентичную нормализованную "
-                    f"структуру (различаются только данными). Рекомендуется "
-                    f"параметризация (@pytest.mark.parametrize)."
+                    f"Код не разбирается парсером Python: {profile.parse_error}. "
+                    f"Метрики не измерены (unknown)."
                 ),
-                suggestion="Объединить в один параметризованный тест.",
+                suggestion="Исправить синтаксис и повторить анализ.",
+            )
+        )
+        return profile
+
+    metrics.total_tests = profile.test_count
+    metrics.duplicate_tests = profile.duplicate_tests
+    metrics.near_duplicate_tests = profile.near_duplicate_pairs
+    metrics.parametrized_tests = profile.parametrized_tests
+    metrics.tests_with_fixtures = profile.tests_with_fixtures
+    metrics.tests_with_docstrings = profile.tests_with_docstrings
+    metrics.hardcoded_urls = len(profile.hardcoded_urls)
+    metrics.missing_assertions = profile.tests_without_assertions
+    metrics.readability_score = readability_score(profile)
+    # Сопоставления «тест -> требование» в проекте нет, поэтому процент
+    # покрытия не вычисляется. Ноль здесь означал бы измеренный ноль.
+    metrics.requirements_coverage_pct = None
+
+    if profile.duplicate_group_sizes:
+        for size in profile.duplicate_group_sizes:
+            issues.append(
+                ReviewIssue(
+                    category="Дублирующие тесты",
+                    severity="high",
+                    description=(
+                        f"Найдена группа из {size} тестов с идентичной "
+                        f"структурой (различаются только данными). Лишних "
+                        f"копий: {size - 1}. Рекомендуется параметризация "
+                        f"(@pytest.mark.parametrize)."
+                    ),
+                    suggestion="Объединить в один параметризованный тест.",
+                )
+            )
+
+    if profile.near_duplicate_pairs:
+        issues.append(
+            ReviewIssue(
+                category="Похожие тесты (near-duplicate)",
+                severity="medium",
+                description=(
+                    f"Пар тестов со сходством структуры выше 70%: "
+                    f"{profile.near_duplicate_pairs}. Проверить на дублирование."
+                ),
+                suggestion="Объединить при целесообразности или вынести шаги в фикстуру.",
             )
         )
 
-    # Поиск близких дублей (похожие тела, не идентичные)
-    for i in range(len(blocks)):
-        for j in range(i + 1, len(blocks)):
-            n1, n2 = blocks[i][2], blocks[j][2]
-            if n1 == n2:
-                continue
-            sim = _similarity(n1, n2)
-            if sim > 0.7:
-                metrics.near_duplicate_tests += 1
-                issues.append(
-                    ReviewIssue(
-                        category="Похожие тесты (near-duplicate)",
-                        severity="medium",
-                        description=(
-                            f"Тесты {blocks[i][0]} и {blocks[j][0]} похожи на {sim:.0%}. "
-                            f"Возможна параметризация или объединение фикстурой."
-                        ),
-                        suggestion="Проверить на дублирование, объединить при целесообразности.",
-                    )
-                )
-
-    # Жёстко заданные URL
-    hardcoded = re.findall(r'http://localhost:\d+', code)
-    metrics.hardcoded_urls = len(set(hardcoded))
-    if metrics.hardcoded_urls > 0:
+    if profile.hardcoded_urls:
         issues.append(
             ReviewIssue(
                 category="Жёстко заданный URL",
                 severity="medium",
                 description=(
-                    f"URL жёстко задан в коде ({', '.join(set(hardcoded))}). "
-                    f"Рекомендуется вынести в переменную окружения / конфиг / фикстуру."
+                    f"URL задан в коде: {', '.join(profile.hardcoded_urls)}. "
+                    f"Рекомендуется вынести в переменную окружения / конфиг."
                 ),
                 suggestion="Использовать os.getenv('BASE_URL', 'http://localhost:8000')",
             )
         )
 
-    # Фикстуры / docstrings
-    has_fixture = bool(re.search(r"@pytest\.fixture", code))
-    metrics.tests_with_fixtures = 1 if has_fixture else 0
-    metrics.tests_with_docstrings = len(re.findall(r'"""', code)) // 2
-    if not has_fixture:
+    if not profile.fixtures:
         issues.append(
             ReviewIssue(
                 category="Отсутствуют фикстуры",
@@ -218,25 +630,67 @@ def static_analysis(code: str, metrics: TestMetrics, issues: List[ReviewIssue]) 
                     "подготовка данных). Тесты не изолированы и могут оставлять "
                     "мусор в системе."
                 ),
-                suggestion="Добавить фикстуру для клиента API и фикстуру для подготовки/очистки тестовых данных.",
+                suggestion=(
+                    "Добавить фикстуру для клиента API и фикстуру для "
+                    "подготовки/очистки тестовых данных."
+                ),
+            )
+        )
+    elif profile.tests_with_fixtures < profile.test_count:
+        issues.append(
+            ReviewIssue(
+                category="Тесты без фикстур",
+                severity="low",
+                description=(
+                    f"Локальные фикстуры объявлены ({', '.join(profile.fixtures)}), "
+                    f"но используются только в {profile.tests_with_fixtures} из "
+                    f"{profile.test_count} тестов."
+                ),
+                suggestion="Подключить фикстуры клиента и очистки данных в остальных тестах.",
             )
         )
 
-    # Читаемость
-    func_lengths = [len(b[1].splitlines()) for b in blocks]
-    avg_len = sum(func_lengths) / len(func_lengths) if func_lengths else 0
-    readability = max(0.0, min(10.0, 10.0 - (avg_len - 5) * 0.5 + (metrics.tests_with_docstrings * 0.5)))
-    metrics.readability_score = round(readability, 2)
+    if profile.tests_without_assertions:
+        issues.append(
+            ReviewIssue(
+                category="Нет assert'ов",
+                severity="high",
+                description=(
+                    f"Тестов без assert (и без pytest.raises): "
+                    f"{profile.tests_without_assertions}. Такой тест проверяет "
+                    f"только отсутствие исключения."
+                ),
+                suggestion="Добавить проверки статуса и полей ответа.",
+            )
+        )
 
-    if avg_len > 12:
+    if profile.avg_test_length and profile.avg_test_length > 12:
         issues.append(
             ReviewIssue(
                 category="Читаемость",
                 severity="medium",
-                description=f"Средняя длина тестовой функции {avg_len:.0f} строк (рекомендуется ≤ 10).",
-                suggestion="Вынести повторяющийся код в вспомогательные функции и фикстуры.",
+                description=(
+                    f"Средняя длина тестовой функции "
+                    f"{profile.avg_test_length:.0f} строк (рекомендуется ≤ 10)."
+                ),
+                suggestion="Вынести повторяющийся код во вспомогательные функции и фикстуры.",
             )
         )
+
+    if metrics.readability_score is not None and metrics.readability_score < 6:
+        issues.append(
+            ReviewIssue(
+                category="Низкая читаемость",
+                severity="medium",
+                description=(
+                    f"Оценка читаемости {metrics.readability_score}/10 по формуле "
+                    f"длины тестов и наличия docstrings."
+                ),
+                suggestion="Сократить тесты и добавить docstrings.",
+            )
+        )
+
+    return profile
 
 
 def _similarity(a: str, b: str) -> float:
@@ -254,6 +708,7 @@ class OllamaClient:
     def __init__(self, base_url: str = OLLAMA_BASE_URL, model: str = OLLAMA_MODEL):
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.last_error: Optional[str] = None
         self.available = self._check_available()
 
     def _check_available(self) -> bool:
@@ -282,12 +737,14 @@ class OllamaClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        self.last_error = None
         try:
             with urllib_request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 raw = resp.read().decode("utf-8")
                 obj = json.loads(raw)
                 return obj.get("response", "")
         except Exception as exc:
+            self.last_error = str(exc)
             print(f"[WARN] Ollama вызов не удался: {exc}", file=sys.stderr)
             return ""
 
@@ -303,6 +760,7 @@ class OllamaClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        self.last_error = None
         try:
             with urllib_request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 raw = resp.read().decode("utf-8")
@@ -310,6 +768,7 @@ class OllamaClient:
                 msg = obj.get("message", {})
                 return msg.get("content", "")
         except Exception as exc:
+            self.last_error = str(exc)
             print(f"[WARN] Ollama chat не удался: {exc}", file=sys.stderr)
             return ""
 
@@ -350,73 +809,89 @@ def build_prioritization_prompt(source_code: str, requirements_text: str) -> str
 # ---------------------------------------------------------------------------
 # Fallback / демо-режим (без Ollama)
 # ---------------------------------------------------------------------------
-FALLBACK_OPTIMIZED_CODE = '''import os
+FALLBACK_OPTIMIZED_CODE = '''"""Демонстрационный вариант тестов API /users (pytest + requests).
+
+Это fallback: код написан заранее и не является ответом модели. Он показывает
+структуру, которую требует промпт: параметризация, фикстуры, конфигурация из
+окружения, изоляция созданных данных. Стенда в проекте нет, поэтому код не
+запускался — проверяйте его на своём API.
+"""
+
+import os
 import uuid
+
 import pytest
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
 TIMEOUT = float(os.getenv("API_TIMEOUT", "5"))
 
 
 @pytest.fixture(scope="session")
 def api_client():
-    """HTTP-клиент с ретраями и таймаутами."""
+    """HTTP-сессия с общим Accept; таймаут задаётся в каждом запросе."""
     session = requests.Session()
-    retry = Retry(total=3, backoff_factor=0.3, status_forcelist=[500, 502, 503, 504])
-    session.mount("http://", HTTPAdapter(max_retries=retry))
+    session.headers.update({"Accept": "application/json"})
     yield session
     session.close()
 
 
 @pytest.fixture
-def created_item(api_client):
-    """Создаёт тестовую сущность и удаляет её после теста (изоляция)."""
-    payload = {"name": f"item_{uuid.uuid4().hex[:8]}"}
-    resp = api_client.post(f"{BASE_URL}/items", json=payload, timeout=TIMEOUT)
-    assert resp.status_code == 201, f"Ожидался 201, получен {resp.status_code}"
-    item = resp.json()
-    yield item
-    # Тедаун: удаляем сущность, чтобы не оставлять мусора
-    api_client.delete(f"{BASE_URL}/items/{item['id']}", timeout=TIMEOUT)
+def created_users(api_client):
+    """Собирает id созданных пользователей и удаляет только их после теста."""
+    user_ids = []
+    yield user_ids
+    for user_id in reversed(user_ids):
+        api_client.delete(f"{BASE_URL}/users/{user_id}", timeout=TIMEOUT)
 
 
-@pytest.mark.parametrize("name, expected_status", [
-    ("Item A", 201),
-    ("Item B", 201),
-    ("Item C", 201),
-])
-def test_create_item_valid(api_client, name, expected_status):
-    """Создание сущности с валидными данными (параметризовано)."""
-    payload = {"name": name}
-    resp = api_client.post(f"{BASE_URL}/items", json=payload, timeout=TIMEOUT)
-    assert resp.status_code == expected_status
-    if expected_status == 201:
-        body = resp.json()
-        assert body["name"] == name
-        assert "id" in body
+@pytest.mark.parametrize(
+    "name",
+    ["Alice", "Bob", "Charlie"],
+)
+def test_create_user_valid(api_client, created_users, name):
+    """Валидный пользователь создаётся, поля ответа совпадают с запросом."""
+    payload = {
+        "name": name,
+        "email": f"{name.lower()}.{uuid.uuid4().hex[:8]}@example.com",
+    }
+    response = api_client.post(f"{BASE_URL}/users", json=payload, timeout=TIMEOUT)
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["name"] == payload["name"]
+    assert body["email"] == payload["email"]
+    assert body["id"]
+    created_users.append(body["id"])
 
 
-def test_create_item_invalid(api_client):
-    """Создание сущности с некорректными данными -> 400."""
-    payload = {}
-    resp = api_client.post(f"{BASE_URL}/items", json=payload, timeout=TIMEOUT)
-    assert resp.status_code == 400
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"name": "Test", "email": "bad-email"},
+        {"email": "test@example.com"},
+    ],
+    ids=["invalid-email", "missing-name"],
+)
+def test_create_user_invalid_payload(api_client, payload):
+    """Невалидные данные отклоняются с кодом 400."""
+    response = api_client.post(f"{BASE_URL}/users", json=payload, timeout=TIMEOUT)
+    assert response.status_code == 400, response.text
 
 
-def test_create_item_duplicate(api_client, created_item):
-    """Повторное создание с теми же данными -> 400."""
-    payload = {"name": created_item["name"]}
-    resp = api_client.post(f"{BASE_URL}/items", json=payload, timeout=TIMEOUT)
-    assert resp.status_code == 400
+def test_create_user_duplicate_email(api_client, created_users):
+    """Повторная регистрация с тем же email отклоняется."""
+    payload = {
+        "name": "Alice",
+        "email": f"duplicate.{uuid.uuid4().hex[:8]}@example.com",
+    }
 
+    first = api_client.post(f"{BASE_URL}/users", json=payload, timeout=TIMEOUT)
+    assert first.status_code == 201, first.text
+    created_users.append(first.json()["id"])
 
-def test_get_nonexistent_item(api_client):
-    """Получение несуществующей сущности -> 404."""
-    resp = api_client.get(f"{BASE_URL}/items/{uuid.uuid4()}", timeout=TIMEOUT)
-    assert resp.status_code == 404
+    second = api_client.post(f"{BASE_URL}/users", json=payload, timeout=TIMEOUT)
+    assert second.status_code == 400, second.text
 '''
 
 FALLBACK_REVIEW_REPORT = """# Отчёт код-ревью автотестов
@@ -458,41 +933,7 @@ FALLBACK_REVIEW_REPORT = """# Отчёт код-ревью автотестов
 Код рабочий, но требует рефакторинга: устранение дублей, добавление фикстур, параметризация, вынос конфига, усиление assert'ов.
 """
 
-FALLBACK_OPTIMIZATION_REPORT = """# Отчёт оптимизации автотестов
-
-## Метрики до оптимизации
-- Всего тестов: 5
-- Дублирующих тестов: 2 (три теста создания сущности — один уникальный + 2 дубля)
-- Близких дублей (near-duplicate): 3
-- Фикстур: 0
-- Тестов с docstring: 0
-- Жёстко заданных URL: 1
-- Оценка читаемости (1–10): ~4.0
-- Покрытие требований: частичное (только создание сущности)
-
-## Метрики после оптимизации
-- Всего тестов: 6 (включая новые сценарии: дубликат, 404)
-- Параметризованных тестов: 1 (test_create_item_valid — 3 набора данных)
-- Фикстур: 2 (api_client, created_item)
-- Жёстко заданных URL: 0 (BASE_URL через os.getenv)
-- Оценка читаемости (1–10): ~8.5
-
-## Проделанные оптимизации
-1. Устранены дублирующие тесты через @pytest.mark.parametrize.
-2. Добавлены фикстуры api_client и created_item с тедауном (удаление сущности).
-3. Базовый URL и таймаут вынесены в переменные окружения.
-4. Добавлены ретраи и таймауты к HTTP-клиенту.
-5. Усилены assert'ы (проверка id, name, структуры тела).
-6. Добавлены docstrings и осмысленные имена тестов.
-7. Добавлены недостающие сценарии: дубликат, 404 на несуществующую сущность.
-
-## Приоритеты исправления (по требованиям)
-- P0 (критично): изоляция тестов, устранение дублей.
-- P1 (высоко): параметризация, фикстуры, таймауты/ретраи.
-- P2 (средне): docstrings, читаемость, assert'ы на все поля.
-- P3 (низко): дополнительные негативные сценарии.
-
-## Критерии "плохих" автотестов (список)
+BAD_TESTS_CRITERIA = """## Критерии "плохих" автотестов (список)
 - Дублируют другие тесты без добавления новой ценности.
 - Нет изоляции (оставляют данные в системе, зависят от порядка выполнения).
 - Жёстко заданные данные и URL в теле теста.
@@ -508,44 +949,94 @@ FALLBACK_OPTIMIZATION_REPORT = """# Отчёт оптимизации автот
 # ---------------------------------------------------------------------------
 # Генерация контента через LLM или fallback
 # ---------------------------------------------------------------------------
-def llm_review(client: OllamaClient, source_code: str) -> str:
-    if client.available:
-        prompt = build_review_prompt(source_code)
-        system = render_prompt("system_review")
-        result = client.generate(prompt, system=system)
-        if result.strip():
-            return result
-    return FALLBACK_REVIEW_REPORT
+def _empty_response_reason(client: OllamaClient) -> str:
+    """Почему ответа нет: сбой запроса или пустой ответ модели."""
+    if getattr(client, "last_error", None):
+        return f"запрос к Ollama не удался: {client.last_error}"
+    return "модель вернула пустой ответ"
 
 
-def llm_optimize(client: OllamaClient, source_code: str) -> str:
-    if client.available:
-        prompt = build_optimization_prompt(source_code)
-        system = render_prompt("system_optimization")
-        result = client.generate(prompt, system=system)
-        code_block = _extract_python_code(result)
-        if code_block:
-            return code_block
-        if result.strip():
-            return result
-    return FALLBACK_OPTIMIZED_CODE
+def llm_review(client: OllamaClient, source_code: str) -> Generation:
+    if not client.available:
+        return Generation(FALLBACK_REVIEW_REPORT, "fallback", "Ollama недоступен")
+    prompt = build_review_prompt(source_code)
+    system = render_prompt("system_review")
+    result = client.generate(prompt, system=system)
+    if result.strip():
+        return Generation(result, "llm")
+    return Generation(
+        FALLBACK_REVIEW_REPORT, "fallback", _empty_response_reason(client)
+    )
 
 
-def llm_prioritization(client: OllamaClient, source_code: str, requirements_text: str) -> str:
-    if client.available:
-        prompt = build_prioritization_prompt(source_code, requirements_text)
-        system = render_prompt("system_prioritization")
-        result = client.generate(prompt, system=system)
-        if result.strip():
-            return result
-    return ("## Приоритеты автотестов (демо-режим)\n\n"
-            "| Тест | Требование | Приоритет | В регрессии | Пробелы в покрытии |\n"
-            "|------|------------|-----------|-------------|--------------------|\n"
-            "| test_create_user_valid | R01 | P0 | Да | нет |\n"
-            "| test_create_user_invalid_email | R03 | P1 | Да | нет |\n"
-            "| test_create_user_missing_name | R04 | P2 | Да | нет |\n"
-            "| test_create_user_duplicate_email | R02 | P1 | Да | нет |\n"
-            "| test_get_nonexistent_user | (новое) | P3 | Нет | требует уточнения |\n")
+def llm_optimize(client: OllamaClient, source_code: str) -> Generation:
+    """Возвращает код и его источник. Fallback никогда не молчит."""
+    if not client.available:
+        return Generation(
+            FALLBACK_OPTIMIZED_CODE, "fallback", "Ollama недоступен"
+        )
+    prompt = build_optimization_prompt(source_code)
+    system = render_prompt("system_optimization")
+    result = client.generate(prompt, system=system)
+    if not result.strip():
+        return Generation(
+            FALLBACK_OPTIMIZED_CODE, "fallback", _empty_response_reason(client)
+        )
+
+    code_block = _extract_python_code(result)
+    if code_block:
+        return Generation(code_block, "llm")
+
+    # Некоторые модели отвечают кодом без markdown-обёртки. Принимаем такой
+    # ответ только если он действительно разбирается как Python.
+    if parse_code(result)[0] is not None:
+        return Generation(
+            result.strip(),
+            "llm",
+            "ответ без markdown-блока, но синтаксически корректен",
+        )
+
+    print(
+        "[WARN] Ответ модели не содержит Python-кода; используется fallback. "
+        f"Начало ответа: {result.strip()[:200]!r}",
+        file=sys.stderr,
+    )
+    return Generation(
+        FALLBACK_OPTIMIZED_CODE,
+        "fallback",
+        "ответ модели не является Python-кодом",
+    )
+
+
+def llm_prioritization(
+    client: OllamaClient, source_code: str, requirements_text: str
+) -> Generation:
+    if not client.available:
+        return Generation(
+            FALLBACK_PRIORITIZATION, "fallback", "Ollama недоступен"
+        )
+    prompt = build_prioritization_prompt(source_code, requirements_text)
+    system = render_prompt("system_prioritization")
+    result = client.generate(prompt, system=system)
+    if result.strip():
+        return Generation(result, "llm")
+    return Generation(
+        FALLBACK_PRIORITIZATION, "fallback", _empty_response_reason(client)
+    )
+
+
+FALLBACK_PRIORITIZATION = (
+    "## Приоритеты автотестов (демо-режим)\n\n"
+    "| Тест | Требование | Приоритет | В регрессии | Пробелы в покрытии |\n"
+    "|------|------------|-----------|-------------|--------------------|\n"
+    "| test_create_user_valid | R01 | P0 | Да | нет |\n"
+    "| test_create_user_invalid_email | R03 | P1 | Да | нет |\n"
+    "| test_create_user_missing_name | R04 | P2 | Да | нет |\n"
+    "| test_create_user_duplicate_email | R02 | P1 | Да | нет |\n"
+    "| test_get_nonexistent_user | (новое) | P3 | Нет | требует уточнения |\n"
+    "\n> Демонстрационная таблица: ID требований и пробелы не проверялись, "
+    "процент покрытия не измерен (unknown).\n"
+)
 
 
 def _extract_python_code(text: str) -> str:
@@ -556,6 +1047,55 @@ def _extract_python_code(text: str) -> str:
     if match:
         return match.group(1).strip()
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Валидация сгенерированного кода
+# ---------------------------------------------------------------------------
+def _forbidden_findings(tree: ast.Module) -> List[str]:
+    """Запрещённые конструкции, найденные по AST (а не по тексту строк)."""
+    findings: List[Tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assert)
+            and isinstance(node.test, ast.Constant)
+            and node.test.value is True
+        ):
+            findings.append((node.lineno, "assert True"))
+        elif isinstance(node, ast.Call) and _called_name(node) == "time.sleep":
+            findings.append((node.lineno, "time.sleep(...)"))
+        elif isinstance(node, ast.ExceptHandler) and node.type is None:
+            findings.append((node.lineno, "bare except"))
+    return [f"{label} (строка {lineno})" for lineno, label in sorted(findings)]
+
+
+def validate_generated_tests(code: str) -> ValidationResult:
+    """Статическая проверка до сохранения артефакта.
+
+    Проверяет синтаксис, наличие тестов и запрещённые паттерны. Не запускает
+    код: стенда с тестируемым API в проекте нет.
+    """
+    result = ValidationResult(parses=False)
+    tree, error = parse_code(code)
+    if tree is None:
+        result.parse_error = error
+        result.problems.append(f"код не разбирается: {error}")
+        return result
+
+    result.parses = True
+    result.tests = count_test_functions(code)
+    if not result.tests:
+        result.problems.append("нет ни одной функции test_*")
+    result.forbidden = _forbidden_findings(tree)
+    return result
+
+
+def _draft_header(validation: ValidationResult) -> str:
+    lines = ["# ЧЕРНОВИК: сгенерированный код не прошёл статическую проверку."]
+    lines += [f"# - {problem}" for problem in validation.problems]
+    lines += [f"# - запрещённый паттерн: {problem}" for problem in validation.forbidden]
+    return "\n".join(lines) + "\n\n"
+
 
 # ---------------------------------------------------------------------------
 # Сохранение результатов
@@ -568,9 +1108,144 @@ def save_output(text: str, filename: str, output_dir: Optional[Path] = None) -> 
     return path
 
 
+
 # ---------------------------------------------------------------------------
 # Основной поток
 # ---------------------------------------------------------------------------
+def _fmt(value: Any, unit: str = "") -> str:
+    """Печать метрики: None — это `unknown`, а не ноль."""
+    if value is None:
+        return "unknown"
+    return f"{value}{unit}"
+
+
+def _yes_no(value: Optional[bool]) -> str:
+    if value is None:
+        return "unknown"
+    return "да" if value else "нет"
+
+
+def describe_changes(before: CodeProfile, after: CodeProfile) -> str:
+    """Факты об изменениях, измеренные по AST, а не текстом шаблона."""
+    if not after.parses:
+        return (
+            "- unknown: сгенерированный код не разбирается, поэтому изменения "
+            f"не измерены ({after.parse_error})."
+        )
+    lines = [
+        f"- Функций `test_*` (без учёта параметров): "
+        f"{_fmt(before.test_count)} → {_fmt(after.test_count)}",
+        f"- Дублирующих тестов (лишних копий): "
+        f"{_fmt(before.duplicate_tests)} → {_fmt(after.duplicate_tests)}",
+        f"- Параметризованных тестов: "
+        f"{_fmt(before.parametrized_tests)} → {_fmt(after.parametrized_tests)}",
+        f"- Объявленных фикстур: {len(before.fixtures)} → {len(after.fixtures)}"
+        + (f" ({', '.join(after.fixtures)})" if after.fixtures else ""),
+        f"- Тестов с docstring: "
+        f"{_fmt(before.tests_with_docstrings)} → {_fmt(after.tests_with_docstrings)}",
+        f"- Тестов без assert: "
+        f"{_fmt(before.tests_without_assertions)} → "
+        f"{_fmt(after.tests_without_assertions)}",
+        f"- Жёстко заданных URL: "
+        f"{len(before.hardcoded_urls)} → {len(after.hardcoded_urls)}",
+    ]
+    if after.env_url_defaults:
+        defaults = ", ".join(f"`{url}`" for url in after.env_url_defaults)
+        lines.append(f"- URL в значении по умолчанию `os.getenv`: {defaults}")
+    lines += [
+        f"- Таймаут в запросах: {_yes_no(before.has_timeout)} → {_yes_no(after.has_timeout)}",
+        f"- Teardown в фикстурах: {_yes_no(before.has_teardown)} → {_yes_no(after.has_teardown)}",
+        f"- Средняя длина теста: {_fmt(_rounded(before.avg_test_length))} → "
+        f"{_fmt(_rounded(after.avg_test_length))} строк",
+    ]
+    return "\n".join(lines)
+
+
+def _rounded(value: Optional[float]) -> Optional[float]:
+    return None if value is None else round(value, 1)
+
+
+def validation_to_md(validation: ValidationResult) -> str:
+    status = "принят" if validation.ok else "**ЧЕРНОВИК** (файл помечен комментарием)"
+    lines = [f"- Статус: {status}"]
+    if validation.parses:
+        lines.append("- `ast.parse`: OK")
+    else:
+        lines.append(f"- `ast.parse`: ошибка — {validation.parse_error}")
+    lines.append(f"- Функций `test_*` в файле: {_fmt(validation.tests)}")
+
+    if not validation.parses:
+        lines.append(
+            "- Запрещённые паттерны: unknown (код не разбирается)"
+        )
+    elif validation.forbidden:
+        lines.append("- Запрещённые паттерны:")
+        lines += [f"  - {problem}" for problem in validation.forbidden]
+    else:
+        lines.append(
+            "- Запрещённые паттерны (`assert True`, `time.sleep`, bare `except`): нет"
+        )
+    for problem in validation.problems:
+        lines.append(f"- Проблема: {problem}")
+    return "\n".join(lines)
+
+
+def _generation_md(label: str, generation: Generation) -> str:
+    if generation.source == "llm":
+        suffix = f" ({generation.reason})" if generation.reason else ""
+        return f"- {label}: получен от модели{suffix}"
+    return f"- {label}: **fallback** — {generation.reason}"
+
+
+def build_optimization_report(
+    test_file: Path,
+    metrics: TestMetrics,
+    issues: List[ReviewIssue],
+    analysis: CodeProfile,
+    review: Generation,
+    optimization: Generation,
+    prioritization: Generation,
+    validation: ValidationResult,
+    client_available: bool,
+) -> str:
+    after = analyze_code(optimization.text)
+    mode = "доступен" if client_available else "недоступен"
+    return f"""# Отчёт оптимизации автотестов
+
+## Исходные данные
+- Источник: `{test_file}`
+- Модель LLM: `{OLLAMA_MODEL}` (Ollama: {mode})
+{_generation_md("Отчёт ревью", review)}
+{_generation_md("Оптимизированный код", optimization)}
+{_generation_md("Приоритизация", prioritization)}
+
+## Валидация сгенерированного кода
+{validation_to_md(validation)}
+
+> Проверка статическая: сгенерированные тесты не запускались — стенда с
+> тестируемым API в проекте нет.
+
+## Метрики до оптимизации
+{metrics_to_md(metrics)}
+
+## Найденные проблемы (ревью)
+{issues_to_md(issues)}
+
+## Приоритизация по требованиям
+{prioritization.text}
+
+## Что изменилось (измерено по AST)
+{describe_changes(analysis, after)}
+
+> Это факты о коде, а не подтверждение поведения: тесты не запускались.
+
+{BAD_TESTS_CRITERIA}
+## Результат
+- Оптимизированные автотесты: `{test_file.stem}_optimized_tests.py`
+- Отчёт ревью: `{test_file.stem}_code_review_report.md`
+"""
+
+
 def process_single_file(
     client: OllamaClient,
     test_file: Path,
@@ -590,12 +1265,18 @@ def process_single_file(
     # 2. Статический анализ
     metrics = TestMetrics()
     issues: List[ReviewIssue] = []
-    static_analysis(source_code, metrics, issues)
+    analysis = static_analysis(source_code, metrics, issues)
     print(
-        f"[2] Статический анализ: тестов={metrics.total_tests}, "
-        f"дублей={metrics.duplicate_tests}, near-dup={metrics.near_duplicate_tests}, "
-        f"читаймость={metrics.readability_score}/10"
+        f"[2] Статический анализ: тестов={_fmt(metrics.total_tests)}, "
+        f"дублей={_fmt(metrics.duplicate_tests)}, "
+        f"near-dup={_fmt(metrics.near_duplicate_tests)}, "
+        f"читаймость={_fmt(metrics.readability_score)}/10"
     )
+    if not analysis.parses:
+        print(
+            f"[WARN] Исходный код не разбирается: {analysis.parse_error}",
+            file=sys.stderr,
+        )
 
     # 3. Ollama клиент уже создан снаружи
     print(
@@ -604,61 +1285,49 @@ def process_single_file(
     )
 
     # 4. Ревью кода
-    review_report = llm_review(client, source_code)
-    review_path = save_output(review_report, f"{stem}_code_review_report.md", output_dir)
-    print(f"[4] Отчёт ревью сохранён: {review_path}")
+    review = llm_review(client, source_code)
+    review_path = save_output(
+        review.text, f"{stem}_code_review_report.md", output_dir
+    )
+    print(f"[4] Отчёт ревью сохранён: {review_path} (источник: {review.source})")
 
-    # 5. Оптимизация кода
-    optimized_code = llm_optimize(client, source_code)
-    opt_code_path = save_output(optimized_code, f"{stem}_optimized_tests.py", output_dir)
-    print(f"[5] Оптимизированные автотесты сохранены: {opt_code_path}")
+    # 5. Оптимизация кода + статическая валидация до сохранения
+    optimization = llm_optimize(client, source_code)
+    validation = validate_generated_tests(optimization.text)
+    code_to_save = optimization.text
+    if not validation.ok:
+        code_to_save = _draft_header(validation) + code_to_save
+        print(
+            "[WARN] Сгенерированный код не прошёл валидацию: "
+            + "; ".join(validation.problems + validation.forbidden),
+            file=sys.stderr,
+        )
+    opt_code_path = save_output(
+        code_to_save, f"{stem}_optimized_tests.py", output_dir
+    )
+    print(
+        f"[5] Оптимизированные автотесты сохранены: {opt_code_path} "
+        f"(источник: {optimization.source}, валидация: {'OK' if validation.ok else 'ЧЕРНОВИК'})"
+    )
 
     # 6. Отчёт оптимизации + приоритизация
     prioritization = llm_prioritization(client, source_code, requirements_text)
-
-    opt_report = f"""# Отчёт оптимизации автотестов
-
-## Исходные данные
-- Источник: `{test_file}`
-- Модель LLM: `{OLLAMA_MODEL}` (Ollama, {'доступен' if client.available else 'демо-режим'})
-
-## Метрики до оптимизации
-{metrics_to_md(metrics)}
-
-## Найденные проблемы (ревью)
-{issues_to_md(issues)}
-
-## Приоритизация по требованиям
-{prioritization}
-
-## Проделанные оптимизации
-1. Устранены дублирующие тесты через `@pytest.mark.parametrize`.
-2. Добавлены фикстуры для клиента API и подготовки/очистки тестовых данных с тедауном.
-3. Базовый URL и таймаут вынесены в переменные окружения.
-4. Добавлены ретраи и таймауты к HTTP-клиенту.
-5. Усилены assert'ы (проверка `id`, `name`, структуры тела).
-6. Добавлены docstrings и осмысленные имена тестов.
-7. Добавлены недостающие сценарии (дубликат, 404).
-
-## Критерии "плохих" автотестов (список)
-- Дублируют другие тесты без добавления новой ценности.
-- Нет изоляции (оставляют данные в системе, зависят от порядка выполнения).
-- Жёстко заданные данные и URL в теле теста.
-- Нет assert'ов или слабые assert'ы (проверяют только статус).
-- Нет обработки ошибок сети и таймаутов.
-- Непонятные, неконсистентные имена тестов.
-- Нет документации (docstrings / комментарии к сложным моментам).
-- Смешивают несколько сценариев в одном тесте.
-- Зависят от внутренней реализации (хрупкие).
-- Не покрывают требования с высоким приоритетом.
-
-## Результат
-Оптимизированные автотесты: `{opt_code_path.name}`
-Отчёт ревью: `{review_path.name}`
-"""
-
-    opt_report_path = save_output(opt_report, f"{stem}_optimization_report.md", output_dir)
+    opt_report = build_optimization_report(
+        test_file=test_file,
+        metrics=metrics,
+        issues=issues,
+        analysis=analysis,
+        review=review,
+        optimization=optimization,
+        prioritization=prioritization,
+        validation=validation,
+        client_available=client.available,
+    )
+    opt_report_path = save_output(
+        opt_report, f"{stem}_optimization_report.md", output_dir
+    )
     print(f"[6] Отчёт оптимизации сохранён: {opt_report_path}")
+
 
 
 def run(
@@ -712,14 +1381,17 @@ def run(
 
 def metrics_to_md(m: TestMetrics) -> str:
     return (
-        f"- Всего тестов: {m.total_tests}\n"
-        f"- Дублирующих тестов: {m.duplicate_tests}\n"
-        f"- Близких дублей (near-duplicate): {m.near_duplicate_tests}\n"
-        f"- Фикстур: {m.tests_with_fixtures}\n"
-        f"- Тестов с docstring: {m.tests_with_docstrings}\n"
-        f"- Жёстко заданных URL: {m.hardcoded_urls}\n"
-        f"- Оценка читаемости (1–10): {m.readability_score}\n"
-        f"- Покрытие требований: частичное (только создание пользователя)\n"
+        f"- Всего тестов: {_fmt(m.total_tests)}\n"
+        f"- Дублирующих тестов (лишних копий): {_fmt(m.duplicate_tests)}\n"
+        f"- Близких дублей (пар): {_fmt(m.near_duplicate_tests)}\n"
+        f"- Параметризованных тестов: {_fmt(m.parametrized_tests)}\n"
+        f"- Тестов с локальными фикстурами (в этом файле): {_fmt(m.tests_with_fixtures)}\n"
+        f"- Тестов с docstring: {_fmt(m.tests_with_docstrings)}\n"
+        f"- Жёстко заданных URL: {_fmt(m.hardcoded_urls)}\n"
+        f"- Тестов без assert: {_fmt(m.missing_assertions)}\n"
+        f"- Оценка читаемости (1–10): {_fmt(m.readability_score)}\n"
+        f"- Покрытие требований: {_fmt(m.requirements_coverage_pct)} "
+        f"(сопоставление тестов с требованиями не реализовано — нужен RTM)\n"
     )
 
 

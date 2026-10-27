@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
 COPY prompts ./prompts
 COPY input ./input
+COPY tests ./tests
 # The prioritisation stage reads this file; without it the prompt is silently empty.
 COPY requirements_with_priorities.md ./requirements_with_priorities.md
 
