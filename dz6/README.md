@@ -14,6 +14,7 @@ dz6/
 ├── TZ.md                             # Техническое задание
 ├── RESEARCH_REPORT.md                # Исследование: практики, площадки, оптимизация
 ├── LOCAL_VS_SUBAGENT_REPORT.md       # Сравнение 7B и субагента на одном промпте
+├── VERIFICATION_PIPELINE.md          # Как проходит проверка автотестов по шагам
 ├── optimization_requests.md          # Тестовые запросы (промпты) для оптимизации
 ├── requirements_with_priorities.md   # Требования к API с приоритетами (P0–P3)
 ├── README.md                         # Описание проекта
