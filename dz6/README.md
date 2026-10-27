@@ -13,7 +13,7 @@ dz6/
 ├── input/example.py                  # Исходные автотесты (входные данные)
 ├── TZ.md                             # Техническое задание
 ├── RESEARCH_REPORT.md                # Исследование: практики, площадки, оптимизация
-├── MODEL_COMPARISON_REPORT.md        # Сравнение 7B и сильной модели на одном промпте
+├── LOCAL_VS_SUBAGENT_REPORT.md       # Сравнение 7B и субагента на одном промпте
 ├── optimization_requests.md          # Тестовые запросы (промпты) для оптимизации
 ├── requirements_with_priorities.md   # Требования к API с приоритетами (P0–P3)
 ├── README.md                         # Описание проекта
@@ -24,13 +24,14 @@ dz6/
 ├── requirements/requirements.txt     # Python-зависимости
 ├── src/test_optimizer.py             # Скрипт оптимизации (Python 3 + Ollama)
 ├── tests/test_static_analysis.py     # Guard-тесты анализатора и валидации
+├── tests/test_docs_encoding.py       # Guard-тест: в .md нет битых символов
 ├── prompts/                          # Тексты запросов к LLM (шаблоны с ${...})
 │   ├── review.md
 │   ├── optimization.md
 │   ├── prioritization.md
 │   └── system_*.md
 └── output/                           # Результаты прогонов
-    ├── README.md                     # Статус артефактов: каким отчётам доверять
+    ├── README.md                     # Что лежит в output и статус артефактов
     ├── <YYYY-MM-DD_HH-MM-SS>/        # Каталог одного прогона
     │   ├── example_optimized_tests.py
     │   ├── example_code_review_report.md
