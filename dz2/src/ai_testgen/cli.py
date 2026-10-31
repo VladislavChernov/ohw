@@ -100,6 +100,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--url", default=None, help="site URL overriding the one found in files")
     parser.add_argument("--max-retries", type=int, default=None, help="extra attempts per file after a failed validation")
+    parser.add_argument("--timeout", type=float, default=None, help="Ollama request timeout in seconds (default: 180)")
     parser.add_argument("--temperature", type=float, default=None, help="LLM sampling temperature")
     parser.add_argument(
         "--testcases-file",
@@ -129,15 +130,18 @@ def _resolve_settings(args: argparse.Namespace) -> Config:
 
     max_retries = args.max_retries if args.max_retries is not None else config.max_retries
     temperature = args.temperature if args.temperature is not None else config.temperature
+    timeout = args.timeout if args.timeout is not None else config.timeout
     if max_retries < 0:
         raise ConfigError(f"--max-retries must not be negative, got {max_retries}")
     if not 0.0 <= temperature <= 2.0:
         raise ConfigError(f"--temperature must be within [0.0, 2.0], got {temperature}")
+    if timeout <= 0:
+        raise ConfigError(f"--timeout must be positive, got {timeout}")
 
     resolved = Config(
         base_url=os.environ.get("OLLAMA_BASE_URL") or config.base_url,
         model=os.environ.get("OLLAMA_MODEL") or config.model,
-        timeout=config.timeout,
+        timeout=timeout,
         input_dir=args.input_dir if args.input_dir is not None else config.input_dir,
         output_dir=args.output_dir if args.output_dir is not None else config.output_dir,
         prompt_dir=args.prompt_dir if args.prompt_dir is not None else config.prompt_dir,

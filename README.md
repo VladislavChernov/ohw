@@ -14,7 +14,7 @@
 | [Dz4](Dz4/) | Vector-first RAG с опциональной offline graph projection; доменно-агностичный учебный прототип | Config/Glossary, Ingestion, асинхронный Query (Valkey → worker → SSE), Streamlit-демо `:8503`, Topology Orchestrator, offline projection с lease и compare-and-set; eval-контур с послойными артефактами прогона — `Dz4/prototype/infra/eval/`; 18 OpenSpec-бандлов, 9 закрыты; ограничения и запуск — в [README](Dz4/README.md) |
 | [dz5](dz5/) | Стенд проверки безопасности LLM-агента по матрице OWASP Top 10 for LLM Applications 2026; агент + fixed-агент, Guardrails Server, red-team-раннер, отчёты | в разработке (пресеты 1–5 запускаются; red-team-матрица не измерена) |
 | [dz6](dz6/) | Оптимизация автотестов с помощью LLM (Ollama): статический анализ, ревью, оптимизация, приоритизация, сохранение артефактов прогона | реализовано |
-| [dz7](dz7/) | Генератор LLM-промптов: пять шаблонов, пресеты, `--emit-templates`/`--emit-presets`; рабочее место — в Dz2 | реализовано; e2e-прогон на GPU выполнен, таблица качества заполнена |
+| [dz7](dz7/) | Генератор LLM-промптов: пять шаблонов, пресеты, `--emit-templates`/`--emit-presets`; рабочее место — в Dz2; **поддержка нормализации требований** (приведение к формату с BR-ID и URL) | реализовано; e2e-прогон на GPU выполнен, таблица качества заполнена |
 | [light-llm-engine](light-llm-engine/) | Движок запросов к локальной LLM (ollama): файл из `input/` → ответ модели → `output/`; запуск в Docker | реализовано |
 
 Каждое задание имеет собственный стек и `.devcontainer/`. Открывайте нужную
