@@ -1,0 +1,10 @@
+# Preset: extra instructions appended to the prompt by {extra}.
+# All keys are required except `types` (default: every artifact type).
+id = "regression"
+label = "Регрессия"
+types = ["testplan", "qareport", "checklist"]
+text = """
+Add a regression section: what must be re-checked after a change, which
+neighbouring areas the change can break, and the minimum smoke set to run
+before release.
+"""

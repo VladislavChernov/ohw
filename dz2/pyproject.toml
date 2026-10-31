@@ -12,8 +12,14 @@ dependencies = [
     "pydantic>=2.11",
 ]
 
+[project.optional-dependencies]
+ui = [
+    "streamlit>=1.40",
+]
+
 [project.scripts]
 ai-testgen = "ai_testgen.cli:main"
+ai-testgen-ui = "ai_testgen.ui.launcher:main"
 
 [dependency-groups]
 dev = [
@@ -21,6 +27,7 @@ dev = [
     "pytest>=8.3",
     "pytest-mock>=3.14",
     "ruff>=0.9",
+    "streamlit>=1.40",
 ]
 
 [build-system]

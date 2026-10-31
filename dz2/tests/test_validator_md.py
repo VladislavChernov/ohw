@@ -1,4 +1,8 @@
-from ai_testgen.prompt import TESTPLAN_SECTIONS
+from ai_testgen.prompt import (
+    COVERAGE_MATRIX_SECTIONS,
+    QAREPORT_SECTIONS,
+    TESTPLAN_SECTIONS,
+)
 from ai_testgen.validator import validate_markdown
 
 
@@ -143,3 +147,80 @@ class TestChecklistItems:
         result = validate_markdown(checklist, items_under_every_section=True)
 
         assert result.ok
+
+
+COVERAGE_OK = (
+    "## Матрица покрытия требований\n\n"
+    "| Requirement ID | Requirement Description | Test Case IDs | Coverage Status | Notes |\n"
+    "|---|---|---|---|---|\n"
+    "| BR-1 | login | TC-01 | Covered | - |\n"
+)
+
+QAREPORT_OK = make_plan({name: f"Content of {name}." for name in QAREPORT_SECTIONS})
+
+
+class TestCoverageMatrix:
+    def test_table_is_accepted(self) -> None:
+        result = validate_markdown(
+            COVERAGE_OK,
+            required_sections=COVERAGE_MATRIX_SECTIONS,
+            require_table=True,
+        )
+
+        assert result.ok
+
+    def test_missing_table_reported(self) -> None:
+        document = "## Матрица покрытия требований\n\nBR-1 covered by TC-01."
+
+        result = validate_markdown(
+            document,
+            required_sections=COVERAGE_MATRIX_SECTIONS,
+            require_table=True,
+        )
+
+        assert not result.ok
+        assert "no Markdown table" in result.issues[0]
+
+    def test_missing_section_reported(self) -> None:
+        document = COVERAGE_OK.replace("## Матрица покрытия требований", "## Другое")
+
+        result = validate_markdown(
+            document,
+            required_sections=COVERAGE_MATRIX_SECTIONS,
+            require_table=True,
+        )
+
+        assert not result.ok
+        assert any("Матрица покрытия требований" in issue for issue in result.issues)
+
+    def test_table_rows_are_not_mistaken_for_separator(self) -> None:
+        document = "## Матрица покрытия требований\n\n| BR-1 | login | TC-01 |"
+
+        result = validate_markdown(
+            document,
+            required_sections=COVERAGE_MATRIX_SECTIONS,
+            require_table=True,
+        )
+
+        assert not result.ok
+
+
+class TestQaReport:
+    def test_all_sections_present(self) -> None:
+        result = validate_markdown(
+            QAREPORT_OK, required_sections=QAREPORT_SECTIONS
+        )
+
+        assert result.ok
+
+    def test_missing_recommendations_reported(self) -> None:
+        document = make_plan(
+            {name: "content" for name in QAREPORT_SECTIONS[:-1]}
+        )
+
+        result = validate_markdown(
+            document, required_sections=QAREPORT_SECTIONS
+        )
+
+        assert not result.ok
+        assert any("Рекомендации" in issue for issue in result.issues)

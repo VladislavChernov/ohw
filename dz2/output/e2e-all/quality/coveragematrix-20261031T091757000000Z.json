@@ -1,0 +1,56 @@
+{
+  "artifact": "coveragematrix",
+  "run_id": "20261031T091757000000Z",
+  "source": "llm",
+  "model": "qwen2.5:7b-instruct",
+  "presets": [],
+  "count": 10,
+  "judge_version": 4,
+  "judge_temperature": 0.0,
+  "prompt_sha256": "c80f7956bc56ba0208e5db1d278690070e00182e4e880641e7d31b50a8398852",
+  "prompt_chars": 3681,
+  "generated_artifact": {
+    "path": "requirements.coveragematrix.md",
+    "sha256": "18d89b3616c8f7327e6b6a7a6216f10fb7ac7e75a90adfedec88cd38dcb53241",
+    "bytes": 2893,
+    "modified_at": "2026-10-31T09:20:25+00:00"
+  },
+  "scores": {
+    "readability": 3,
+    "context": 3,
+    "goal": 3,
+    "coverage": 3
+  },
+  "comments": {
+    "readability": "The instructions are understandable but verbose, with some repetitive wording such as 'One row per business requirement' and 'Test Case IDs list the ids of the test cases above that verify the requirement'.",
+    "context": "The prompt provides the necessary context for the task and format, but it is missing the target URL.",
+    "goal": "The deliverable and its format are clear, but the exact JSON keys or sections are not specified.",
+    "coverage": "The prompt requires positive and negative test cases, but boundaries and traceability to requirement ids are missing."
+  },
+  "evidence": {
+    "readability": [
+      "Create a requirements coverage matrix (traceability matrix) as a Markdown document",
+      "One row per business requirement (BR-N) found in the requirements.",
+      "Test Case IDs list the ids of the test cases above that verify the requirement."
+    ],
+    "context": [
+      "Create a requirements coverage matrix (traceability matrix) as a Markdown document",
+      "One row per business requirement (BR-N) found in the requirements",
+      "Test Case IDs list the ids of the test cases above that verify the requirement"
+    ],
+    "goal": [
+      "Create a requirements coverage matrix (traceability matrix) as a Markdown document",
+      "One row per business requirement (BR-N) found in the requirements",
+      "Coverage Status values: \"Covered\", \"Partially Covered\", \"Not Covered"
+    ],
+    "coverage": [
+      "Coverage Status values: 'Covered', 'Partially Covered', 'Not Covered",
+      "Test Case IDs list the ids of the test cases above that verify the requirement.",
+      "Do not add requirements that are not in the requirements text."
+    ]
+  },
+  "summary": "The instructions are understandable but verbose, with some repetitive wording such as 'One row per business requirement' and 'Test Case IDs list the ids of the test cases above that verify the requirement'. The prompt provides the necessary context for the task and format, but it is missing the target URL. The deliverable and its format are clear, but the exact JSON keys or sections are not specified. The prompt requires positive and negative test cases, but boundaries and traceability to requirement ids are missing.",
+  "note": "",
+  "average": 3.0,
+  "created_at": "2026-10-31T09:17:57+00:00"
+}

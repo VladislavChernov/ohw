@@ -156,3 +156,25 @@ def test_front_matter_type_case_insensitive(input_dir: Path) -> None:
     docs = load_docs(input_dir, None)
 
     assert docs[0].artifact_type is ArtifactType.CHECKLIST
+
+
+@pytest.mark.parametrize(
+    ("raw_type", "expected"),
+    [
+        ("testcase", ArtifactType.TESTCASES),
+        ("test-cases", ArtifactType.TESTCASES),
+        ("qa_report", ArtifactType.QAREPORT),
+        ("qa-report", ArtifactType.QAREPORT),
+        ("coverage_matrix", ArtifactType.COVERAGEMATRIX),
+        ("coverage", ArtifactType.COVERAGEMATRIX),
+        ("traceability", ArtifactType.COVERAGEMATRIX),
+    ],
+)
+def test_front_matter_type_aliases(
+    input_dir: Path, raw_type: str, expected: ArtifactType
+) -> None:
+    write_input(input_dir, "doc.md", f"---\ntype: {raw_type}\n---\nbody")
+
+    docs = load_docs(input_dir, None)
+
+    assert docs[0].artifact_type is expected

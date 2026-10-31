@@ -4,8 +4,10 @@ model = "qwen2.5:7b-instruct"
 timeout = 180.0
 
 [paths]
-input_dir = "input"
+input_dir = "docs"
 output_dir = "output"
+prompt_dir = "prompts"
+presets_dir = "presets"
 
 [generation]
 temperature = 0.7

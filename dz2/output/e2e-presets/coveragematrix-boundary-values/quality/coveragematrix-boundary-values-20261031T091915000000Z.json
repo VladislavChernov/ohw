@@ -1,0 +1,58 @@
+{
+  "artifact": "coveragematrix",
+  "run_id": "20261031T091915000000Z",
+  "source": "llm",
+  "model": "qwen2.5:7b-instruct",
+  "presets": [
+    "boundary-values"
+  ],
+  "count": 10,
+  "judge_version": 4,
+  "judge_temperature": 0.0,
+  "prompt_sha256": "091fff181e227a1949216387325738dea221e4570a77973a2389a52e5affc8c9",
+  "prompt_chars": 4310,
+  "generated_artifact": {
+    "path": "requirements.coveragematrix.md",
+    "sha256": "08f834c51676579fc3922e35ec0a8b2e17adb029905ea126eccd61776329105b",
+    "bytes": 2583,
+    "modified_at": "2026-10-31T09:22:20+00:00"
+  },
+  "scores": {
+    "readability": 3,
+    "context": 5,
+    "goal": 3,
+    "coverage": 3
+  },
+  "comments": {
+    "readability": "The instructions are understandable but verbose, with repeated information about the matrix structure and format.",
+    "context": "The prompt provides the target URL, the requirements, the output format, and the necessary constraints, making it clear for the model to produce the required document without guessing.",
+    "goal": "The prompt clearly defines the artifact type and format, but it is not entirely explicit about the required sections or the exact JSON keys.",
+    "coverage": "The prompt requires positive and negative test cases, but does not mention boundary scenarios or traceability to requirement ids."
+  },
+  "evidence": {
+    "readability": [
+      "Create a requirements coverage matrix (traceability matrix) as a Markdown document",
+      "One row per business requirement (BR-N) found in the requirements.",
+      "Coverage Status values: \"Covered\", \"Partially Covered\", \"Not Covered\"."
+    ],
+    "context": [
+      "Target site: https://otus.ru/catalog/courses?categories=programming",
+      "Create a requirements coverage matrix (traceability matrix) as a Markdown document",
+      "The document must contain the '## Матрица покрытия требований' section with a Markdown table:"
+    ],
+    "goal": [
+      "Create a requirements coverage matrix (traceability matrix) as a Markdown document",
+      "One row per business requirement (BR-N) found in the requirements.",
+      "Coverage Status values: 'Covered', 'Partially Covered', 'Not Covered'."
+    ],
+    "coverage": [
+      "Coverage Status values: 'Covered', 'Partially Covered', 'Not Covered",
+      "Test Case IDs list the ids of the test cases above that verify the requirement.",
+      "Never invent TC ids and never renumber them."
+    ]
+  },
+  "summary": "The instructions are understandable but verbose, with repeated information about the matrix structure and format. The prompt provides the target URL, the requirements, the output format, and the necessary constraints, making it clear for the model to produce the required document without guessing. The prompt clearly defines the artifact type and format, but it is not entirely explicit about the required sections or the exact JSON keys. The prompt requires positive and negative test cases, but does not mention boundary scenarios or traceability to requirement ids.",
+  "note": "",
+  "average": 3.5,
+  "created_at": "2026-10-31T09:19:15+00:00"
+}

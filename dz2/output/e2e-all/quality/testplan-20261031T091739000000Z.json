@@ -1,0 +1,56 @@
+{
+  "artifact": "testplan",
+  "run_id": "20261031T091739000000Z",
+  "source": "llm",
+  "model": "qwen2.5:7b-instruct",
+  "presets": [],
+  "count": 10,
+  "judge_version": 4,
+  "judge_temperature": 0.0,
+  "prompt_sha256": "3b525488652133a9bf2fbcc424af070993d57077d134fa1162c2ea49cf3449bb",
+  "prompt_chars": 2110,
+  "generated_artifact": {
+    "path": "requirements.testplan.md",
+    "sha256": "9e0fcd8514c30dfb2a7924a9c4a0fc8bf3f1466e138715a4db338700739c093f",
+    "bytes": 2497,
+    "modified_at": "2026-10-31T09:20:06+00:00"
+  },
+  "scores": {
+    "readability": 3,
+    "context": 5,
+    "goal": 5,
+    "coverage": 3
+  },
+  "comments": {
+    "readability": "The prompt is understandable but verbose, with repetitive instructions about the document format and content.",
+    "context": "The prompt clearly specifies the target URL, the format (Markdown document), and the content requirements for each section, providing all necessary context without guessing.",
+    "goal": "The prompt clearly states the artifact type (Markdown document) and specifies the required sections and content format.",
+    "coverage": "The prompt requires listing business requirement ids and does not demand positive, negative, or boundary scenarios, nor traceability."
+  },
+  "evidence": {
+    "readability": [
+      "Write a test plan as a Markdown document",
+      "Every section must contain at least one sentence",
+      "list the covered business requirement ids (BR-1, BR-2, ...) explicitly"
+    ],
+    "context": [
+      "Target site: https://otus.ru/catalog/courses?categories=programming",
+      "Write a test plan as a Markdown document",
+      "Every section must contain at least one sentence of real content; if there are no risks, write why."
+    ],
+    "goal": [
+      "Write a test plan as a Markdown document",
+      "Every section must contain at least one sentence of real content",
+      "list the covered business requirement ids (BR-1, BR-2, ...) explicitly"
+    ],
+    "coverage": [
+      "list the covered business requirement ids (BR-1, BR-2, ...)",
+      "do not wrap the document in code fences",
+      "do not respond with JSON"
+    ]
+  },
+  "summary": "The prompt is understandable but verbose, with repetitive instructions about the document format and content. The prompt clearly specifies the target URL, the format (Markdown document), and the content requirements for each section, providing all necessary context without guessing. The prompt clearly states the artifact type (Markdown document) and specifies the required sections and content format. The prompt requires listing business requirement ids and does not demand positive, negative, or boundary scenarios, nor traceability.",
+  "note": "",
+  "average": 4.0,
+  "created_at": "2026-10-31T09:17:39+00:00"
+}

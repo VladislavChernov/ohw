@@ -27,12 +27,23 @@ class OllamaClient:
         self._client = httpx.Client(base_url=self.base_url, timeout=timeout, transport=transport)
 
     def chat(self, system: str, user: str, temperature: float, *, json_mode: bool = True) -> str:
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        return self.chat_messages(messages, temperature, json_mode=json_mode)
+
+    def chat_messages(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float,
+        *,
+        json_mode: bool = False,
+    ) -> str:
+        """Send a full message history (used by the workbench chat)."""
         payload: dict[str, object] = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            "messages": messages,
             "stream": False,
             "options": {"temperature": temperature},
         }
@@ -49,5 +60,21 @@ class OllamaClient:
         try:
             body = response.json()
             return str(body["message"]["content"])
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            raise OllamaResponseError(f"unexpected ollama response structure: {exc}") from exc
+
+    def list_models(self) -> list[str]:
+        """Return model names installed in ollama (``/api/tags``)."""
+        try:
+            response = self._client.get("/api/tags")
+        except httpx.HTTPError as exc:
+            raise OllamaConnectionError(f"ollama service at {self.base_url} is unreachable: {exc}") from exc
+        if response.status_code != 200:
+            raise OllamaResponseError(
+                f"ollama returned HTTP {response.status_code}: {response.text[:200]}"
+            )
+        try:
+            body = response.json()
+            return sorted(str(model["name"]) for model in body["models"])
         except (json.JSONDecodeError, KeyError, TypeError) as exc:
             raise OllamaResponseError(f"unexpected ollama response structure: {exc}") from exc

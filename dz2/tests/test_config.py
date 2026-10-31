@@ -88,6 +88,28 @@ def test_wrong_types_raise(isolated_cwd: Path) -> None:
         load_config(path)
 
 
+def test_prompt_dir_loaded(isolated_cwd: Path) -> None:
+    path = write_config(
+        isolated_cwd / "ai-testgen.toml",
+        '[paths]\nprompt_dir = "custom-prompts"\n',
+    )
+
+    assert load_config(path).prompt_dir == Path("custom-prompts")
+
+
+def test_presets_dir_loaded(isolated_cwd: Path) -> None:
+    path = write_config(
+        isolated_cwd / "ai-testgen.toml",
+        '[paths]\npresets_dir = "custom-presets"\n',
+    )
+
+    assert load_config(path).presets_dir == Path("custom-presets")
+
+
+def test_default_input_dir_is_docs(isolated_cwd: Path) -> None:
+    assert Config().input_dir == Path("docs")
+
+
 def test_unknown_keys_ignored_with_warning(isolated_cwd: Path, capsys) -> None:
     path = write_config(
         isolated_cwd / "ai-testgen.toml",
@@ -114,8 +136,8 @@ def test_cli_model_from_config_without_env(monkeypatch, isolated_cwd: Path) -> N
         isolated_cwd / "ai-testgen.toml",
         '[ollama]\nmodel = "config-model"\nbase_url = "http://cfg:11434"\n',
     )
-    (isolated_cwd / "input").mkdir()
-    (isolated_cwd / "input" / "doc.md").write_text("https://example.com", encoding="utf-8")
+    (isolated_cwd / "docs").mkdir()
+    (isolated_cwd / "docs" / "doc.md").write_text("https://example.com", encoding="utf-8")
     captured = capture_client_init(monkeypatch)
     fake = FakeChat([make_raw_cases(balanced_set(10))])
     patch_client(monkeypatch, fake)

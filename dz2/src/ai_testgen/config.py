@@ -18,8 +18,10 @@ class Config:
     base_url: str = DEFAULT_BASE_URL
     model: str = ""
     timeout: float = DEFAULT_TIMEOUT
-    input_dir: Path = Path("input")
+    input_dir: Path = Path("docs")
     output_dir: Path = Path("output")
+    prompt_dir: Path | None = None
+    presets_dir: Path | None = None
     temperature: float = 0.7
     max_retries: int = 3
 
@@ -53,8 +55,10 @@ def load_config(explicit_path: Path | None) -> Config:
         base_url=_string(ollama, "base_url", DEFAULT_BASE_URL, path),
         model=_string(ollama, "model", "", path),
         timeout=_float(ollama, "timeout", DEFAULT_TIMEOUT, path),
-        input_dir=Path(_string(paths, "input_dir", "input", path)),
+        input_dir=Path(_string(paths, "input_dir", "docs", path)),
         output_dir=Path(_string(paths, "output_dir", "output", path)),
+        prompt_dir=_optional_path(paths, "prompt_dir", path),
+        presets_dir=_optional_path(paths, "presets_dir", path),
         temperature=_float(generation, "temperature", 0.7, path),
         max_retries=_int(generation, "max_retries", 3, path),
     )
@@ -72,6 +76,8 @@ def _section(raw: dict, name: str, path: Path) -> dict:
         "timeout",
         "input_dir",
         "output_dir",
+        "prompt_dir",
+        "presets_dir",
         "temperature",
         "max_retries",
     }
@@ -97,6 +103,15 @@ def _typed(
 
 def _string(section: dict, key: str, default: str, path: Path) -> str:
     return str(_typed(section, key, str, default, path))
+
+
+def _optional_path(section: dict, key: str, path: Path) -> Path | None:
+    value = section.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{path}: '{key}' must be a non-empty string")
+    return Path(value)
 
 
 def _float(section: dict, key: str, default: float, path: Path) -> float:

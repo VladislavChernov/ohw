@@ -1,0 +1,40 @@
+# Coverage Matrix Prompt Template
+# Generates a requirements-to-test-cases coverage matrix from requirements.
+#
+# Placeholders:
+# {url}       - target site URL (the whole line is dropped when no URL is known)
+# {content}   - requirements content from the input file
+# {extra}     - optional preset instructions; the line is empty when no preset is used
+# {testcases} - test cases already generated for these requirements, or a note
+#               that there are none yet
+
+Target site: {url}
+
+Create a requirements coverage matrix (traceability matrix) as a Markdown document based on the requirements below and, when they are available, on the test cases already generated for them.
+
+The document must contain the '## Матрица покрытия требований' section with a Markdown table:
+
+| Requirement ID | Requirement Description | Test Case IDs | Coverage Status | Notes |
+|---|---|---|---|---|
+| BR-<n> | short requirement description | <TC ids from the list, or —> | Covered / Partially Covered / Not Covered | - |
+
+Rules:
+- One row per business requirement (BR-N) found in the requirements.
+- Coverage Status values: "Covered", "Partially Covered", "Not Covered".
+- Test Case IDs list the ids of the test cases above that verify the requirement.
+- Do not wrap the document in code fences and do not respond with JSON.
+
+{extra}
+
+{testcases}
+
+Grounding rules (these override any additional instructions above):
+- Test Case IDs may contain only ids from the test case list above. Never invent
+  TC ids and never renumber them.
+- If the list says no test cases are available, put "—" in Test Case IDs and use
+  "Not Covered" for every row: the matrix must not claim coverage that is not
+  evidenced.
+- Do not add requirements that are not in the requirements text.
+
+Requirements:
+{content}

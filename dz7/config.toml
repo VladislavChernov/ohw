@@ -1,0 +1,14 @@
+# Dz7 prompt generator configuration.
+# CLI arguments take precedence over these values.
+
+[generation]
+default_count = 5
+default_type = "testcases"
+
+[paths]
+# Paths are relative to this config file.
+templates_dir = "templates"
+# Requirements come from the Dz2 test stand input directory.
+input_dir = "../dz2/docs"
+# Relative to the current working directory.
+output_dir = "output"

@@ -9,6 +9,18 @@ SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".md", ".txt"})
 _URL_PATTERN = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
 _FRONT_MATTER_PATTERN = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 _KNOWN_FRONT_MATTER_KEYS = frozenset({"type"})
+
+# Aliases accepted in front-matter: normalized (lowercase, no separators) -> type.
+_ARTIFACT_ALIASES: dict[str, ArtifactType] = {
+    "testcase": ArtifactType.TESTCASES,
+    "testcases": ArtifactType.TESTCASES,
+    "checklist": ArtifactType.CHECKLIST,
+    "testplan": ArtifactType.TESTPLAN,
+    "qareport": ArtifactType.QAREPORT,
+    "coveragematrix": ArtifactType.COVERAGEMATRIX,
+    "coverage": ArtifactType.COVERAGEMATRIX,
+    "traceability": ArtifactType.COVERAGEMATRIX,
+}
 _ARTIFACT_TYPES = {member.value: member for member in ArtifactType}
 
 
@@ -45,17 +57,17 @@ def split_front_matter(content: str) -> tuple[ArtifactType, str]:
         if key not in _KNOWN_FRONT_MATTER_KEYS:
             raise InputError(f"unknown front-matter key: {key!r} (supported: type)")
         if key == "type":
-            artifact_type = _parse_artifact_type(value.strip())
+            artifact_type = parse_artifact_type(value.strip())
 
     return artifact_type, content[match.end() :].lstrip("\n")
 
 
-def _parse_artifact_type(value: str) -> ArtifactType:
-    normalized = value.lower()
-    if normalized not in _ARTIFACT_TYPES:
-        supported = ", ".join(sorted(_ARTIFACT_TYPES))
-        raise InputError(f"unknown artifact type: {value!r} (supported: {supported})")
-    return _ARTIFACT_TYPES[normalized]
+def parse_artifact_type(value: str) -> ArtifactType:
+    normalized = re.sub(r"[\s_-]+", "", value.strip().lower())
+    if normalized in _ARTIFACT_ALIASES:
+        return _ARTIFACT_ALIASES[normalized]
+    supported = ", ".join(sorted(_ARTIFACT_TYPES))
+    raise InputError(f"unknown artifact type: {value!r} (supported: {supported})")
 
 
 def collect_input_files(input_dir: Path) -> list[Path]:

@@ -1,0 +1,29 @@
+# Test Cases Prompt Template
+# Generates test cases (positive/negative) from requirements.
+#
+# Placeholders:
+# {url}              - target site URL (the whole line is dropped when no URL is known)
+# {count}            - total number of test cases
+# {count_noun}       - "test case" or "test cases" for the count above
+# {positive}         - number of positive test cases
+# {negative}         - number of negative test cases
+# {requirement_rule} - traceability rule; empty when requirements have no BR-N ids
+# {content}          - requirements content from the input file
+# {extra}            - optional preset instructions; the line is empty when no preset is used
+
+Target site: {url}
+
+Generate exactly {count} {count_noun}: {positive} positive and {negative} negative.
+
+Respond with a JSON object {"cases": [...]} containing all {count} test cases.
+Each test case must have: id, type (positive/negative), title, preconditions, steps, expected, requirement.
+
+{requirement_rule}
+
+{extra}
+
+Requirements:
+{content}
+
+All titles, preconditions, steps and expected results must be in Russian.
+Keep product names, UI element labels and URLs in their original language.

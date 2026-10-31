@@ -1,0 +1,58 @@
+{
+  "artifact": "testplan",
+  "run_id": "20261031T091846000000Z",
+  "source": "llm",
+  "model": "qwen2.5:7b-instruct",
+  "presets": [
+    "regression"
+  ],
+  "count": 10,
+  "judge_version": 4,
+  "judge_temperature": 0.0,
+  "prompt_sha256": "7ebd4479fb0ac13407efda68a9b67f8eef564c11d4c2cc130d71b9c45c336fdf",
+  "prompt_chars": 2473,
+  "generated_artifact": {
+    "path": "requirements.testplan.md",
+    "sha256": "e92f87f2c973bdd74b4c98049e0930322f0182ede536def0d6646b2450e19fe8",
+    "bytes": 2949,
+    "modified_at": "2026-10-31T09:21:50+00:00"
+  },
+  "scores": {
+    "readability": 3,
+    "context": 5,
+    "goal": 5,
+    "coverage": 3
+  },
+  "comments": {
+    "readability": "The instructions are clear and structured, but the requirement for at least one sentence per section can be verbose and repetitive.",
+    "context": "The prompt provides the target URL, specific section headings, and the required output format without ambiguity.",
+    "goal": "The prompt clearly states the artifact type (Markdown document) and the format (no code fences, no JSON).",
+    "coverage": "The prompt requires positive and negative scenarios but lacks explicit mention of boundary conditions and traceability to requirement ids."
+  },
+  "evidence": {
+    "readability": [
+      "Write a test plan as a Markdown document",
+      "Every section must contain at least one sentence of real content",
+      "Do not wrap the document in code fences and do not respond with JSON"
+    ],
+    "context": [
+      "Target site: https://otus.ru/catalog/courses?categories=programming",
+      "The document must contain exactly these '## ' section headings, in this order:",
+      "Do not wrap the document in code fences and do not respond with JSON."
+    ],
+    "goal": [
+      "Write a test plan as a Markdown document",
+      "Every section must contain at least one sentence of real content",
+      "Do not wrap the document in code fences and do not respond with JSON"
+    ],
+    "coverage": [
+      "Do not wrap the document in code fences",
+      "do not respond with JSON",
+      "Add a regression section: what must be re-checked after a change, which neighbouring areas the change can break, and the minimum smoke set to run before release."
+    ]
+  },
+  "summary": "The instructions are clear and structured, but the requirement for at least one sentence per section can be verbose and repetitive. The prompt provides the target URL, specific section headings, and the required output format without ambiguity. The prompt clearly states the artifact type (Markdown document) and the format (no code fences, no JSON). The prompt requires positive and negative scenarios but lacks explicit mention of boundary conditions and traceability to requirement ids.",
+  "note": "",
+  "average": 4.0,
+  "created_at": "2026-10-31T09:18:46+00:00"
+}

@@ -1,8 +1,8 @@
 
 from conftest import balanced_set, make_case
 
-from ai_testgen.models import CaseType, TestCase
-from ai_testgen.renderer import render
+from ai_testgen.models import ArtifactType, CaseType, TestCase
+from ai_testgen.renderer import render, render_document
 
 
 def build_cases(count: int) -> list[TestCase]:
@@ -67,3 +67,16 @@ def test_requirement_absent_no_line() -> None:
     output = render([case], None, "x.md")
 
     assert "Проверяет требование" not in output
+
+
+def test_document_titles_cover_new_artifact_types() -> None:
+    qa = render_document(
+        ArtifactType.QAREPORT, "https://x.com", "doc.md", "## Введение\n\nТекст"
+    )
+    matrix = render_document(
+        ArtifactType.COVERAGEMATRIX, None, "doc.md", "## Матрица покрытия требований"
+    )
+
+    assert qa.startswith("# QA-отчёт: doc.md")
+    assert "**Тестируемый сайт:** https://x.com" in qa
+    assert matrix.startswith("# Матрица покрытия: doc.md")

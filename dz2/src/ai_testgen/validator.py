@@ -10,6 +10,7 @@ _CASE_KEYS = {"id", "type", "steps", "expected"}
 _HEADING_PATTERN = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _LIST_ITEM_PATTERN = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
 _NUMBERING_PATTERN = re.compile(r"^\d+[.)]\s+")
+_TABLE_SEPARATOR_PATTERN = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|[\s:|-]*$")
 
 
 def _unwrap_cases(data: object) -> tuple[list[object], str | None]:
@@ -63,6 +64,7 @@ def validate_markdown(
     raw: str,
     required_sections: tuple[str, ...] = (),
     items_under_every_section: bool = False,
+    require_table: bool = False,
 ) -> GenerationResult:
     document = _strip_code_fences(raw)
 
@@ -104,6 +106,11 @@ def validate_markdown(
         for title, index in h2_headings:
             if not any(_LIST_ITEM_PATTERN.match(line) for line in section_body(index)):
                 issues.append(f"zone has no checklist items: {title}")
+
+    if require_table and not any(
+        _TABLE_SEPARATOR_PATTERN.match(line) for line in lines
+    ):
+        issues.append("document has no Markdown table")
 
     return GenerationResult(document=document, issues=issues)
 

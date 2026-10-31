@@ -1,0 +1,10 @@
+# Preset: extra instructions appended to the prompt by {extra}.
+# All keys are required except `types` (default: every artifact type).
+id = "negative-scenarios"
+label = "Негативные сценарии"
+types = ["testcases", "checklist", "qareport"]
+text = """
+Cover failure paths explicitly: invalid input, missing data, unavailable
+service, forbidden action. Every negative scenario must have a verifiable
+expected result and must reference the requirement it protects.
+"""

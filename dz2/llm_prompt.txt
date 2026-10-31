@@ -1,0 +1,23 @@
+# LLM Prompt for Test Case Generation
+# Этот файл содержит шаблон пользовательского промпта, который отправляется локальной модели Ollama.
+# Dz2 читает этот файл и подставляет динамические части (содержимое требований, URL, количество).
+
+# Структура промпта:
+# - URL целевого сайта
+# - Количество тест-кейсов (позитивных/негативных)
+# - Содержимое требований из входного файла
+# - Правило о бизнес-идентификаторах (BR-N)
+
+Target site: {url}
+
+Generate exactly {count} test cases: {positive} positive and {negative} negative.
+
+Every test case MUST set its 'requirement' field to the business requirement id (BR-N) from the Requirements section that it verifies.
+
+Requirements:
+{content}
+
+Respond with a JSON object {"cases": [...]} containing all {count} test cases.
+Each test case must have: id, type (positive/negative), title, preconditions, steps, expected, requirement.
+All titles, preconditions, steps and expected results must be in Russian.
+Keep product names, UI element labels and URLs in their original language.

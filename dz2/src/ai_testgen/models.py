@@ -13,6 +13,8 @@ class ArtifactType(StrEnum):
     TESTCASES = "testcases"
     CHECKLIST = "checklist"
     TESTPLAN = "testplan"
+    QAREPORT = "qareport"
+    COVERAGEMATRIX = "coveragematrix"
 
 
 class TestCase(BaseModel):

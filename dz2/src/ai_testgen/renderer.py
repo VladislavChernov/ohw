@@ -3,6 +3,8 @@ from ai_testgen.models import ArtifactType, CaseType, TestCase
 _DOCUMENT_TITLES: dict[ArtifactType, str] = {
     ArtifactType.CHECKLIST: "Чек-лист",
     ArtifactType.TESTPLAN: "Тест-план",
+    ArtifactType.QAREPORT: "QA-отчёт",
+    ArtifactType.COVERAGEMATRIX: "Матрица покрытия",
 }
 
 
