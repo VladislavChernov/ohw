@@ -55,13 +55,14 @@
 ## 5. Тесты и проверка
 
 - [x] 5.1 Dz7: `tests/test_generator.py` (unittest) — шаблоны, подстановка,
-      URL, BR-правило, CLI, `--emit-templates` (23 теста, OK)
+      URL, BR-правило, CLI, `--emit-templates` (39 тестов, OK)
 - [x] 5.2 Dz2: `tests/test_prompts.py` — подстановка, литеральный JSON,
       отсутствие шаблона, неизвестный плейсхолдер, env-переменная
 - [x] 5.3 Dz2: registry/renderer/front-matter/валидатор на 5 типов
 - [x] 5.4 Dz2: сквозной тест `--prompt-dir` (sentinel виден в промпте)
 - [x] 5.5 Прогнать `pytest -m "not integration"`, `ruff`, `mypy` в Docker
-      (153 passed; `mypy` и `ruff` чисто)
+      (242 passed, 1 deselected; `mypy` чисто, `ruff` — только `EXE002` на
+      Windows-монтировании файлов)
 - [x] 5.6 Запустить e2e: Dz7 → 5 промптов → Dz2 + Ollama → артефакты
       (10 промптов, 2026-10-31, см. `docs/prompt-quality.md`)
 
@@ -89,10 +90,10 @@
 - [x] 7.1 `docker compose up ui` + прогон пяти типов в рабочем месте
       (автоматизирован `test_all_five_types_are_generated_and_saved`)
 
-## 6. Документация и оценка качества
+## 8. Документация и оценка качества
 
-- [x] 6.1 `dz7/README.md`: ТЗ + реальные инструкции локального запуска
-- [x] 6.2 `dz2/README.md`: внешние промпты, 5 типов, `--prompt-dir`
-- [x] 6.3 `dz7/docs/prompt-quality.md`: rubric по 4 критериям + результаты
+- [x] 8.1 `dz7/README.md`: ТЗ + реальные инструкции локального запуска
+- [x] 8.2 `dz2/README.md`: внешние промпты, 5 типов, `--prompt-dir`
+- [x] 8.3 `dz7/docs/prompt-quality.md`: rubric по 4 критериям + результаты
       (таблица заполняется после e2e)
-- [x] 6.4 Добавить `dz7` в индекс `ohw/README.md`
+- [x] 8.4 Добавить `dz7` в индекс `ohw/README.md`
