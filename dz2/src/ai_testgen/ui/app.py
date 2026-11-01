@@ -381,7 +381,7 @@ def _requirements_panel() -> RequirementDoc | None:
     columns[1].metric("URL", url or "не найден")
     columns[2].metric("Символов", len(text))
 
-    content = _normalization_panel(text, url, selected)
+    content = _normalization_panel(text, url, selected, encoding)
     return RequirementDoc(
         path=Path(selected),
         content=content,
@@ -389,7 +389,7 @@ def _requirements_panel() -> RequirementDoc | None:
     )
 
 
-def _normalization_panel(text: str, url: str, name: str) -> str:
+def _normalization_panel(text: str, url: str, name: str, encoding: str) -> str:
     """Show the canonical form and return the text that goes into the prompt."""
     st.subheader("Нормализация требований")
     st.caption(
@@ -402,7 +402,7 @@ def _normalization_panel(text: str, url: str, name: str) -> str:
 
     if st.button("Нормализовать", key="normalize_requirements"):
         try:
-            normalized = normalize_text(text, url or None)
+            normalized = normalize_text(text, url or None, encoding=encoding)
         except NormalizationError as exc:
             st.session_state.pop("normalization", None)
             st.error(f"Нормализация не удалась: {exc}")

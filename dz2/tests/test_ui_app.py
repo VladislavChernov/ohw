@@ -141,6 +141,12 @@ def test_non_utf8_upload_is_decoded(workbench: Path) -> None:
     assert any("cp1251" in item.value for item in at.caption)
     assert _text(at, 0).startswith("# Требования")
 
+    _button(at, "Нормализовать").click().run()
+
+    metric = {item.label: item.value for item in at.metric}
+    assert metric["Кодировка"] == "cp1251"
+    assert metric["Требований после нормализации"] == "3"
+
 
 def test_missing_br_ids_are_flagged(workbench: Path) -> None:
     at = _upload(_app().run(), ("messy.md", MESSY))
