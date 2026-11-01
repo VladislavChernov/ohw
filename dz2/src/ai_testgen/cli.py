@@ -58,7 +58,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Generate test documentation for a website via local ollama LLM",
     )
     parser.add_argument(
-        "-n", "--count", type=int, required=True, help="number of test cases per input file"
+        "-n", "--count", type=int, default=None, help="number of test cases per input file"
     )
     parser.add_argument("--config", type=Path, default=None, help="path to TOML config (default: ./ai-testgen.toml)")
     parser.add_argument(
@@ -111,6 +111,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "coverage matrix prompt reuses these ids instead of inventing them"
         ),
     )
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
+        "--normalize",
+        action="store_true",
+        help=(
+            "detect the encoding and normalize requirements before building "
+            "prompts; the canonical text only goes to the model"
+        ),
+    )
+    mode_group.add_argument(
+        "--normalize-only",
+        action="store_true",
+        help=(
+            "only write normalized requirements and exit: no Ollama calls, "
+            "-n/--count is not required"
+        ),
+    )
+    parser.add_argument(
+        "--normalized-dir",
+        type=Path,
+        default=None,
+        help="directory for --normalize-only output (default: <output-dir>/normalized)",
+    )
     parser.add_argument(
         "--evaluate",
         action="store_true",
@@ -120,7 +143,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     args = parser.parse_args(argv)
-    if args.count < 1:
+    if args.count is None and not args.normalize_only:
+        parser.error("the following arguments are required: -n/--count")
+    if args.count is not None and args.count < 1:
         parser.error(f"--count must be a positive integer, got {args.count}")
     return args
 
@@ -175,14 +200,26 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
+    try:
+        docs = load_docs(
+            settings.input_dir,
+            args.url,
+            normalize=args.normalize or args.normalize_only,
+        )
+    except InputError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.normalize_only:
+        return _normalize_only(docs, settings, args.normalized_dir)
+
     if not settings.model:
         print("error: model is not set: provide OLLAMA_MODEL or 'model' in [ollama] config section", file=sys.stderr)
         return EXIT_USAGE
 
-    try:
-        docs = load_docs(settings.input_dir, args.url)
-    except InputError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    count = args.count
+    if count is None:  # pragma: no cover - parse_args rejects this
+        print("error: -n/--count is required", file=sys.stderr)
         return EXIT_USAGE
 
     try:
@@ -205,13 +242,14 @@ def main(argv: list[str] | None = None) -> int:
 
     client = OllamaClient(base_url=settings.base_url, model=settings.model, timeout=settings.timeout)
     options = GenerationOptions(
-        count=args.count,
+        count=count,
         temperature=settings.temperature,
         max_retries=settings.max_retries,
     )
     explicit_type = args.all_types or type_override is not None
 
     for doc in docs:
+        _print_normalization(doc)
         # The coverage matrix may only reference test cases that exist: keep the
         # artifact generated earlier in this run and hand its ids to the matrix.
         generated_cases: GeneratedArtifact | None = None
@@ -304,6 +342,48 @@ def main(argv: list[str] | None = None) -> int:
                 generated_cases = generated
 
     return EXIT_OK
+
+
+def _normalize_only(
+    docs: list[RequirementDoc],
+    settings: Config,
+    directory: Path | None,
+) -> int:
+    target = directory if directory is not None else settings.output_dir / "normalized"
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"error: cannot create {target}: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    for doc in docs:
+        result = doc.normalization
+        if result is None:  # pragma: no cover - load_docs(normalize=True) fills it
+            continue
+        path = target / f"{doc.path.stem}.md"
+        try:
+            path.write_text(result.text, encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot write {path}: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        print(
+            f"normalized: {path} ({result.encoding}, "
+            f"{len(result.requirements)} requirements, strategy: {result.strategy})"
+        )
+        for warning in result.warnings:
+            print(f"warning: {doc.path.name}: {warning}", file=sys.stderr)
+    return EXIT_OK
+
+
+def _print_normalization(doc: RequirementDoc) -> None:
+    result = doc.normalization
+    if result is None:
+        return
+    print(
+        f"normalized: {doc.path.name} ({result.encoding}, "
+        f"{len(result.requirements)} requirements, strategy: {result.strategy})"
+    )
+    for warning in result.warnings:
+        print(f"warning: {doc.path.name}: {warning}", file=sys.stderr)
 
 
 def _testcases_for(

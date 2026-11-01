@@ -140,6 +140,63 @@ def test_invalid_temperature_in_config_returns_2(
     assert fake.calls == []
 
 
+def test_timeout_flag_reaches_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+    input_dir: Path,
+    output_dir: Path,
+    config_env: Path,
+) -> None:
+    monkeypatch.setenv("OLLAMA_MODEL", "test-model")
+    write_input(input_dir, "doc.md", "https://example.com")
+    captured = capture_client_init(monkeypatch)
+    fake = FakeChat([make_raw_cases(balanced_set(10))])
+    patch_client(monkeypatch, fake)
+
+    code = main(
+        [
+            "--count",
+            "10",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+            "--timeout",
+            "7.5",
+        ]
+    )
+
+    assert code == EXIT_OK
+    assert captured["timeout"] == 7.5
+
+
+def test_negative_timeout_returns_2(
+    monkeypatch: pytest.MonkeyPatch,
+    input_dir: Path,
+    output_dir: Path,
+    config_env: Path,
+) -> None:
+    monkeypatch.setenv("OLLAMA_MODEL", "test-model")
+    write_input(input_dir, "doc.md", "https://example.com")
+    fake = FakeChat([])
+    patch_client(monkeypatch, fake)
+
+    code = main(
+        [
+            "--count",
+            "10",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+            "--timeout",
+            "-1",
+        ]
+    )
+
+    assert code == EXIT_USAGE
+    assert fake.calls == []
+
+
 def test_explicit_config_flag_is_respected(
     monkeypatch: pytest.MonkeyPatch,
     input_dir: Path,
