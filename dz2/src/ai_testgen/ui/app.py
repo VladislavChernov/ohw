@@ -30,6 +30,12 @@ from ai_testgen.evaluation import (
 from ai_testgen.handlers import ArtifactHandler, get_handler
 from ai_testgen.input_doc import RequirementDoc, extract_url
 from ai_testgen.models import ArtifactType, GenerationResult
+from ai_testgen.normalizer import (
+    NormalizationError,
+    NormalizationResult,
+    decode_bytes,
+    normalize_text,
+)
 from ai_testgen.ollama_client import (
     OllamaClient,
     OllamaConnectionError,
@@ -64,6 +70,14 @@ _BR_PATTERN = re.compile(r"\bBR-\d+\b")
 _FENCE_PATTERN = re.compile(r"^\s*```[a-zA-Z]*\s*$", re.MULTILINE)
 
 MANUAL_MODEL_OPTION = "Другая модель (ввести вручную)"
+
+STRATEGY_LABELS: dict[str, str] = {
+    "heading": "разделы BR-N",
+    "table": "таблица",
+    "list": "список",
+    "inline": "строки BR-N",
+    "paragraph": "абзацы",
+}
 
 #: Ready-made Ollama addresses. The last entry keeps the URL below editable.
 CONNECTION_PRESETS: tuple[tuple[str, str], ...] = (
@@ -338,16 +352,12 @@ def _requirements_panel() -> RequirementDoc | None:
     signature = hashlib.sha256(data).hexdigest()
     if st.session_state.get("requirements_signature") != signature:
         st.session_state["requirements_signature"] = signature
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            st.error(
-                f"Файл «{selected}» не в UTF-8 — перекодируйте его "
-                "и загрузите снова."
-            )
-            return None
+        text, encoding = decode_bytes(data)
         st.session_state["requirements_text"] = text
+        st.session_state["requirements_encoding"] = encoding
         st.session_state["url_input"] = requirements_url(text)
+        st.session_state.pop("normalization", None)
+        st.session_state.pop("use_normalized", None)
 
     text = st.text_area(
         "Текст требований (можно править)",
@@ -358,17 +368,104 @@ def _requirements_panel() -> RequirementDoc | None:
         "URL тестируемого сайта (пусто — взять из текста)",
         key="url_input",
     )
+    encoding = str(st.session_state.get("requirements_encoding", "utf-8"))
+    if encoding != "utf-8":
+        st.caption(
+            f"Кодировка файла: {encoding} — текст перекодирован в UTF-8. "
+            "В промпт уйдёт UTF-8."
+        )
+
     requirements = _BR_PATTERN.findall(text)
     columns = st.columns(3)
     columns[0].metric("Требований BR", len(set(requirements)))
     columns[1].metric("URL", url or "не найден")
     columns[2].metric("Символов", len(text))
 
+    content = _normalization_panel(text, url, selected)
     return RequirementDoc(
         path=Path(selected),
-        content=text,
+        content=content,
         url=url or extract_url(text),
     )
+
+
+def _normalization_panel(text: str, url: str, name: str) -> str:
+    """Show the canonical form and return the text that goes into the prompt."""
+    st.subheader("Нормализация требований")
+    st.caption(
+        "Детерминированно, без модели: заголовок, URL, раздел Requirements и "
+        "по разделу на каждое требование BR-N."
+    )
+    if not text.strip():
+        st.caption("Загрузите требования, чтобы нормализовать их.")
+        return text
+
+    if st.button("Нормализовать", key="normalize_requirements"):
+        try:
+            normalized = normalize_text(text, url or None)
+        except NormalizationError as exc:
+            st.session_state.pop("normalization", None)
+            st.error(f"Нормализация не удалась: {exc}")
+            return text
+        st.session_state["normalization"] = {
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "result": normalized,
+        }
+
+    stored = st.session_state.get("normalization")
+    if not stored:
+        if not _BR_PATTERN.search(text):
+            st.warning(
+                "В тексте нет BR-ID: трассировка и матрица покрытия потеряют "
+                "ссылки на требования. Нажмите «Нормализовать»."
+            )
+        return text
+
+    current = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if stored["sha256"] != current:
+        st.warning(
+            "Текст изменён после нормализации — нажмите «Нормализовать» заново, "
+            "иначе он не попадёт в промпт."
+        )
+        return text
+
+    result: NormalizationResult = stored["result"]
+    columns = st.columns(3)
+    columns[0].metric("Требований после нормализации", len(result.requirements))
+    columns[1].metric("Кодировка", result.encoding)
+    columns[2].metric(
+        "Стратегия", STRATEGY_LABELS.get(result.strategy, result.strategy)
+    )
+    for warning in result.warnings:
+        st.warning(warning)
+    if not result.changed:
+        st.caption("Текст уже в каноническом виде: нормализация ничего не изменила.")
+
+    original_tab, normalized_tab = st.tabs(["Исходный", "Нормализованный"])
+    with original_tab:
+        st.code(text, language="markdown")
+    with normalized_tab:
+        st.code(result.text, language="markdown")
+
+    use_normalized = st.checkbox(
+        "Использовать нормализованный текст в промптах",
+        key="use_normalized",
+        help=(
+            "Если выключено, в промпт уходит текст из редактора. "
+            "Нормализованный текст проверен на свежесть по sha256."
+        ),
+    )
+    st.download_button(
+        "Скачать нормализованный текст",
+        data=result.text,
+        file_name=f"{Path(name).stem}.normalized.md",
+        mime="text/markdown",
+    )
+    if use_normalized:
+        st.caption("В промпт уйдёт нормализованный текст.")
+        return result.text
+    st.caption("В промпт уйдёт текст из редактора.")
+    return text
 
 
 def requirements_url(text: str) -> str:
@@ -418,7 +515,10 @@ def _prompt_panel(
             "будет без TC-id (—/Not Covered), а не с придуманными номерами."
         )
 
-    signature = f"{doc.path}|{artifact_type}|{count}|{','.join(selected)}|{bool(testcases)}"
+    signature = (
+        f"{doc.path}|{hashlib.sha256(doc.content.encode('utf-8')).hexdigest()}|"
+        f"{doc.url}|{artifact_type}|{count}|{','.join(selected)}|{bool(testcases)}"
+    )
     try:
         handler = get_handler(artifact_type, prompt_dir)
         rendered = handler.build_user(doc, int(count), extras, testcases)

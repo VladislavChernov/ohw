@@ -33,6 +33,13 @@ CATALOG = """# Каталог
 | BR-1 | Список курсов |
 """
 
+MESSY = """# Требования: корзина
+
+https://shop.example.com/cart
+
+Пользователь добавляет товар в корзину и удаляет его.
+"""
+
 
 @pytest.fixture
 def workbench(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -123,15 +130,54 @@ def test_editing_requirements_updates_metrics(workbench: Path) -> None:
     assert metric["Требований BR"] == "4"
 
 
-def test_non_utf8_upload_is_reported(workbench: Path) -> None:
+def test_non_utf8_upload_is_decoded(workbench: Path) -> None:
     at = _app().run()
     at.file_uploader[0].set_value(
-        [("broken.md", b"\xff\xfe\x00", "text/markdown")]
+        [("cp1251.md", REQUIREMENTS.encode("cp1251"), "text/markdown")]
     ).run()
 
     assert not at.exception
-    assert any("не в UTF-8" in item.value for item in at.error)
-    assert "Сначала загрузите файл требований" in at.info[0].value
+    assert not at.error
+    assert any("cp1251" in item.value for item in at.caption)
+    assert _text(at, 0).startswith("# Требования")
+
+
+def test_missing_br_ids_are_flagged(workbench: Path) -> None:
+    at = _upload(_app().run(), ("messy.md", MESSY))
+
+    assert not at.exception
+    assert any("нет BR-ID" in item.value for item in at.warning)
+
+
+def test_normalized_text_can_feed_the_prompt(workbench: Path) -> None:
+    at = _upload(_app().run(), ("messy.md", MESSY))
+
+    _button(at, "Нормализовать").click().run()
+
+    assert not at.exception
+    metric = {item.label: item.value for item in at.metric}
+    assert metric["Требований после нормализации"] == "1"
+    assert metric["Стратегия"] == "абзацы"
+    assert any("структура не распознана" in item.value for item in at.warning)
+    normalized = next(
+        item for item in at.checkbox if item.label.startswith("Использовать нормализованный")
+    )
+    normalized.check().run()
+
+    prompt = _text(at, 1)
+    assert "## Requirements" in prompt
+    assert "### BR-1" in prompt
+    assert "Пользователь добавляет товар" in prompt
+
+
+def test_editing_after_normalization_marks_it_stale(workbench: Path) -> None:
+    at = _upload(_app().run(), ("messy.md", MESSY))
+    _button(at, "Нормализовать").click().run()
+
+    at.text_area[0].set_value(MESSY + "\nЕщё одно требование к корзине.\n").run()
+
+    assert not at.exception
+    assert any("Текст изменён после нормализации" in item.value for item in at.warning)
 
 
 def test_type_switch_rebuilds_prompt(workbench: Path) -> None:
