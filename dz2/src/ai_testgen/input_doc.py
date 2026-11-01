@@ -3,10 +3,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ai_testgen.models import ArtifactType
+from ai_testgen.normalizer import (
+    NormalizationError,
+    NormalizationResult,
+    decode_bytes,
+    find_url,
+    normalize_text,
+)
 
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".md", ".txt"})
 
-_URL_PATTERN = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
 _FRONT_MATTER_PATTERN = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 _KNOWN_FRONT_MATTER_KEYS = frozenset({"type"})
 
@@ -34,13 +40,11 @@ class RequirementDoc:
     content: str
     url: str | None
     artifact_type: ArtifactType = ArtifactType.TESTCASES
+    normalization: NormalizationResult | None = None
 
 
 def extract_url(content: str) -> str | None:
-    match = _URL_PATTERN.search(content)
-    if match is None:
-        return None
-    return match.group(0).rstrip(".,;:")
+    return find_url(content)
 
 
 def split_front_matter(content: str) -> tuple[ArtifactType, str]:
@@ -99,9 +103,24 @@ def collect_input_files(input_dir: Path) -> list[Path]:
     return files
 
 
-def load_docs(input_dir: Path, url_override: str | None) -> list[RequirementDoc]:
+def load_docs(
+    input_dir: Path,
+    url_override: str | None,
+    *,
+    normalize: bool = False,
+) -> list[RequirementDoc]:
+    """Load requirement files.
+
+    ``normalize=False`` keeps the historical strict UTF-8 contract.
+    ``normalize=True`` detects the encoding (UTF-8/BOM, UTF-16, cp1251,
+    cp866) and stores the canonical document; the original bytes are not
+    written anywhere.
+    """
     docs: list[RequirementDoc] = []
     for path in collect_input_files(input_dir):
+        if normalize:
+            docs.append(_load_normalized(path, url_override))
+            continue
         content = path.read_text(encoding="utf-8")
         artifact_type, body = split_front_matter(content)
         docs.append(
@@ -113,6 +132,22 @@ def load_docs(input_dir: Path, url_override: str | None) -> list[RequirementDoc]
             )
         )
     return docs
+
+
+def _load_normalized(path: Path, url_override: str | None) -> RequirementDoc:
+    try:
+        text, encoding = decode_bytes(path.read_bytes())
+        artifact_type, body = split_front_matter(text)
+        result = normalize_text(body, url_override, encoding=encoding)
+    except NormalizationError as exc:
+        raise InputError(f"{path.name}: {exc}") from exc
+    return RequirementDoc(
+        path=path,
+        content=result.text,
+        url=result.url,
+        artifact_type=artifact_type,
+        normalization=result,
+    )
 
 
 def _find_name_collisions(files: list[Path]) -> dict[str, list[str]]:

@@ -158,6 +158,37 @@ def test_front_matter_type_case_insensitive(input_dir: Path) -> None:
     assert docs[0].artifact_type is ArtifactType.CHECKLIST
 
 
+def test_normalize_decodes_cp1251_and_keeps_front_matter(input_dir: Path) -> None:
+    input_dir.mkdir()
+    path = input_dir / "doc.md"
+    path.write_bytes(
+        (
+            "---\ntype: checklist\n---\n"
+            "# Требования: вход\n\n"
+            "Сайт: https://example.com\n\n"
+            "## BR-1\nвход по email и паролю\n"
+        ).encode("cp1251")
+    )
+
+    docs = load_docs(input_dir, None, normalize=True)
+
+    assert docs[0].artifact_type is ArtifactType.CHECKLIST
+    assert docs[0].normalization is not None
+    assert docs[0].normalization.encoding == "cp1251"
+    assert docs[0].normalization.url == "https://example.com"
+    assert "## Requirements" in docs[0].content
+    assert "### BR-1" in docs[0].content
+    assert "type:" not in docs[0].content
+
+
+def test_strict_utf8_remains_default_without_normalize(input_dir: Path) -> None:
+    input_dir.mkdir()
+    (input_dir / "doc.md").write_bytes("# Требования\n".encode("cp1251"))
+
+    with pytest.raises(UnicodeDecodeError):
+        load_docs(input_dir, None)
+
+
 @pytest.mark.parametrize(
     ("raw_type", "expected"),
     [
