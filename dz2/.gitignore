@@ -9,3 +9,6 @@ build/
 .ruff_cache/
 /input/
 uv.lock.bak
+
+# Output of the Dz7 demo runbook (../dz7/DEMO.md)
+output/demo/

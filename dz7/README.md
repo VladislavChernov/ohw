@@ -15,6 +15,9 @@
 входной директории (`../dz2/docs`), а Dz7 строит по ним промпты; затем Dz2
 прогоняет полученные промпты через Ollama и сохраняет артефакты.
 
+Готовый сценарий показа ДЗ7 — [`DEMO.md`](DEMO.md): что запускать, какие
+файлы открывать и что должно получиться. Dz2 в нём описан как стенд.
+
 ## Как это работает
 
 ```
@@ -105,10 +108,14 @@ python3 generator.py --list-presets
 python3 generator.py --requirements-file business-requirements_catalog-courses.md \
     --type testcases --preset boundary-values --preset localization
 
-# все промпты: пресет применяется только к поддерживающим типам
+# пресет выбирается под конкретный тип: для типа вне его `types` — ошибка
 python3 generator.py --requirements-file business-requirements_catalog-courses.md \
-    --all-types --preset negative-scenarios --output-dir output/prompts
+    --type testcases --preset negative-scenarios
 ```
+
+`--all-types` с пресетом допустим только тогда, когда пресет поддерживает все
+пять типов; иначе команда завершится кодом 2 на первом неподходящем типе.
+Для полного набора запускайте пары «тип + пресет» отдельно.
 
 Правила:
 
@@ -117,7 +124,7 @@ python3 generator.py --requirements-file business-requirements_catalog-courses.m
   пропуск: иначе результат выглядел бы полным, но без нужных проверок.
 - Если в шаблоне нет `{extra}`, а пресет выбран — тоже ошибка.
 - В `--all-types` один и тот же набор пресетов применяется к каждому типу
-  отдельно.
+  отдельно; тип, который пресет не поддерживает, останавливает прогон ошибкой.
 
 ## Передача промптов в Dz2
 

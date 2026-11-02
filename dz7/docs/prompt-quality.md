@@ -2,7 +2,8 @@
 
 Промпты проверяются на стенде Dz2: файл требований прогоняется через
 локальную Ollama, промпт и полученный артефакт оцениваются по четырём
-критериям. Источник требований — рабочий документ основного проекта
+критериям. Пошаговый показ генератора — [`../DEMO.md`](../DEMO.md).
+Источник требований — рабочий документ основного проекта
 (`dz2/docs/business-requirements_catalog-courses.md`, требования BR-1…BR-7),
 а не демонстрационный `login.md`.
 
@@ -14,21 +15,23 @@
    cd dz7
    python3 generator.py \
        --requirements-file business-requirements_catalog-courses.md \
-       --all-types --output-dir output/prompts
+       --count 10 --all-types --output-dir output/prompts
    ```
 
-2. Собрать те же промпты с пресетами, чтобы оценить вклад дополнительных
-   инструкций:
+2. Собрать промпты с пресетами, чтобы оценить вклад дополнительных
+   инструкций. Пресет поддерживает не все пять типов, поэтому сборка идёт
+   по одной паре «тип + пресет»:
 
    ```bash
    python3 generator.py \
        --requirements-file business-requirements_catalog-courses.md \
-       --all-types --preset boundary-values --preset negative-scenarios \
-       --output-dir output/prompts-presets
+       --count 10 --type testcases --preset boundary-values \
+       --output output/prompts-presets/testcases-boundary-values.txt
    ```
 
-   Для типов, к которым пресет неприменим, команда завершится ошибкой —
-   поэтому в матрице ниже пары «тип + пресет» выбраны по `types`.
+   Остальные пары — так же; допустимые типы перечислены в `types` каждого
+   файла `presets/*.toml`. Для типа вне `types` команда завершится ошибкой
+   (код 2), а не молча пропустит пресет.
 
 3. Скопировать шаблоны и пресеты на стенд (Dz2 подставит требования каждого
    входного файла сам):
