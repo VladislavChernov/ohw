@@ -33,8 +33,14 @@ from ai_testgen.models import ArtifactType, GenerationResult
 from ai_testgen.normalizer import (
     NormalizationError,
     NormalizationResult,
+    NormalizerSettings,
+    NormalizerSettingsError,
     decode_bytes,
+    default_settings_path,
     normalize_text,
+)
+from ai_testgen.normalizer import (
+    load_settings as load_normalizer_settings,
 )
 from ai_testgen.ollama_client import (
     OllamaClient,
@@ -66,7 +72,11 @@ TYPE_LABELS: dict[ArtifactType, str] = {
     ArtifactType.COVERAGEMATRIX: "Матрица покрытия",
 }
 
-_BR_PATTERN = re.compile(r"\bBR-\d+\b")
+def _id_pattern(prefix: str) -> re.Pattern[str]:
+    """Requirement ids: ``BR-N`` always, plus the configured prefix."""
+    names = ["BR"] if prefix.upper() == "BR" else ["BR", prefix]
+    alternation = "|".join(re.escape(name) for name in names)
+    return re.compile(rf"\b(?:{alternation})-\d+\b", re.IGNORECASE)
 _FENCE_PATTERN = re.compile(r"^\s*```[a-zA-Z]*\s*$", re.MULTILINE)
 
 MANUAL_MODEL_OPTION = "Другая модель (ввести вручную)"
@@ -352,7 +362,8 @@ def _requirements_panel() -> RequirementDoc | None:
     signature = hashlib.sha256(data).hexdigest()
     if st.session_state.get("requirements_signature") != signature:
         st.session_state["requirements_signature"] = signature
-        text, encoding = decode_bytes(data)
+        file_settings, _ = _normalizer_defaults()
+        text, encoding = decode_bytes(data, file_settings)
         st.session_state["requirements_text"] = text
         st.session_state["requirements_encoding"] = encoding
         st.session_state["url_input"] = requirements_url(text)
@@ -375,9 +386,10 @@ def _requirements_panel() -> RequirementDoc | None:
             "В промпт уйдёт UTF-8."
         )
 
-    requirements = _BR_PATTERN.findall(text)
+    default_settings, _ = _normalizer_defaults()
+    requirements = _id_pattern(default_settings.id_prefix).findall(text)
     columns = st.columns(3)
-    columns[0].metric("Требований BR", len(set(requirements)))
+    columns[0].metric("Требований с ID", len({item.upper() for item in requirements}))
     columns[1].metric("URL", url or "не найден")
     columns[2].metric("Символов", len(text))
 
@@ -392,32 +404,39 @@ def _requirements_panel() -> RequirementDoc | None:
 def _normalization_panel(text: str, url: str, name: str, encoding: str) -> str:
     """Show the canonical form and return the text that goes into the prompt."""
     st.subheader("Нормализация требований")
+    heading = _normalizer_defaults()[0].requirements_heading
     st.caption(
-        "Детерминированно, без модели: заголовок, URL, раздел Requirements и "
-        "по разделу на каждое требование BR-N."
+        f"Детерминированно, без модели: заголовок, URL, раздел «{heading}» и "
+        "по разделу на каждое требование с ID."
     )
     if not text.strip():
         st.caption("Загрузите требования, чтобы нормализовать их.")
         return text
 
+    settings = _normalization_settings_form()
+
     if st.button("Нормализовать", key="normalize_requirements"):
         try:
-            normalized = normalize_text(text, url or None, encoding=encoding)
+            normalized = normalize_text(
+                text, url or None, encoding=encoding, settings=settings
+            )
         except NormalizationError as exc:
             st.session_state.pop("normalization", None)
             st.error(f"Нормализация не удалась: {exc}")
             return text
         st.session_state["normalization"] = {
             "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "settings": settings,
             "result": normalized,
         }
 
     stored = st.session_state.get("normalization")
     if not stored:
-        if not _BR_PATTERN.search(text):
+        if not _id_pattern(settings.id_prefix).search(text):
             st.warning(
-                "В тексте нет BR-ID: трассировка и матрица покрытия потеряют "
-                "ссылки на требования. Нажмите «Нормализовать»."
+                f"В тексте нет ID с префиксом {settings.id_prefix}: трассировка "
+                "и матрица покрытия потеряют ссылки на требования. Нажмите "
+                "«Нормализовать»."
             )
         return text
 
@@ -426,6 +445,12 @@ def _normalization_panel(text: str, url: str, name: str, encoding: str) -> str:
         st.warning(
             "Текст изменён после нормализации — нажмите «Нормализовать» заново, "
             "иначе он не попадёт в промпт."
+        )
+        return text
+    if stored.get("settings") != settings:
+        st.warning(
+            "Настройки нормализации изменены — нажмите «Нормализовать» заново, "
+            "чтобы применить их."
         )
         return text
 
@@ -466,6 +491,95 @@ def _normalization_panel(text: str, url: str, name: str, encoding: str) -> str:
         return result.text
     st.caption("В промпт уйдёт текст из редактора.")
     return text
+
+
+_NORMALIZER_ENCODINGS = ("utf-8", "cp1251", "cp866", "koi8-r")
+_NORMALIZER_WIDGET_KEYS = (
+    "nz_prefix",
+    "nz_heading",
+    "nz_url_label",
+    "nz_fallback_title",
+    "nz_encodings",
+    "nz_min_length",
+)
+
+
+def _normalizer_defaults() -> tuple[NormalizerSettings, Path | None]:
+    """Settings from ``normalizer.toml`` (or the built-in defaults), cached."""
+    cached = st.session_state.get("normalizer_defaults")
+    if cached is not None:
+        return cached
+    path = default_settings_path()
+    try:
+        settings = load_normalizer_settings(path)
+    except NormalizerSettingsError as exc:
+        st.session_state["normalizer_error"] = str(exc)
+        settings = NormalizerSettings()
+    st.session_state["normalizer_defaults"] = (settings, path)
+    return settings, path
+
+
+def _normalization_settings_form() -> NormalizerSettings:
+    """Widgets over the file defaults; the file itself stays the source of truth."""
+    base, path = _normalizer_defaults()
+    error = st.session_state.pop("normalizer_error", None)
+    if error:
+        st.warning(f"Настройки из файла не применены: {error}")
+
+    with st.expander("Настройки нормализации", expanded=False):
+        st.caption(
+            f"По умолчанию: {path.name if path else 'встроенные значения'} "
+            f"({path if path else 'normalizer.toml не найден'}). Правки ниже "
+            "действуют на текущую сессию; чтобы изменить значения по умолчанию, "
+            "правьте файл."
+        )
+        prefix = st.text_input(
+            "Префикс ID требований", value=base.id_prefix, key="nz_prefix", max_chars=10
+        )
+        heading = st.text_input(
+            "Заголовок раздела", value=base.requirements_heading, key="nz_heading"
+        )
+        url_label = st.text_input(
+            "Подпись строки URL", value=base.url_label, key="nz_url_label"
+        )
+        fallback_title = st.text_input(
+            "Заголовок, если его нет в тексте",
+            value=base.fallback_title,
+            key="nz_fallback_title",
+        )
+        encodings = st.multiselect(
+            "Кодировки для определения (после UTF-8 и BOM)",
+            options=list(_NORMALIZER_ENCODINGS),
+            default=[name for name in base.encodings],
+            key="nz_encodings",
+            help="Порядок важен: при равном счёте выигрывает первая кодировка.",
+        )
+        min_length = st.number_input(
+            "Минимальная длина абзаца в fallback-режиме",
+            min_value=1,
+            max_value=2000,
+            value=base.paragraph_min_length,
+            step=1,
+            key="nz_min_length",
+        )
+        if st.button("Вернуть значения из файла", key="nz_reset"):
+            for key in _NORMALIZER_WIDGET_KEYS:
+                st.session_state.pop(key, None)
+            st.session_state.pop("normalizer_defaults", None)
+            st.rerun()
+
+    try:
+        return NormalizerSettings(
+            id_prefix=prefix.strip(),
+            requirements_heading=heading.strip(),
+            url_label=url_label.strip(),
+            fallback_title=fallback_title.strip(),
+            encodings=tuple(encodings),
+            paragraph_min_length=int(min_length),
+        )
+    except NormalizerSettingsError as exc:
+        st.error(f"Настройки нормализации некорректны: {exc}")
+        return base
 
 
 def requirements_url(text: str) -> str:

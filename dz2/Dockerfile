@@ -21,11 +21,13 @@ FROM ohw-python:3.13
 COPY --from=builder /app/.venv /app/.venv
 COPY prompts /app/prompts
 COPY presets /app/presets
+COPY normalizer.toml /app/normalizer.toml
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     DZ2_PROMPT_DIR=/app/prompts \
-    DZ2_PRESETS_DIR=/app/presets
+    DZ2_PRESETS_DIR=/app/presets \
+    AI_TESTGEN_NORMALIZER_CONFIG=/app/normalizer.toml
 
 USER app
 

@@ -23,6 +23,12 @@ from ai_testgen.input_doc import (
     parse_artifact_type,
 )
 from ai_testgen.models import ArtifactType
+from ai_testgen.normalizer import (
+    NormalizerSettingsError,
+)
+from ai_testgen.normalizer import (
+    load_settings as load_normalizer_settings,
+)
 from ai_testgen.ollama_client import (
     OllamaClient,
     OllamaConnectionError,
@@ -135,6 +141,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="directory for --normalize-only output (default: <output-dir>/normalized)",
     )
     parser.add_argument(
+        "--normalizer-config",
+        type=Path,
+        default=None,
+        help=(
+            "TOML file with normalization parameters (default: "
+            "$AI_TESTGEN_NORMALIZER_CONFIG, then ./normalizer.toml)"
+        ),
+    )
+    parser.add_argument(
         "--evaluate",
         action="store_true",
         help=(
@@ -193,10 +208,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         settings = _resolve_settings(args)
+        normalizer_settings = load_normalizer_settings(args.normalizer_config)
         type_override = (
             parse_artifact_type(args.artifact_type) if args.artifact_type else None
         )
-    except (ConfigError, InputError) as exc:
+    except (ConfigError, InputError, NormalizerSettingsError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return EXIT_USAGE
 
@@ -205,6 +221,7 @@ def main(argv: list[str] | None = None) -> int:
             settings.input_dir,
             args.url,
             normalize=args.normalize or args.normalize_only,
+            settings=normalizer_settings,
         )
     except InputError as exc:
         print(f"error: {exc}", file=sys.stderr)

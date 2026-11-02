@@ -6,6 +6,7 @@ from ai_testgen.models import ArtifactType
 from ai_testgen.normalizer import (
     NormalizationError,
     NormalizationResult,
+    NormalizerSettings,
     decode_bytes,
     find_url,
     normalize_text,
@@ -108,18 +109,19 @@ def load_docs(
     url_override: str | None,
     *,
     normalize: bool = False,
+    settings: NormalizerSettings | None = None,
 ) -> list[RequirementDoc]:
     """Load requirement files.
 
     ``normalize=False`` keeps the historical strict UTF-8 contract.
-    ``normalize=True`` detects the encoding (UTF-8/BOM, UTF-16, cp1251,
-    cp866) and stores the canonical document; the original bytes are not
-    written anywhere.
+    ``normalize=True`` detects the encoding (UTF-8/BOM, UTF-16 or the codecs
+    from ``normalizer.toml``) and stores the canonical document; the original
+    bytes are not written anywhere.
     """
     docs: list[RequirementDoc] = []
     for path in collect_input_files(input_dir):
         if normalize:
-            docs.append(_load_normalized(path, url_override))
+            docs.append(_load_normalized(path, url_override, settings))
             continue
         content = path.read_text(encoding="utf-8")
         artifact_type, body = split_front_matter(content)
@@ -134,11 +136,15 @@ def load_docs(
     return docs
 
 
-def _load_normalized(path: Path, url_override: str | None) -> RequirementDoc:
+def _load_normalized(
+    path: Path,
+    url_override: str | None,
+    settings: NormalizerSettings | None,
+) -> RequirementDoc:
     try:
-        text, encoding = decode_bytes(path.read_bytes())
+        text, encoding = decode_bytes(path.read_bytes(), settings)
         artifact_type, body = split_front_matter(text)
-        result = normalize_text(body, url_override, encoding=encoding)
+        result = normalize_text(body, url_override, encoding=encoding, settings=settings)
     except NormalizationError as exc:
         raise InputError(f"{path.name}: {exc}") from exc
     return RequirementDoc(

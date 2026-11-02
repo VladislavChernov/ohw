@@ -91,7 +91,7 @@ def test_workbench_renders_uploaded_requirements(workbench: Path) -> None:
     assert _selectbox(at, "Файл требований").value == "login.md"
     assert _text(at, 0).startswith("# Требования")
     metric = {item.label: item.value for item in at.metric}
-    assert metric["Требований BR"] == "3"
+    assert metric["Требований с ID"] == "3"
     assert metric["URL"] == "https://shop.example.com/login"
     assert "Target site: https://shop.example.com/login" in _text(at, 1)
 
@@ -127,7 +127,7 @@ def test_editing_requirements_updates_metrics(workbench: Path) -> None:
     at.text_area[0].set_value(REQUIREMENTS + "\n| BR-4 | Выход |").run()
 
     metric = {item.label: item.value for item in at.metric}
-    assert metric["Требований BR"] == "4"
+    assert metric["Требований с ID"] == "4"
 
 
 def test_non_utf8_upload_is_decoded(workbench: Path) -> None:
@@ -152,7 +152,7 @@ def test_missing_br_ids_are_flagged(workbench: Path) -> None:
     at = _upload(_app().run(), ("messy.md", MESSY))
 
     assert not at.exception
-    assert any("нет BR-ID" in item.value for item in at.warning)
+    assert any("нет ID с префиксом BR" in item.value for item in at.warning)
 
 
 def test_normalized_text_can_feed_the_prompt(workbench: Path) -> None:
@@ -174,6 +174,45 @@ def test_normalized_text_can_feed_the_prompt(workbench: Path) -> None:
     assert "## Requirements" in prompt
     assert "### BR-1" in prompt
     assert "Пользователь добавляет товар" in prompt
+
+
+def test_normalizer_settings_change_the_canonical_ids(workbench: Path) -> None:
+    at = _upload(_app().run(), ("messy.md", MESSY))
+    prefix = next(
+        item for item in at.text_input if item.label == "Префикс ID требований"
+    )
+
+    prefix.set_value("REQ").run()
+    _button(at, "Нормализовать").click().run()
+
+    assert not at.exception
+    normalized = next(
+        item for item in at.checkbox if item.label.startswith("Использовать нормализованный")
+    )
+    normalized.check().run()
+
+    prompt = _text(at, 1)
+    assert "### REQ-1" in prompt
+    assert "### BR-1" not in prompt
+
+
+def test_settings_file_is_the_default_and_widgets_override_it(workbench: Path) -> None:
+    (workbench / "normalizer.toml").write_text(
+        'id_prefix = "REQ"\nfallback_title = "Из файла"\n', encoding="utf-8"
+    )
+
+    at = _upload(_app().run(), ("login.md", REQUIREMENTS))
+    prefix = next(
+        item for item in at.text_input if item.label == "Префикс ID требований"
+    )
+    fallback = next(
+        item
+        for item in at.text_input
+        if item.label == "Заголовок, если его нет в тексте"
+    )
+
+    assert prefix.value == "REQ"
+    assert fallback.value == "Из файла"
 
 
 def test_editing_after_normalization_marks_it_stale(workbench: Path) -> None:
@@ -198,7 +237,8 @@ def test_type_switch_rebuilds_prompt(workbench: Path) -> None:
 def test_preset_adds_instructions_to_prompt(workbench: Path) -> None:
     at = _file(_app().run())
 
-    at.multiselect[0].set_value(["boundary-values"]).run()
+    presets = next(item for item in at.multiselect if item.label.startswith("Пресеты"))
+    presets.set_value(["boundary-values"]).run()
 
     assert not at.exception
     prompt = _text(at, 1)

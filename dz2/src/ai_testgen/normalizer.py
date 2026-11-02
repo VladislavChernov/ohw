@@ -12,25 +12,27 @@ Entry points:
 - :func:`decode_bytes` — bytes to text with encoding detection;
 - :func:`normalize_text` — text to a canonical requirements document;
 - :func:`normalize_bytes` — both steps, reporting the detected encoding.
+
+The shape of the canonical document is configurable: defaults live in
+:class:`NormalizerSettings` and can be overridden by ``normalizer.toml``
+(:func:`load_settings`) or by the widgets in the workbench.
 """
 
 from __future__ import annotations
 
+import codecs
+import os
 import re
+import tomllib
 import unicodedata
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 
 _URL_PATTERN = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
-_BR_PATTERN = re.compile(r"\bBR-(\d+)\b", re.IGNORECASE)
-_BR_HEADING = re.compile(r"^(BR-\d+)\s*[:.\-—]?\s*(.*)$", re.IGNORECASE)
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 _LIST_ITEM = re.compile(r"^(\s*)(?:[-*+]|\d+[.)])\s+(.*)$")
-_INLINE_BR = re.compile(
-    r"^(?:[-*+]\s+)?(?:\*\*)?(BR-\d+)(?:\*\*)?\s*[:.\-—)]?\s*(.*)$",
-    re.IGNORECASE,
-)
 _TABLE_SEPARATOR = re.compile(r"^\s*\|?[\s:|-]*-[\s:|-]*\|[\s:|-]*$")
-_ID_COLUMN = re.compile(r"^(?:id|№|номер|идентификатор|br|требование.*id)$", re.IGNORECASE)
 _REQUIREMENTS_HEADING = re.compile(r"^(?:требовани\w*|requirements?)\b", re.IGNORECASE)
 _URL_ONLY = re.compile(
     r"^(?:url|сайт|target site|адрес)?\s*:?\s*https?://\S+$",
@@ -47,9 +49,160 @@ _BOMS: tuple[tuple[bytes, str], ...] = (
 _RUSSIAN = frozenset("абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
 _JUNK = frozenset("¤¦§¨©ª«¬®¯°±²³´µ¶·¸¹º»¼½¾¿„…†‡€‰‹›€™№")
 
+DEFAULT_SETTINGS_FILE = "normalizer.toml"
+SETTINGS_ENV = "AI_TESTGEN_NORMALIZER_CONFIG"
+SETTING_KEYS = (
+    "id_prefix",
+    "requirements_heading",
+    "url_label",
+    "fallback_title",
+    "encodings",
+    "paragraph_min_length",
+)
+
 
 class NormalizationError(Exception):
     """Raised when bytes or text cannot become a requirements document."""
+
+
+class NormalizerSettingsError(Exception):
+    """Raised when ``normalizer.toml`` cannot be read or holds a bad value."""
+
+
+@dataclass(frozen=True)
+class NormalizerSettings:
+    """Parameters of the canonical form, previously hardcoded in this module."""
+
+    id_prefix: str = "BR"
+    requirements_heading: str = "Requirements"
+    url_label: str = "URL"
+    fallback_title: str = "Требования"
+    encodings: tuple[str, ...] = ("cp1251", "cp866")
+    paragraph_min_length: int = 20
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[A-Za-zА-Яа-яЁё]{1,10}", self.id_prefix) is None:
+            raise NormalizerSettingsError(
+                f"id_prefix must be 1-10 letters, got {self.id_prefix!r}"
+            )
+        for field_name in ("requirements_heading", "url_label", "fallback_title"):
+            value = getattr(self, field_name)
+            if not value.strip() or "\n" in value:
+                raise NormalizerSettingsError(
+                    f"{field_name} must be a non-empty single line"
+                )
+        if not self.encodings:
+            raise NormalizerSettingsError("encodings must list at least one codec")
+        for name in self.encodings:
+            try:
+                codecs.lookup(name)
+            except LookupError as exc:
+                raise NormalizerSettingsError(f"unknown codec in encodings: {name!r}") from exc
+        if self.paragraph_min_length < 1:
+            raise NormalizerSettingsError("paragraph_min_length must be positive")
+
+    @property
+    def patterns(self) -> _Patterns:
+        return _patterns(self.id_prefix)
+
+
+@dataclass(frozen=True)
+class _Patterns:
+    br: re.Pattern[str]
+    br_heading: re.Pattern[str]
+    inline_br: re.Pattern[str]
+    id_column: re.Pattern[str]
+
+
+@lru_cache(maxsize=16)
+def _patterns(prefix: str) -> _Patterns:
+    """Patterns for the configured prefix plus the historical ``BR`` one.
+
+    Existing documents keep their ``BR-N`` ids even after ``id_prefix`` is
+    switched to ``REQ``: only newly assigned ids use the configured prefix.
+    """
+    names = ["BR"] if prefix.upper() == "BR" else ["BR", prefix]
+    alternation = "|".join(re.escape(name) for name in names)
+    return _Patterns(
+        br=re.compile(rf"\b(?:{alternation})-(\d+)\b", re.IGNORECASE),
+        br_heading=re.compile(
+            rf"^((?:{alternation})-\d+)\s*[:.\-—]?\s*(.*)$", re.IGNORECASE
+        ),
+        inline_br=re.compile(
+            rf"^(?:[-*+]\s+)?(?:\*\*)?((?:{alternation})-\d+)(?:\*\*)?"
+            r"\s*[:.\-—)]?\s*(.*)$",
+            re.IGNORECASE,
+        ),
+        id_column=re.compile(
+            rf"^(?:id|№|номер|идентификатор|br|{re.escape(prefix.lower())}"
+            r"|требование.*id)$",
+            re.IGNORECASE,
+        ),
+    )
+
+
+def default_settings_path(cwd: Path | None = None) -> Path | None:
+    """``--normalizer-config`` > env var > ``normalizer.toml`` in the cwd."""
+    override = os.environ.get(SETTINGS_ENV)
+    if override:
+        return Path(override)
+    candidate = (cwd or Path.cwd()) / DEFAULT_SETTINGS_FILE
+    return candidate if candidate.is_file() else None
+
+
+def load_settings(path: Path | None = None) -> NormalizerSettings:
+    """Read ``normalizer.toml``; an absent file means the built-in defaults."""
+    resolved = path if path is not None else default_settings_path()
+    if resolved is None:
+        return NormalizerSettings()
+    if not resolved.is_file():
+        raise NormalizerSettingsError(f"файл настроек не найден: {resolved}")
+    try:
+        raw = tomllib.loads(resolved.read_text(encoding="utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+        raise NormalizerSettingsError(f"некорректный TOML в {resolved}: {exc}") from exc
+    except OSError as exc:
+        raise NormalizerSettingsError(f"не удалось прочитать {resolved}: {exc}") from exc
+
+    unknown = set(raw) - set(SETTING_KEYS)
+    if unknown:
+        print(
+            f"warning: {resolved}: ignoring unknown keys: {', '.join(sorted(unknown))}",
+            flush=True,
+        )
+
+    def string(key: str, default: str) -> str:
+        value = raw.get(key, default)
+        if not isinstance(value, str):
+            raise NormalizerSettingsError(f"{resolved}: '{key}' must be a string")
+        return value
+
+    encodings = raw.get("encodings", list(NormalizerSettings.encodings))
+    if not isinstance(encodings, (list, tuple)) or not all(
+        isinstance(item, str) for item in encodings
+    ):
+        raise NormalizerSettingsError(
+            f"{resolved}: 'encodings' must be a list of codec names"
+        )
+    length = raw.get("paragraph_min_length", NormalizerSettings.paragraph_min_length)
+    if isinstance(length, bool) or not isinstance(length, int):
+        raise NormalizerSettingsError(
+            f"{resolved}: 'paragraph_min_length' must be an integer"
+        )
+
+    try:
+        return NormalizerSettings(
+            id_prefix=string("id_prefix", NormalizerSettings.id_prefix),
+            requirements_heading=string(
+                "requirements_heading", NormalizerSettings.requirements_heading
+            ),
+            url_label=string("url_label", NormalizerSettings.url_label),
+            fallback_title=string("fallback_title", NormalizerSettings.fallback_title),
+            encodings=tuple(encodings),
+            paragraph_min_length=length,
+        )
+    except NormalizerSettingsError as exc:
+        raise NormalizerSettingsError(f"{resolved}: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -87,13 +240,17 @@ class _Heading:
 # --------------------------------------------------------------------------
 
 
-def decode_bytes(data: bytes) -> tuple[str, str]:
+def decode_bytes(
+    data: bytes,
+    settings: NormalizerSettings | None = None,
+) -> tuple[str, str]:
     """Return ``(text, encoding)``; text is UTF-8-decoded for the caller.
 
-    Order: BOM, strict UTF-8, then cp1251/cp866. The last two decode any byte
-    sequence, so the winner is the one with more Russian letters and fewer
-    junk characters (``„®Єг¬Ґ­в`` versus ``документация``).
+    Order: BOM, strict UTF-8, then the configured single-byte codecs. Those
+    decode any byte sequence, so the winner is the one with more Russian
+    letters and fewer junk characters (``„®Єг¬Ґ­в`` versus ``документация``).
     """
+    settings = settings or NormalizerSettings()
     if not data:
         return "", "utf-8"
 
@@ -110,10 +267,21 @@ def decode_bytes(data: bytes) -> tuple[str, str]:
     except UnicodeDecodeError:
         pass
 
-    candidates = {name: data.decode(name) for name in ("cp1251", "cp866")}
+    candidates: dict[str, str] = {}
+    for name in settings.encodings:
+        try:
+            candidates[name] = data.decode(name)
+        except UnicodeDecodeError:
+            continue
+    if not candidates:
+        raise NormalizationError(
+            "не удалось декодировать файл: ни одна из кодировок "
+            f"({', '.join(settings.encodings)}) не подошла"
+        )
+    order = {name: index for index, name in enumerate(settings.encodings)}
     encoding = max(
         candidates,
-        key=lambda name: (_cyrillic_score(candidates[name]), name == "cp1251"),
+        key=lambda name: (_cyrillic_score(candidates[name]), -order[name]),
     )
     return candidates[encoding], encoding
 
@@ -140,10 +308,16 @@ def find_url(text: str) -> str | None:
 # --------------------------------------------------------------------------
 
 
-def normalize_bytes(data: bytes, url: str | None = None) -> NormalizationResult:
+def normalize_bytes(
+    data: bytes,
+    url: str | None = None,
+    *,
+    settings: NormalizerSettings | None = None,
+) -> NormalizationResult:
     """Decode ``data`` and normalize it."""
-    text, encoding = decode_bytes(data)
-    return normalize_text(text, url, encoding=encoding)
+    settings = settings or NormalizerSettings()
+    text, encoding = decode_bytes(data, settings)
+    return normalize_text(text, url, encoding=encoding, settings=settings)
 
 
 def normalize_text(
@@ -151,29 +325,31 @@ def normalize_text(
     url: str | None = None,
     *,
     encoding: str = "utf-8",
+    settings: NormalizerSettings | None = None,
 ) -> NormalizationResult:
     """Turn arbitrary requirement text into the canonical BR-N document."""
+    settings = settings or NormalizerSettings()
     cleaned = _clean(raw)
     if not cleaned.strip():
         raise NormalizationError("документ пуст: нет текста требований")
 
     lines = cleaned.split("\n")
     headings = _headings(lines)
-    title, title_index = _title(lines, headings)
+    title, title_index = _title(lines, headings, settings)
 
     extracted = (
-        _from_br_headings(lines, headings)
-        or _from_table(lines)
-        or _from_list(lines, headings)
-        or _from_inline(lines)
-        or _from_paragraphs(lines, title_index)
+        _from_br_headings(lines, headings, settings)
+        or _from_table(lines, settings)
+        or _from_list(lines, headings, settings)
+        or _from_inline(lines, settings)
+        or _from_paragraphs(lines, title_index, settings)
     )
     if extracted is None:
         raise NormalizationError("не удалось найти ни одного требования")
 
     requirements, stop, strategy = extracted
-    requirements = _assign_ids(requirements)
-    requirements, warnings = _dedupe(requirements)
+    requirements = _assign_ids(requirements, settings)
+    requirements, warnings = _dedupe(requirements, settings)
 
     resolved_url = url or find_url(cleaned)
     if resolved_url is None:
@@ -182,8 +358,8 @@ def normalize_text(
         warnings.append(
             "структура не распознана: требования выделены по абзацам, проверьте результат"
         )
-    preamble = _preamble(lines[:stop], title_index)
-    rendered = _render(title, resolved_url, preamble, requirements)
+    preamble = _preamble(lines[:stop], title_index, settings)
+    rendered = _render(title, resolved_url, preamble, requirements, settings)
 
     return NormalizationResult(
         text=rendered,
@@ -235,51 +411,66 @@ def _headings(lines: list[str]) -> list[_Heading]:
     return result
 
 
-def _title(lines: list[str], headings: list[_Heading]) -> tuple[str, int | None]:
+def _title(
+    lines: list[str],
+    headings: list[_Heading],
+    settings: NormalizerSettings,
+) -> tuple[str, int | None]:
     for heading in headings:
-        if heading.level == 1 and _leading_br(heading.title) is None:
+        if heading.level == 1 and _leading_br(heading.title, settings) is None:
             return heading.title, heading.index
     # No H1: a short first line is a title, not a requirement.
     for index, line in enumerate(lines):
         text = line.strip()
         if not text or text.startswith(("#", "|", "-", "*", "+")):
             continue
-        if _is_url_only(text) or len(text) > 80 or _BR_PATTERN.search(text):
+        if _is_url_only(text) or len(text) > 80 or settings.patterns.br.search(text):
             break
         return text, index
-    return "Требования", None
+    return settings.fallback_title, None
 
 
 def _is_url_only(line: str) -> bool:
     return _URL_ONLY.match(line.replace("*", "").strip()) is not None
 
 
-def _leading_br(text: str) -> tuple[str, str] | None:
-    match = _BR_HEADING.match(text.strip())
+def _leading_br(
+    text: str, settings: NormalizerSettings
+) -> tuple[str, str] | None:
+    match = settings.patterns.br_heading.match(text.strip())
     if match is None:
         return None
     return match.group(1).upper(), match.group(2).strip()
 
 
 def _from_br_headings(
-    lines: list[str], headings: list[_Heading]
+    lines: list[str],
+    headings: list[_Heading],
+    settings: NormalizerSettings,
 ) -> tuple[list[Requirement], int, str] | None:
-    br_headings = [heading for heading in headings if _leading_br(heading.title)]
+    br_headings = [
+        heading for heading in headings if _leading_br(heading.title, settings)
+    ]
     if not br_headings:
         return None
 
     requirements: list[Requirement] = []
     for heading in br_headings:
-        parsed = _leading_br(heading.title)
+        parsed = _leading_br(heading.title, settings)
         assert parsed is not None
         identifier, remainder = parsed
-        body = _demote_headings(_br_body(lines, headings, heading))
+        body = _demote_headings(_br_body(lines, headings, heading, settings))
         text = _join_blocks([remainder, _block(body)])
         requirements.append(Requirement(identifier, text, "heading"))
     return requirements, br_headings[0].index, "heading"
 
 
-def _br_body(lines: list[str], headings: list[_Heading], heading: _Heading) -> list[str]:
+def _br_body(
+    lines: list[str],
+    headings: list[_Heading],
+    heading: _Heading,
+    settings: NormalizerSettings,
+) -> list[str]:
     """Body of a BR section: stop at the next sibling or at another BR heading.
 
     Deeper headings belong to the requirement, so ``### Details`` inside
@@ -289,7 +480,7 @@ def _br_body(lines: list[str], headings: list[_Heading], heading: _Heading) -> l
     for other in headings:
         if other.index <= heading.index:
             continue
-        if other.level <= heading.level or _leading_br(other.title) is not None:
+        if other.level <= heading.level or _leading_br(other.title, settings) is not None:
             end = other.index
             break
     return lines[heading.index + 1 : end]
@@ -309,19 +500,21 @@ def _demote_headings(lines: list[str]) -> list[str]:
     return result
 
 
-def _from_table(lines: list[str]) -> tuple[list[Requirement], int, str] | None:
+def _from_table(
+    lines: list[str], settings: NormalizerSettings
+) -> tuple[list[Requirement], int, str] | None:
     for start, header, rows in _tables(lines):
         id_column = next(
             (
                 index
                 for index, name in enumerate(header)
-                if _ID_COLUMN.match(name.strip())
+                if settings.patterns.id_column.match(name.strip())
             ),
             None,
         )
         requirements: list[Requirement] = []
         for cells in rows:
-            identifier, text = _table_requirement(cells, id_column)
+            identifier, text = _table_requirement(cells, id_column, settings)
             if identifier is None:
                 continue
             requirements.append(Requirement(identifier, text, "table"))
@@ -355,19 +548,22 @@ def _cells(line: str) -> list[str]:
     return [cell.strip() for cell in stripped.split("|")]
 
 
-def _table_requirement(cells: list[str], id_column: int | None) -> tuple[str | None, str]:
+def _table_requirement(
+    cells: list[str], id_column: int | None, settings: NormalizerSettings
+) -> tuple[str | None, str]:
     """ID and description of one table row; ``None`` when the row has no BR id."""
+    br = settings.patterns.br
     identifier: str | None = None
     rest: list[str] = []
     if id_column is not None and id_column < len(cells):
-        match = re.fullmatch(r"\s*(BR-\d+)\s*", cells[id_column], re.IGNORECASE)
+        match = br.fullmatch(cells[id_column].strip())
         if match is not None:
-            identifier = match.group(1).upper()
+            identifier = match.group(0).upper()
         rest = [cell for index, cell in enumerate(cells) if index != id_column]
     if identifier is None and cells:
-        match = re.fullmatch(r"\s*(BR-\d+)\s*", cells[0], re.IGNORECASE)
+        match = br.fullmatch(cells[0].strip())
         if match is not None:
-            identifier = match.group(1).upper()
+            identifier = match.group(0).upper()
             rest = cells[1:]
     if identifier is None:
         return None, ""
@@ -376,16 +572,29 @@ def _table_requirement(cells: list[str], id_column: int | None) -> tuple[str | N
 
 
 def _from_list(
-    lines: list[str], headings: list[_Heading]
+    lines: list[str],
+    headings: list[_Heading],
+    settings: NormalizerSettings,
 ) -> tuple[list[Requirement], int, str] | None:
     for heading in headings:
-        if _REQUIREMENTS_HEADING.match(heading.title.strip()) is None:
+        if not _is_requirements_heading(heading.title, settings):
             continue
         body = _section_body(lines, headings, heading)
         items = _list_items(body)
         if items:
-            return [_item_requirement(text) for text in items], heading.index, "list"
+            return (
+                [_item_requirement(text, settings) for text in items],
+                heading.index,
+                "list",
+            )
     return None
+
+
+def _is_requirements_heading(title: str, settings: NormalizerSettings) -> bool:
+    stripped = title.strip()
+    if _REQUIREMENTS_HEADING.match(stripped) is not None:
+        return True
+    return stripped.casefold() == settings.requirements_heading.strip().casefold()
 
 
 def _section_body(lines: list[str], headings: list[_Heading], heading: _Heading) -> list[str]:
@@ -415,15 +624,17 @@ def _list_items(body: list[str]) -> list[str]:
     return [" ".join(part for part in group if part).strip() for group in groups]
 
 
-def _item_requirement(text: str) -> Requirement:
-    parsed = _leading_br(text)
+def _item_requirement(text: str, settings: NormalizerSettings) -> Requirement:
+    parsed = _leading_br(text, settings)
     if parsed is not None:
         identifier, remainder = parsed
         return Requirement(identifier, remainder, "list")
     return Requirement("", text, "list")
 
 
-def _from_inline(lines: list[str]) -> tuple[list[Requirement], int, str] | None:
+def _from_inline(
+    lines: list[str], settings: NormalizerSettings
+) -> tuple[list[Requirement], int, str] | None:
     requirements: list[Requirement] = []
     first: int | None = None
     index = 0
@@ -433,7 +644,7 @@ def _from_inline(lines: list[str]) -> tuple[list[Requirement], int, str] | None:
         if stripped.startswith(("#", "|")):
             index += 1
             continue
-        match = _INLINE_BR.match(stripped)
+        match = settings.patterns.inline_br.match(stripped)
         if match is None:
             index += 1
             continue
@@ -446,7 +657,7 @@ def _from_inline(lines: list[str]) -> tuple[list[Requirement], int, str] | None:
             following = lines[index]
             if not following.strip():
                 break
-            if _INLINE_BR.match(following.lstrip()) is not None:
+            if settings.patterns.inline_br.match(following.lstrip()) is not None:
                 break
             if following.lstrip().startswith(("#", "|")):
                 break
@@ -459,7 +670,7 @@ def _from_inline(lines: list[str]) -> tuple[list[Requirement], int, str] | None:
 
 
 def _from_paragraphs(
-    lines: list[str], start: int | None
+    lines: list[str], start: int | None, settings: NormalizerSettings
 ) -> tuple[list[Requirement], int, str] | None:
     begin = (start + 1) if start is not None else 0
     blocks = re.split(r"\n\s*\n", "\n".join(lines[begin:]))
@@ -473,7 +684,7 @@ def _from_paragraphs(
             and not _is_url_only(row)
         ]
         text = _block(rows)
-        if len(text) < 20:
+        if len(text) < settings.paragraph_min_length:
             continue
         requirements.append(Requirement("", text, "paragraph"))
     if not requirements:
@@ -481,25 +692,30 @@ def _from_paragraphs(
     return requirements, begin, "paragraph"
 
 
-def _assign_ids(requirements: list[Requirement]) -> list[Requirement]:
-    explicit = {_id_number(item.id) for item in requirements if item.id}
-    explicit.discard(None)
+def _assign_ids(
+    requirements: list[Requirement], settings: NormalizerSettings
+) -> list[Requirement]:
+    prefix = settings.id_prefix.upper()
+    explicit = {item.id.strip().upper() for item in requirements if item.id}
     next_number = 1
     assigned: list[Requirement] = []
     for item in requirements:
         if item.id:
             assigned.append(item)
             continue
-        while next_number in explicit:
+        while f"{prefix}-{next_number}" in explicit:
             next_number += 1
-        explicit.add(next_number)
-        assigned.append(Requirement(f"BR-{next_number}", item.text, item.source))
+        identifier = f"{prefix}-{next_number}"
+        explicit.add(identifier)
+        assigned.append(Requirement(identifier, item.text, item.source))
     return assigned
 
 
-def _dedupe(requirements: list[Requirement]) -> tuple[list[Requirement], list[str]]:
+def _dedupe(
+    requirements: list[Requirement], settings: NormalizerSettings
+) -> tuple[list[Requirement], list[str]]:
     unique: list[Requirement] = []
-    seen: set[int | None] = set()
+    seen: set[str] = set()
     duplicates: list[str] = []
     empty: list[str] = []
     for item in requirements:
@@ -507,7 +723,7 @@ def _dedupe(requirements: list[Requirement]) -> tuple[list[Requirement], list[st
         if not text:
             empty.append(item.id)
             continue
-        key = _id_number(item.id)
+        key = item.id.strip().upper()
         if key in seen:
             duplicates.append(item.id)
             continue
@@ -526,16 +742,13 @@ def _dedupe(requirements: list[Requirement]) -> tuple[list[Requirement], list[st
     return unique, warnings
 
 
-def _id_number(identifier: str) -> int | None:
-    match = _BR_PATTERN.fullmatch(identifier.strip())
-    return int(match.group(1)) if match else None
-
-
 def _unique(values: list[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-def _preamble(lines: list[str], title_index: int | None) -> str:
+def _preamble(
+    lines: list[str], title_index: int | None, settings: NormalizerSettings
+) -> str:
     kept: list[str] = []
     for index, line in enumerate(lines):
         if index == title_index:
@@ -543,7 +756,7 @@ def _preamble(lines: list[str], title_index: int | None) -> str:
         if _is_url_only(line):
             continue
         heading = _HEADING.match(line)
-        if heading is not None and _REQUIREMENTS_HEADING.match(heading.group(2).strip()):
+        if heading is not None and _is_requirements_heading(heading.group(2), settings):
             continue
         kept.append(line)
     return _clean("\n".join(kept)).strip()
@@ -554,13 +767,14 @@ def _render(
     url: str | None,
     preamble: str,
     requirements: list[Requirement],
+    settings: NormalizerSettings,
 ) -> str:
     blocks = [f"# {title}"]
     if url:
-        blocks.append(f"**URL:** {url}")
+        blocks.append(f"**{settings.url_label}:** {url}")
     if preamble:
         blocks.append(preamble)
-    blocks.append("## Requirements")
+    blocks.append(f"## {settings.requirements_heading}")
     for item in requirements:
         blocks.append(f"### {item.id}\n{item.text}".rstrip())
     return "\n\n".join(blocks) + "\n"

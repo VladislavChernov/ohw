@@ -35,6 +35,17 @@ def workbench(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return tmp_path
 
 
+NO_ID_DOC = """# Требования к корзине
+
+https://shop.example.com/cart
+
+## Требования
+
+- вход в корзину
+- выход из корзины
+"""
+
+
 def _write_cp1251(directory: Path, name: str = "doc.md") -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / name
@@ -184,6 +195,100 @@ def test_normalize_only_fails_on_empty_document(
     code = main(
         [
             "--normalize-only",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert code == EXIT_USAGE
+
+
+def test_normalizer_config_file_changes_the_canonical_form(
+    workbench: Path, input_dir: Path, output_dir: Path
+) -> None:
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / "doc.md").write_text(NO_ID_DOC, encoding="utf-8")
+    config = workbench / "custom.toml"
+    config.write_text(
+        'id_prefix = "REQ"\nrequirements_heading = "Требования системы"\n',
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "--normalize-only",
+            "--normalizer-config",
+            str(config),
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert code == EXIT_OK
+    text = (output_dir / "normalized" / "doc.md").read_text(encoding="utf-8")
+    assert "## Требования системы" in text
+    assert "### REQ-1" in text
+    assert "### REQ-2" in text
+
+
+def test_normalizer_toml_is_picked_up_from_the_working_directory(
+    workbench: Path, input_dir: Path, output_dir: Path
+) -> None:
+    input_dir.mkdir(parents=True, exist_ok=True)
+    (input_dir / "doc.md").write_text(NO_ID_DOC, encoding="utf-8")
+    (workbench / "normalizer.toml").write_text('id_prefix = "REQ"\n', encoding="utf-8")
+
+    code = main(
+        [
+            "--normalize-only",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert code == EXIT_OK
+    text = (output_dir / "normalized" / "doc.md").read_text(encoding="utf-8")
+    assert "### REQ-1" in text
+
+
+def test_missing_normalizer_config_returns_2(
+    workbench: Path, input_dir: Path, output_dir: Path
+) -> None:
+    _write_cp1251(input_dir)
+
+    code = main(
+        [
+            "--normalize-only",
+            "--normalizer-config",
+            str(workbench / "absent.toml"),
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert code == EXIT_USAGE
+
+
+def test_invalid_normalizer_config_returns_2(
+    workbench: Path, input_dir: Path, output_dir: Path
+) -> None:
+    _write_cp1251(input_dir)
+    config = workbench / "broken.toml"
+    config.write_text('id_prefix = "BR-1"\n', encoding="utf-8")
+
+    code = main(
+        [
+            "--normalize-only",
+            "--normalizer-config",
+            str(config),
             "--input-dir",
             str(input_dir),
             "--output-dir",

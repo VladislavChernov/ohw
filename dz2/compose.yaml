@@ -24,6 +24,7 @@ services:
       - ./output:/data/output
       - ./prompts:/app/prompts:ro
       - ./presets:/app/presets:ro
+      - ./normalizer.toml:/app/normalizer.toml:ro
     networks:
       - ohw-net
 
@@ -47,6 +48,7 @@ services:
       - ./output:/data/output
       - ./prompts:/app/prompts:ro
       - ./presets:/app/presets:ro
+      - ./normalizer.toml:/app/normalizer.toml:ro
     networks:
       - ohw-net
 
