@@ -1,0 +1,50 @@
+{
+  "artifact": "testcases",
+  "run_id": "20261101T082645415295Z",
+  "source": "llm",
+  "model": "qwen2.5:7b-instruct",
+  "presets": [],
+  "count": 10,
+  "judge_version": 4,
+  "judge_temperature": 0.0,
+  "prompt_sha256": "5c30897cd849cd6b047bff30e59365fe4438db1fea9ec39b6791fa7f5d25e67c",
+  "prompt_chars": 777,
+  "generated_artifact": null,
+  "scores": {
+    "readability": 3,
+    "context": 3,
+    "goal": 3,
+    "coverage": 3
+  },
+  "comments": {
+    "readability": "The instructions are clear and structured, but the requirement to use Russian for all text except URLs and product names is not explicitly stated, which could lead to confusion.",
+    "context": "The prompt provides the target URL, the number of test cases, and their types, but it is missing the output language and format instructions in English, which are required for clarity.",
+    "goal": "The deliverable and its format are clear, but the exact JSON keys are not specified.",
+    "coverage": "The prompt requires 6 positive and 4 negative test cases, but does not mention boundary scenarios or traceability to requirement ids."
+  },
+  "evidence": {
+    "readability": [
+      "Generate exactly 10 test cases",
+      "6 positive and 4 negative",
+      "Each test case must have: id, type (positive/negative), title, preconditions, steps, expected, requirement"
+    ],
+    "context": [
+      "Target site: https://shop.example.com/login",
+      "Generate exactly 10 test cases: 6 positive and 4 negative.",
+      "Each test case must have: id, type (positive/negative), title, preconditions, steps, expected, requirement."
+    ],
+    "goal": [
+      "Generate exactly 10 test cases",
+      "6 positive and 4 negative",
+      "Respond with a JSON object {"
+    ],
+    "coverage": [
+      "Generate exactly 10 test cases: 6 positive and 4 negative.",
+      "Every test case MUST set its 'requirement' field to the business requirement id (BR-N) from the Requirements section that it verifies."
+    ]
+  },
+  "summary": "The instructions are clear and structured, but the requirement to use Russian for all text except URLs and product names is not explicitly stated, which could lead to confusion. The prompt provides the target URL, the number of test cases, and their types, but it is missing the output language and format instructions in English, which are required for clarity. The deliverable and its format are clear, but the exact JSON keys are not specified. The prompt requires 6 positive and 4 negative test cases, but does not mention boundary scenarios or traceability to requirement ids.",
+  "note": "",
+  "average": 3.0,
+  "created_at": "2026-11-01T08:26:45+00:00"
+}
