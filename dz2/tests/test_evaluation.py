@@ -95,6 +95,17 @@ def test_build_evaluator_prompt_forbids_absent_instead_of_quotes() -> None:
     assert "character for character" in system
 
 
+def test_build_evaluator_prompt_asks_for_a_russian_comment() -> None:
+    """The workbench renders the comment as-is, so the judge must answer in Russian."""
+
+    system, user = build_evaluator_prompt(
+        PROMPT, "goal", artifact_type=ArtifactType.TESTCASES
+    )
+
+    assert "Write the comment in Russian" in system
+    assert "in Russian" in user
+
+
 def test_context_rubric_counts_a_link_inside_requirements() -> None:
     """The judge called the URL missing while quoting it as evidence."""
 
@@ -429,7 +440,7 @@ def test_quality_record_is_reproducible() -> None:
     assert payload["source"] == "llm"
     assert payload["presets"] == ["boundary-values"]
     assert payload["judge_temperature"] == 0.0
-    assert payload["judge_version"] == 4
+    assert payload["judge_version"] == 5
     assert payload["generated_artifact"] is None
     assert payload["evidence"]["readability"] == ["Generate exactly 10 test cases"]
     assert payload["prompt_sha256"] == hashlib.sha256(PROMPT.encode()).hexdigest()

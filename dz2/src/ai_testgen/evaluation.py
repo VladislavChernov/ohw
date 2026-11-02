@@ -32,7 +32,7 @@ CRITERIA_LABELS: dict[str, str] = {
     "coverage": "Покрытие сценариев",
 }
 EVALUATOR_TEMPERATURE = 0.0
-EVALUATOR_VERSION = 4
+EVALUATOR_VERSION = 5
 JUDGE_ATTEMPTS = 3
 
 CRITERION_RUBRIC: dict[str, str] = {
@@ -53,8 +53,9 @@ CRITERION_RUBRIC: dict[str, str] = {
         "1 = the model has to invent the subject, the data or the output shape.\n"
         "The target URL is present if any http(s) link appears anywhere in the\n"
         "prompt, including inside the requirements block. Requirements are present\n"
-        "if a requirements block or requirement ids are included. Do not call these\n"
-        "missing when they are there."
+        "if a requirements block or requirement ids are included. Output language\n"
+        "is present if the prompt says which language the answer must use. Do not\n"
+        "call these missing when they are there."
     ),
     "goal": (
         "Whether it is unambiguous what to produce and in which format: artifact\n"
@@ -63,7 +64,8 @@ CRITERION_RUBRIC: dict[str, str] = {
         "3 = the deliverable is clear, the format is only partly specified.\n"
         "1 = it is unclear what should be generated.\n"
         "If the prompt names the required sections or the exact JSON keys, the\n"
-        "format is explicit."
+        "format is explicit. A list of fields the answer must contain is also an\n"
+        "explicit format."
     ),
     "coverage": (
         "Whether the prompt demands the right scenario breadth and traceability\n"
@@ -72,13 +74,18 @@ CRITERION_RUBRIC: dict[str, str] = {
         "For plans, reports and coverage matrices: the equivalent breadth and\n"
         "traceability.\n"
         "5 = all scenario groups and requirement traceability are required.\n"
-        "3 = positive and negative only, boundaries and traceability missing.\n"
+        "3 = positive and negative only: either boundaries or traceability is\n"
+        "    missing. Name the missing one; do not call a present one missing.\n"
         "1 = only the happy path is requested.\n"
         "Grade what the prompt asks the model to cover, not whether execution\n"
         "results exist. A rule that demands failure or negative paths, or checks\n"
         "for every requirement id, counts as coverage even when the same prompt\n"
         "forbids inventing test results. A preset that adds failure paths counts\n"
-        "as part of the prompt."
+        "as part of the prompt. A field that must hold a requirement id taken from\n"
+        "the Requirements section is traceability; a rule that demands negative or\n"
+        "failure scenarios is the negative group. Judge the groups one by one: if\n"
+        "traceability is required and boundaries are not, say exactly that instead\n"
+        "of listing every group as missing."
     ),
 }
 
@@ -99,13 +106,29 @@ Rules:
 - Before calling an input missing, search the whole prompt for it: the
   requirements block, the target-site line and the preset block are all part of
   the prompt.
+- Never call an element missing when the prompt states it in other words. A
+  requirement that the answer "must be in Russian" is an output-language rule;
+  a list of JSON keys or section names is an output format; a rule tying each
+  item to a requirement id is traceability.
+- Do not soften a 5 out of caution: when the 5 anchor is satisfied, answer 5.
+  Score 3 only when you can name the specific element that is absent from the
+  prompt text.
 
 How to answer:
 1. Collect evidence first: copy 3 to 5 fragments of 3-12 words each from the
    prompt that are relevant to this criterion, character for character, in the
    original language. Do not paraphrase them.
 2. Only then decide the score from the rubric.
-3. Write one sentence that ties the evidence to the score.
+3. Before answering, check every element you intend to call missing: find the
+   line where it would belong and confirm the prompt does not express it there
+   or anywhere else. If it does, it is not missing.
+4. Write one sentence that ties the evidence to the score. The comment must not
+   deny an element the prompt contains: a reader checks it against the prompt.
+   Read the prompt to the last line - language and format rules often sit after
+   the requirements block.
+
+Write the comment in Russian: the workbench is Russian-language. The evidence
+stays verbatim in the language of the prompt, the comment is translated.
 
 Never write the word "absent" instead of collecting evidence. If the prompt
 really lacks something, quote the fragment where it should be and name what is
@@ -124,14 +147,15 @@ Preset additions: {presets}.
 {prompt}
 PROMPT>>>
 
-The prompt is written in English and embeds Russian requirements. Judge the
-English instructions that define the task and the format.
+Judge the whole prompt, including the lines that follow the requirements block:
+they set the output language and the formatting rules.
 
 Return one JSON object with exactly these keys, in this order:
 {{"evidence": ["<verbatim fragment>", "<verbatim fragment>", "<verbatim fragment>"],
  "score": <integer, your own grade for {label} on the scale above>,
- "comment": "<one sentence: what the evidence shows, and what is missing if anything>"}}
+ "comment": "<one sentence in Russian: what the evidence shows, and what is missing if anything>"}}
 No markdown fences, no text outside the object.
+The comment must be Russian; the evidence quotes stay in the prompt's language.
 """
 
 _FENCE_PATTERN = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
