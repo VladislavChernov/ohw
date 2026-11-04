@@ -20,33 +20,54 @@
 
 ## Быстрый старт
 
-Требуется Python 3.13+.
+Нужен только Docker — зависимости ставятся внутри контейнера.
+
+**Windows:**
+
+```bat
+run_windows.bat
+```
+
+**Linux / macOS:**
+
+```bash
+chmod +x run_linux_mac.sh
+./run_linux_mac.sh
+```
+
+Без аргументов выполняется полный демо-прогон: оба датасета × обе модели,
+метрики, графики и сравнительная сводка. Свои аргументы передаются как есть:
+
+```bat
+run_windows.bat --dataset breast_cancer --model logistic_regression --train --predict --metrics --visualize
+```
+
+Локальный запуск без Docker:
 
 ```bash
 cd dz9
 uv sync
-uv run python -m model_quality_lab --train --predict --metrics --visualize
+uv run python -m model_quality_lab --all-datasets --all-models --train --predict --metrics --visualize
 ```
 
-Запуск через Docker (зависимости ставятся внутри контейнера):
-
-```bash
-docker run --rm -v "D:/Otus/ohw:/app" -w /app \
-  ghcr.io/astral-sh/uv:python3.13-bookworm-slim \
-  sh -c "uv pip install --system -r dz9/requirements.txt && \
-         PYTHONPATH=/app/dz9/src python -m model_quality_lab \
-         --all-datasets --all-models --train --predict --metrics --visualize"
-```
+Подробно — в [`HOWTO.md`](HOWTO.md).
 
 ## Структура
 
 ```
 dz9/
+├── README.md                # обзор проекта
+├── HOWTO.md                 # как добавить датасет, запустить, где результаты
+├── METRICS_GLOSSARY.md      # глоссарий метрик
+├── example_metrics_run.md   # контрольный прогон и разбор датасетов
 ├── pyproject.toml           # пакет, зависимости, pytest/ruff/mypy
+├── run_windows.bat          # запуск пайплайна (Windows)
+├── run_linux_mac.sh         # запуск пайплайна (Linux/macOS)
+├── run_tests_docker.{bat,ps1,sh}  # quality gate (ruff/mypy/pytest)
 ├── data/
 │   ├── heart.csv            # синтетический демо-набор (10 строк)
 │   └── pima_indians.csv     # Pima Indians Diabetes (768 строк)
-├── output/                  # генерируемые PNG-графики (gitignored)
+├── output/                  # генерируемые PNG/модели (gitignored)
 ├── src/model_quality_lab/
 │   ├── config.py            # константы + QualityLabConfig
 │   ├── dataset.py           # registry, csv:<path>, split, валидации
@@ -118,6 +139,16 @@ plot_comparison({"logistic_regression": metrics}, output_path="output/comparison
 
 ## Тесты и качество
 
+Скрипты quality gate (ruff + mypy + pytest в Docker):
+
+| Платформа | Команда |
+|---|---|
+| Windows (cmd) | `run_tests_docker.bat` |
+| Windows (PowerShell) | `powershell -File run_tests_docker.ps1` |
+| Linux / macOS | `bash run_tests_docker.sh` |
+
+Локально:
+
 ```bash
 cd dz9
 uv run pytest -q
@@ -129,10 +160,12 @@ uv run mypy src
 
 ## Документация
 
+- [`HOWTO.md`](HOWTO.md) — как добавить датасет, запустить пайплайн и где
+  смотреть результаты.
 - [`METRICS_GLOSSARY.md`](METRICS_GLOSSARY.md) — что означают accuracy,
   precision, recall, матрица ошибок и стратификация.
-- [`example_metrics_run.md`](example_metrics_run.md) — контрольный прогон на
-  двух датасетах и двух моделях с воспроизводимой командой.
+- [`example_metrics_run.md`](example_metrics_run.md) — контрольный прогон,
+  разбор датасетов и интерпретация метрик.
 
 ## Источник данных
 
