@@ -17,11 +17,11 @@
       - `requires-python = ">=3.13"`;
       - deps: `scikit-learn`, `matplotlib`;
       - dev group: `pytest`, `ruff`, `mypy`;
-      - `build-system`: `uv_build`, `module-name = "model_quality"`;
+      - `build-system`: `uv_build`, `module-name = "model_quality_lab"`;
       - `[tool.pytest.ini_options] markers`: unit (без интеграции);
       - `[tool.ruff]`, `[tool.mypy]` без ослаблений.
-- [ ] 1.2 `dz9/src/model_quality/__init__.py` с `__version__`.
-- [ ] 1.3 `dz9/src/model_quality/__main__.py` — точка входа (если CLI
+- [ ] 1.2 `dz9/src/model_quality_lab/__init__.py` с `__version__`.
+- [ ] 1.3 `dz9/src/model_quality_lab/__main__.py` — точка входа (если CLI
       подтвердит ТЗ 15.5).
 - [ ] 1.4 `dz9/config.py`: `QualityLabConfig` (seed, test_size, model_name,
       data_dir, output_dir).

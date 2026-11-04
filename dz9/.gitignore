@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+
+# Model artifacts
+*.pkl
+
+# Run logs
+test_output.log
+run_all_models_output.log
