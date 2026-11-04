@@ -127,6 +127,13 @@ uv run mypy src
 
 Требования: unit-тесты без сети и внешних данных; `ruff` и `mypy` — чисто.
 
+## Документация
+
+- [`METRICS_GLOSSARY.md`](METRICS_GLOSSARY.md) — что означают accuracy,
+  precision, recall, матрица ошибок и стратификация.
+- [`example_metrics_run.md`](example_metrics_run.md) — контрольный прогон на
+  двух датасетах и двух моделях с воспроизводимой командой.
+
 ## Источник данных
 
 `pima_indians.csv` — Pima Indians Diabetes (UCI), приведён к формату
