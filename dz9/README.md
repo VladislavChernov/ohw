@@ -60,6 +60,7 @@ dz9/
 ├── HOWTO.md                 # как добавить датасет, запустить, где результаты
 ├── METRICS_GLOSSARY.md      # глоссарий метрик
 ├── example_metrics_run.md   # контрольный прогон и разбор датасетов
+├── risks.md                 # риски и ограничения методологии
 ├── pyproject.toml           # пакет, зависимости, pytest/ruff/mypy
 ├── run_windows.bat          # запуск пайплайна (Windows)
 ├── run_linux_mac.sh         # запуск пайплайна (Linux/macOS)
@@ -166,6 +167,8 @@ uv run mypy src
   precision, recall, матрица ошибок и стратификация.
 - [`example_metrics_run.md`](example_metrics_run.md) — контрольный прогон,
   разбор датасетов и интерпретация метрик.
+- [`risks.md`](risks.md) — риски и ограничения методологии: hold-out split,
+  пропуски в Pima, отсутствие подбора гиперпараметров.
 
 ## Источник данных
 

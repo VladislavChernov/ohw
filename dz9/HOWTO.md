@@ -162,6 +162,7 @@ python -m model_quality_lab --dataset my_dataset --train --predict --metrics --v
 - **Документация:**
   - [`example_metrics_run.md`](example_metrics_run.md) — контрольный прогон и
     разбор датасетов;
+  - [`risks.md`](risks.md) — риски и ограничения методологии;
   - [`METRICS_GLOSSARY.md`](METRICS_GLOSSARY.md) — что означают метрики.
 
 `output/` не хранится в git: графики и модели генерируются заново при каждом
