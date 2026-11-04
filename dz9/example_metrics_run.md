@@ -118,13 +118,31 @@ precision, если важна цена ложной тревоги.
 - Числа зависят от версий scikit-learn/numpy; при обновлении возможны
   небольшие расхождения.
 
-## Артефакты
+## Артефакты последнего прогона
 
-- `output/metrics_breast_cancer_logistic_regression.png`
-- `output/metrics_breast_cancer_perceptron.png`
-- `output/metrics_pima_indians_logistic_regression.png`
-- `output/metrics_pima_indians_perceptron.png`
-- `output/metrics_comparison.png`
+Все графики ниже сгенерированы последним полным прогоном
+(`--all-datasets --all-models --visualize`).
+
+### Сравнительный график
+
+[![Сравнение моделей](output/metrics_comparison.png)](output/metrics_comparison.png)
+
+### `breast_cancer`
+
+| Модель | График |
+|---|---|
+| `logistic_regression` | [![breast_cancer / logistic_regression](output/metrics_breast_cancer_logistic_regression.png)](output/metrics_breast_cancer_logistic_regression.png) |
+| `perceptron` | [![breast_cancer / perceptron](output/metrics_breast_cancer_perceptron.png)](output/metrics_breast_cancer_perceptron.png) |
+
+### `pima_indians`
+
+| Модель | График |
+|---|---|
+| `logistic_regression` | [![pima_indians / logistic_regression](output/metrics_pima_indians_logistic_regression.png)](output/metrics_pima_indians_logistic_regression.png) |
+| `perceptron` | [![pima_indians / perceptron](output/metrics_pima_indians_perceptron.png)](output/metrics_pima_indians_perceptron.png) |
+
+Сами файлы лежат в `output/`; модели (`.pkl`) в git не хранятся, а графики
+последнего прогона закоммичены, чтобы ссылки в документации работали.
 
 ## Как воспроизвести
 

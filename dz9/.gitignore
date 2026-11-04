@@ -9,9 +9,13 @@ venv/
 # Model artifacts
 *.pkl
 
-# Generated artifacts
-output/
+# Generated artifacts: only the final run plots are kept for the docs
+output/*
+!output/metrics_breast_cancer_logistic_regression.png
+!output/metrics_breast_cancer_perceptron.png
+!output/metrics_pima_indians_logistic_regression.png
+!output/metrics_pima_indians_perceptron.png
+!output/metrics_comparison.png
 
 # Run logs
 test_output.log
-run_all_models_output.log
