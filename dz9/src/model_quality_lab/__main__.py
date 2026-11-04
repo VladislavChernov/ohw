@@ -5,7 +5,7 @@ import argparse
 from numpy.typing import NDArray
 
 from .config import (
-    DATA_DIR,
+    DEFAULT_DATASET_NAME,
     DEFAULT_MODEL_NAME,
     OUTPUT_DIR,
     RANDOM_STATE,
@@ -21,6 +21,7 @@ from .train import train
 from .visualize import plot_comparison, plot_metrics
 
 __all__ = [
+    "DEFAULT_DATASET_NAME",
     "DEFAULT_MODEL_NAME",
     "RANDOM_STATE",
     "TEST_SIZE",
@@ -36,6 +37,8 @@ __all__ = [
     "train",
 ]
 
+EXAMPLE_DATASETS = ["breast_cancer", "pima_indians"]
+
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     """Parse command-line arguments for the pipeline."""
@@ -50,10 +53,18 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help=f"Model to use. Choices: {SUPPORTED_MODELS}. Default: {DEFAULT_MODEL_NAME}",
     )
     parser.add_argument(
-        "--data",
+        "--dataset",
         type=str,
-        default=None,
-        help="Path to CSV dataset. Default: uses config default path.",
+        default=DEFAULT_DATASET_NAME,
+        help=(
+            "Dataset registry key (heart, breast_cancer, pima_indians) "
+            "or a csv:<path> locator."
+        ),
+    )
+    parser.add_argument(
+        "--all-datasets",
+        action="store_true",
+        help="Run the pipeline sequentially for breast_cancer and pima_indians.",
     )
     parser.add_argument(
         "--test-size",
@@ -104,91 +115,93 @@ def main(args: list[str] | None = None) -> None:
     """Main entry point for the CLI pipeline."""
     parsed = parse_args(args)
 
+    dataset_names = EXAMPLE_DATASETS if parsed.all_datasets else [parsed.dataset]
+    models_to_run = SUPPORTED_MODELS if parsed.all_models else [parsed.model]
+
     print("=" * 60)
     print("Model-Quality-Lab Pipeline")
     print("=" * 60)
     print(f"Random state: {parsed.random_state}")
     print(f"Test size: {parsed.test_size}")
-    print(f"Model: {parsed.model}")
-    print(f"Data: {parsed.data or 'default (heart.csv)'}")
+    print(f"Model(s): {models_to_run}")
+    print(f"Dataset(s): {dataset_names}")
     print("=" * 60)
 
-    # Load dataset
-    data_path = parsed.data or str(DATA_DIR / "heart.csv")
-    print(f"\nLoading dataset from: {data_path}")
-    dataset = load_dataset(data_path)
-
-    # Determine which models to run
-    models_to_run: list[str]
-    if parsed.all_models:
-        models_to_run = SUPPORTED_MODELS
-        print(f"\nRunning ALL models: {models_to_run}")
-    else:
-        models_to_run = [parsed.model]
-        print(f"\nRunning model: {parsed.model}")
-
-    # Track results for comparison
+    # Track results for comparison (key: model name or dataset:model)
     results: dict[str, dict] = {}
 
-    # Run selected models
-    for model_name in models_to_run:
-        print(f"\n{'=' * 40}")
-        print(f"Training model: {model_name}")
-        print(f"{'=' * 40}")
+    for dataset_name in dataset_names:
+        print(f"\nLoading dataset: {dataset_name}")
+        dataset = load_dataset(
+            dataset_name,
+            test_size=parsed.test_size,
+            random_state=parsed.random_state,
+        )
 
-        # Build model
-        model = build_model(model_name)
+        for model_name in models_to_run:
+            result_key = (
+                model_name if len(dataset_names) == 1 else f"{dataset_name}:{model_name}"
+            )
 
-        # Train model
-        if parsed.train:
-            print("Training...")
-            model = train(model_name=model_name, dataset=dataset)
-            print("Training completed!")
+            print(f"\n{'=' * 40}")
+            print(f"Dataset: {dataset_name} | model: {model_name}")
+            print(f"{'=' * 40}")
 
-            # Save model if requested
-            if parsed.save_model:
-                save_path = OUTPUT_DIR / f"model_{model_name}.pkl"
-                save_model(model, save_path)
-                print(f"Model saved to: {save_path}")
+            # Build model
+            model = build_model(model_name)
 
-        # Run predictions if requested
-        y_pred: NDArray | None = None
-        if parsed.predict or parsed.metrics or parsed.visualize:
-            print("Running predictions...")
-            y_pred = predict(model, dataset=dataset)
-            print(f"Predictions shape: {len(y_pred)}")
+            # Train model
+            if parsed.train:
+                print("Training...")
+                model = train(model_name=model_name, dataset=dataset)
+                print("Training completed!")
 
-        # Compute metrics if requested
-        metrics_dict: dict[str, float] | None = None
-        if parsed.metrics or parsed.visualize:
-            print("Computing metrics...")
-            # Only compute metrics if we have predictions and test data
-            if y_pred is not None and dataset.y_test is not None and len(dataset.y_test) > 0:
-                metrics_dict = compute_metrics(dataset.y_test, y_pred)
-                print(f"Metrics: {metrics_dict}")
+                # Save model if requested
+                if parsed.save_model:
+                    save_path = OUTPUT_DIR / f"model_{dataset_name}_{model_name}.pkl"
+                    save_model(model, save_path)
+                    print(f"Model saved to: {save_path}")
 
-        # Visualize if requested
-        if parsed.visualize:
-            print("Generating visualization...")
-            # Only plot if we have metrics
-            if metrics_dict is not None:
-                plot_path = OUTPUT_DIR / f"metrics_{model_name}.png"
-                plot_file = plot_metrics(metrics_dict, output_path=plot_path)
-                print(f"Plot saved to: {plot_file}")
+            # Run predictions if requested
+            y_pred: NDArray | None = None
+            if parsed.predict or parsed.metrics or parsed.visualize:
+                print("Running predictions...")
+                y_pred = predict(model, dataset=dataset)
+                print(f"Predictions shape: {len(y_pred)}")
 
-        # Store results
-        results[model_name] = {
-            "metrics": metrics_dict,
-            "predictions": y_pred,
-            "model": model,
-        }
+            # Compute metrics if requested
+            metrics_dict: dict[str, float] | None = None
+            if parsed.metrics or parsed.visualize:
+                print("Computing metrics...")
+                if (
+                    y_pred is not None
+                    and dataset.y_test is not None
+                    and len(dataset.y_test) > 0
+                ):
+                    metrics_dict = compute_metrics(dataset.y_test, y_pred)
+                    print(f"Metrics: {metrics_dict}")
+
+            # Visualize if requested
+            if parsed.visualize:
+                print("Generating visualization...")
+                if metrics_dict is not None:
+                    plot_path = OUTPUT_DIR / f"metrics_{dataset_name}_{model_name}.png"
+                    plot_file = plot_metrics(metrics_dict, output_path=plot_path)
+                    print(f"Plot saved to: {plot_file}")
+
+            # Store results
+            results[result_key] = {
+                "metrics": metrics_dict,
+                "predictions": y_pred,
+                "model": model,
+            }
 
     # Summary
     print("\n" + "=" * 60)
     print("PIPELINE COMPLETED")
     print("=" * 60)
 
-    if parsed.all_models and len(results) > 1:
+    if len(results) > 1:
         comparison: dict[str, dict[str, float]] = {}
         for name, res in results.items():
             if res.get("metrics"):

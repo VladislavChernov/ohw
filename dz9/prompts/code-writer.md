@@ -117,12 +117,18 @@
 
 ### ML: загрузка данных
 
-1. `dataset.load(name) -> DatasetSplit` — generic mechanism: registry
-   (`breast_cancer`, `pima_indians`) + локатор `csv:<path>`.
+1. `dataset.load_dataset(name) -> DatasetSplit` — generic mechanism: registry
+   (`heart`, `breast_cancer`, `pima_indians`) + локатор `csv:<path>`.
 2. Формат размеченного CSV: колонки `feature_1…feature_N` + бинарная метка
    `label ∈ {0, 1}`.
-3. Датасет выбирается ключом конфигурации (`dataset`); конвейер выполняется
-   для каждого выбранного ключа.
+3. Датасет выбирается ключом (`--dataset`); конвейер выполняется для каждого
+   выбранного ключа (`--all-datasets` — последовательный прогон).
+4. Модели: `logistic_regression` и `perceptron` (MLP исключена); выбор через
+   `--model` / `--all-models`.
+5. Split — `sklearn.model_selection.train_test_split(stratify=y)`,
+   `TEST_SIZE = 0.2`, `random_state = 42`.
+6. Визуализация: `plot_metrics` (одна модель) и `plot_comparison`
+   (сравнение нескольких прогонов).
 
 ## Workflow
 

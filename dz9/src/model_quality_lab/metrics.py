@@ -37,7 +37,6 @@ def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     fp = int(((y_true == 0) & (y_pred == 1)).sum())
     fn = int(((y_true == 1) & (y_pred == 0)).sum())
 
-    n = len(y_true) + len(y_pred)  # total samples (simplified)
     n = len(y_true)
 
     # Calculate metrics with fail-safe zero handling

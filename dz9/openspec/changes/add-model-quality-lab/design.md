@@ -37,15 +37,15 @@ dz9/tests/                        # unit: dataset, model, train, predict,
 ### Датасеты
 
 - Generic mechanism: registry датасетов + локатор `csv:<path>`.
-- Реестр: `breast_cancer` (встроенный в scikit-learn, без скачивания) и
-  `pima_indians` (UCI, через `fetch_openml`/CSV) — как примеры загрузки
-  сторонних/встроенных наборов.
+- Реестр: `breast_cancer` (встроенный в scikit-learn, без скачивания),
+  `pima_indians` (CSV в `dz9/data/`, офлайн) и `heart` (синтетический
+  демо-набор).
 - Формат CSV стороннего датасета: колонки признаков `feature_1…feature_N`
   + бинарная метка `label ∈ {0, 1}`.
 - Для пользовательского датасета — достаточно положить файл в `dz9/data/`
   и передать локатор `csv:<path>`.
-- Датасет выбирается ключом конфигурации (`dataset`); конвейер выполняется
-  для каждого выбранного ключа (последовательные прогон/запуск по ключу).
+- Датасет выбирается ключом (`--dataset`); конвейер выполняется для каждого
+  выбранного ключа (`--all-datasets` — последовательный прогон).
 
 ### Разбиение
 
@@ -55,8 +55,11 @@ dz9/tests/                        # unit: dataset, model, train, predict,
 
 ### Модель
 
-- Делегирование в scikit-learn (`LogisticRegression` / `MLPClassifier`).
+- Делегирование в scikit-learn (`LogisticRegression` / `Perceptron`).
+- Обе модели обёрнуты в `Pipeline(StandardScaler, model)`: признаки на разных
+  шкалах, без масштабирования перцептрон деградирует.
 - Фиксированный `random_state`, `max_iter` ограничен конфигом.
+- Малая нейросеть (`MLPClassifier`) в объём работ не входит.
 
 ### Метрики
 
@@ -73,6 +76,8 @@ dz9/tests/                        # unit: dataset, model, train, predict,
 ### Визуализация
 
 - matplotlib, headless backend (Agg), сохранение PNG.
+- Одиночный график метрик и сравнительный график по нескольким
+  моделям/датасетам (`plot_comparison`).
 
 ## Тесты
 
@@ -80,9 +85,10 @@ dz9/tests/                        # unit: dataset, model, train, predict,
 - Roundtrip сохранения/загрузки.
 - Все unit-тесты без сети.
 
-## Открытые решения (заморожены в design)
+## Решённые вопросы (зафиксированы)
 
-- Точный состав датасета и модель — фиксируются конфигом
-  (`config.py`) и открытым вопросом ТЗ 15.
+- Датасеты: `breast_cancer` (sklearn), `pima_indians` (CSV в репозитории),
+  `heart` (демо); сторонние — через `csv:<path>`.
+- Модели: `LogisticRegression` и `Perceptron` (MLP исключена).
 - Формат внешнего CSV (`feature_*` + `label`) — зафиксирован в design;
-  провалидировать на сторонних данных при появлении первого прогона.
+  провалидирован на `heart.csv` и `pima_indians.csv`.

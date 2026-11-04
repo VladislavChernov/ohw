@@ -17,7 +17,7 @@ from model_quality_lab.visualize import plot_comparison, plot_metrics
 
 def test_load_dataset():
     """Test that dataset loads correctly and returns DatasetSplit."""
-    ds = load_dataset("dz9/data/heart.csv")
+    ds = load_dataset("heart")
     assert isinstance(ds, DatasetSplit), "Should return DatasetSplit"
     assert ds.X_train.shape[0] > 0, "X_train should not be empty"
     assert ds.X_test.shape[0] > 0, "X_test should not be empty"
@@ -38,7 +38,7 @@ def test_build_model():
 
 def test_train_model():
     """Test that model trains on dataset."""
-    ds = load_dataset("dz9/data/heart.csv")
+    ds = load_dataset("heart")
     model = train("logistic_regression", ds)
     assert model is not None, "Trained model should not be None"
     print("test_train_model PASSED")
@@ -46,7 +46,7 @@ def test_train_model():
 
 def test_predict():
     """Test that predictions can be made."""
-    ds = load_dataset("dz9/data/heart.csv")
+    ds = load_dataset("heart")
     model = train("logistic_regression", ds)
     y_pred = predict(model, ds)
     assert len(y_pred) == len(ds.y_test), "Predictions should match test set size"
@@ -86,7 +86,7 @@ def test_compute_metrics_zero_denominator():
 def test_save_load_model():
     """Test model save and load roundtrip."""
     import tempfile
-    ds = load_dataset("dz9/data/heart.csv")
+    ds = load_dataset("heart")
     model = train("logistic_regression", ds)
     
     with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
