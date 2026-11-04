@@ -177,4 +177,11 @@ uv run mypy src
 
 ## Лицензия
 
-Учебный проект (Otus, ДЗ9).
+Проект распространяется под лицензией MIT. Полный текст — в общем файле
+репозитория: [`../LICENSE.md`](../LICENSE.md).
+
+```text
+MIT License
+
+Copyright (c) 2026 VladislavChernov
+```
