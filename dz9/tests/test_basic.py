@@ -31,6 +31,14 @@ def test_load_dataset():
     assert ds.X_test.shape[0] > 0, "X_test should not be empty"
     assert ds.y_train.shape[0] > 0, "y_train should not be empty"
     assert ds.y_test.shape[0] > 0, "y_test should not be empty"
+    # Features and labels must describe the same rows.
+    assert ds.X_train.shape[0] == ds.y_train.shape[0]
+    assert ds.X_test.shape[0] == ds.y_test.shape[0]
+    assert ds.X_train.shape[1] == ds.X_test.shape[1], "Feature count must match"
+    assert not np.isnan(ds.X_train).any(), "X_train should not contain NaN"
+    # The configured 20% test share is respected (within one sample).
+    total = ds.X_train.shape[0] + ds.X_test.shape[0]
+    assert abs(ds.X_test.shape[0] / total - 0.2) < 0.01
     # Check label values are binary
     assert set(np.unique(ds.y_train)).issubset({0, 1}), "y_train should be binary"
     assert set(np.unique(ds.y_test)).issubset({0, 1}), "y_test should be binary"
@@ -44,12 +52,19 @@ def test_build_model():
     print("test_build_model PASSED")
 
 
-def test_train_model():
-    """Test that model trains on dataset."""
-    ds = load_dataset("heart")
-    model = train("logistic_regression", ds)
+@pytest.mark.parametrize("model_name", ["logistic_regression", "perceptron"])
+def test_train_model(model_name):
+    """Test that the model actually fits the training data."""
+    ds = load_dataset("breast_cancer")
+    model = train(model_name, ds)
     assert model is not None, "Trained model should not be None"
-    print("test_train_model PASSED")
+    final_estimator = model.steps[-1][1]
+    assert hasattr(final_estimator, "coef_"), "Trained model should have coefficients"
+    train_accuracy = model.score(ds.X_train, ds.y_train)
+    assert train_accuracy > 0.9, (
+        f"{model_name} should fit the training set, got {train_accuracy:.3f}"
+    )
+    print(f"test_train_model[{model_name}] PASSED")
 
 
 def test_predict():
@@ -103,9 +118,11 @@ def test_save_load_model():
     try:
         save_model(model, tmp_path)
         loaded_model = load_model(tmp_path)
-        # Check that loaded model can predict
-        y_pred = predict(loaded_model, ds)
-        assert len(y_pred) == len(ds.y_test)
+        # The loaded model must reproduce predictions exactly.
+        before = predict(model, ds)
+        after = predict(loaded_model, ds)
+        assert np.array_equal(before, after), "Loaded model must predict identically"
+        assert len(after) == len(ds.y_test)
         print("test_save_load_model PASSED")
     finally:
         import os
@@ -186,7 +203,8 @@ def test_plot_comparison(tmp_path):
 if __name__ == "__main__":
     test_load_dataset()
     test_build_model()
-    test_train_model()
+    test_train_model("logistic_regression")
+    test_train_model("perceptron")
     test_predict()
     test_compute_metrics()
     test_compute_metrics_zero_denominator()
