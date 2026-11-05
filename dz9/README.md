@@ -35,11 +35,32 @@ git pull
 cd dz9
 ```
 
+### Только dz9 (sparse checkout)
+
+Если остальные домашние задания не нужны, можно скачать только папку `dz9`:
+
+```bash
+git clone --depth 1 --filter=blob:none --sparse \
+  https://github.com/VladislavChernov/ohw.git
+cd ohw
+git sparse-checkout set dz9
+cd dz9
+```
+
+`--filter=blob:none` не скачивает содержимое остальных папок, а
+`git sparse-checkout set dz9` оставляет в рабочей копии только `dz9`.
+Файлы корня (включая `LICENSE.md`) при этом доступны. Позже можно добавить
+ещё задание: `git sparse-checkout add dz7`.
+
 ## Быстрый старт
 
 Нужен Docker (Docker Desktop на Windows/macOS, Docker Engine на Linux;
 Docker Desktop должен быть запущен) — зависимости ставятся внутри контейнера.
 Git нужен только чтобы скачать проект.
+
+Версии зависимостей зафиксированы точно: `requirements.txt` (Docker и CI)
+и `uv.lock` (локальный `uv sync`). Это те версии, на которых получены
+метрики и графики в [`example_metrics_run.md`](example_metrics_run.md).
 
 **Windows:**
 
@@ -93,6 +114,8 @@ dz9/
 ├── example_metrics_run.md   # контрольный прогон и разбор датасетов
 ├── risks.md                 # риски и ограничения методологии
 ├── pyproject.toml           # пакет, зависимости, pytest/ruff/mypy
+├── requirements.txt         # точные версии зависимостей для Docker/CI
+├── uv.lock                  # lock-файл для локального uv sync
 ├── run_windows.bat          # запуск пайплайна (Windows)
 ├── run_linux_mac.sh         # запуск пайплайна (Linux/macOS)
 ├── run_tests_docker.{bat,ps1,sh}  # quality gate (ruff/mypy/pytest)
