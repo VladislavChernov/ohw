@@ -24,7 +24,7 @@ docker run --rm \
   -v "$PROJECT_DIR":/app \
   -w /app \
   "$IMAGE" \
-  sh -c "uv pip install --system -r dz9/requirements.txt >/dev/null && echo '--- RUNNING RUFF LINTER ---' && ruff check dz9/src/ --config dz9/pyproject.toml --ignore EXE002 && echo '--- RUNNING MYPY TYPE CHECK ---' && mypy dz9/src/ --config-file dz9/pyproject.toml --ignore-missing-imports && echo '--- RUNNING PYTEST ---' && python -m pytest dz9/tests/ -v -p no:cacheprovider" 2>&1 | tee "$OUTPUT_FILE"
+  sh -c "uv pip install --system -r dz9/requirements.txt >/dev/null && echo '--- RUNNING RUFF LINTER ---' && ruff check dz9/src dz9/tests --config dz9/pyproject.toml && echo '--- RUNNING MYPY TYPE CHECK ---' && mypy dz9/src/ --config-file dz9/pyproject.toml --ignore-missing-imports && echo '--- RUNNING PYTEST ---' && python -m pytest dz9/tests/ -v -p no:cacheprovider" 2>&1 | tee "$OUTPUT_FILE"
 EXIT_CODE=${PIPESTATUS[0]}
 set -e
 

@@ -19,7 +19,7 @@ echo Image:       %IMAGE%
 echo Output file: %OUTPUT_FILE%
 echo.
 
-docker run --rm -v "%REPO_ROOT%:/app" -w /app "%IMAGE%" sh -c "uv pip install --system -r dz9/requirements.txt >/dev/null && ruff check dz9/src/ --config dz9/pyproject.toml --ignore EXE002 && mypy dz9/src/ --config-file dz9/pyproject.toml --ignore-missing-imports && python -m pytest dz9/tests/ -v -p no:cacheprovider" > "%OUTPUT_FILE%" 2>&1
+docker run --rm -v "%REPO_ROOT%:/app" -w /app "%IMAGE%" sh -c "uv pip install --system -r dz9/requirements.txt >/dev/null && ruff check dz9/src dz9/tests --config dz9/pyproject.toml && mypy dz9/src/ --config-file dz9/pyproject.toml --ignore-missing-imports && python -m pytest dz9/tests/ -v -p no:cacheprovider" > "%OUTPUT_FILE%" 2>&1
 set "EXIT_CODE=%ERRORLEVEL%"
 
 type "%OUTPUT_FILE%"

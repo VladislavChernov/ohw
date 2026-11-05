@@ -18,9 +18,28 @@
   нескольким моделям/датасетам; набор метрик настраивается в `PLOT_METRICS`.
 - **Детерминизм**: фиксированный seed, стратифицированный split.
 
+## Как получить проект
+
+```bash
+git clone https://github.com/VladislavChernov/ohw.git
+cd ohw/dz9
+```
+
+Все команды ниже выполняются из папки `dz9`: скрипты сами находят корень
+репозитория и монтируют его в контейнер. Если проект уже склонирован,
+обновите его:
+
+```bash
+cd ohw
+git pull
+cd dz9
+```
+
 ## Быстрый старт
 
-Нужен только Docker — зависимости ставятся внутри контейнера.
+Нужен Docker (Docker Desktop на Windows/macOS, Docker Engine на Linux;
+Docker Desktop должен быть запущен) — зависимости ставятся внутри контейнера.
+Git нужен только чтобы скачать проект.
 
 **Windows:**
 
@@ -50,6 +69,18 @@ uv sync
 uv run python -m model_quality_lab --all-datasets --all-models --train --predict --metrics --visualize
 ```
 
+Проверить, что всё работает, можно quality gate:
+
+```bash
+# Windows (cmd)
+run_tests_docker.bat
+
+# Linux / macOS
+bash run_tests_docker.sh
+```
+
+Ожидаемо: `ruff` и `mypy` без ошибок, все тесты `passed`.
+
 Подробно — в [`HOWTO.md`](HOWTO.md).
 
 ## Структура
@@ -68,7 +99,7 @@ dz9/
 ├── data/
 │   ├── heart.csv            # синтетический демо-набор (10 строк)
 │   └── pima_indians.csv     # Pima Indians Diabetes (768 строк)
-├── output/                  # генерируемые PNG/модели (gitignored)
+├── output/                  # 5 PNG последнего прогона (в git); модели и прочее gitignored
 ├── src/model_quality_lab/
 │   ├── config.py            # константы + QualityLabConfig
 │   ├── dataset.py           # registry, csv:<path>, split, валидации

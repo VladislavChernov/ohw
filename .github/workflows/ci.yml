@@ -26,3 +26,24 @@ jobs:
         run: uv run mypy
       - name: pytest (без e2e)
         run: uv run pytest -q
+
+  dz9:
+    name: dz9 (ruff + mypy + pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dz9
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv + Python 3.13
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: uv pip install --system -r requirements.txt
+      - name: ruff
+        run: ruff check src tests
+      - name: mypy
+        run: mypy src
+      - name: pytest
+        run: python -m pytest -q

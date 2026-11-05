@@ -8,18 +8,18 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 import numpy as np
 import pytest
 
-import model_quality_lab.config as config
+from model_quality_lab import config
 from model_quality_lab.config import enabled_plot_metrics
-from model_quality_lab.dataset import load_dataset, DatasetSplit
-from model_quality_lab.model import build_model
-from model_quality_lab.train import train
-from model_quality_lab.predict import predict
+from model_quality_lab.dataset import DatasetSplit, load_dataset
 from model_quality_lab.metrics import (
     compute_confusion_matrix,
     compute_metrics,
     format_confusion_matrix,
 )
-from model_quality_lab.persistence import save_model, load_model
+from model_quality_lab.model import build_model
+from model_quality_lab.persistence import load_model, save_model
+from model_quality_lab.predict import predict
+from model_quality_lab.train import train
 from model_quality_lab.visualize import plot_comparison, plot_metrics
 
 
