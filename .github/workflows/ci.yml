@@ -39,11 +39,11 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           python-version: "3.13"
-      - name: Install dependencies
-        run: uv pip install --system -r requirements.txt
+      - name: Install dependencies (uv.lock)
+        run: uv sync --frozen
       - name: ruff
-        run: ruff check src tests
+        run: uv run ruff check src tests
       - name: mypy
-        run: mypy src
+        run: uv run mypy src
       - name: pytest
-        run: python -m pytest -q
+        run: uv run pytest -q
