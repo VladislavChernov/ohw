@@ -26,6 +26,18 @@ MODEL_MAX_ITER = 5000
 # Default test/train split ratio
 TEST_SIZE = 0.2
 
+# Metrics drawn on plots, in this order. Set a metric to False to hide it.
+PLOT_METRICS: dict[str, bool] = {
+    "accuracy": True,
+    "precision": True,
+    "recall": True,
+}
+
+
+def enabled_plot_metrics() -> list[str]:
+    """Return plot metric names with the flag set to True, in config order."""
+    return [name for name, enabled in PLOT_METRICS.items() if enabled]
+
 
 @dataclass(frozen=True)
 class QualityLabConfig:

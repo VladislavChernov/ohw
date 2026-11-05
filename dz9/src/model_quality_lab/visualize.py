@@ -8,7 +8,21 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-from .config import OUTPUT_DIR
+from .config import OUTPUT_DIR, enabled_plot_metrics
+
+_BAR_COLORS = ["skyblue", "lightgreen", "salmon", "plum", "khaki", "lightslategray"]
+
+
+def _select_metrics(metrics: dict[str, float]) -> dict[str, float]:
+    """Keep only metrics enabled in config, preserving the config order."""
+    selected = {
+        name: metrics[name] for name in enabled_plot_metrics() if name in metrics
+    }
+    if not selected:
+        raise ValueError(
+            "no metrics enabled for plotting; check PLOT_METRICS in config.py"
+        )
+    return selected
 
 
 def plot_metrics(metrics: dict[str, float], 
@@ -19,7 +33,8 @@ def plot_metrics(metrics: dict[str, float],
     Parameters
     ----------
     metrics : Dict[str, float]
-        Dictionary with keys 'accuracy', 'precision', 'recall'.
+        Dictionary with keys 'accuracy', 'precision', 'recall'. Only metrics
+        enabled in ``PLOT_METRICS`` are drawn.
     output_path : Path, optional
         Path to save the plot to. If None, uses default output path.
 
@@ -33,11 +48,13 @@ def plot_metrics(metrics: dict[str, float],
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    labels = list(metrics.keys())
-    values = list(metrics.values())
+    selected = _select_metrics(metrics)
+    labels = list(selected.keys())
+    values = list(selected.values())
 
     plt.figure(figsize=(8, 5))
-    bars = plt.bar(labels, values, color=["skyblue", "lightgreen", "salmon"])
+    colors = [_BAR_COLORS[i % len(_BAR_COLORS)] for i in range(len(labels))]
+    bars = plt.bar(labels, values, color=colors)
     plt.ylim(0, 1.1)
     plt.title("Classification Metrics")
     plt.ylabel("Score")
@@ -83,7 +100,7 @@ def plot_comparison(
     Raises
     ------
     ValueError
-        If `results` is empty.
+        If `results` is empty or no metrics are enabled in ``PLOT_METRICS``.
     """
     if not results:
         raise ValueError("results must contain at least one model")
@@ -93,7 +110,15 @@ def plot_comparison(
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    metrics_keys = ["accuracy", "precision", "recall"]
+    metrics_keys = [
+        metric
+        for metric in enabled_plot_metrics()
+        if all(metric in values for values in results.values())
+    ]
+    if not metrics_keys:
+        raise ValueError(
+            "no metrics enabled for plotting; check PLOT_METRICS in config.py"
+        )
     models = list(results.keys())
     n_models = len(models)
     width = 0.25

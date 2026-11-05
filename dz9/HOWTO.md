@@ -148,6 +148,24 @@ python -m model_quality_lab --dataset my_dataset --train --predict --metrics --v
 | `breast_cancer` | встроен в scikit-learn, работает офлайн | 569 строк, 30 признаков |
 | `pima_indians` | `data/pima_indians.csv` (UCI Pima Indians Diabetes) | 768 строк, 8 признаков |
 
+### Какие метрики попадают на графики
+
+Список задаётся в `src/model_quality_lab/config.py` и общий для обоих типов
+графиков:
+
+```python
+PLOT_METRICS: dict[str, bool] = {
+    "accuracy": True,
+    "precision": True,
+    "recall": True,
+}
+```
+
+`False` убирает метрику с графиков; при этом она всё равно считается и
+печатается в консоли. Порядок ключей в словаре задаёт порядок столбцов.
+Если выключить все три, построение графика завершится ошибкой
+`no metrics enabled for plotting`.
+
 ## 4. Где смотреть результаты
 
 - **Консоль** — метрики каждого прогона, матрица ошибок

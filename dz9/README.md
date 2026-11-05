@@ -15,7 +15,7 @@
   печатается в консоль; fail-safe `0.0` при нулевом знаменателе.
 - **Сохранение модели**: pickle (`output/*.pkl`).
 - **Визуализация**: одиночный график метрик и сравнительный график по
-  нескольким моделям/датасетам.
+  нескольким моделям/датасетам; набор метрик настраивается в `PLOT_METRICS`.
 - **Детерминизм**: фиксированный seed, стратифицированный split.
 
 ## Быстрый старт
@@ -137,6 +137,7 @@ plot_comparison({"logistic_regression": metrics}, output_path="output/comparison
 | `SUPPORTED_MODELS` | `logistic_regression`, `perceptron` |
 | `DEFAULT_DATASET_NAME` | `heart` |
 | `MODEL_MAX_ITER` | `5000` |
+| `PLOT_METRICS` | `accuracy`, `precision`, `recall` — флаги `True`/`False`: что рисовать на графиках |
 
 ## Тесты и качество
 

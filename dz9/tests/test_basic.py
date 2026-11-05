@@ -6,6 +6,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 import numpy as np
+import pytest
+
+import model_quality_lab.config as config
+from model_quality_lab.config import enabled_plot_metrics
 from model_quality_lab.dataset import load_dataset, DatasetSplit
 from model_quality_lab.model import build_model
 from model_quality_lab.train import train
@@ -139,6 +143,35 @@ def test_plot_metrics(tmp_path):
     print("test_plot_metrics PASSED")
 
 
+def test_enabled_plot_metrics():
+    """All three metrics are plotted by default."""
+    assert enabled_plot_metrics() == ["accuracy", "precision", "recall"]
+    print("test_enabled_plot_metrics PASSED")
+
+
+def test_plot_metrics_respects_config(tmp_path, monkeypatch):
+    """A metric disabled in PLOT_METRICS is not drawn, but plotting still works."""
+    monkeypatch.setitem(config.PLOT_METRICS, "recall", False)
+    assert enabled_plot_metrics() == ["accuracy", "precision"]
+    path = plot_metrics(
+        {"accuracy": 0.85, "precision": 0.90, "recall": 0.80},
+        output_path=tmp_path / "metrics.png",
+    )
+    assert path.exists(), "Metrics plot should be saved"
+    print("test_plot_metrics_respects_config PASSED")
+
+
+def test_plot_comparison_rejects_all_disabled(monkeypatch):
+    """Disabling every metric is a configuration error."""
+    for name in list(config.PLOT_METRICS):
+        monkeypatch.setitem(config.PLOT_METRICS, name, False)
+    with pytest.raises(ValueError):
+        plot_comparison(
+            {"logistic_regression": {"accuracy": 0.9, "precision": 0.8, "recall": 0.85}}
+        )
+    print("test_plot_comparison_rejects_all_disabled PASSED")
+
+
 def test_plot_comparison(tmp_path):
     """Test comparison metrics plotting across multiple models."""
     results = {
@@ -160,5 +193,5 @@ if __name__ == "__main__":
     test_save_load_model()
     test_compute_confusion_matrix()
     test_format_confusion_matrix()
-    test_plot_metrics()
-    print("\nAll tests passed!")
+    test_enabled_plot_metrics()
+    print("\nFixture-free tests passed; run pytest for the full suite.")
