@@ -96,6 +96,9 @@ uv run python -m model_quality_lab --all-datasets --all-models --train --predict
 # Windows (cmd)
 run_tests_docker.bat
 
+# Windows (PowerShell)
+powershell -File run_tests_docker.ps1
+
 # Linux / macOS
 bash run_tests_docker.sh
 ```
