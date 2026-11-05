@@ -69,3 +69,24 @@ def compute_confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[in
     fn = int(((y_true == 1) & (y_pred == 0)).sum())
 
     return tp, tn, fp, fn
+
+
+def format_confusion_matrix(tp: int, tn: int, fp: int, fn: int) -> str:
+    """
+    Render a 2x2 confusion matrix as text for console output.
+
+    Rows are actual labels, columns are predicted labels.
+
+    Returns
+    -------
+    str
+        Multi-line table with TP, FN, FP and TN counts.
+    """
+    return "\n".join(
+        [
+            "Confusion matrix (test set, rows=actual, cols=predicted):",
+            f"  {'':<12}{'pred=1':<10}{'pred=0'}",
+            f"  {'actual=1':<12}{'TP=' + str(tp):<10}{'FN=' + str(fn)}",
+            f"  {'actual=0':<12}{'FP=' + str(fp):<10}{'TN=' + str(tn)}",
+        ]
+    )

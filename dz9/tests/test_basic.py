@@ -10,7 +10,11 @@ from model_quality_lab.dataset import load_dataset, DatasetSplit
 from model_quality_lab.model import build_model
 from model_quality_lab.train import train
 from model_quality_lab.predict import predict
-from model_quality_lab.metrics import compute_metrics, compute_confusion_matrix
+from model_quality_lab.metrics import (
+    compute_confusion_matrix,
+    compute_metrics,
+    format_confusion_matrix,
+)
 from model_quality_lab.persistence import save_model, load_model
 from model_quality_lab.visualize import plot_comparison, plot_metrics
 
@@ -117,20 +121,31 @@ def test_compute_confusion_matrix():
     print("test_compute_confusion_matrix PASSED")
 
 
-def test_plot_metrics():
+def test_format_confusion_matrix():
+    """Test console formatting of the confusion matrix."""
+    text = format_confusion_matrix(tp=3, tn=2, fp=0, fn=1)
+    assert "pred=1" in text, "Header should contain predicted columns"
+    assert "actual=1" in text, "Table should contain actual rows"
+    for cell in ("TP=3", "TN=2", "FP=0", "FN=1"):
+        assert cell in text, f"Table should contain {cell}"
+    print("test_format_confusion_matrix PASSED")
+
+
+def test_plot_metrics(tmp_path):
     """Test metrics plotting."""
     metrics = {"accuracy": 0.85, "precision": 0.90, "recall": 0.80}
-    plot_metrics(metrics)
+    path = plot_metrics(metrics, output_path=tmp_path / "metrics.png")
+    assert path.exists(), "Metrics plot should be saved"
     print("test_plot_metrics PASSED")
 
 
-def test_plot_comparison():
+def test_plot_comparison(tmp_path):
     """Test comparison metrics plotting across multiple models."""
     results = {
         "logistic_regression": {"accuracy": 0.9, "precision": 0.8, "recall": 0.85},
         "perceptron": {"accuracy": 0.7, "precision": 0.6, "recall": 0.75},
     }
-    path = plot_comparison(results)
+    path = plot_comparison(results, output_path=tmp_path / "comparison.png")
     assert path.exists(), "Comparison plot should be saved"
     print("test_plot_comparison PASSED")
 
@@ -144,5 +159,6 @@ if __name__ == "__main__":
     test_compute_metrics_zero_denominator()
     test_save_load_model()
     test_compute_confusion_matrix()
+    test_format_confusion_matrix()
     test_plot_metrics()
     print("\nAll tests passed!")

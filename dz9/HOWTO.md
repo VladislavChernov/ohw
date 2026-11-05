@@ -150,8 +150,8 @@ python -m model_quality_lab --dataset my_dataset --train --predict --metrics --v
 
 ## 4. Где смотреть результаты
 
-- **Консоль** — метрики каждого прогона и итоговая таблица
-  `Comparison summary`.
+- **Консоль** — метрики каждого прогона, матрица ошибок
+  (`Confusion matrix`, TP/TN/FP/FN) и итоговая таблица `Comparison summary`.
 - **`dz9/output/`** — графики (PNG):
   - `metrics_<dataset>_<model>.png` — accuracy / precision / recall одной
     модели;
@@ -165,8 +165,9 @@ python -m model_quality_lab --dataset my_dataset --train --predict --metrics --v
   - [`risks.md`](risks.md) — риски и ограничения методологии;
   - [`METRICS_GLOSSARY.md`](METRICS_GLOSSARY.md) — что означают метрики.
 
-`output/` не хранится в git: графики и модели генерируются заново при каждом
-запуске.
+`output/` не хранится в git целиком: графики и модели генерируются заново при
+каждом запуске. Исключение — пять графиков последнего прогона: они
+закоммичены, чтобы ссылки в документации работали на GitHub.
 
 ## 5. Тесты и качество кода
 

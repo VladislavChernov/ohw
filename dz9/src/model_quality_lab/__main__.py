@@ -13,7 +13,7 @@ from .config import (
     TEST_SIZE,
 )
 from .dataset import DatasetSplit, load_dataset
-from .metrics import compute_metrics
+from .metrics import compute_confusion_matrix, compute_metrics, format_confusion_matrix
 from .model import build_model
 from .persistence import load_model, save_model
 from .predict import predict
@@ -27,7 +27,9 @@ __all__ = [
     "TEST_SIZE",
     "DatasetSplit",
     "build_model",
+    "compute_confusion_matrix",
     "compute_metrics",
+    "format_confusion_matrix",
     "load_dataset",
     "load_model",
     "plot_comparison",
@@ -180,6 +182,10 @@ def main(args: list[str] | None = None) -> None:
                 ):
                     metrics_dict = compute_metrics(dataset.y_test, y_pred)
                     print(f"Metrics: {metrics_dict}")
+                    tp, tn, fp, fn = compute_confusion_matrix(
+                        dataset.y_test, y_pred
+                    )
+                    print(format_confusion_matrix(tp, tn, fp, fn))
 
             # Visualize if requested
             if parsed.visualize:

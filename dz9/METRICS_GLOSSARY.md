@@ -21,6 +21,29 @@
 
 `N = TP + TN + FP + FN` — общее число объектов в тестовой выборке.
 
+## Где посмотреть матрицу ошибок
+
+Матрица считается для каждого прогона на тестовой выборке и печатается в
+консоль, если указан `--metrics` или `--visualize`:
+
+```text
+Confusion matrix (test set, rows=actual, cols=predicted):
+              pred=1    pred=0
+  actual=1    TP=71     FN=1
+  actual=0    FP=1      TN=41
+```
+
+Строки — истинный класс, столбцы — предсказание модели.
+
+- Отдельного файла с матрицей нет: она не сохраняется на диск, а
+  пересчитывается из предсказаний при каждом запуске.
+- На графиках `output/metrics_*.png` её тоже нет — там только три столбца
+  accuracy / precision / recall.
+- Готовые числа контрольного прогона выписаны в
+  [`example_metrics_run.md`](example_metrics_run.md#матрицы-ошибок).
+- В коде матрицу считает `compute_confusion_matrix`, а форматирует для
+  консоли `format_confusion_matrix` (`src/model_quality_lab/metrics.py`).
+
 ## Accuracy (доля правильных ответов)
 
 ```text
