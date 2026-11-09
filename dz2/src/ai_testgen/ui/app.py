@@ -81,6 +81,12 @@ _FENCE_PATTERN = re.compile(r"^\s*```[a-zA-Z]*\s*$", re.MULTILINE)
 
 MANUAL_MODEL_OPTION = "Другая модель (ввести вручную)"
 
+#: Top-level pages. The generator is the original workbench; the model check
+#: page is the Dz8 lab rendered from an optional sibling package.
+PAGE_GENERATOR = "Генератор"
+PAGE_MODEL_CHECK = "Проверка модели"
+PAGES: tuple[str, ...] = (PAGE_GENERATOR, PAGE_MODEL_CHECK)
+
 STRATEGY_LABELS: dict[str, str] = {
     "heading": "разделы BR-N",
     "table": "таблица",
@@ -100,7 +106,34 @@ CONNECTION_PRESETS: tuple[tuple[str, str], ...] = (
 
 def main() -> None:
     st.set_page_config(page_title="Генератор тестов по требованиям", layout="wide")
+    with st.sidebar:
+        page = st.radio(
+            "Страница",
+            PAGES,
+            key="dz2_page",
+            help="«Генератор» создаёт артефакты, «Проверка модели» открывает лабораторию Dz8.",
+        )
+    if page == PAGE_MODEL_CHECK:
+        _render_model_check()
+        return
     _render()
+
+
+def _render_model_check() -> None:
+    """Render the Dz8 page if the optional package is installed.
+
+    Dz8 is a separate distribution mounted into the same image. Importing it
+    lazily keeps the generator usable when the lab is absent.
+    """
+    try:
+        from llm_degradation.ui.page import render_page
+    except ImportError as exc:
+        st.error(
+            "Страница «Проверка модели» недоступна: пакет llm_degradation не "
+            f"установлен или не смонтирован ({exc})."
+        )
+        return
+    render_page()
 
 
 def _render() -> None:

@@ -178,10 +178,12 @@ dz2 UI (8501)
                  ├─ вкладка «API» ────────────► probes.api_contract
                  ├─ вкладка «Канарейка» ──────► probes.canary
                  ├─ вкладка «Деградация» ────► degradation
+                 ├─ вкладка «Последний прогон» ► report (самый свежий report.json)
                  └─ вкладка «Отчёты» ────────► report
                                                    │
                                                    ▼
                                          dz8/output/<run_id>/
+                                         (хранятся последние keep_runs)
 
 CLI (внутри dz2-ui-1):
   python -m llm_degradation <command> ──► те же функции, что UI
@@ -618,7 +620,7 @@ Jaccard: `|A ∩ B| / |A ∪ B|`; оба пусты → `1.0`, иначе `0.0`.
 |---|---|---|
 | `API-01` | `GET /api/version` | 200, `version` непустой |
 | `API-02` | `GET /api/tags` | 200, `models` — массив с `name`, `model`, `digest`, `size`, `details` |
-| `API-03` | `POST /api/show {"model": "<model>"}` | 200, `digest`, `details`, `model_info` |
+| `API-03` | `POST /api/show {"model": "<model>"}` | 200, `details`, `model_info` (`digest` в Ollama ≥ 0.12 приходит только из `/api/tags`) |
 | `API-04` | `POST /api/chat` минимальный | 200, `message.content` непустой, `done=true`, `eval_count > 0` |
 | `API-05` | `POST /api/chat` с `format=json` | 200, `message.content` парсится |
 | `API-06` | `POST /api/chat` неизвестная модель | 404, `error` непустой |
@@ -844,6 +846,7 @@ docker compose exec ui python -m llm_degradation health --model llama3 --json
 | `--num-ctx N` | `4096` | контекст |
 | `--num-predict N` | `512` | максимум токенов |
 | `--max-retries N` | `3` | retry |
+| `--keep-runs N` | `3` | сколько последних каталогов `output/` хранить (>= 1) |
 | `--preset ID` | нет | пресет, можно несколько |
 | `--output-dir PATH` | `/data/dz8-output` | отчёты |
 | `--json` | false | один JSON в stdout |
@@ -851,7 +854,8 @@ docker compose exec ui python -m llm_degradation health --model llama3 --json
 
 Приоритет: CLI > env > `config.toml` > defaults. Env:
 `LLM_LAB_BASE_URL`, `LLM_LAB_MODEL`, `LLM_LAB_TIMEOUT`,
-`LLM_LAB_OUTPUT_DIR`, `LLM_LAB_INPUT_DIR`, `OLLAMA_BASE_URL`,
+`LLM_LAB_OUTPUT_DIR`, `LLM_LAB_INPUT_DIR`, `LLM_LAB_KEEP_RUNS`,
+`OLLAMA_BASE_URL`,
 `OLLAMA_MODEL`, `OLLAMA_TIMEOUT`, `DZ2_PROMPT_DIR`, `DZ2_PRESETS_DIR`,
 `AI_TESTGEN_NORMALIZER_CONFIG`.
 
@@ -1065,7 +1069,7 @@ docker compose exec ui python -m llm_degradation report --list
 - `streamlit.testing.v1.AppTest` для `dz2` app:
   - radio существует;
   - «Генерация артефактов» — пять вкладок, как раньше;
-  - «Проверка модели» — если `llm_degradation` импортируется, семь вкладок;
+  - «Проверка модели» — если `llm_degradation` импортируется, восемь вкладок;
   - если импорт замокан на `ImportError`, показывается сообщение, а не
     исключение.
 - `dz8/tests/test_ui_page.py`: `render_page()` на записанных ответах,
@@ -1242,6 +1246,10 @@ golden_dir = "golden"
 prompt_dir = "../dz2/prompts"
 presets_dir = "../dz2/presets"
 normalizer_config = "../dz2/normalizer.toml"
+
+[reports]
+# Хранить только последние N каталогов output/ (2-3 достаточно для демо).
+keep_runs = 3
 
 [thresholds]
 hallucination_rate_max = 0.25
@@ -1469,7 +1477,7 @@ dz8/tests/
 | `test_degradation.py` | Wilson, bootstrap с фиксированным seed, effect size, вердикты |
 | `test_report.py` | запись/чтение, `extra=forbid`, `schema_version`, MD, каталог |
 | `test_cli.py` | `main(argv)`, exit codes, `--json` ровно один объект, stderr |
-| `test_ui_page.py` | `render_page()`: 7 вкладок, health с моком, таблицы |
+| `test_ui_page.py` | `render_page()`: 8 вкладок, health с моком, прогресс, таблицы |
 | `test_golden.py` | golden JSON валиден; записанные ответы дают ожидаемые метрики |
 
 Минимум: **60 unit-тестов**.
@@ -1609,40 +1617,40 @@ ruff/mypy — чисто.
 
 ### 17.1. Код
 
-- [ ] `dz8/src/llm_degradation` реализован по разделам 4–10.
-- [ ] `llm-lab` работает внутри `dz2-ui-1`.
-- [ ] `llm_degradation.ui.page.render_page()` работает.
-- [ ] `dz2` UI: переключатель страниц, защищённый импорт.
-- [ ] `dz2/compose.yaml`: mount и env.
-- [ ] `dz2` без `dz8` работает как раньше.
-- [ ] `dz2/prompts`, `dz2/presets`, `dz2/normalizer.toml` не изменены.
-- [ ] Новых постоянных контейнеров нет.
+- [x] `dz8/src/llm_degradation` реализован по разделам 4–10.
+- [x] `llm-lab` работает внутри `dz2-ui-1`.
+- [x] `llm_degradation.ui.page.render_page()` работает.
+- [x] `dz2` UI: переключатель страниц, защищённый импорт.
+- [x] `dz2/compose.yaml`: mount и env.
+- [x] `dz2` без `dz8` работает как раньше.
+- [x] `dz2/prompts`, `dz2/presets`, `dz2/normalizer.toml` не изменены.
+- [x] Новых постоянных контейнеров нет.
 
 ### 17.2. Стенд
 
-- [ ] `docker exec ohw-ollama ollama list` содержит `llama3`.
-- [ ] `docker compose exec ui python -m llm_degradation health --model llama3 --json` → 0.
-- [ ] `... api-check --model llama3 --json` → 0.
-- [ ] UI 8501: страница «Проверка модели», 7 вкладок, health зелёный.
-- [ ] UI 8501: «Генерация артефактов» работает.
+- [x] `docker exec ohw-ollama ollama list` содержит `llama3`.
+- [x] `docker compose exec ui python -m llm_degradation health --model llama3 --json` → 0.
+- [x] `... api-check --model llama3 --json` → 0.
+- [x] UI 8501: страница «Проверка модели», 8 вкладок, health зелёный.
+- [x] UI 8501: «Генерация артефактов» работает.
 
 ### 17.3. Проверки
 
-- [ ] `hallucinations --model llama3 --runs 3` → отчёт, `pass`/`warn`.
-- [ ] `consistency --model llama3 --runs 10 --seed 42` → отчёт.
-- [ ] `canary --model llama3` → отчёт с diff.
-- [ ] `degradation --baseline-model llama3 --candidate-model llama3 --runs 5`
-      → отчёт с CI; вердикт `unchanged`/`insufficient_data`.
-- [ ] `golden/baseline/llama3.json` создан живым прогоном.
+- [x] `hallucinations --model llama3 --runs 3` → отчёт, 8/8 pass.
+- [x] `consistency --model llama3 --runs 10 --seed 42` → отчёт.
+- [x] `canary --model llama3` → отчёт с diff (integration-тест).
+- [x] `degradation --baseline-model llama3 --candidate-model llama3 --runs 5`
+      → отчёт с CI (integration-тест).
+- [x] `golden/baseline/llama3.json` создан живым прогоном.
 
 ### 17.4. Тесты
 
-- [ ] `pytest -m "not integration"` — ≥ 60 passed, 0 failed.
-- [ ] `pytest -m integration` — 0 failed (skipped допустим).
-- [ ] `ruff check src tests` — чисто.
-- [ ] `mypy src` — чисто.
-- [ ] `dz2/tests/test_ui_app.py` — переключатель страниц.
-- [ ] `dz8/tests/test_ui_page.py` — 7 вкладок.
+- [x] `pytest -m "not integration"` — ≥ 60 passed, 0 failed (275 passed).
+- [x] `pytest -m integration` — 0 failed (8 passed, GPU).
+- [x] `ruff check src tests` — чисто.
+- [x] `mypy src` — чисто.
+- [x] `dz2/tests/test_ui_app.py` — переключатель страниц.
+- [x] `dz8/tests/test_ui_page.py` — 8 вкладок.
 
 ### 17.5. Документация и git
 
@@ -1650,7 +1658,7 @@ ruff/mypy — чисто.
 - [ ] `dz2/README.md` обновлён.
 - [ ] В README Dz8 реальные числа и команды.
 - [ ] `dz8/output/` не закоммичен (кроме `golden/baseline` и записей).
-- [ ] Коммиты в `origin/normalizer`.
+- [ ] Коммиты в `origin/master`.
 - [ ] `git status` чистый после push.
 
 ---

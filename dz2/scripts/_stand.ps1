@@ -30,9 +30,36 @@ $uiUrl = "http://localhost:8501"
 
 function Invoke-Compose {
     param([string[]]$ComposeArgs)
-    & docker compose @ComposeArgs
-    if ($LASTEXITCODE -ne 0) {
+    # Docker Compose prints informational lines (for example the "volume was
+    # not created by Compose" warning) to stderr. Under
+    # $ErrorActionPreference = "Stop" PowerShell 5.1 would turn them into a
+    # terminating NativeCommandError, so relax the preference for the call and
+    # decide by the exit code instead.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & docker compose @ComposeArgs 2>&1 | ForEach-Object { Write-Host $_ }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($code -ne 0) {
         throw "docker compose failed: $($ComposeArgs -join ' ')"
+    }
+}
+
+function Invoke-DockerBuild {
+    param([string[]]$BuildArgs)
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & docker build @BuildArgs
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($code -ne 0) {
+        throw "docker build failed: $($BuildArgs -join ' ')"
     }
 }
 
@@ -119,10 +146,7 @@ if ($Mode -eq "gpu") {
 & docker image inspect $baseImage *> $null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Building shared base image $baseImage (infra/python)..."
-    & docker build -t $baseImage (Join-Path $infraDir "python")
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to build $baseImage"
-    }
+    Invoke-DockerBuild @("-t", $baseImage, (Join-Path $infraDir "python"))
 }
 
 $components = Get-Components
@@ -143,10 +167,7 @@ if ($Rebuild) {
 }
 
 Write-Host "Building project image $projectImage..."
-& docker build --build-arg "EXTRAS=--extra ui" -t $projectImage $projectDir
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to build $projectImage"
-}
+Invoke-DockerBuild @("--build-arg", "EXTRAS=--extra ui", "-t", $projectImage, $projectDir)
 
 Write-Host "Starting the ui service..."
 Invoke-Compose @("-f", $composeFile, "up", "-d", "--no-build", "ui")

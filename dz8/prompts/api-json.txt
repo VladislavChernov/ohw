@@ -1,0 +1,1 @@
+Return a JSON object with the key ok set to true.

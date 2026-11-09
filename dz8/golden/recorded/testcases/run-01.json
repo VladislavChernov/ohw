@@ -1,0 +1,23 @@
+{
+  "request": {
+    "model": "llama3",
+    "messages": [
+      {"role": "system", "content": "You are a senior QA engineer."},
+      {"role": "user", "content": "Generate 5 test cases for golden/inputs/catalog.md"}
+    ],
+    "stream": false,
+    "options": {"temperature": 0.7, "seed": 42, "num_ctx": 4096, "num_predict": 512}
+  },
+  "response": {
+    "model": "llama3",
+    "message": {
+      "content": "{\"cases\": [{\"id\": \"TC-01\", \"type\": \"positive\", \"title\": \"Открытие каталога курсов\", \"preconditions\": [\"Пользователь на главной странице\"], \"steps\": [\"Открыть каталог курсов\"], \"expected\": \"Отображается список курсов направления Программирование\", \"requirement\": \"BR-1\"}, {\"id\": \"TC-02\", \"type\": \"negative\", \"title\": \"Неверный фильтр направления\", \"preconditions\": [\"Пользователь в каталоге\"], \"steps\": [\"Выбрать несуществующее направление\"], \"expected\": \"Показано сообщение об отсутствии курсов\", \"requirement\": \"BR-2\"}, {\"id\": \"TC-03\", \"type\": \"positive\", \"title\": \"Переход в карточку курса\", \"preconditions\": [\"Открыт каталог\"], \"steps\": [\"Нажать на название курса\"], \"expected\": \"Открылась карточка курса с программой\", \"requirement\": \"BR-3\"}, {\"id\": \"TC-04\", \"type\": \"negative\", \"title\": \"Карточка удалённого курса\", \"preconditions\": [\"Курс удалён из каталога\"], \"steps\": [\"Открыть прямую ссылку на курс\"], \"expected\": \"Показана страница 404\", \"requirement\": \"BR-4\"}, {\"id\": \"TC-05\", \"type\": \"negative\", \"title\": \"Фильтр сбрасывается\", \"preconditions\": [\"Открыт каталог с фильтром\"], \"steps\": [\"Нажать сброс фильтра\", \"Проверить адрес страницы\"], \"expected\": \"Фильтр сброшен, адрес без параметра categories\", \"requirement\": \"BR-5\"}]}"
+    },
+    "done": true,
+    "eval_count": 340,
+    "prompt_eval_count": 512
+  },
+  "recorded_at": "2026-11-05T12:00:00Z",
+  "model_digest": "sha256:synthetic",
+  "synthetic": true
+}

@@ -5,10 +5,16 @@ import pytest
 from ai_testgen.models import ArtifactType
 from ai_testgen.prompt import (
     PromptError,
+    build_doc_system_prompt,
+    build_markdown_retry_prompt,
+    build_retry_prompt,
+    build_system_prompt,
     build_user_prompt,
     load_prompt_template,
+    load_system_template,
     render_template,
     resolve_prompt_dir,
+    resolve_system_prompt_dir,
     strip_template_comments,
 )
 
@@ -148,6 +154,75 @@ def test_shipped_testcases_template_uses_singular_for_count_one() -> None:
     )
 
     assert "Generate exactly 1 test case: 1 positive and 0 negative." in prompt
+
+
+def test_system_prompts_are_shipped_in_the_system_directory() -> None:
+    system_dir = resolve_system_prompt_dir()
+
+    assert system_dir.name == "_system"
+    for name in (
+        "system-json.txt",
+        "system-markdown.txt",
+        "retry-json.txt",
+        "retry-markdown.txt",
+    ):
+        assert (system_dir / name).is_file()
+
+
+def test_json_system_prompt_substitutes_the_schema() -> None:
+    prompt = build_system_prompt()
+
+    assert prompt.startswith("You are a senior QA engineer.")
+    assert '"requirement": "BR-1"' in prompt
+    assert "{schema}" not in prompt
+
+
+def test_markdown_system_prompt_comes_from_the_file() -> None:
+    prompt = build_doc_system_prompt()
+
+    assert "GitHub-flavored Markdown" in prompt
+    assert "no code fences" in prompt
+
+
+def test_retry_prompts_list_issues() -> None:
+    json_retry = build_retry_prompt(["missing cases", "bad json"])
+    markdown_retry = build_markdown_retry_prompt(["missing heading"])
+
+    assert "- missing cases" in json_retry
+    assert "- bad json" in json_retry
+    assert "JSON array only" in json_retry
+    assert "- missing heading" in markdown_retry
+    assert "Markdown document only" in markdown_retry
+
+
+def test_custom_system_directory_overrides_defaults(tmp_path: Path) -> None:
+    system_dir = tmp_path / "_system"
+    system_dir.mkdir()
+    (system_dir / "system-json.txt").write_text("CUSTOM {schema}", encoding="utf-8")
+    (system_dir / "system-markdown.txt").write_text("CUSTOM MD", encoding="utf-8")
+    (system_dir / "retry-json.txt").write_text("RETRY {problems}", encoding="utf-8")
+    (system_dir / "retry-markdown.txt").write_text("RETRY MD {problems}", encoding="utf-8")
+
+    assert build_system_prompt(tmp_path).startswith("CUSTOM ")
+    assert build_doc_system_prompt(tmp_path) == "CUSTOM MD"
+    assert build_retry_prompt(["a"], tmp_path) == "RETRY - a"
+    assert build_markdown_retry_prompt(["b"], tmp_path) == "RETRY MD - b"
+
+
+def test_custom_prompt_dir_without_system_dir_uses_defaults(tmp_path: Path) -> None:
+    (tmp_path / "testcases.txt").write_text("{content}", encoding="utf-8")
+
+    assert resolve_system_prompt_dir(tmp_path).name == "_system"
+    assert "senior QA engineer" in build_system_prompt(tmp_path)
+
+
+def test_missing_system_template_raises(tmp_path: Path) -> None:
+    system_dir = tmp_path / "_system"
+    system_dir.mkdir()
+
+    with pytest.raises(PromptError, match="system-json.txt"):
+        load_system_template("system-json.txt", tmp_path)
+
 
 
 DZ7_TEMPLATES_DIR = Path(__file__).parent.parent.parent / "dz7" / "templates"

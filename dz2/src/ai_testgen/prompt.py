@@ -8,6 +8,7 @@ from ai_testgen.models import ArtifactType
 
 PROMPT_DIR_NAME = "prompts"
 PROMPT_DIR_ENV = "DZ2_PROMPT_DIR"
+SYSTEM_DIR_NAME = "_system"
 # Editable install / repository checkout: <repo>/dz2/prompts
 DEFAULT_PROMPT_DIR = Path(__file__).resolve().parent.parent.parent / PROMPT_DIR_NAME
 # Package data fallback (non-editable install with prompts copied next to the module).
@@ -72,6 +73,39 @@ def _require_dir(path: Path, source: str) -> Path:
     if not path.is_dir():
         raise PromptError(f"prompt directory from {source} does not exist: {path}")
     return path
+
+
+def resolve_system_prompt_dir(prompt_dir: Path | None = None) -> Path:
+    """Resolve the directory with system and retry prompt templates.
+
+    ``<prompt_dir>/_system`` wins so custom prompt directories can override the
+    system prompts together with the artifact templates. Directories that only
+    contain per-artifact templates keep using the repository defaults.
+    """
+    resolved = resolve_prompt_dir(prompt_dir)
+    candidates = (
+        resolved / SYSTEM_DIR_NAME,
+        DEFAULT_PROMPT_DIR / SYSTEM_DIR_NAME,
+        PACKAGE_PROMPT_DIR / SYSTEM_DIR_NAME,
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    raise PromptError(
+        "system prompt directory not found: tried "
+        + ", ".join(str(candidate) for candidate in candidates)
+    )
+
+
+def load_system_template(name: str, prompt_dir: Path | None = None) -> str:
+    """Read ``<system_dir>/<name>`` and drop the trailing newline."""
+    path = resolve_system_prompt_dir(prompt_dir) / name
+    if not path.is_file():
+        raise PromptError(f"system prompt template not found: {path}")
+    try:
+        return path.read_text(encoding="utf-8").rstrip("\r\n")
+    except OSError as exc:
+        raise PromptError(f"cannot read system prompt template {path}: {exc}") from exc
 
 
 def load_prompt_template(
@@ -203,51 +237,27 @@ def target_negative_count(count: int) -> int:
     return max(1, min(count - 1, math.ceil(count * 0.4)))
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(prompt_dir: Path | None = None) -> str:
     schema = (
         '{"cases": [{"id": "TC-01", "type": "positive", "title": "...", '
         '"preconditions": ["..."], "steps": ["step 1", "step 2"], "expected": "...", '
         '"requirement": "BR-1"}]}'
     )
-    return (
-        "You are a senior QA engineer. You generate web site test cases "
-        "as strict JSON. Respond with a single JSON object only, no markdown "
-        f"fences, no extra text. The object must match this schema exactly: {schema} "
-        "The 'cases' key holds the array of ALL generated test cases. Each 'type' must be "
-        "either 'positive' or 'negative'. Each 'steps' must contain at least one concrete "
-        "action. Each 'expected' must describe the verifiable result. Each 'requirement' "
-        "must reference the business requirement id (e.g. BR-1) from the requirements text "
-        "that this case verifies. Write ALL titles, "
-        "preconditions, steps and expected results in Russian. Keep product names, "
-        "UI element labels and URLs in their original language."
-    )
+    template = load_system_template("system-json.txt", prompt_dir)
+    return render_template(template, {"schema": schema})
 
 
-def build_doc_system_prompt() -> str:
-    return (
-        "You are a senior QA engineer. You write documents as clean GitHub-flavored "
-        "Markdown in Russian. Keep product names, UI element labels and URLs in "
-        "their original language. Respond with "
-        "the document text only: no code fences, no JSON, no commentary before or "
-        "after. Structure the document with '## ' section headings exactly as "
-        "required by the task."
-    )
+def build_doc_system_prompt(prompt_dir: Path | None = None) -> str:
+    return load_system_template("system-markdown.txt", prompt_dir)
 
 
-def build_retry_prompt(issues: list[str]) -> str:
+def build_retry_prompt(issues: list[str], prompt_dir: Path | None = None) -> str:
     problems = "\n".join(f"- {issue}" for issue in issues)
-    return (
-        "Your previous response violated the constraints:\n"
-        f"{problems}\n"
-        "Fix the problems and respond again with the full corrected JSON array only."
-    )
+    template = load_system_template("retry-json.txt", prompt_dir)
+    return render_template(template, {"problems": problems})
 
 
-def build_markdown_retry_prompt(issues: list[str]) -> str:
+def build_markdown_retry_prompt(issues: list[str], prompt_dir: Path | None = None) -> str:
     problems = "\n".join(f"- {issue}" for issue in issues)
-    return (
-        "Your previous response violated the constraints:\n"
-        f"{problems}\n"
-        "Fix the problems and respond again with the full corrected Markdown "
-        "document only."
-    )
+    template = load_system_template("retry-markdown.txt", prompt_dir)
+    return render_template(template, {"problems": problems})

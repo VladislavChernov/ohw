@@ -1,0 +1,40 @@
+# Dz8 lab configuration. Relative paths are resolved against this file.
+# Environment variables and CLI flags override these values.
+
+[ollama]
+base_url = "http://ohw-ollama:11434"
+model = "llama3"
+timeout = 600.0
+temperature = 0.7
+seed = 42
+num_ctx = 4096
+num_predict = 512
+max_retries = 3
+
+[paths]
+input_dir = "input"
+output_dir = "output"
+golden_dir = "golden"
+prompt_dir = "../dz2/prompts"
+probe_prompt_dir = "prompts"
+presets_dir = "../dz2/presets"
+normalizer_config = "../dz2/normalizer.toml"
+
+[reports]
+# Keep only the newest run directories under output/ (2-3 is enough for a demo).
+keep_runs = 3
+
+[thresholds]
+hallucination_rate_max = 0.25
+validator_pass_rate_min = 0.90
+count_match_rate_min = 1.0
+br_coverage_min = 0.80
+tc_jaccard_mean_min = 0.40
+heading_jaccard_mean_min = 0.70
+canary_title_overlap_min = 0.60
+canary_body_overlap_mean_min = 0.85
+canary_body_overlap_min = 0.50
+degradation_pass_drop_max = 0.20
+degradation_br_drop_max = 0.10
+degradation_json_drop_max = 0.20
+degradation_attempts_increase_max = 1.0

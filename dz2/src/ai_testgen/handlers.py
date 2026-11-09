@@ -99,10 +99,10 @@ def get_handler(
         return ArtifactHandler(
             artifact_type=artifact_type,
             wants_json=True,
-            build_system=build_system_prompt,
+            build_system=lambda: build_system_prompt(prompt_dir),
             build_user=_user_builder(artifact_type, template),
             validate_response=_testcases_validate,
-            build_retry=build_retry_prompt,
+            build_retry=lambda issues: build_retry_prompt(issues, prompt_dir),
         )
 
     validators: dict[ArtifactType, Callable[[str, int], GenerationResult]] = {
@@ -114,8 +114,8 @@ def get_handler(
     return ArtifactHandler(
         artifact_type=artifact_type,
         wants_json=False,
-        build_system=build_doc_system_prompt,
+        build_system=lambda: build_doc_system_prompt(prompt_dir),
         build_user=_user_builder(artifact_type, template),
         validate_response=validators[artifact_type],
-        build_retry=build_markdown_retry_prompt,
+        build_retry=lambda issues: build_markdown_retry_prompt(issues, prompt_dir),
     )

@@ -5,7 +5,7 @@
 # in infra.yaml. Do not run a per-project ollama: port 11434 belongs to
 # ohw-ollama. Start the stand with the platform scripts:
 #   .\scripts\up-gpu.ps1   /   .\scripts\up-cpu.ps1   (Windows)
-#   ./scripts/up-gpu.sh                                (Linux/macOS)
+#   ./scripts/up-cpu.sh      (Linux/macOS); ./scripts/up-gpu.sh — Linux + NVIDIA
 # The scripts also add the infra GPU overlay for GPU mode.
 
 x-dz2-image: &dz2-image ohw/dz2:local
@@ -40,6 +40,17 @@ services:
     environment:
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ohw-ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      # Dz8 laboratory: imported from the sibling checkout, never installed
+      # into the image. Keep its paths inside the mounted directories.
+      PYTHONPATH: /opt/dz8/src
+      LLM_LAB_ROOT: /opt/dz8
+      LLM_LAB_BASE_URL: ${OLLAMA_BASE_URL:-http://ohw-ollama:11434}
+      LLM_LAB_MODEL: ${LLM_LAB_MODEL:-llama3}
+      LLM_LAB_INPUT_DIR: /data/dz8-input
+      LLM_LAB_OUTPUT_DIR: /data/dz8-output
+      DZ2_PROMPT_DIR: /app/prompts
+      DZ2_PRESETS_DIR: /app/presets
+      AI_TESTGEN_NORMALIZER_CONFIG: /app/normalizer.toml
     ports:
       - "8501:8501"
     volumes:
@@ -49,6 +60,13 @@ services:
       - ./prompts:/app/prompts:ro
       - ./presets:/app/presets:ro
       - ./normalizer.toml:/app/normalizer.toml:ro
+      - ../dz8:/opt/dz8
+      - ../dz8/input:/data/dz8-input:ro
+      - ../dz8/output:/data/dz8-output
+      # Dz8 declares `ai-testcase-generator = { path = "../dz2" }`, which inside
+      # the container resolves to /opt/dz2. Expose the project read-only so
+      # `uv sync --frozen` can build the path dependency.
+      - ./:/opt/dz2:ro
     networks:
       - ohw-net
 

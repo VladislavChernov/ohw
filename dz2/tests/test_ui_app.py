@@ -475,3 +475,55 @@ def test_quality_score_is_saved(workbench: Path) -> None:
         "goal": 3,
         "coverage": 3,
     }
+
+
+def test_page_switch_renders_the_model_check_page(
+    workbench: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lab page comes from the optional Dz8 package, imported lazily."""
+    import sys
+    import types
+
+    import streamlit
+
+    package = types.ModuleType("llm_degradation")
+    package.__path__ = []  # type: ignore[attr-defined]
+    ui = types.ModuleType("llm_degradation.ui")
+    ui.__path__ = []  # type: ignore[attr-defined]
+    lab_page = types.ModuleType("llm_degradation.ui.page")
+
+    def render_page() -> None:
+        streamlit.header("Проверка модели")
+
+    lab_page.render_page = render_page  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "llm_degradation", package)
+    monkeypatch.setitem(sys.modules, "llm_degradation.ui", ui)
+    monkeypatch.setitem(sys.modules, "llm_degradation.ui.page", lab_page)
+
+    at = _app().run()
+    radio = next(item for item in at.radio if item.label == "Страница")
+    assert radio.value == "Генератор"
+    assert at.title[0].value == "Рабочее место: тесты по требованиям"
+
+    radio.set_value("Проверка модели").run()
+
+    assert not at.exception
+    assert at.header[0].value == "Проверка модели"
+    assert not at.title
+
+
+def test_page_switch_reports_missing_lab_package(
+    workbench: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import sys
+
+    monkeypatch.setitem(sys.modules, "llm_degradation", None)
+
+    at = _app().run()
+    next(item for item in at.radio if item.label == "Страница").set_value(
+        "Проверка модели"
+    ).run()
+
+    assert not at.exception
+    assert any("Проверка модели" in item.value for item in at.error)
+    assert not at.title

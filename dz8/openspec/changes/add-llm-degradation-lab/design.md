@@ -362,6 +362,11 @@ os.replace(tmp, path)
 
 Сырые ответы не попадают в Markdown целиком, только цитаты до 300 символов.
 
+Каталог `output/` не растёт бесконечно: после записи отчёта `prune_reports`
+удаляет старые каталоги с валидным `report.json`, оставляя последние
+`reports.keep_runs` (по умолчанию 3; CLI `--keep-runs`, env
+`LLM_LAB_KEEP_RUNS`). `golden/baseline/` не затрагивается.
+
 ## 7. CLI и UI
 
 CLI — `argparse`, без Click/Typer: меньше зависимостей, проще тестировать

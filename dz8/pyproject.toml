@@ -1,0 +1,69 @@
+[project]
+name = "llm-degradation-lab"
+version = "0.1.0"
+description = "LLM Degradation Lab for Dz8"
+requires-python = ">=3.13"
+dependencies = [
+  "httpx",
+  "pydantic",
+  "ai-testcase-generator",
+]
+
+[project.optional-dependencies]
+ui = [
+  "streamlit",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "pytest-mock",
+  "ruff",
+  "mypy",
+  "streamlit",
+]
+
+[tool.uv.sources]
+ai-testcase-generator = { path = "../dz2", editable = true }
+
+[build-system]
+requires = ["uv_build>=0.6.5"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "llm_degradation"
+
+[project.scripts]
+llm-lab = "llm_degradation.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: integration tests that need a live Ollama",
+  "slow: slow tests",
+  "ui: Streamlit UI tests",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "TID", "TRY"]
+# TRY003 wants every message to live in a dedicated exception class. The lab
+# has a small set of public error types (ConfigError, BridgeError, ...) and
+# builds user-facing messages where the failing check happens; splitting them
+# into dozens of subclasses would not improve the CLI/UI output.
+ignore = ["TRY003"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unused_ignores = true
+show_error_codes = true
+
+# Dz2 is consumed as an editable path dependency. It does not ship a py.typed
+# marker, so treat its surface as untyped instead of failing on import-untyped.
+[[tool.mypy.overrides]]
+module = "ai_testgen.*"
+ignore_missing_imports = true

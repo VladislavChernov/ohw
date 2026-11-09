@@ -1,0 +1,23 @@
+{
+  "request": {
+    "model": "llama3",
+    "messages": [
+      {"role": "system", "content": "You are a senior QA engineer."},
+      {"role": "user", "content": "Generate a QA report for golden/inputs/catalog.md"}
+    ],
+    "stream": false,
+    "options": {"temperature": 0.0, "seed": 42, "num_ctx": 4096, "num_predict": 512}
+  },
+  "response": {
+    "model": "llama3",
+    "message": {
+      "content": "## Введение\n\nДокумент описывает каталог курсов и требования BR-1…BR-4.\n\n## Тестовые сценарии\n\n- Проверка отображения списка курсов (BR-1).\n- Проверка фильтра по направлению (BR-2).\n- Проверка перехода в карточку курса (BR-3).\n\n## Дефекты\n\nСведения о дефектах в документе отсутствуют.\n\n## Рекомендации\n\n- Добавить проверку поиска по каталогу (BR-4).\n"
+    },
+    "done": true,
+    "eval_count": 210,
+    "prompt_eval_count": 480
+  },
+  "recorded_at": "2026-11-05T12:01:00Z",
+  "model_digest": "sha256:synthetic",
+  "synthetic": true
+}

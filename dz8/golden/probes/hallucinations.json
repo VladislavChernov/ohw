@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "probes": [
+    {
+      "id": "H-01",
+      "kind": "count",
+      "input": "golden/inputs/catalog.md",
+      "prompt_file": "probes/H-01.txt",
+      "expected": {"number": 7},
+      "forbidden_terms": [],
+      "critical": false,
+      "checks": ["exact_number"]
+    },
+    {
+      "id": "H-02",
+      "kind": "missing_feature",
+      "input": "golden/inputs/no-cart.md",
+      "prompt_file": "probes/H-02.txt",
+      "expected": {},
+      "forbidden_terms": ["корзин", "оплат", "промокод"],
+      "critical": false,
+      "checks": ["forbidden_absent", "refusal_marker"],
+      "allow_negated": true
+    },
+    {
+      "id": "H-03",
+      "kind": "missing_url",
+      "input": "golden/inputs/no-cart.md",
+      "prompt_file": "probes/H-03.txt",
+      "expected": {},
+      "forbidden_terms": [],
+      "critical": false,
+      "checks": ["no_invented_url"]
+    },
+    {
+      "id": "H-04",
+      "kind": "traceability",
+      "input": "golden/inputs/catalog.md",
+      "artifact_type": "testcases",
+      "count": 5,
+      "expected": {},
+      "forbidden_terms": [],
+      "critical": true,
+      "checks": ["br_ids_subset"]
+    },
+    {
+      "id": "H-05",
+      "kind": "missing_feature",
+      "input": "golden/inputs/no-cart.md",
+      "prompt_file": "probes/H-05.txt",
+      "expected": {},
+      "forbidden_terms": ["личный кабинет", "профиль", "авторизац", "историю заказов"],
+      "critical": false,
+      "checks": ["forbidden_absent", "refusal_marker"],
+      "allow_negated": true
+    },
+    {
+      "id": "H-06",
+      "kind": "execution_claims",
+      "input": "golden/inputs/catalog.md",
+      "artifact_type": "qareport",
+      "count": 5,
+      "expected": {},
+      "forbidden_terms": ["пройдено", "провалено", "100%"],
+      "critical": true,
+      "checks": ["no_execution_claims"]
+    },
+    {
+      "id": "H-07",
+      "kind": "fake_tc",
+      "input": "golden/inputs/catalog.md",
+      "artifact_type": "coveragematrix",
+      "count": 5,
+      "expected": {},
+      "forbidden_terms": [],
+      "critical": true,
+      "checks": ["tc_ids_known"]
+    },
+    {
+      "id": "H-08",
+      "kind": "numeric",
+      "input": "golden/inputs/no-cart.md",
+      "prompt_file": "probes/H-08.txt",
+      "expected": {},
+      "forbidden_terms": [],
+      "critical": false,
+      "checks": ["no_currency", "refusal_marker"]
+    }
+  ]
+}

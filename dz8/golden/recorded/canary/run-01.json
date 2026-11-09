@@ -1,0 +1,23 @@
+{
+  "request": {
+    "model": "llama3",
+    "messages": [
+      {"role": "system", "content": "Ты — детерминированный нормализатор требований."},
+      {"role": "user", "content": "Нормализуй документ golden/inputs/no-cart.md"}
+    ],
+    "stream": false,
+    "options": {"temperature": 0.0, "seed": 42, "num_ctx": 4096, "num_predict": 512}
+  },
+  "response": {
+    "model": "llama3",
+    "message": {
+      "content": "# Требования к каталогу курсов\n\n**URL:** https://otus.ru/catalog/courses\n\n## Requirements\n\n### BR-1\nКаталог отображает список курсов с названием, направлением и кратким описанием.\n\n### BR-2\nПользователь может отфильтровать курсы по направлению подготовки.\n\n### BR-3\nКарточка курса открывается по ссылке и показывает программу обучения.\n\n### BR-4\nПоиск по названию курса возвращает подходящие карточки каталога.\n"
+    },
+    "done": true,
+    "eval_count": 260,
+    "prompt_eval_count": 420
+  },
+  "recorded_at": "2026-11-05T12:02:00Z",
+  "model_digest": "sha256:synthetic",
+  "synthetic": true
+}

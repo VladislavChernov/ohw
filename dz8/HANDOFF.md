@@ -32,28 +32,29 @@
 
 ### В `dz2/`
 
-Только тонкий адаптер:
+Тонкий адаптер и вынесенные промпты:
 
 - `src/ai_testgen/ui/app.py` — radio страниц и защищённый импорт;
+- `src/ai_testgen/{prompt,handlers}.py` — загрузка user/system/retry-промптов из файлов;
+- `prompts/**` — user-промпты артефактов и `prompts/_system/**`;
 - `compose.yaml` — mount `dz8` и env для сервиса `ui`;
-- `tests/test_ui_app.py` — тест переключателя;
-- `README.md` — раздел про страницу.
+- `tests/test_ui_app.py`, `tests/test_prompts.py` — тесты адаптера и промптов;
+- `scripts/**` — запуск стенда и README для других людей;
+- `README.md` — раздел про страницу и стенд.
 
 ### Не менять
 
-- `dz2/src/ai_testgen/**`, кроме `ui/app.py`;
-- `dz2/prompts/**`;
+- `dz2/src/ai_testgen/**`, кроме `ui/app.py`, `prompt.py` и `handlers.py`;
 - `dz2/presets/**`;
 - `dz2/normalizer.toml`;
 - `dz2/Dockerfile` (если не согласовано отдельно);
-- `dz2/scripts/**`;
 - `dz7/**`;
 - `infra/**`.
 
 Проверка перед коммитом:
 
 ```powershell
-git -C D:\Otus\ohw diff -- dz2/prompts dz2/presets dz2/normalizer.toml
+git -C D:\Otus\ohw diff -- dz2/presets dz2/normalizer.toml
 # должно быть пусто
 ```
 
@@ -155,7 +156,8 @@ docker compose up -d --no-build ui
 - Все входы — через нормализатор.
 - `prompt_sha256` — только `sha256(user.encode("utf-8"))`.
 - Не копировать нормализатор/валидаторы/шаблоны из Dz2 — импортировать.
-- Не менять `dz2/prompts`, `dz2/presets`, `dz2/normalizer.toml`.
+- Промпты менять только в файлах `dz2/prompts/**` и `dz8/prompts/**`, не в Python.
+- Не менять `dz2/presets`, `dz2/normalizer.toml`.
 - Не использовать LLM-судью для деградации.
 - Не писать baseline-числа руками.
 - Не добавлять зависимости без необходимости.
@@ -181,20 +183,21 @@ docker compose up -d --no-build ui
 - `llama3` в `ohw-ollama`;
 - `health`/`api-check` → 0;
 - `hallucinations`/`consistency`/`canary`/`degradation` пишут отчёты;
-- UI 8501: страница «Проверка модели», 7 вкладок;
+- UI 8501: страница «Проверка модели», 8 вкладок;
 - UI 8501: «Генерация артефактов» работает;
 - unit ≥ 60 passed, integration зелёный/ skip с причиной;
 - ruff/mypy чисто;
-- `dz2` изменён только в UI-адаптере, compose, тестах, README;
+- `dz2` изменён только в UI-адаптере, загрузчике промптов, compose, тестах, скриптах и README;
 - новых постоянных контейнеров нет;
-- commit/push в `origin/normalizer`.
+- commit/push в `origin/master`.
 
 ## 9. Чего не делать
 
 - Не создавать `dz8/Dockerfile`, `dz8/compose.yaml`, сервис `lab`, порт 8502.
 - Не поднимать второй Ollama.
-- Не менять `dz2/src`, кроме UI-адаптера.
-- Не менять `dz2/prompts`, `dz2/presets`, `dz2/normalizer.toml`.
+- Не менять `dz2/src`, кроме UI-адаптера и загрузчика промптов.
+- Промпты менять только в `dz2/prompts/**` и `dz8/prompts/**`.
+- Не менять `dz2/presets`, `dz2/normalizer.toml`.
 - Не переносить код Dz2 в Dz8 копированием.
 - Не использовать судью текста как основную метрику.
 - Не автоматизировать `ollama pull`.

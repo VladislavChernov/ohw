@@ -41,3 +41,9 @@ module-name = "ai_testgen"
 markers = [
     "integration: requires live ollama service",
 ]
+
+# Dz8 is an optional integration mounted into the same image. It is imported
+# lazily by the UI and is not a dependency of the generator.
+[[tool.mypy.overrides]]
+module = "llm_degradation.*"
+ignore_missing_imports = true

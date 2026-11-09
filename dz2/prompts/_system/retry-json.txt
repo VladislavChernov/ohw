@@ -1,0 +1,3 @@
+Your previous response violated the constraints:
+{problems}
+Fix the problems and respond again with the full corrected JSON array only.
