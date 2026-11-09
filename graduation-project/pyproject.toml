@@ -1,0 +1,41 @@
+[project]
+name = "graduation-project"
+version = "0.1.0"
+description = "Graduation project: Automated Test Documentation Generation with LLM"
+readme = "README.md"
+requires-python = ">=3.13"
+authors = [
+    { name = "Vladislav Chernov", email = "vladislav.chernov@ligastavok.ru" }
+]
+
+dependencies = [
+    "httpx>=0.28",
+    "pydantic>=2.11",
+    "streamlit>=1.40",
+]
+
+dev-dependencies = [
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "pytest-mock>=3.14",
+    "ruff>=0.9",
+]
+
+[project.scripts]
+ai-testgen-graduation = "src.workflow:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "ai_testgen_graduation"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: requires live ollama service",
+]
+
+[[tool.mypy.overrides]]
+module = "graduation_project.generator"
+ignore_missing_imports = true
