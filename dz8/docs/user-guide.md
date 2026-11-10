@@ -213,11 +213,12 @@ CLI полезен для CI и для проверки без UI. Внутри 
 ```bash
 /app/.venv/bin/python -m llm_degradation health --model llama3 --json
 /app/.venv/bin/python -m llm_degradation api-check --model llama3 --json
-/app/.venv/bin/python -m llm_degradation canary --model llama3 --json
+/app/.venv/bin/python -m llm_degradation canary --model llama3 --input /opt/dz8/golden/inputs/catalog.md --json
 /app/.venv/bin/python -m llm_degradation hallucinations --model llama3 --runs 3 --json
-/app/.venv/bin/python -m llm_degradation consistency --model llama3 --runs 10 --seed 42 --json
+/app/.venv/bin/python -m llm_degradation consistency --model llama3 --input /opt/dz8/golden/inputs/catalog.md --runs 10 --seed 42 --json
 /app/.venv/bin/python -m llm_degradation degradation \
-  --baseline-model llama3 --candidate-model llama3 --runs 5 --json
+  --baseline-model llama3 --candidate-model llama3 --input /opt/dz8/golden/inputs/catalog.md \
+  --runs 5 --json
 /app/.venv/bin/python -m llm_degradation report --list --json
 ```
 

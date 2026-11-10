@@ -145,15 +145,15 @@ cd D:\Otus\ohw\dz2
 docker compose exec ui python -m llm_degradation health --model llama3 --json
 docker compose exec ui python -m llm_degradation api-check --model llama3 --json
 docker compose exec ui python -m llm_degradation hallucinations --model llama3 --runs 3 --json
-docker compose exec ui python -m llm_degradation consistency --model llama3 --runs 10 --seed 42 --json
-docker compose exec ui python -m llm_degradation canary --model llama3 --json
-docker compose exec ui python -m llm_degradation degradation --baseline-model llama3 --candidate-model llama3 --runs 5 --json
+docker compose exec ui python -m llm_degradation consistency --model llama3 --input /opt/dz8/golden/inputs/catalog.md --runs 10 --seed 42 --json
+docker compose exec ui python -m llm_degradation canary --model llama3 --input /opt/dz8/golden/inputs/catalog.md --json
+docker compose exec ui python -m llm_degradation degradation --baseline-model llama3 --candidate-model llama3 --input /opt/dz8/golden/inputs/catalog.md --runs 5 --json
 ```
 
 Файл требований (`.md`/`.txt`) кладётся в `dz8/input/` (в контейнере это
 `/data/dz8-input`) или передаётся флагом `--input`. Если каталог пуст,
-`consistency` и `degradation` возвращают код 2 с подсказкой; `hallucinations`
-и `canary` берут вход из `golden/inputs/`.
+`consistency`, `canary` и `degradation` возвращают код 2 с подсказкой;
+`hallucinations` берёт вход из файла проб (`golden/probes/hallucinations.json`).
 
 Тесты Dz8 — в одноразовом dev-контейнере с Python 3.13 (`bookworm`) на той же
 сети, что и Ollama; постоянных контейнеров он не создаёт:

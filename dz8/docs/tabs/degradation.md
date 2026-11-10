@@ -147,7 +147,7 @@ A/B-сравнение двух состояний: **baseline** и **candidate*
 
 ```bash
 /app/.venv/bin/python -m llm_degradation consistency \
-  --model llama3 --runs 10 --seed 42 --json
+  --model llama3 --input /opt/dz8/golden/inputs/catalog.md --runs 10 --seed 42 --json
 cp output/<run_id>/report.json golden/baseline/llama3.json
 ```
 
@@ -155,14 +155,15 @@ cp output/<run_id>/report.json golden/baseline/llama3.json
 
 ```bash
 /app/.venv/bin/python -m llm_degradation degradation \
-  --baseline-report golden/baseline/llama3.json \
-  --candidate-model llama3 --runs 5 --json
+  --baseline-report golden/baseline/llama3.json --candidate-model llama3 \
+  --input /opt/dz8/golden/inputs/catalog.md --runs 5 --json
 ```
 
 Сравнить две живые модели:
 
 ```bash
-... degradation --baseline-model llama3 --candidate-model qwen2.5:7b-instruct --runs 5
+... degradation --baseline-model llama3 --candidate-model qwen2.5:7b-instruct \
+  --input /opt/dz8/golden/inputs/catalog.md --runs 5
 ```
 
 С падением на регрессии:

@@ -136,7 +136,8 @@ llm-lab consistency --model llama3 --runs 10 --seed 42 --json
 
 ```bash
 /app/.venv/bin/python -m llm_degradation consistency \
-  --model llama3 --artifact-type testcases --count 5 --runs 10 --json
+  --model llama3 --input /opt/dz8/golden/inputs/catalog.md \
+  --artifact-type testcases --count 5 --runs 10 --json
 ```
 
 Код выхода: `0` для `pass`/`warn`, `4` для `fail`.

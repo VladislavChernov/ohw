@@ -122,14 +122,19 @@ Markdown. Результат сравнивается с тем, что выда
 ## CLI
 
 ```bash
-/app/.venv/bin/python -m llm_degradation canary --model llama3 --json
+/app/.venv/bin/python -m llm_degradation canary --model llama3 \
+  --input /opt/dz8/golden/inputs/catalog.md --json
 ```
 
 Несколько прогонов:
 
 ```bash
-... canary --model llama3 --runs 3 --json
+... canary --model llama3 --input /opt/dz8/golden/inputs/catalog.md --runs 3 --json
 ```
+
+Если `--input` не указан, берётся `paths.input_dir` (в контейнере
+`/data/dz8-input`). Каталог должен содержать файл требований; при пустом
+каталоге команда завершается с кодом `2`.
 
 Код выхода: `0` для `pass`/`warn`, `4` для `fail`.
 
