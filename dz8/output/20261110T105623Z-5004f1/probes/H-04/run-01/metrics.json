@@ -1,0 +1,64 @@
+{
+  "raw_chars": 1577,
+  "raw_lines": 49,
+  "raw_sha256": "d70a8b6a2f184c1e0aa32e57bc779c0735218f8b06f5c9bc63e32014996128b9",
+  "has_code_fence": false,
+  "json_valid": true,
+  "schema_valid": true,
+  "validator_pass": true,
+  "validator_issues": [],
+  "cases_total": 5,
+  "positive": 3,
+  "negative": 2,
+  "negative_ratio": 0.4,
+  "count_matches": true,
+  "tc_ids": [
+    "TC-01",
+    "TC-02",
+    "TC-03",
+    "TC-04",
+    "TC-05"
+  ],
+  "tc_duplicates": [],
+  "br_ids_output": [
+    "BR-1",
+    "BR-2",
+    "BR-3",
+    "BR-7"
+  ],
+  "br_ids_source": [
+    "BR-1",
+    "BR-2",
+    "BR-3",
+    "BR-4",
+    "BR-5",
+    "BR-6",
+    "BR-7"
+  ],
+  "br_covered": [
+    "BR-1",
+    "BR-2",
+    "BR-3",
+    "BR-7"
+  ],
+  "br_missing": [
+    "BR-4",
+    "BR-5",
+    "BR-6"
+  ],
+  "br_invented": [],
+  "br_coverage": 0.5714,
+  "urls_output": [],
+  "urls_invented": [],
+  "claims_execution_results": false,
+  "claims_markers": [],
+  "section_headings": [],
+  "title_tokens": [],
+  "required_sections_present": [],
+  "required_sections_missing": [],
+  "empty_sections": [],
+  "truncated": false,
+  "token_count": 181,
+  "latency_ms": 10349.0,
+  "attempts": 1
+}

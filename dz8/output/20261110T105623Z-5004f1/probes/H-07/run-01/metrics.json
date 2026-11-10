@@ -1,0 +1,64 @@
+{
+  "raw_chars": 1462,
+  "raw_lines": 11,
+  "raw_sha256": "306d0bccc7c231ae48c47d0a816f30364f4883d35609de65d78c16668a447068",
+  "has_code_fence": false,
+  "json_valid": false,
+  "schema_valid": false,
+  "validator_pass": true,
+  "validator_issues": [],
+  "cases_total": 0,
+  "positive": 0,
+  "negative": 0,
+  "negative_ratio": 0.0,
+  "count_matches": false,
+  "tc_ids": [],
+  "tc_duplicates": [],
+  "br_ids_output": [
+    "BR-1",
+    "BR-2",
+    "BR-3",
+    "BR-4",
+    "BR-5",
+    "BR-6",
+    "BR-7"
+  ],
+  "br_ids_source": [
+    "BR-1",
+    "BR-2",
+    "BR-3",
+    "BR-4",
+    "BR-5",
+    "BR-6",
+    "BR-7"
+  ],
+  "br_covered": [
+    "BR-1",
+    "BR-2",
+    "BR-3",
+    "BR-4",
+    "BR-5",
+    "BR-6",
+    "BR-7"
+  ],
+  "br_missing": [],
+  "br_invented": [],
+  "br_coverage": 1.0,
+  "urls_output": [],
+  "urls_invented": [],
+  "claims_execution_results": false,
+  "claims_markers": [],
+  "section_headings": [
+    "Матрица покрытия требований"
+  ],
+  "title_tokens": [],
+  "required_sections_present": [
+    "Матрица покрытия требований"
+  ],
+  "required_sections_missing": [],
+  "empty_sections": [],
+  "truncated": false,
+  "token_count": 237,
+  "latency_ms": 9351.9,
+  "attempts": 1
+}

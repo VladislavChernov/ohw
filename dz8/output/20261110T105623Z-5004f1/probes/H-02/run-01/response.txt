@@ -1,0 +1,1 @@
+According to the provided document, there is no information about adding a course to a cart or paying for it. The document only describes the requirements for the catalog of courses, including filtering courses by direction, viewing course details, and searching for courses by name.
