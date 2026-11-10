@@ -35,7 +35,7 @@ for arg in "$@"; do
     --rebuild) rebuild=1 ;;
     --check) check=1 ;;
     --no-pull) pull=0 ;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done

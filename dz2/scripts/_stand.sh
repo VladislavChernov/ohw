@@ -18,7 +18,7 @@ rebuild=0
 case "$mode" in
   cpu|gpu) ;;
   -h|--help)
-    sed -n '2,12p' "$0"
+    sed -n '2,11p' "$0"
     exit 0
     ;;
   *)
