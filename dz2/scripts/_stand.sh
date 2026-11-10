@@ -56,6 +56,10 @@ command -v docker >/dev/null 2>&1 || {
   echo "docker not found. Install Docker Desktop / Docker Engine." >&2
   exit 1
 }
+command -v curl >/dev/null 2>&1 || {
+  echo "curl not found. It is used to wait for the UI (install curl)." >&2
+  exit 1
+}
 docker info >/dev/null 2>&1 || {
   echo "Docker daemon is not available. Start Docker." >&2
   exit 1
@@ -81,7 +85,7 @@ if ! docker image inspect "$base_image" >/dev/null 2>&1; then
   docker build -t "$base_image" "$infra_dir/python"
 fi
 
-components="$(grep -E '^\s*-\s*[A-Za-z0-9_-]+\s*$' "$manifest" | awk '{print $2}')"
+components="$(grep -E '^[[:space:]]*-[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*$' "$manifest" | awk '{print $2}')"
 if [[ -z "$components" ]]; then
   echo "No components declared in $manifest" >&2
   exit 1

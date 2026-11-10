@@ -55,6 +55,13 @@ dz2 UI (8501)
    .\scripts\up-gpu.ps1     # или .\scripts\up-cpu.ps1
    ```
 
+   Linux/macOS (только CPU):
+
+   ```bash
+   cd ohw/dz2
+   ./scripts/up-cpu.sh
+   ```
+
 2. Откройте `http://localhost:8501` и переключите страницу на
    **«Проверка модели»**.
 

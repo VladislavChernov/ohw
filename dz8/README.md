@@ -87,6 +87,14 @@ docker exec ohw-ollama ollama pull llama3
 docker exec ohw-ollama ollama list
 ```
 
+Linux/macOS (CPU; на Linux с NVIDIA есть `./scripts/up-gpu.sh`):
+
+```bash
+cd ohw/dz2
+./scripts/up-cpu.sh
+docker exec ohw-ollama ollama pull llama3
+```
+
 Для тестов используется тот же контейнер `dz2-ui-1`: в нём создаётся
 временное venv в `/tmp` (см. [`TZ.md`](TZ.md), раздел 14). Одноразовый
 `docker run --rm` допустим только как аварийный вариант; постоянных
