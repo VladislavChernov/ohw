@@ -8,6 +8,10 @@
 `http://localhost:8501` → sidebar «Страница» → **«Проверка модели»**.
 Нового приложения, порта и контейнера нет.
 
+Поднять стенд и проверить модель на другой машине: [`docs/install.md`](docs/install.md)
+— `git sparse-checkout` для нужных папок и запуск одним скриптом
+(`dz8/run.ps1` на Windows, `dz8/run.sh` на Linux/macOS).
+
 | Страница / вкладка | Что проверяет |
 |---|---|
 | Генерация артефактов | существующая страница Dz2, не меняется |
@@ -78,7 +82,29 @@ Baseline `golden/baseline/llama3.json` — реальный прогон
 - нет порта 8502;
 - нет `dz8/Dockerfile` и `dz8/compose.yaml`.
 
-`llama3` просто докачивается в существующий `ohw-ollama`:
+`llama3` просто докачивается в существующий `ohw-ollama`. Весь этот путь
+выполняет один скрипт из `dz8`:
+
+```powershell
+cd D:\Otus\ohw\dz8
+.\run.ps1            # auto: GPU при наличии runtime nvidia, иначе CPU
+```
+
+Вместо PowerShell-команды можно дважды кликнуть `run.cmd` в папке `dz8`:
+он запускает `run.ps1` и оставляет окно открытым.
+
+```bash
+cd ohw/dz8
+./run.sh             # Linux/macOS (CPU); ./run.sh --gpu — Linux + NVIDIA
+```
+
+Флаги: `-Mode gpu|cpu|auto`, `-Rebuild`, `-Check`, `-NoPull`
+(в bash — `--gpu`, `--rebuild`, `--check`, `--no-pull`). Скрипт вызывает
+существующие `dz2/scripts/up-*.ps1` / `up-*.sh`, поэтому новых контейнеров и
+портов не появляется; если стенд уже здоров, шаг подъёма пропускается и
+модель не выгружается.
+
+Вручную то же самое:
 
 ```powershell
 cd D:\Otus\ohw\dz2
@@ -208,6 +234,7 @@ probe-ы ссылаются на файл через `prompt_file` в
 
 | Файл | Для кого | Что внутри |
 |---|---|---|
+| [`docs/install.md`](docs/install.md) | пользователь | установка на другом ПК: git clone и sparse checkout, запуск одним скриптом, остановка, типовые ошибки |
 | [`docs/user-guide.md`](docs/user-guide.md) | пользователь | общий гайд: зачем, быстрый старт, порядок проверок, чтение отчёта, вердикты, ограничения |
 | [`docs/glossary.md`](docs/glossary.md) | пользователь | глоссарий ключей «Сводки», формулы, пороги |
 | [`docs/tabs/stand.md`](docs/tabs/stand.md) | пользователь | вкладка «Стенд» |

@@ -48,11 +48,27 @@ dz2 UI (8501)
 
 ## 2. Быстрый старт
 
-1. Поднимите стенд (Docker Desktop должен быть запущен):
+1. Поднимите стенд (Docker Desktop должен быть запущен). Один скрипт из
+   `dz8` делает всё: поднимает стенд и докачивает `llama3`.
+
+   ```powershell
+   cd D:\Otus\ohw\dz8
+   .\run.ps1                # auto: GPU при наличии runtime nvidia, иначе CPU
+   ```
+
+   Linux/macOS:
+
+   ```bash
+   cd ohw/dz8
+   ./run.sh                 # CPU; ./run.sh --gpu — Linux + NVIDIA
+   ```
+
+   Вручную то же самое (если нужен контроль по шагам):
 
    ```powershell
    cd D:\Otus\ohw\dz2
    .\scripts\up-gpu.ps1     # или .\scripts\up-cpu.ps1
+   docker exec ohw-ollama ollama pull llama3
    ```
 
    Linux/macOS (только CPU):
@@ -60,7 +76,11 @@ dz2 UI (8501)
    ```bash
    cd ohw/dz2
    ./scripts/up-cpu.sh
+   docker exec ohw-ollama ollama pull llama3
    ```
+
+   Как забрать проект из git на другом ПК (в том числе только нужные папки)
+   — [`install.md`](install.md).
 
 2. Откройте `http://localhost:8501` и переключите страницу на
    **«Проверка модели»**.
@@ -298,6 +318,9 @@ docker compose -f D:\Otus\ohw\dz2\compose.yaml exec -T ui `
 | Деградация | [tabs/degradation.md](tabs/degradation.md) |
 | Последний прогон | [tabs/last-run.md](tabs/last-run.md) |
 | Отчёты | [tabs/reports.md](tabs/reports.md) |
+
+Установка на другом ПК (git clone, sparse checkout, запуск одним скриптом) —
+в [install.md](install.md).
 
 Все ключи раздела «Сводка», формулы и пороги — в
 [глоссарии](glossary.md).
