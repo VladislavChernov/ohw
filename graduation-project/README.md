@@ -67,15 +67,18 @@ uv run --no-dev python -m src.workflow.main --input-dir input --output-dir outpu
 ## CLI
 
 ```text
-python -m src.workflow [--generate] [--assess] [--visualize] [--report]
+python -m src.workflow [--generate] [--assess] [--visualize] [--api-tests] [--report]
     --input-dir input --output-dir output --type testcases
     --count 10 --runs 1 --temperature 0.7 --max-retries 3
     --url URL --normalize --preset ID [--preset ID ...]
     --prompt-dir DIR --base-url URL --model NAME --timeout SEC
+    --api-base-url URL --api-contract FILE --api-cases 5
     --fail-under SCORE
 ```
 
-Без флагов фаз выполняются все четыре. Фазы можно запускать отдельно по
+Без флагов фаз выполняются все четыре. Фаза `api-tests` выполняется только при
+явном `--api-tests`; пока адаптер не подключён, она возвращает код 2 с
+объяснением (контракт — `openspec/specs/autotests/spec.md`). Фазы можно запускать отдельно по
 сохранённым файлам:
 
 ```bash
@@ -117,6 +120,7 @@ type: checklist
 | `output/quality-metrics.json` | метрики и реальные тест-кейсы |
 | `output/report.md` | Markdown-отчёт |
 | `output/charts/*.png` | графики |
+| `output/api-tests.json` | результаты API-тестов (только с `--api-tests`) |
 
 ## Метрики
 

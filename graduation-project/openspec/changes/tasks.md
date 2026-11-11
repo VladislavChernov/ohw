@@ -70,7 +70,7 @@
 - [x] Раздел `## API-тесты` в `report.md` только при наличии данных
 - [x] `openspec/changes/add-guard-tests/` — кодировка документации и лаунчеры
 - [x] `tests/test_autotests.py`, `tests/test_docs_encoding.py`, `tests/test_launchers.py`
-- [ ] Коммит и push реализации
+- [x] Коммит и push реализации
 
 ## Фаза 7. Документация и отдача
 

@@ -7,4 +7,4 @@
 - [x] `uv run pytest` — 93 passed, 1 skipped
 - [x] `ruff check src scripts tests`
 - [x] `mypy src`
-- [ ] Коммит и push
+- [x] Коммит и push

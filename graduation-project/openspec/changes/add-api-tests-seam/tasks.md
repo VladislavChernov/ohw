@@ -29,4 +29,4 @@
 - [x] `mypy src`
 - [x] Живой прогон без `--api-tests`: `report.md` и `quality-metrics.json`
   побайтово совпали с `examples/live-run`, `api-tests.json` не создан
-- [ ] Коммит и push реализации
+- [x] Коммит и push реализации
