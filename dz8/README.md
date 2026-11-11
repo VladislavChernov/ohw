@@ -34,13 +34,6 @@
 `--keep-runs N` или env `LLM_LAB_KEEP_RUNS`. Baseline в
 `golden/baseline/` под очистку не попадает.
 
-> Статус: реализация готова. Unit- и integration-тесты зелёные, живые прогоны
-> на GPU-стенде (`ohw-ollama` + `dz2-ui-1`) выполнены, baseline
-> `golden/baseline/llama3.json` записан живым прогоном. Гейт
-> `run_all_verification.ps1`: **10/12 PASS**; 2 FAIL — реальные fail-вердикты
-> модели (`hallucinations` H-04 и `consistency` `br_coverage_min`), а не сбой
-> лаборатории.
-
 ## Состояние проверок
 
 Проверки выполнены в одноразовом контейнере
