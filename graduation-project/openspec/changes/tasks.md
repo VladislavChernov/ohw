@@ -66,4 +66,4 @@
 - [x] `docs/user-guide.md`
 - [x] `docs/metrics.md`
 - [x] `docs/demo.md` с результатами живого прогона
-- [ ] Коммит и push в `master`
+- [x] Коммит и push в `master` (`f605a61`)
