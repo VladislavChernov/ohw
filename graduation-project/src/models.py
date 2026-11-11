@@ -14,6 +14,7 @@ model, while the report stays small and human-readable.
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.autotests.models import ApiTestReport
 from src.generator.models import TestCase
 
 METRIC_KEYS: tuple[str, ...] = (
@@ -197,6 +198,7 @@ class PipelineData:
     errors: list[str] = field(default_factory=list)
     averages: dict[str, float | None] = field(default_factory=dict)
     charts: dict[str, str] = field(default_factory=dict)
+    api_tests: ApiTestReport | None = None
 
     @property
     def successful(self) -> int:
@@ -237,13 +239,16 @@ class PipelineData:
         }
 
     def to_snapshot_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             **self._metadata(),
             "scenarios": [
                 scenario.to_snapshot_dict() for scenario in self.scenarios
             ],
             "errors": list(self.errors),
         }
+        if self.api_tests is not None:
+            payload["api_tests"] = self.api_tests.to_dict()
+        return payload
 
     @classmethod
     def from_snapshot_dict(cls, raw: dict[str, Any]) -> "PipelineData":
@@ -264,10 +269,13 @@ class PipelineData:
             errors=list(raw.get("errors") or []),
         )
         data.refresh_averages()
+        api_tests = raw.get("api_tests")
+        if api_tests:
+            data.api_tests = ApiTestReport.from_dict(api_tests)
         return data
 
     def to_report_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "project": "graduation-project",
             "version": "0.1.0",
             **self._metadata(),
@@ -283,6 +291,9 @@ class PipelineData:
                 for index, scenario in enumerate(self.scenarios, start=1)
             ],
         }
+        if self.api_tests is not None:
+            payload["api_tests"] = self.api_tests.to_dict()
+        return payload
 
     @classmethod
     def from_report_dict(cls, raw: dict[str, Any]) -> "PipelineData":
@@ -306,4 +317,7 @@ class PipelineData:
         )
         if not data.averages:
             data.refresh_averages()
+        api_tests = raw.get("api_tests")
+        if api_tests:
+            data.api_tests = ApiTestReport.from_dict(api_tests)
         return data

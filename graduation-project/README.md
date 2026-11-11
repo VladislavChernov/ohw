@@ -179,6 +179,7 @@ graduation-project/
 │   ├── quality/        # 4 метрики
 │   ├── visualization/  # графики
 │   ├── reporting/      # JSON + Markdown
+│   ├── autotests/      # шов API-тестов (без сети)
 │   └── workflow/       # CLI и фазы
 ├── tests/              # unit + e2e (источник — SDD)
 ├── input/              # пример требований
