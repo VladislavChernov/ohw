@@ -1,34 +1,69 @@
-# Чек-лиз реализации по фазам
+# Чек-лист реализации по фазам
 
-## Фаза 1: Подготовка (2-3 дня)
-- [ ] Создать папку graduation-project с вложенной структурой openspec
-- [ ] Создать openspec/project.md с полной спецификацией
-- [ ] Создать openspec/changes/proposal.md с оценкой scopes
-- [ ] Создать openspec/changes/design.md с архитектурой
-- [ ] Создать openspec/changes/tasks.md с чек-листом задач
-- [ ] Создать pyproject.toml с зависимостями
+Отметка `[x]` — реализовано и проверено; `[ ]` — осталось.
 
-## Фаза 2: Генерация (3-4 дня)
-- [ ] Дополнить service.py DZ2 выход структурированными данными
-- [ ] Реализовать generate_tests.py скрипт
-- [ ] Интегрировать prompt templates из DZ7
-- [ ] Добавить генерацию boundary values в prompt
+## Фаза 1. Структура и OpenSpec
 
-## Фаза 3: Оценка качества (3-4 дня)
-- [ ] Реализовать метрику читаемости (Flesch или упрощенная)
-- [ ] Реализовать метрику консистентности (сравнение повторных генераций)
-- [ ] Реализовать метрику покрытия сценариев (BR-N → TC mapping)
-- [ ] Реализовать метрику четкости целей (pattern analysis)
-- [ ] Создать dataset_generator.py для good/bad сценариев
+- [x] Папка `graduation-project` с `src/`, `scripts/`, `openspec/`, `docs/`
+- [x] `openspec/project.md` актуализирован под standalone-код и общий `infra/`
+- [x] `openspec/changes/proposal.md` — фактический объём
+- [x] `openspec/changes/design.md` — архитектура и поток данных
+- [x] `openspec/changes/tasks.md` — этот чек-лист
+- [x] `SDD.md` и `SDD_new.md` сведены в один `SDD.md`, `SDD_new.md` удалён
+- [x] `pyproject.toml` без path-зависимостей; `[tool.uv] package = false`
 
-## Фаза 4: Визуализация и отчет (2-3 дня)
-- [ ] Реализовать create_report.py
-- [ ] Добавить matplotlib/seaborn графики
-- [ ] Создать формат Markdown отчета как в задании
-- [ ] Интегрировать с Streamlit workbench Dz2
+## Фаза 2. Генерация (вендоринг DZ2)
 
-## Фаза 5: Тестирование и отдача (2-3 дня)
-- [ ] Написать unit-тесты для всех модулей
-- [ ] Проверить полный end-to-end workflow
-- [ ] Создать примеры генерации и оценки
-- [ ] Подготовить презентацию проекта
+- [x] `src/generator/`: `input_doc`, `normalizer`, `prompt`, `presets`,
+  `handlers`, `service`, `validator`, `renderer`, `ollama_client`
+- [x] `src/generator/templates/` (5 промптов + `_system/`)
+- [x] `src/generator/presets/` (6 пресетов) и `normalizer.toml`
+- [x] Импорты переписаны на `src.generator.*`, зависимость от `../dz2` убрана
+- [x] `src/generator/pipeline.py`: один файл → `ScenarioResult`, `--runs N`
+- [x] `src/config.py`: `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT`
+- [x] Проверка установленной модели через `/api/tags` с предупреждением
+
+## Фаза 3. Оценка качества
+
+- [x] Readability: средняя длина предложения, оптимум 17 слов
+- [x] Clarity of goals: 5 категорий по 0.2
+- [x] Scenario coverage: `BR-N`, `None` без идентификаторов
+- [x] Consistency: Jaccard повторных генераций, эвристика при `--runs 1`
+- [x] Overall: взвешенное среднее с перенормировкой известных метрик
+- [x] `None` → `n/a`, без подмены нулём
+- [x] `src/models.py`: snapshot/report-сериализация
+
+## Фаза 4. Визуализация и отчёт
+
+- [x] Boxplot, radar, grouped bars (`Agg`)
+- [x] `quality-metrics.json` с реальными `case_summaries`
+- [x] `report.md` в формате задания, с детализацией и `n/a`
+- [x] `generation.json` для отдельного запуска `--assess`
+- [x] Файловое взаимодействие фаз `generate/assess/visualize/report`
+
+## Фаза 5. CLI и развёртывание
+
+- [x] `src/workflow/main.py`, `src/cli.py`, `scripts/cli.py`
+- [x] Коды возврата 0/2/3/4/5/130, `--fail-under`
+- [x] `Dockerfile` на `ohw-python:3.13`
+- [x] `compose.yaml` только с `app`, внешняя сеть `ohw_net`
+- [x] `infra.yaml` с компонентом `ollama`
+- [x] `run.ps1`, `run.cmd`, `run.sh`
+- [x] `input/registration-requirements.md`, `.env.example`, `.gitignore`
+
+## Фаза 6. Тесты
+
+- [x] Unit-тесты метрик, моделей, отчётов, генератора, workflow, графиков
+- [x] `ruff check src scripts tests` без ошибок
+- [x] `mypy src` без ошибок
+- [x] Integration/e2e-тест с живой Ollama, источник — SDD проекта
+- [x] Прогон e2e в Docker с `RUN_OLLAMA_INTEGRATION=1`: 1 passed, 53 deselected
+- [x] Живой прогон на `qwen2.5:7b-instruct`, пример сохранён в `examples/live-run/`
+
+## Фаза 7. Документация и отдача
+
+- [x] `README.md` с быстрым стартом
+- [x] `docs/user-guide.md`
+- [x] `docs/metrics.md`
+- [x] `docs/demo.md` с результатами живого прогона
+- [ ] Коммит и push в `master`

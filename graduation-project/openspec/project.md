@@ -1,41 +1,91 @@
 # Project: graduation-project
 
-Автоматизация генерации и оценки качества тестовой документации с использованием LLM
+Автоматизация генерации и оценки качества тестовой документации с использованием локальной LLM.
 
 ## Стек
-- Python 3.13, uv, lock-файл коммитится
-- HTTP: httpx; схемы: pydantic; тесты: pytest; UI: streamlit
-- Инференс: существующий контейнер `ohw-ollama`, модель `qwen2.5:7b-instruct`
-- UI: работаем в `dz2-ui-1` на 8501
-- Зависимость `ai-testcase-generator` — path-зависимость на `../dz2`, не копия кода
-- OpenSpec конвенции: спеки в `openspec/changes/<change>/{proposal,design,tasks}.md`
-- Требования — EARS: `SHALL` + сценарии `WHEN/THEN`
-- Код и комментарии — на английском; документация (README, спеки) — на русском
-- Отчёты — JSON (источник правды) + Markdown (представление)
+
+- Python 3.13, `uv`, lock-файл коммитится.
+- HTTP: `httpx`; схемы: `pydantic`; графики: `matplotlib` (backend `Agg`).
+- Тесты: `pytest`, `pytest-mock`; статический анализ: `ruff`, `mypy`.
+- Инференс: общий контейнер `ohw-ollama` из `infra/`, модель `qwen2.5:7b-instruct`.
+- Базовый образ приложения: `ohw-python:3.13` из `infra/python`.
+- Общая сеть: `ohw_net` (external), Ollama доступен как `http://ohw-ollama:11434`.
+- Код и комментарии — на английском; документация, CLI-сообщения и отчёты — на русском.
+- Отчёты — JSON (источник правды) + Markdown (представление) + PNG-графики.
+
+## Архитектура исходников
+
+Код лежит в существующей структуре `src/`, без установки проекта как wheel:
+
+```text
+src/
+├── __init__.py
+├── cli.py                  # console wrapper
+├── config.py               # Settings, env
+├── models.py               # QualityMetrics, ScenarioResult, PipelineData
+├── generator/              # вендоренное ядро DZ2
+│   ├── handlers.py
+│   ├── input_doc.py
+│   ├── models.py
+│   ├── normalizer.py
+│   ├── normalizer.toml
+│   ├── ollama_client.py
+│   ├── pipeline.py
+│   ├── presets.py
+│   ├── presets/*.toml
+│   ├── prompt.py
+│   ├── renderer.py
+│   ├── service.py
+│   ├── templates/*.txt
+│   ├── templates/_system/*.txt
+│   └── validator.py
+├── quality/assessor.py     # 4 метрики
+├── visualization/charts.py # boxplot, radar, per-scenario
+├── reporting/report_generator.py
+└── workflow/main.py        # оркестрация фаз
+```
+
+Запуск: `python -m src.workflow` (или `python -m src.workflow.main`) из корня проекта;
+в Docker — `PYTHONPATH=/app`.
+
+Проект **не зависит** от `../dz2` во время выполнения: генератор, промпты, пресеты и
+`normalizer.toml` вендорены в `src/generator/`.
 
 ## Окружение
-- `OLLAMA_BASE_URL` — адрес Ollama (в Docker `http://ohw-ollama:11434`, с хоста `http://localhost:11434`)
-- `OLLAMA_MODEL` — имя модели (по умолчанию `qwen2.5:7b-instruct`)
-- `OLLAMA_TIMEOUT` — таймаут запроса (по умолчанию 600 с)
-- `DZ2_PROMPT_DIR`, `DZ2_PRESETS_DIR`, `AI_TESTGEN_NORMALIZER_CONFIG` — ресурсы Dz2
+
+- `OLLAMA_BASE_URL` — адрес Ollama (по умолчанию `http://localhost:11434`;
+  в compose — `http://ohw-ollama:11434`).
+- `OLLAMA_MODEL` — имя модели (по умолчанию `qwen2.5:7b-instruct`).
+- `OLLAMA_TIMEOUT` — таймаут запроса в секундах (по умолчанию 600).
+- `GRADUATION_PROMPT_DIR` — своя папка шаблонов промптов.
+- `GRADUATION_PRESETS_DIR` — своя папка пресетов.
+- `GRADUATION_NORMALIZER_CONFIG` — свой `normalizer.toml`.
+- Устаревшие `DZ2_PROMPT_DIR`, `DZ2_PRESETS_DIR`, `AI_TESTGEN_NORMALIZER_CONFIG`
+  принимаются как fallback.
 
 ## Контейнеры
-- Используем `infra/compose.yaml`: `ohw-ollama`, сеть `ohw_net`
-- Используем `infra/python`: `ohw-python:3.13`
-- Используем `dz2/compose.yaml`: `dz2-ui-1`
-- Новых постоянных контейнеров, сервисов и портов нет
-- `qwen2.5:7b` докачивается в `ohw-ollama`, второй Ollama не поднимается
-- Тесты идут в `dz2-ui-1` с временным venv в `/tmp`
+
+- Общий стенд поднимается из `infra/`: `./infra/up.sh .` читает `graduation-project/infra.yaml`
+  и запускает профиль `ollama` (`ohw-ollama`).
+- Приложение собирается из `ohw-python:3.13`, подключается к внешней сети `ohw_net`.
+- Собственный Ollama, собственная сеть и собственные порты не создаются.
+- GPU/AMD-режим настраивается на уровне `infra/` (`./infra/up.sh . --gpu` / `--amd`).
 
 ## Границы
-- Выпускной проект не меняет `dz2/src`, кроме адаптеров и тестов
-- Не меняет `dz2/prompts`, `dz2/presets`, `dz2/normalizer.toml`
-- Не обучает модель и не использует LLM-судью текста промпта как метрику деградации
-- Использует детерминированный нормализатор ДЗ2 до сборки промпта
+
+- Проект не меняет `dz2/src`, `dz2/prompts`, `dz2/presets`, `dz2/normalizer.toml`.
+- Проект не включает DZ6 (проверка и оптимизация автотестов).
+- Нет Streamlit-вкладки: интерфейс — CLI-пайплайн, отчёты и графики.
+- Модель не обучается; LLM-судья текста не используется как метрика.
+- Нормализация требований детерминированная (DZ2 normalizer), до сборки промпта.
 
 ## Связь с домашними заданиями
-- **DZ2**: Ядро генерации тест-кейсов и артефактов (5 типов: testcases, checklist, testplan, qareport, coveragematrix)
-- **DZ7**: Шаблоны промптов для 5 типов артефактов (в `templates/<type>.txt`)
-- **DZ8**: Проверка качества генерации (галлюцинации, консистентность, деградация)
-- **Infra**: Общий Ollama сервис и Docker окружение
-- **Цель**: Собрать существующие компоненты в единый выпускной проект с полной отчетностью по требованиям курса
+
+- **DZ2**: генерация тест-кейсов и пяти типов артефактов; нормализатор требований,
+  шаблоны промптов, пресеты, валидация и рендеринг вендорены в проект.
+- **DZ7**: шаблоны промптов для пяти типов артефактов (используются вендоренные копии
+  в `src/generator/templates/`).
+- **DZ8**: идея оценки качества; метрики переработаны и реализованы заново в
+  `src/quality/assessor.py`.
+- **Infra**: общий `ohw-ollama`, образ `ohw-python:3.13`, сеть `ohw_net`.
+- **DZ6** в выпускной проект не входит.

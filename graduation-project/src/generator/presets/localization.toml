@@ -1,0 +1,10 @@
+# Preset: extra instructions appended to the prompt by {extra}.
+# All keys are required except `types` (default: every artifact type).
+id = "localization"
+label = "Локализация и тексты"
+types = ["testcases", "checklist"]
+text = """
+Add localisation checks: long translated strings do not break the layout,
+numbers and dates use the expected format, and every user-visible message is
+in the required language.
+"""

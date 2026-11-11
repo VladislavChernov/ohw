@@ -1,0 +1,163 @@
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+from src.generator.models import ArtifactType
+from src.generator.normalizer import (
+    NormalizationError,
+    NormalizationResult,
+    NormalizerSettings,
+    decode_bytes,
+    find_url,
+    normalize_text,
+)
+
+SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".md", ".txt"})
+
+_FRONT_MATTER_PATTERN = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
+_KNOWN_FRONT_MATTER_KEYS = frozenset({"type"})
+
+# Aliases accepted in front-matter: normalized (lowercase, no separators) -> type.
+_ARTIFACT_ALIASES: dict[str, ArtifactType] = {
+    "testcase": ArtifactType.TESTCASES,
+    "testcases": ArtifactType.TESTCASES,
+    "checklist": ArtifactType.CHECKLIST,
+    "testplan": ArtifactType.TESTPLAN,
+    "qareport": ArtifactType.QAREPORT,
+    "coveragematrix": ArtifactType.COVERAGEMATRIX,
+    "coverage": ArtifactType.COVERAGEMATRIX,
+    "traceability": ArtifactType.COVERAGEMATRIX,
+}
+_ARTIFACT_TYPES = {member.value: member for member in ArtifactType}
+
+
+class InputError(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class RequirementDoc:
+    path: Path
+    content: str
+    url: str | None
+    artifact_type: ArtifactType = ArtifactType.TESTCASES
+    normalization: NormalizationResult | None = None
+
+
+def extract_url(content: str) -> str | None:
+    return find_url(content)
+
+
+def split_front_matter(content: str) -> tuple[ArtifactType, str]:
+    match = _FRONT_MATTER_PATTERN.match(content)
+    if match is None:
+        return ArtifactType.TESTCASES, content
+
+    artifact_type = ArtifactType.TESTCASES
+    for line in match.group(1).splitlines():
+        key, separator, value = line.partition(":")
+        if not separator or not key.strip() or not value.strip():
+            raise InputError(f"malformed front-matter line (expected 'key: value'): {line!r}")
+        key = key.strip().lower()
+        if key not in _KNOWN_FRONT_MATTER_KEYS:
+            raise InputError(f"unknown front-matter key: {key!r} (supported: type)")
+        if key == "type":
+            artifact_type = parse_artifact_type(value.strip())
+
+    return artifact_type, content[match.end() :].lstrip("\n")
+
+
+def parse_artifact_type(value: str) -> ArtifactType:
+    normalized = re.sub(r"[\s_-]+", "", value.strip().lower())
+    if normalized in _ARTIFACT_ALIASES:
+        return _ARTIFACT_ALIASES[normalized]
+    supported = ", ".join(sorted(_ARTIFACT_TYPES))
+    raise InputError(f"unknown artifact type: {value!r} (supported: {supported})")
+
+
+def collect_input_files(input_dir: Path) -> list[Path]:
+    if not input_dir.is_dir():
+        raise InputError(f"input directory does not exist: {input_dir}")
+
+    files = sorted(
+        p
+        for p in input_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in SUPPORTED_EXTENSIONS
+    )
+    skipped = sorted(
+        p for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() not in SUPPORTED_EXTENSIONS
+    )
+    for path in skipped:
+        print(f"warning: skipping unsupported file: {path.name}", flush=True)
+
+    if not files:
+        raise InputError(f"no .md/.txt requirement files found in: {input_dir}")
+
+    collisions = _find_name_collisions(files)
+    if collisions:
+        details = "; ".join(
+            f"'{stem}': {', '.join(sorted(names))}" for stem, names in sorted(collisions.items())
+        )
+        raise InputError(
+            f"name collision in input directory, keep only one of each pair (delete or rename): {details}"
+        )
+    return files
+
+
+def load_docs(
+    input_dir: Path,
+    url_override: str | None,
+    *,
+    normalize: bool = False,
+    settings: NormalizerSettings | None = None,
+) -> list[RequirementDoc]:
+    """Load requirement files.
+
+    ``normalize=False`` keeps the historical strict UTF-8 contract.
+    ``normalize=True`` detects the encoding (UTF-8/BOM, UTF-16 or the codecs
+    from ``normalizer.toml``) and stores the canonical document; the original
+    bytes are not written anywhere.
+    """
+    docs: list[RequirementDoc] = []
+    for path in collect_input_files(input_dir):
+        if normalize:
+            docs.append(_load_normalized(path, url_override, settings))
+            continue
+        content = path.read_text(encoding="utf-8")
+        artifact_type, body = split_front_matter(content)
+        docs.append(
+            RequirementDoc(
+                path=path,
+                content=body,
+                url=url_override if url_override else extract_url(body),
+                artifact_type=artifact_type,
+            )
+        )
+    return docs
+
+
+def _load_normalized(
+    path: Path,
+    url_override: str | None,
+    settings: NormalizerSettings | None,
+) -> RequirementDoc:
+    try:
+        text, encoding = decode_bytes(path.read_bytes(), settings)
+        artifact_type, body = split_front_matter(text)
+        result = normalize_text(body, url_override, encoding=encoding, settings=settings)
+    except NormalizationError as exc:
+        raise InputError(f"{path.name}: {exc}") from exc
+    return RequirementDoc(
+        path=path,
+        content=result.text,
+        url=result.url,
+        artifact_type=artifact_type,
+        normalization=result,
+    )
+
+
+def _find_name_collisions(files: list[Path]) -> dict[str, list[str]]:
+    by_stem: dict[str, list[str]] = {}
+    for path in files:
+        by_stem.setdefault(path.stem.lower(), []).append(path.name)
+    return {stem: names for stem, names in by_stem.items() if len(names) > 1}

@@ -1,0 +1,10 @@
+# Preset: extra instructions appended to the prompt by {extra}.
+# All keys are required except `types` (default: every artifact type).
+id = "accessibility"
+label = "Доступность"
+types = ["testcases", "checklist", "qareport"]
+text = """
+Add an accessibility pass: keyboard-only navigation, focus order, visible focus
+state, screen-reader labels for controls, and a colour-contrast check of the
+main actions. Mark findings that need a manual expert review.
+"""

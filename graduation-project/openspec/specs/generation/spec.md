@@ -2,17 +2,51 @@
 
 ## EARS Requirements
 
-### SHALL requirements
-- **SHALL** генерировать 5 типов артефактов из requirement файлов: testcases, checklist, testplan, qareport, coveragematrix
-- **SHALL** использовать внешние шаблоны промптов из `dz7/templates/<type>.txt` (не hardcoded в code)
-- **SHALL** поддерживать normalization требований через `--normalize` флаг DZ2
-- **SHALL** валидировать ответ Ollama по schema и retry при неудаче (max_retries из config)
-- **SHALL**.render markdown отчеты через renderer DZ2 service
-- **SHALL** генерировать boundary values в тест-кейсах при наличии границ в требованиях
-- **SHALL** поддерживать `--url` аргумент для указания URL тестируемого сайта
+### SHALL
 
-### WHEN/THEN scenarios
-- **WHEN** подставляются плейсхолдеры `{url}`, `{count}`, `{positive}`, `{negative}`, `{requirement_rule}`, `{content}`, `{extra}`, `{testcases}`
-- **THEN** Generated artifact сохраняется в `output/<stem>.md`
-- **WHEN** URL неизвестен, строка `Target site: {url}` удаляется completely
-- **THEN** `{testcases}` в coveragematrix шаблоне превращается в список real TC или "No test cases have been generated..."
+- **SHALL** генерировать пять типов артефактов из файлов требований:
+  `testcases`, `checklist`, `testplan`, `qareport`, `coveragematrix`.
+- **SHALL** брать шаблоны промптов из `src/generator/templates/<type>.txt`, а
+  системные и retry-промпты — из `src/generator/templates/_system/`.
+  Шаблоны не хардкодятся в коде и могут быть переопределены `--prompt-dir`
+  или `GRADUATION_PROMPT_DIR`.
+- **SHALL** поддерживать `.md` и `.txt`, front-matter `type: <artifact>` и
+  извлечение URL из текста требований.
+- **SHALL** поддерживать детерминированную нормализацию требований через
+  `--normalize`; нормализатор вендорен в `src/generator/normalizer.py` и не
+  требует установленного DZ2.
+- **SHALL** валидировать ответ Ollama: JSON-схему тест-кейсов, наличие
+  позитивных и негативных кейсов, количество, Markdown-разделы и таблицы.
+- **SHALL** повторять запрос при невалидном ответе до `--max-retries` раз,
+  передавая модели список замечаний.
+- **SHALL** рендерить итоговый Markdown через `src/generator/renderer.py` и
+  сохранять его в `<output>/scenarios/<stem>.md`.
+- **SHALL** поддерживать пресеты `--preset ID` из `src/generator/presets/*.toml`;
+  неизвестный пресет или пресет, не применимый к типу артефакта, — ошибка.
+- **SHALL** поддерживать `--runs N` (N ≥ 1): каждый сценарий генерируется N раз,
+  все варианты сохраняются в `generation.json` для метрики консистентности.
+- **SHALL** сохранять снимок генерации `generation.json` с rendered-текстом,
+  вариантами генераций, тест-кейсами, промптом и метаданными.
+- **SHALL** продолжать обработку остальных файлов, если один файл не удалось
+  сгенерировать; ошибка попадает в `errors`.
+- **SHALL** прерывать прогон при недоступности Ollama.
+
+### WHEN/THEN
+
+- **WHEN** в шаблоне подставляются `{url}`, `{count}`, `{count_noun}`,
+  `{positive}`, `{negative}`, `{requirement_rule}`, `{content}`, `{extra}`,
+  `{testcases}`
+- **THEN** все плейсхолдеры заменяются; неизвестный плейсхолдер — ошибка шаблона.
+- **WHEN** URL неизвестен
+- **THEN** строка `Target site: {url}` удаляется целиком.
+- **WHEN** в требованиях нет идентификаторов `BR-N`
+- **THEN** правило трассируемости пустое, а покрытие требований не измеряется.
+- **WHEN** используется `coveragematrix`
+- **THEN** `{testcases}` содержит реальные идентификаторы ранее сгенерированных
+  кейсов, а не выдуманные моделью.
+- **WHEN** модель вернула невалидный ответ
+- **THEN** выполняется повтор с перечнем замечаний; после исчерпания попыток
+  сценарий помечается ошибкой.
+- **WHEN** `--runs 1`
+- **THEN** консистентность считается внутренней эвристикой и в отчёте это
+  отражается через `runs = 1`.

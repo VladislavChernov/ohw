@@ -1,0 +1,22 @@
+# Checklist Prompt Template
+# Generates a test checklist (zones with verification items) from requirements.
+#
+# Placeholders:
+# {url}     - target site URL (the whole line is dropped when no URL is known)
+# {content} - requirements content from the input file
+# {extra}   - optional preset instructions; the line is empty when no preset is used
+
+Target site: {url}
+
+Create a test checklist as a Markdown document based on the requirements below.
+
+Rules:
+- Each checklist zone is an '## ' heading; use the zone names from the requirements.
+- Under every zone heading put at least one concrete check as a '- ' list item.
+- End every check item with the business requirement id it verifies in parentheses, e.g. '(BR-1)'.
+- Do not wrap the document in code fences and do not respond with JSON.
+
+{extra}
+
+Requirements:
+{content}

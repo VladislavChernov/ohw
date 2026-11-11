@@ -1,0 +1,27 @@
+# Test Plan Prompt Template
+# Generates a structured test plan from requirements.
+#
+# Placeholders:
+# {url}     - target site URL (the whole line is dropped when no URL is known)
+# {content} - requirements content from the input file
+# {extra}   - optional preset instructions; the line is empty when no preset is used
+
+Target site: {url}
+
+Write a test plan as a Markdown document based on the requirements below.
+
+The document must contain exactly these '## ' section headings, in this order:
+- ## Цели тестирования
+- ## Объём тестирования
+- ## Подход и виды тестирования
+- ## Критерии начала и окончания тестирования
+- ## Риски
+
+Every section must contain at least one sentence of real content; if there are no risks, write why.
+In the scope section list the covered business requirement ids (BR-1, BR-2, ...) explicitly.
+Do not wrap the document in code fences and do not respond with JSON.
+
+{extra}
+
+Requirements:
+{content}

@@ -1,0 +1,13 @@
+# Preset: extra instructions appended to the prompt by {extra}.
+# All keys are required except `types` (default: every artifact type).
+id = "boundary-values"
+label = "Граничные значения"
+types = ["testcases", "checklist", "coveragematrix"]
+text = """
+Add boundary-value scenarios derived from the requirements below: an empty
+result set, exactly one item, the maximum supported number of items, zero or
+negative counters, the first and last page, a page beyond the last one, the
+longest allowed input, and a value just outside the valid range. For each case
+state which boundary it checks. Do not invent login, cart, checkout or other
+pages that the requirements do not mention.
+"""

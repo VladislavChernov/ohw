@@ -1,0 +1,45 @@
+# QA Report Prompt Template
+# Generates a QA report (testing results summary) from requirements.
+#
+# Placeholders:
+# {url}     - target site URL (the whole line is dropped when no URL is known)
+# {content} - requirements content from the input file
+# {extra}   - optional preset instructions; the line is empty when no preset is used
+
+Target site: {url}
+
+Write a QA report as a Markdown document based on the requirements below.
+
+The document must contain exactly these '## ' section headings, in this order:
+- ## Введение
+- ## Тестовые сценарии
+- ## Дефекты
+- ## Рекомендации
+
+Rules:
+- In 'Введение' describe the purpose and scope; if no version is given, say it is not specified.
+- In 'Тестовые сценарии' summarise executed test cases: passed / failed / skipped.
+  If the requirements contain no execution results, say testing has not been run and
+  list the checks to run; do not invent counts.
+- In 'Дефекты' list found defects with severity, status and the BR id they relate to.
+  If no defects were provided, say none were reported and name the risks to check;
+  do not invent defects.
+- In 'Рекомендации' give improvement suggestions and next steps.
+- Every section must contain at least one sentence of real content.
+- Reference business requirement ids (BR-1, BR-2, ...) where applicable.
+- Do not wrap the document in code fences and do not respond with JSON.
+
+{extra}
+
+Grounding rules (these override any additional instructions above):
+- Requirements are not test results. Unless the requirements explicitly contain
+  execution results, do not write that a requirement "passed", "failed" or
+  "успешно прошёл", and do not report a pass rate or defect counts.
+- Without execution results, start 'Тестовые сценарии' with the sentence
+  "Тестирование не проводилось: результаты не предоставлены." and then list the
+  checks to run for each BR id.
+- In 'Дефекты' say that no defects were reported (not "not found") and name the
+  risks to check; never invent defects.
+
+Requirements:
+{content}

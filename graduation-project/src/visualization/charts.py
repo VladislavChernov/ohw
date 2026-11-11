@@ -1,126 +1,151 @@
-#!/usr/bin/env python3
-"""Generate matplotlib/seaborn quality assessment charts."""
+"""Charts for the four quality metrics (headless matplotlib)."""
 
-import matplotlib.pyplot as plt
-import seaborn as sns
-import os
-from typing import Dict, List, Any
-import statistics
+import math
+from pathlib import Path
 
-sns.set_style("whitegrid")
-plt.rcParams.update({'font.size': 10})
+import matplotlib
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt  # noqa: E402  (backend must be selected first)
+
+from src.models import METRIC_KEYS, PipelineData, QualityMetrics  # noqa: E402
+
+METRIC_LABELS: dict[str, str] = {
+    "readability": "Readability",
+    "clarity_goals": "Clarity of goals",
+    "scenario_coverage": "Scenario coverage",
+    "consistency": "Consistency",
+}
+
+CHART_FILES: dict[str, str] = {
+    "boxplot": "metrics_boxplot.png",
+    "radar": "radar_chart.png",
+    "per_scenario": "per_scenario_scores.png",
+}
 
 
-def create_boxplot(scenarios_data: Dict, output_dir: str) -> Optional[str]:
-    """Create boxplot of metrics distribution across scenarios."""
-    scenarios = scenarios_data.get("scenarios", [])
+def _values(data: PipelineData, key: str) -> list[float]:
+    return [
+        value
+        for value in (getattr(scenario.quality, key) for scenario in data.scenarios)
+        if value is not None
+    ]
+
+
+def _known_metrics(data: PipelineData) -> list[str]:
+    return [key for key in METRIC_KEYS if _values(data, key)]
+
+
+def create_boxplot(data: PipelineData, charts_dir: Path) -> Path | None:
+    """Boxplot of each metric across scenarios."""
+    series = [(key, _values(data, key)) for key in _known_metrics(data)]
+    if not series:
+        return None
+    figure, axes = plt.subplots(figsize=(9, 5.5))
+    axes.boxplot(
+        [values for _, values in series],
+        tick_labels=[METRIC_LABELS[key] for key, _ in series],
+    )
+    axes.set_title("Распределение метрик качества по сценариям")
+    axes.set_ylabel("Score (0–1)")
+    axes.set_ylim(0, 1)
+    axes.grid(axis="y", alpha=0.3)
+    figure.tight_layout()
+    output = charts_dir / CHART_FILES["boxplot"]
+    figure.savefig(output, dpi=150)
+    plt.close(figure)
+    return output
+
+
+def create_radar_chart(data: PipelineData, charts_dir: Path) -> Path | None:
+    """Radar chart of average metrics; needs at least three axes."""
+    averages = {
+        key: data.averages.get(key)
+        for key in METRIC_KEYS
+        if data.averages.get(key) is not None
+    }
+    if len(averages) < 3:
+        return None
+    labels = [METRIC_LABELS[key] for key in averages]
+    values: list[float] = []
+    for value in averages.values():
+        if value is not None:
+            values.append(value)
+    angles = [index * 2 * math.pi / len(labels) for index in range(len(labels))]
+    angles += angles[:1]
+    values += values[:1]
+
+    figure, axes = plt.subplots(figsize=(6, 6), subplot_kw={"polar": True})
+    axes.plot(angles, values, "o-", linewidth=2)
+    axes.fill(angles, values, alpha=0.25)
+    axes.set_xticks(angles[:-1], labels)
+    axes.set_ylim(0, 1)
+    axes.set_title("Средние метрики качества")
+    figure.tight_layout()
+    output = charts_dir / CHART_FILES["radar"]
+    figure.savefig(output, dpi=150)
+    plt.close(figure)
+    return output
+
+
+def create_per_scenario_chart(data: PipelineData, charts_dir: Path) -> Path | None:
+    """Grouped bars with one group per scenario."""
+    scenarios = [
+        scenario
+        for scenario in data.scenarios
+        if any(getattr(scenario.quality, key) is not None for key in METRIC_KEYS)
+    ]
     if not scenarios:
         return None
-    
-    readability = [s.get("quality_metrics", {}).get("readability", 0) for s in scenarios]
-    clarity = [s.get("quality_metrics", {}).get("clarity_goals", 0) for s in scenarios]
-    coverage = [s.get("quality_metrics", {}).get("scenario_coverage", 0) * 100 for s in scenarios]
-    consistency = [s.get("quality_metrics", {}).get("consistency", 0.5) for s in scenarios]
-    
-    data = {"Readability": readability, "Clarity Goals": clarity, 
-            "Coverage %": coverage, "Consistency": consistency}
-    
-    plt.figure(figsize=(10, 6))
-    sns.boxplot(data=data)
-    plt.title("Распределение метрик качества по сценариям")
-    plt.ylabel("Score (0-1)")
-    plt.xticks(rotation=45)
-    plt.ylim(0, 1)
-    plt.tight_layout()
-    
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, "metrics_boxplot.png")
-    plt.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close()
-    return path
-
-
-def create_radar_chart(avg_metrics: Dict, output_dir: str) -> Optional[str]:
-    """Create radar chart of average metrics."""
-    categories = list(avg_metrics.keys())
-    values = list(avg_metrics.values())
-    values_closed = values + [values[0]]
-    angles = [n * (2 * 3.14159 / len(categories)) for n in range(len(categories))]
-    angles_closed = angles + [angles[0]]
-    
-    plt.figure(figsize=(6, 6), subplot_kw=dict(polar=True))
-    plt.plot(angles_closed, values_closed, 'o-', linewidth=2)
-    plt.fill(angles_closed, values_closed, alpha=0.25)
-    plt.xticks(angles[:-1], categories)
-    plt.ylim(0, 1)
-    plt.title("Radar-chart качеств генерации")
-    plt.tight_layout()
-    
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, "radar_chart.png")
-    plt.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close()
-    return path
-
-
-def create_per_scenario_chart(scenarios_data: Dict, output_dir: str) -> Optional[str]:
-    """Create bar chart showing metrics per scenario."""
-    scenarios = scenarios_data.get("scenarios", [])
-    if not scenarios:
+    metrics = _known_metrics(data)
+    if not metrics:
         return None
-    
-    total = len(scenarios)
-    readability = [s.get("quality_metrics", {}).get("readability", 0) for s in scenarios]
-    clarity = [s.get("quality_metrics", {}).get("clarity_goals", 0) for s in scenarios]
-    coverage = [s.get("quality_metrics", {}).get("scenario_coverage", 0) * 100 for s in scenarios]
-    consistency = [s.get("quality_metrics", {}).get("consistency", 0.5) for s in scenarios]
-    
-    x = range(total)
-    
-    plt.figure(figsize=(12, 6))
-    plt.bar(x, readability, label="Readability", alpha=0.6, color="#4c72b0")
-    plt.bar(x, clarity, bottom=readability, label="Clarity Goals", alpha=0.6, color="#55a868")
-    plt.bar(x, coverage, bottom=[r + c for r, c in zip(readability, clarity)], 
-            label="Coverage %", alpha=0.6, color="#c44e52")
-    plt.bar(x, consistency, bottom=[r + c + co for r, c, co in zip(readability, clarity, coverage)], 
-            label="Consistency", alpha=0.6, color="#8172b3")
-    
-    plt.title("Метрики качества по каждому сценарию")
-    plt.xlabel("Сценарий")
-    plt.ylabel("Score")
-    plt.xticks(x, [s.get("filename", f"TC-{i+1}") for i, s in enumerate(scenarios)], rotation=45)
-    plt.legend()
-    plt.tight_layout()
-    
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, "per_scenario_scores.png")
-    plt.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close()
-    return path
+
+    positions = list(range(len(scenarios)))
+    width = 0.8 / len(metrics)
+    figure, axes = plt.subplots(figsize=(max(9, len(scenarios) * 1.6), 5.5))
+    for index, key in enumerate(metrics):
+        offsets = [position + index * width for position in positions]
+        heights: list[float] = []
+        for scenario in scenarios:
+            value: float | None = getattr(scenario.quality, key)
+            heights.append(float(value) if value is not None else float("nan"))
+        axes.bar(offsets, heights, width=width, label=METRIC_LABELS[key])
+    axes.set_xticks(
+        [position + width * (len(metrics) - 1) / 2 for position in positions],
+        [scenario.filename for scenario in scenarios],
+        rotation=30,
+        ha="right",
+    )
+    axes.set_ylim(0, 1)
+    axes.set_ylabel("Score (0–1)")
+    axes.set_title("Метрики качества по каждому сценарию")
+    axes.legend(ncol=2, fontsize=8)
+    axes.grid(axis="y", alpha=0.3)
+    figure.tight_layout()
+    output = charts_dir / CHART_FILES["per_scenario"]
+    figure.savefig(output, dpi=150)
+    plt.close(figure)
+    return output
 
 
-def create_all_charts(pipeline_data: Dict, output_dir: str) -> Dict:
-    """Create all charts for the graduation project."""
-    charts_dir = os.path.join(output_dir, "charts")
-    result = {}
-    
-    boxplot_path = create_boxplot(pipeline_data, charts_dir)
-    if boxplot_path:
-        result["boxplot"] = boxplot_path
-    
-    scenarios = pipeline_data.get("scenarios", [])
-    if scenarios:
-        avg_metrics = {}
-        for key in ["readability", "clarity_goals", "scenario_coverage", "consistency"]:
-            values = [s.get("quality_metrics", {}).get(key, 0) for s in scenarios]
-            avg_metrics[key] = round(statistics.mean(values), 3) if values else 0.0
-        
-        radar_path = create_radar_chart(avg_metrics, charts_dir)
-        if radar_path:
-            result["radar"] = radar_path
-        
-        per_scenario_path = create_per_scenario_chart(pipeline_data, charts_dir)
-        if per_scenario_path:
-            result["per_scenario"] = per_scenario_path
-    
-    return result
+def create_all_charts(data: PipelineData, output_dir: Path) -> dict[str, str]:
+    """Create every applicable chart and return relative paths by key."""
+    charts_dir = output_dir / "charts"
+    charts_dir.mkdir(parents=True, exist_ok=True)
+    created: dict[str, str] = {}
+    for key, factory in (
+        ("boxplot", create_boxplot),
+        ("radar", create_radar_chart),
+        ("per_scenario", create_per_scenario_chart),
+    ):
+        path = factory(data, charts_dir)
+        if path is not None:
+            created[key] = f"charts/{path.name}"
+    return created
+
+
+def empty_metrics() -> QualityMetrics:
+    """Convenience for callers that need a blank metric object."""
+    return QualityMetrics()

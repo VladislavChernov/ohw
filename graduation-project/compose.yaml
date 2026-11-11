@@ -1,0 +1,34 @@
+name: graduation-project
+
+# The LLM and the Python base image come from the shared infra catalog:
+#   infra/compose.yaml -> ohw-ollama (profile "ollama", network ohw_net)
+#   infra/python       -> ohw-python:3.13
+# Start the shared component once with `./infra/up.sh .` (see infra.yaml).
+# The app joins the external network and reaches Ollama as http://ohw-ollama:11434.
+
+services:
+  app:
+    build: .
+    environment:
+      OLLAMA_BASE_URL: http://ohw-ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      OLLAMA_TIMEOUT: "900"
+    volumes:
+      - ./input:/app/input:ro
+      - ./output:/app/output
+    networks:
+      - ohw_net
+    command:
+      - --input-dir
+      - /app/input
+      - --output-dir
+      - /app/output
+      - --generate
+      - --assess
+      - --visualize
+      - --report
+
+networks:
+  ohw_net:
+    external: true
+    name: ohw_net

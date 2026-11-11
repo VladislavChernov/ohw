@@ -1,0 +1,11 @@
+# Preset: extra instructions appended to the prompt by {extra}.
+# All keys are required except `types` (default: every artifact type).
+id = "input-validation"
+label = "Валидация ввода и безопасность"
+types = ["testcases", "checklist", "testplan"]
+text = """
+Add input-validation and basic security checks: HTML/script injection in text
+fields, overlong values, unexpected query parameters, direct URL manipulation,
+and behaviour without an authorised session. Do not invent vulnerabilities that
+the requirements cannot demonstrate; describe the observable check instead.
+"""

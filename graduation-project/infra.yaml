@@ -1,0 +1,4 @@
+# Shared components required by the graduation project.
+# Start them with: ../infra/up.sh .   (or ./infra/up.sh . from the repo root)
+components:
+  - ollama

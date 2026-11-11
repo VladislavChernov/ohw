@@ -1,34 +1,195 @@
 # Graduation Project
 
-Automated Test Documentation Generation with LLM
+Автоматическая генерация и оценка качества тестовой документации с локальной
+LLM. Проект самодостаточен: генератор, промпты, пресеты и нормализатор лежат
+внутри папки, дополнительных ДЗ устанавливать не нужно. Из общего стенда
+используются только `ohw-ollama` и образ `ohw-python:3.13` из `infra/`.
 
-This project integrates existing homeworks (DZ2, DZ7, DZ8) into a comprehensive graduation project.
+## Что делает
 
-## Structure
-- `openspec/` - Mandatory OpenSpec specifications
-- `src/` - Source code
-- `scripts/` - Helper scripts
-- `docs/` - Documentation
-- `output/` - Generated results
-
-## Quick Start
-
-```bash
-cd d:/Otus/ohw
-python -m graduation_project \
-  --generate \
-  --assess \
-  --visualize \
-  --report \
-  --input-dir dz2/docs \
-  --type testcases \
-  --count 10 \
-  --normalize \
-  --output-dir output
+```text
+input/*.md ──▶ generate ──▶ scenarios/*.md + generation.json
+                   │
+                   ▼
+                 assess ──▶ quality-metrics.json
+                   │
+          ┌────────┴─────────┐
+          ▼                  ▼
+     visualize             report
+   charts/*.png           report.md
 ```
 
-## Related Homeworks
-- **DZ2**: Ядро генерации тест-кейсов и артефактов (5 типов)
-- **DZ7**: Шаблоны промптов для 5 типов артефактов
-- **DZ8**: Проверка качества генерации (галлюцинации, консистентность)
-- **Infra**: Общий Ollama сервис и Docker окружение
+- Генерирует 5 типов артефактов: `testcases`, `checklist`, `testplan`,
+  `qareport`, `coveragematrix`.
+- Считает 4 метрики: читаемость, чёткость целей, покрытие требований,
+  консистентность, плюс взвешенный `overall`.
+- Строит boxplot, radar и оценки по сценариям.
+- Пишет JSON (источник правды) и Markdown-отчёт.
+
+## Быстрый старт (Windows)
+
+Нужны Docker Desktop и папка `infra/` рядом с проектом.
+
+```powershell
+cd graduation-project
+.\run.ps1
+```
+
+Скрипт сам поднимет общий `ohw-ollama`, соберёт приложение и выполнит полный
+пайплайн. Первый запуск скачивает модель и Python-зависимости, это может занять
+несколько минут. Результаты — в `.\output`.
+
+Linux/macOS:
+
+```bash
+cd graduation-project
+./run.sh
+```
+
+## Быстрый старт (локально, без Docker)
+
+Нужна запущенная Ollama на `localhost:11434` с моделью `qwen2.5:7b-instruct`.
+
+```bash
+uv sync --dev
+uv run python -m src.workflow --input-dir input --output-dir output
+```
+
+## CLI
+
+```text
+python -m src.workflow [--generate] [--assess] [--visualize] [--report]
+    --input-dir input --output-dir output --type testcases
+    --count 10 --runs 1 --temperature 0.7 --max-retries 3
+    --url URL --normalize --preset ID [--preset ID ...]
+    --prompt-dir DIR --base-url URL --model NAME --timeout SEC
+    --fail-under SCORE
+```
+
+Без флагов фаз выполняются все четыре. Фазы можно запускать отдельно по
+сохранённым файлам:
+
+```bash
+python -m src.workflow --generate --count 5
+python -m src.workflow --assess
+python -m src.workflow --visualize
+python -m src.workflow --report
+```
+
+`--runs 2` и больше даёт честную консистентность (Jaccard повторных генераций).
+При `--runs 1` используется внутренняя эвристика, и отчёт это показывает.
+
+## Входные данные
+
+Папка `input/` с файлами `.md` или `.txt`. Требования удобно нумеровать `BR-N`:
+
+```markdown
+## BR-1. Открытие формы
+Пользователь открывает страницу регистрации. Форма должна содержать поля
+«Email», «Пароль» и кнопку «Зарегистрироваться».
+```
+
+Поддерживается front-matter:
+
+```markdown
+---
+type: checklist
+---
+```
+
+Без front-matter тип задаётся флагом `--type`.
+
+## Результаты
+
+| Файл | Что внутри |
+|---|---|
+| `output/scenarios/<stem>.md` | сгенерированный артефакт |
+| `output/generation.json` | снимок генерации для `--assess` |
+| `output/quality-metrics.json` | метрики и реальные тест-кейсы |
+| `output/report.md` | Markdown-отчёт |
+| `output/charts/*.png` | графики |
+
+## Метрики
+
+| Метрика | Формула | Вес |
+|---|---|---:|
+| Readability | `1 - |avg_words - 17| / 30` | 0.25 |
+| Clarity of goals | 5 категорий × 0.2 | 0.25 |
+| Scenario coverage | покрытые `BR-N` / все `BR-N` | 0.30 |
+| Consistency | средний Jaccard повторных генераций | 0.20 |
+
+`overall` — взвешенное среднее известных метрик. `n/a` означает «не измеримо»
+(например, в требованиях нет `BR-N`), а не ноль. Подробности —
+[`docs/metrics.md`](docs/metrics.md).
+
+## Конфигурация
+
+| Переменная | По умолчанию |
+|---|---|
+| `OLLAMA_BASE_URL` | `http://localhost:11434` |
+| `OLLAMA_MODEL` | `qwen2.5:7b-instruct` |
+| `OLLAMA_TIMEOUT` | `600` |
+| `GRADUATION_PROMPT_DIR` | `src/generator/templates` |
+| `GRADUATION_PRESETS_DIR` | `src/generator/presets` |
+| `GRADUATION_NORMALIZER_CONFIG` | `src/generator/normalizer.toml` |
+
+Скопируйте `.env.example` в `.env` для локального запуска.
+
+## Общий стенд
+
+```bash
+./infra/up.sh graduation-project          # CPU
+./infra/up.sh graduation-project --gpu    # NVIDIA
+./infra/up.sh graduation-project --amd    # AMD ROCm
+```
+
+`compose.yaml` проекта содержит только `app`, подключает внешнюю сеть `ohw_net`
+и обращается к Ollama по `http://ohw-ollama:11434`. Собственный Ollama не
+поднимается.
+
+## Тесты и проверки
+
+```bash
+uv run pytest
+uv run ruff check src scripts tests
+uv run mypy src
+
+# живой e2e на источнике из SDD проекта
+RUN_OLLAMA_INTEGRATION=1 uv run pytest -m integration
+```
+
+## Структура
+
+```text
+graduation-project/
+├── src/
+│   ├── generator/      # вендоренное ядро DZ2 + шаблоны и пресеты
+│   ├── quality/        # 4 метрики
+│   ├── visualization/  # графики
+│   ├── reporting/      # JSON + Markdown
+│   └── workflow/       # CLI и фазы
+├── tests/              # unit + e2e (источник — SDD)
+├── input/              # пример требований
+├── openspec/           # спеки и изменения
+├── docs/               # руководство, метрики, демо
+├── SDD.md              # единый Software Design Document
+├── Dockerfile
+├── compose.yaml
+├── infra.yaml
+└── run.ps1 / run.sh / run.cmd
+```
+
+## Документация
+
+- [`docs/user-guide.md`](docs/user-guide.md) — подробное руководство.
+- [`docs/metrics.md`](docs/metrics.md) — формулы и ограничения метрик.
+- [`docs/demo.md`](docs/demo.md) — пример живого прогона.
+- [`SDD.md`](SDD.md) — архитектура и дизайн.
+- [`openspec/`](openspec/) — требования и изменения.
+
+## Ограничения
+
+- Нет веб-интерфейса и Streamlit.
+- DZ6 (проверка/оптимизация автотестов) не входит.
+- Модель не обучается, LLM-судья не используется как метрика.
+- Результат требует ревью человеком.
