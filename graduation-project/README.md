@@ -55,6 +55,15 @@ uv sync --dev
 uv run python -m src.workflow --input-dir input --output-dir output
 ```
 
+Если Python не установлен, `uv` скачает переносимый CPython сам — это тот же
+подход, что у портативных сборок, но без бинарей в репозитории:
+
+```bash
+uv python install 3.13
+uv sync --frozen --no-dev
+uv run --no-dev python -m src.workflow.main --input-dir input --output-dir output
+```
+
 ## CLI
 
 ```text
@@ -158,6 +167,9 @@ uv run mypy src
 RUN_OLLAMA_INTEGRATION=1 uv run pytest -m integration
 ```
 
+Guard-тесты проверяют кодировку документации и контракт лаунчеров; они входят
+в обычный прогон `uv run pytest`.
+
 ## Структура
 
 ```text
@@ -186,6 +198,17 @@ graduation-project/
 - [`docs/demo.md`](docs/demo.md) — пример живого прогона.
 - [`SDD.md`](SDD.md) — архитектура и дизайн.
 - [`openspec/`](openspec/) — требования и изменения.
+
+## Возможное развитие
+
+- **API-тесты.** Шов уже зафиксирован: порт `ApiTestRunner`, `api-tests.json` и
+  раздел отчёта. Следующий шаг — адаптер ДЗ3 advanced (JSON-план + HTTP-движок)
+  и целевой API. Пока сеть не используется. Контракт —
+  [`openspec/specs/autotests/spec.md`](openspec/specs/autotests/spec.md).
+- **ДЗ6.** Ревью автотестов не входит: он анализирует pytest-код, а advanced
+  даёт JSON-план; вернёмся отдельным портом.
+- **Портативный запуск.** Вместо вендоринга embedded Python используется `uv
+  python install`; бинари в репозиторий не коммитятся.
 
 ## Ограничения
 

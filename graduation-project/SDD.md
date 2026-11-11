@@ -39,9 +39,12 @@
 - Визуализация: boxplot, radar, оценки по сценариям.
 - Отчётность: JSON (источник правды) + Markdown + PNG.
 - CLI-пайплайн с возможностью запускать фазы отдельно.
+- Точка расширения API-тестов (шов): контракт фазы, `api-tests.json` и раздел
+  отчёта. Сеть и ДЗ3 advanced пока не подключены.
 
 Вне области: веб-интерфейс, Streamlit, DZ6, обучение модели, LLM-судья,
-собственный Ollama и собственные постоянные контейнеры.
+собственный Ollama и собственные постоянные контейнеры. API-тесты реализованы
+только как шов; исполняемые HTTP-тесты появятся отдельным шагом.
 
 ### 1.3 Определения
 
@@ -108,6 +111,7 @@
 | `src/quality/assessor.py` | детерминированные метрики и агрегация |
 | `src/visualization/charts.py` | графики matplotlib (`Agg`) |
 | `src/reporting/report_generator.py` | JSON + Markdown |
+| `src/autotests/` | шов API-тестов: порт, модели, заглушка, `api-tests.json` |
 | `src/workflow/main.py` | CLI, фазы, проверка модели, коды возврата |
 | `scripts/cli.py` | совместимый запуск `python scripts/cli.py` |
 
@@ -625,6 +629,8 @@ uv run python -m src.workflow --input-dir input --output-dir output
 - `--runs 1` даёт лишь внутреннюю эвристику консистентности.
 - Качество текста ограничено моделью `qwen2.5:7b-instruct` и шаблонами промптов.
 - Проект не заменяет ревью тест-документации человеком.
+- API-тесты пока не выполняют HTTP-запросов: шов не создаёт сетевой активности.
+- Embedded Python не поставляется; переносимый запуск — через `uv python install`.
 
 ---
 
@@ -638,16 +644,81 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | `openspec/changes/tasks.md` | чек-лист реализации |
 | `openspec/specs/generation/spec.md` | EARS-требования к генерации |
 | `openspec/specs/quality/spec.md` | EARS-требования и формулы метрик |
+| `openspec/specs/autotests/spec.md` | EARS-требования к шву API-тестов |
+| `openspec/changes/add-api-tests-seam/` | шов API-тестов: предложение, дизайн, задачи |
+| `openspec/changes/add-guard-tests/` | guard-тесты документации и лаунчеров |
 
 Документы описывают реализованное поведение. Изменения поведения должны
 сопровождаться обновлением соответствующей спеки и этого SDD.
 
 ---
 
-## 12. История документа
+## 12. Точка расширения: API-тесты (запланировано)
+
+Шов для будущих исполняемых API-тестов. Сейчас не вызывает сеть и не меняет
+поведение без явного флага. Спецификация — `openspec/specs/autotests/spec.md`,
+решение — `openspec/changes/add-api-tests-seam/`.
+
+### 12.1 Граница
+
+```text
+workflow ──▶ ApiTestRunner (Protocol) ──▶ ApiTestReport
+                    ├── DisabledApiTestRunner  (сейчас)
+                    └── Dz3AdvancedRunner      (потом)
+```
+
+Порт возвращает готовый отчёт, а не JSON-план: типы ДЗ3 остаются в адаптере и
+не протекают в модели, отчёт и графики.
+
+### 12.2 Артефакты
+
+| Элемент | Назначение |
+|---|---|
+| `src/autotests/models.py` | `ApiTestRequest`, `ApiCaseResult`, `ApiTestReport` |
+| `src/autotests/ports.py` | `ApiTestRunner`, `ApiTestError` |
+| `src/autotests/disabled.py` | заглушка «адаптер не подключён» |
+| `src/autotests/service.py` | запуск и запись `api-tests.json` |
+| `output/api-tests.json` | источник правды раздела API-тестов |
+| `report.md` → `## API-тесты` | таблица кейсов и ошибки |
+
+`quality-metrics.json` получает необязательный ключ `api_tests`; без фазы ключа
+нет. `overall` и четыре метрики документации не меняются.
+
+### 12.3 CLI
+
+| Флаг | По умолчанию | Смысл |
+|---|---|---|
+| `--api-tests` | выкл. | выполнить фазу |
+| `--api-base-url` | env `API_TEST_BASE_URL` | базовый URL API |
+| `--api-contract` | — | описание/контракт API |
+| `--api-cases` | `5` | кейсов на прогон |
+
+Фаза встаёт после `visualize` и до `report`. Без `--api-tests` артефакты и коды
+возврата не меняются. При указанном флаге без URL или без адаптера — код 2.
+
+### 12.4 План подключения ДЗ3 advanced
+
+1. Вендорить `plan.py`, `core.py`, `docs.py`, `generator.py`, `report.py`
+   в `src/autotests/dz3_advanced/`.
+2. Использовать `src/generator/ollama_client.py` и наш validate/retry вместо
+   `ohw_kit.ollama_client` и `ohw_kit.jsonreply`.
+3. Перенести `ohw_kit.checks` (JSONPath + evaluate) локально.
+4. Реализовать `Dz3AdvancedRunner.run()` → `ApiTestReport`.
+5. Поднять целевой API (фасад проекта или заглушка) и добавить integration-тест.
+
+### 12.5 Ограничения
+
+- ДЗ6 не подключается: он анализирует pytest-код, а advanced даёт JSON-план.
+- Исполнительные результаты не входят в `overall`, `--fail-under` и графики.
+- Embedded Python не вендорится: переносимый запуск — через `uv python install`.
+
+---
+
+## 13. История документа
 
 | Версия | Дата | Изменение |
 |---|---|---|
 | 0.1 | 09.11.2026 | Черновик `SDD.md` |
 | 0.2 | 10.11.2026 | Подробный `SDD_new.md` с псевдокодом |
 | 0.3 | 11.11.2026 | Документы сведены в один `SDD.md`, приведены к фактической реализации: `src.*`, вендоринг DZ2, общий `infra`, CLI-фазы, метрики, e2e на SDD |
+| 0.4 | 11.11.2026 | Добавлен раздел о шве API-тестов, guard-тестах и решении по embedded Python |

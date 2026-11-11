@@ -50,6 +50,20 @@ uv run python -m src.workflow --input-dir input --output-dir output
 OLLAMA_BASE_URL=http://localhost:11434 uv run python -m src.workflow
 ```
 
+#### Портативный запуск
+
+Если Python не установлен, `uv` скачает переносимый CPython. Это замена
+портативной сборке с embedded Python — без бинарей в репозитории:
+
+```bash
+uv python install 3.13
+uv sync --frozen --no-dev
+uv run --no-dev python -m src.workflow.main --input-dir input --output-dir output
+```
+
+Модель и Ollama всё равно остаются внешними: их нельзя встроить в папку
+проекта.
+
 ## 3. Входные требования
 
 Положите файлы `.md` или `.txt` в `input/` (или укажите `--input-dir`).
