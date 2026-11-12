@@ -27,6 +27,27 @@ jobs:
       - name: pytest (без e2e)
         run: uv run pytest -q
 
+  graduation-project:
+    name: graduation-project (ruff + mypy + pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: graduation-project
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install uv + Python 3.13
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          python-version: "3.13"
+      - name: Install dependencies (uv.lock + dev group)
+        run: uv sync --frozen --group dev
+      - name: ruff
+        run: uv run ruff check src tests scripts
+      - name: mypy
+        run: uv run mypy src
+      - name: pytest (без live e2e)
+        run: uv run pytest -q
+
   dz9:
     name: dz9 (ruff + mypy + pytest)
     runs-on: ubuntu-latest
