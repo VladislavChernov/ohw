@@ -28,6 +28,23 @@ services:
       - --visualize
       - --report
 
+  # Same image as the CLI, different entry point: the Streamlit workbench.
+  # Open http://localhost:8501 after `docker compose up -d ui`.
+  ui:
+    build: .
+    entrypoint: ["uv", "run", "--no-dev", "python", "-m", "src.ui"]
+    environment:
+      OLLAMA_BASE_URL: http://ohw-ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen2.5:7b-instruct}
+      OLLAMA_TIMEOUT: "900"
+      GRADUATION_OUTPUT_DIR: /app/output
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./output:/app/output
+    networks:
+      - ohw_net
+
 networks:
   ohw_net:
     external: true

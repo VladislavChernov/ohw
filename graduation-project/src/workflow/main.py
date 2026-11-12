@@ -16,21 +16,14 @@ the ``api-tests`` stage runs only with an explicit ``--api-tests`` flag.
 """
 
 import argparse
-import json
 import os
 import sys
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from pathlib import Path
 
 from src.autotests.models import ApiTestRequest
 from src.autotests.ports import ApiTestError
-from src.autotests.service import (
-    load_api_tests,
-    resolve_runner,
-    run_api_tests,
-    write_api_tests,
-)
+from src.autotests.service import resolve_runner
 from src.config import DEFAULT_MODEL, Settings
 from src.generator.input_doc import InputError
 from src.generator.models import ArtifactType
@@ -39,37 +32,22 @@ from src.generator.ollama_client import (
     OllamaConnectionError,
     OllamaResponseError,
 )
-from src.generator.pipeline import GenerationRequest, generate_scenarios
+from src.generator.pipeline import GenerationRequest
 from src.generator.presets import PresetError
 from src.generator.prompt import PromptError
 from src.generator.service import RetryNotice
 from src.models import PipelineData
-from src.quality.assessor import (
-    assess_quality,
-    covered_requirement_ids,
-)
-from src.reporting.report_generator import (
-    REPORT_JSON_NAME,
-    generate_all_reports,
-    load_pipeline_data,
-    write_json_report,
-)
-from src.visualization.charts import create_all_charts
+from src.reporting.report_generator import load_pipeline_data
+from src.workflow import stages
 
 PHASES: tuple[str, ...] = ("generate", "assess", "visualize", "api-tests", "report")
 CORE_PHASES: tuple[str, ...] = ("generate", "assess", "visualize", "report")
-
-SNAPSHOT_NAME = "generation.json"
 
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_GENERATION = 3
 EXIT_REPORT = 4
 EXIT_QUALITY = 5
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _log(message: str) -> None:
@@ -233,30 +211,6 @@ def selected_phases(args: argparse.Namespace) -> list[str]:
     return requested or list(CORE_PHASES)
 
 
-def _snapshot_path(output_dir: Path) -> Path:
-    return output_dir / SNAPSHOT_NAME
-
-
-def _write_snapshot(data: PipelineData, output_dir: Path) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    path = _snapshot_path(output_dir)
-    path.write_text(
-        json.dumps(data.to_snapshot_dict(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return path
-
-
-def _load_snapshot(output_dir: Path) -> PipelineData:
-    path = _snapshot_path(output_dir)
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"generation snapshot not found: {path}; run --generate first"
-        )
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    return PipelineData.from_snapshot_dict(raw)
-
-
 def _check_model(client: OllamaClient) -> None:
     """Warn early when the configured model is not installed."""
     try:
@@ -304,22 +258,7 @@ def _run_generate(
             f"{', '.join(notice.issues)}"
         )
 
-    outcome = generate_scenarios(request, client, on_retry=on_retry)
-    data = PipelineData(
-        input_dir=str(request.input_dir),
-        artifact_type=request.artifact_type.value,
-        model=client.model,
-        runs=request.runs,
-        count=request.count,
-        temperature=request.temperature,
-        normalize=request.normalize,
-        presets=list(request.presets),
-        generated_at=_now(),
-        scenarios=outcome.scenarios,
-        errors=outcome.errors,
-    )
-    data.refresh_averages()
-    _write_snapshot(data, output_dir)
+    data = stages.generate(request, client, on_retry=on_retry)
 
     for scenario in data.scenarios:
         _log(
@@ -337,19 +276,7 @@ def _run_generate(
 
 def _run_assess(data: PipelineData, output_dir: Path) -> PipelineData:
     """Recompute the metrics from the stored rendered text and runs."""
-    for scenario in data.scenarios:
-        generations = scenario.generations or [scenario.rendered]
-        scenario.quality = assess_quality(
-            scenario.rendered,
-            scenario.requirement_ids,
-            generations if len(generations) > 1 else None,
-        )
-        scenario.covered_requirements = covered_requirement_ids(
-            scenario.rendered, scenario.requirement_ids
-        )
-        scenario.runs = len(generations)
-    data.refresh_averages()
-    write_json_report(data, output_dir)
+    stages.assess(data, output_dir)
     _log(
         "оценка: overall="
         f"{data.averages.get('overall')} "
@@ -359,10 +286,8 @@ def _run_assess(data: PipelineData, output_dir: Path) -> PipelineData:
 
 
 def _run_visualize(data: PipelineData, output_dir: Path) -> PipelineData:
-    data.refresh_averages()
-    data.charts = create_all_charts(data, output_dir)
+    stages.visualize(data, output_dir)
     if data.charts:
-        write_json_report(data, output_dir)
         _log(
             "визуализация: "
             + ", ".join(sorted(data.charts.values()))
@@ -400,27 +325,19 @@ def _run_api_tests(
         timeout=settings.timeout,
         model=settings.model,
     )
-    report = run_api_tests(request, runner=resolve_runner())
-    path = write_api_tests(report, output_dir)
+    report, data = stages.api_tests(
+        request, resolve_runner(), output_dir, data
+    )
     _log(
         f"API-тесты: {report.passed}/{report.total} успешно "
         f"(раннер={report.runner}, {report.duration_ms:.0f} мс)"
     )
-    _log(f"данные: {path}")
-
-    if data is None and (output_dir / REPORT_JSON_NAME).is_file():
-        data = load_pipeline_data(output_dir)
-    if data is not None:
-        data.api_tests = report
-        write_json_report(data, output_dir)
+    _log(f"данные: {output_dir / 'api-tests.json'}")
     return data
 
 
 def _run_report(data: PipelineData, output_dir: Path) -> PipelineData:
-    data.refresh_averages()
-    if data.api_tests is None:
-        data.api_tests = load_api_tests(output_dir)
-    paths = generate_all_reports(data, output_dir)
+    paths = stages.report(data, output_dir)
     _log(f"отчёт: {paths['markdown']}")
     _log(f"данные: {paths['json']}")
     return data
@@ -453,7 +370,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if phase == "generate":
                 data = _run_generate(args, settings, output_dir)
             elif phase == "assess":
-                data = data or _load_snapshot(output_dir)
+                data = data or stages.load_snapshot(output_dir)
                 data = _run_assess(data, output_dir)
             elif phase == "visualize":
                 if data is None:

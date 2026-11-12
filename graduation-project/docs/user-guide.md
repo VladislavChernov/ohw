@@ -64,6 +64,36 @@ uv run --no-dev python -m src.workflow.main --input-dir input --output-dir outpu
 Модель и Ollama всё равно остаются внешними: их нельзя встроить в папку
 проекта.
 
+### UI (Streamlit)
+
+То же ядро, но в браузере:
+
+```bash
+uv run python -m src.ui
+```
+
+Или в Docker, вместе с общим стендом:
+
+```powershell
+docker compose up -d ui
+```
+
+Адрес — <http://localhost:8501>. Порядок работы:
+
+1. В боковой панели проверьте URL Ollama и нажмите «Загрузить модели» (без
+   нажатия сетевых запросов нет).
+2. На вкладке «Требования» загрузите `.md`/`.txt`, при необходимости
+   отредактируйте текст и выберите тип, число кейсов, повторы и пресеты.
+3. Нажмите «Сгенерировать» на вкладке «Генерация». Файлы копируются в
+   `output/ui-input/`, результаты — в `output/scenarios/`.
+4. На вкладке «Метрики» пересчитайте оценки и постройте графики.
+5. На вкладке «Отчёт» сформируйте `report.md` и скачайте артефакты.
+6. Вкладка «API-тесты» использует существующий шов; пока адаптер не подключён,
+   она показывает объяснение и не падает.
+
+CLI и UI можно запускать по очереди: они читают и пишут одни и те же файлы в
+`output/`.
+
 ## 3. Входные требования
 
 Положите файлы `.md` или `.txt` в `input/` (или укажите `--input-dir`).
@@ -163,9 +193,11 @@ python -m src.workflow --preset boundary-values --preset negative-scenarios
 output/
 ├── scenarios/
 │   └── registration-requirements.md
+├── ui-input/           # копии файлов, загруженных через UI
 ├── generation.json
 ├── quality-metrics.json
 ├── report.md
+├── api-tests.json      # только после фазы api-tests
 └── charts/
     ├── metrics_boxplot.png
     ├── radar_chart.png

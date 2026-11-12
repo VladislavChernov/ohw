@@ -12,6 +12,7 @@ dependencies = [
     "httpx>=0.28",
     "pydantic>=2.11",
     "matplotlib>=3.9",
+    "streamlit>=1.40",
 ]
 
 [dependency-groups]
