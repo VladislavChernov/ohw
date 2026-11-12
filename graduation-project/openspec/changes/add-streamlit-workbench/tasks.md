@@ -26,7 +26,7 @@
 - [x] `tests/test_ui_app.py` — AppTest без сети
 - [x] `tests/test_ui_app.py` — вкладка промпта и генерация с правкой
 - [x] `uv run pytest`
-- [ ] `ruff check src scripts tests`
-- [ ] `mypy src`
-- [ ] Живой запуск UI в Docker и проверка вкладок
-- [ ] Коммит и push реализации
+- [x] `ruff check src scripts tests`
+- [x] `mypy src`
+- [x] Живой запуск UI в Docker и проверка вкладок
+- [x] Коммит и push реализации
