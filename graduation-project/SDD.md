@@ -39,12 +39,14 @@
 - Визуализация: boxplot, radar, оценки по сценариям.
 - Отчётность: JSON (источник правды) + Markdown + PNG.
 - CLI-пайплайн с возможностью запускать фазы отдельно.
+- Streamlit-рабочее место: требования, генерация, метрики, отчёт и API-тесты
+  поверх тех же стадий, что и CLI.
 - Точка расширения API-тестов (шов): контракт фазы, `api-tests.json` и раздел
   отчёта. Сеть и ДЗ3 advanced пока не подключены.
 
-Вне области: веб-интерфейс, Streamlit, DZ6, обучение модели, LLM-судья,
-собственный Ollama и собственные постоянные контейнеры. API-тесты реализованы
-только как шов; исполняемые HTTP-тесты появятся отдельным шагом.
+Вне области: DZ6, обучение модели, LLM-судья, собственный Ollama и собственные
+постоянные контейнеры. API-тесты реализованы только как шов; исполняемые
+HTTP-тесты появятся отдельным шагом.
 
 ### 1.3 Определения
 
@@ -112,6 +114,8 @@
 | `src/visualization/charts.py` | графики matplotlib (`Agg`) |
 | `src/reporting/report_generator.py` | JSON + Markdown |
 | `src/autotests/` | шов API-тестов: порт, модели, заглушка, `api-tests.json` |
+| `src/ui/` | Streamlit-рабочее место |
+| `src/workflow/stages.py` | общие стадии для CLI и UI |
 | `src/workflow/main.py` | CLI, фазы, проверка модели, коды возврата |
 | `scripts/cli.py` | совместимый запуск `python scripts/cli.py` |
 
@@ -208,14 +212,26 @@ Markdown содержит обязательные разделы: общая и
 качества, список сценариев, детализация по сценариям, визуальный отчёт,
 ошибки, источник данных. Неизмеримые значения печатаются как `n/a`.
 
-### 3.5 `src/workflow/main.py`
+### 3.5 `src/workflow/main.py` и `src/workflow/stages.py`
+
+`stages.py` — файловые стадии без `argparse` и Streamlit:
+
+- `generate` — сценарии, `generation.json`;
+- `assess` — пересчёт метрик, `quality-metrics.json`;
+- `visualize` — графики;
+- `api_tests` — шов, `api-tests.json`;
+- `report` — `report.md` и JSON;
+- `write_snapshot` / `load_snapshot` — снимок генерации.
+
+`main.py` добавляет CLI и логирование:
 
 - `build_parser` — CLI;
 - `selected_phases` — выбранные фазы в каноническом порядке;
-- `_run_generate` — проверка модели, генерация, `generation.json`;
-- `_run_assess` — пересчёт метрик из снимка, `quality-metrics.json`;
-- `_run_visualize` — графики, обновление JSON;
-- `_run_report` — `report.md`;
+- `_run_generate` — проверка модели, вызов `stages.generate`;
+- `_run_assess` — `stages.assess`;
+- `_run_visualize` — `stages.visualize`;
+- `_run_api_tests` — `stages.api_tests`;
+- `_run_report` — `stages.report`;
 - `main` — обработка ошибок, коды возврата, `--fail-under`.
 
 ### 3.6 `src/models.py`
@@ -227,6 +243,15 @@ Markdown содержит обязательные разделы: общая и
   `to_report_dict`/`from_report_dict`.
 
 Порог успешности сценария: `overall ≥ 0.5`.
+
+### 3.7 `src/ui/`
+
+- `app.py` — Streamlit-рабочее место: пять вкладок и боковая панель;
+- `launcher.py` — `streamlit run` с адресом `0.0.0.0:8501`;
+- `__main__.py` — `python -m src.ui`.
+
+UI вызывает `src.workflow.stages`, поэтому результаты совпадают с CLI. Загрузки
+копируются в `output/ui-input/`, а `PipelineData` живёт в `st.session_state`.
 
 ---
 
@@ -292,8 +317,19 @@ from src.generator.ollama_client import OllamaClient
 from src.quality.assessor import assess_quality
 from src.reporting.report_generator import generate_all_reports
 from src.visualization.charts import create_all_charts
+from src.workflow import stages
 from src.workflow.main import main
 ```
+
+### 4.5 Streamlit UI
+
+```bash
+uv run python -m src.ui                 # http://localhost:8501
+docker compose up -d ui                 # тот же адрес
+```
+
+UI и CLI вызывают одни и те же функции `src.workflow.stages`; отдельного API
+между фронтами нет.
 
 ---
 

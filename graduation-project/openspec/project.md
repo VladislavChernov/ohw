@@ -47,7 +47,13 @@ src/
 │   ├── ports.py
 │   ├── disabled.py
 │   └── service.py
-└── workflow/main.py        # оркестрация фаз
+├── ui/                     # Streamlit-рабочее место (второй фронт)
+│   ├── app.py
+│   ├── launcher.py
+│   └── __main__.py
+└── workflow/
+    ├── main.py             # CLI и оркестрация фаз
+    └── stages.py           # общие стадии для CLI и UI
 ```
 
 Запуск: `python -m src.workflow` (или `python -m src.workflow.main`) из корня проекта;
@@ -83,7 +89,8 @@ src/
 - Проект не меняет `dz2/src`, `dz2/prompts`, `dz2/presets`, `dz2/normalizer.toml`.
 - Проект не включает DZ6 (проверка и оптимизация автотестов).
 - API-тесты — только шов (`src/autotests/`): сеть и ДЗ3 advanced не подключены.
-- Нет Streamlit-вкладки: интерфейс — CLI-пайплайн, отчёты и графики.
+- Streamlit-рабочее место (`src/ui/`) — второй фронт поверх тех же стадий;
+  бизнес-логика генерации, метрик и отчёта не дублируется.
 - Модель не обучается; LLM-судья текста не используется как метрика.
 - Нормализация требований детерминированная (DZ2 normalizer), до сборки промпта.
 - Embedded Python не вендорится; переносимый запуск — через `uv`.
@@ -105,3 +112,4 @@ src/
 
 - `openspec/changes/add-api-tests-seam/` — шов API-тестов.
 - `openspec/changes/add-guard-tests/` — guard-тесты документации и лаунчеров.
+- `openspec/changes/add-streamlit-workbench/` — Streamlit-рабочее место.
