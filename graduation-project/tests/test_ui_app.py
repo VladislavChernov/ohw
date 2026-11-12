@@ -82,6 +82,10 @@ def _text_input(at: AppTest, label: str) -> Any:
     return next(item for item in at.text_input if item.label == label)
 
 
+def _text_area(at: AppTest, label: str) -> Any:
+    return next(item for item in at.text_area if item.label == label)
+
+
 def _number_input(at: AppTest, label: str) -> Any:
     return next(item for item in at.number_input if item.label == label)
 
@@ -168,6 +172,40 @@ def test_generation_uses_the_shared_stages(
     scenarios = list((output / "scenarios").glob("*.md"))
     assert len(scenarios) == 1
     assert "TC-01" in scenarios[0].read_text(encoding="utf-8")
+
+
+def test_prompt_tab_builds_and_applies_edited_prompt(
+    workbench: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: list[str] = []
+
+    def fake_chat(
+        self: OllamaClient,
+        system: str,
+        user: str,
+        temperature: float,
+        json_mode: bool = True,
+    ) -> str:
+        captured.append(user)
+        return _testcases(10)
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+    at = _upload(_app(), ("login.md", REQUIREMENTS))
+
+    prompt = _text_area(at, "Промпт для модели")
+    assert "BR-1" in prompt.value
+    assert "Вход по email и паролю" in prompt.value
+
+    prompt.set_value("EDITED PROMPT").run()
+    _button(at, "Сгенерировать").click().run()
+
+    assert not at.exception
+    assert captured
+    assert captured[0] == "EDITED PROMPT"
+    snapshot = json.loads(
+        (workbench / "output" / "generation.json").read_text(encoding="utf-8")
+    )
+    assert snapshot["scenarios"][0]["prompt"] == "EDITED PROMPT"
 
 
 def test_metrics_charts_and_report_are_produced(

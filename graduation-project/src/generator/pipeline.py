@@ -1,7 +1,7 @@
 """Generation phase: requirement files in, rendered artifacts and metrics out."""
 
 import hashlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,6 +50,9 @@ class GenerationRequest:
     presets: Sequence[str] = ()
     prompt_dir: Path | None = None
     output_dir: Path = Path("output")
+    # Per-file prompt overrides from the workbench; the CLI leaves this empty
+    # and prompts are rendered from the templates.
+    prompts: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -146,6 +149,9 @@ def generate_scenarios(
                     extras,
                     testcase_index(testcases_artifact.result),
                 )
+            override = request.prompts.get(doc.path.name)
+            if override:
+                user_prompt = override
             artifact = generate_artifact(
                 client,
                 handler,

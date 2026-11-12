@@ -1,4 +1,4 @@
-"""Streamlit workbench: requirements -> generation -> metrics -> report.
+"""Streamlit workbench: requirements -> prompt -> generation -> metrics -> report.
 
 The app is deliberately thin. It calls the same ``src.workflow.stages``
 functions as the CLI, so the two fronts cannot drift. Open it with
@@ -22,6 +22,8 @@ from src.autotests import (
     resolve_runner,
 )
 from src.config import DEFAULT_MODEL
+from src.generator.handlers import get_handler
+from src.generator.input_doc import InputError, load_docs
 from src.generator.models import ArtifactType
 from src.generator.normalizer import decode_bytes
 from src.generator.ollama_client import (
@@ -35,7 +37,9 @@ from src.generator.presets import (
     PresetError,
     load_presets,
     resolve_presets_dir,
+    select_extras,
 )
+from src.generator.prompt import PromptError
 from src.models import METRIC_KEYS, PipelineData
 from src.quality.assessor import extract_requirement_ids
 from src.workflow import stages
@@ -85,22 +89,25 @@ def main() -> None:
 
     tabs = st.tabs(
         [
-            "1. Требования",
-            "2. Генерация",
-            "3. Метрики",
-            "4. Отчёт",
-            "5. API-тесты",
+            "1. Требования (DZ2)",
+            "2. Промпт (DZ7)",
+            "3. Генерация (DZ2)",
+            "4. Метрики (DZ8)",
+            "5. Отчёт",
+            "6. API-тесты (DZ3, шов)",
         ]
     )
     with tabs[0]:
         _requirements_tab()
     with tabs[1]:
-        _generation_tab()
+        _prompt_tab()
     with tabs[2]:
-        _metrics_tab()
+        _generation_tab()
     with tabs[3]:
-        _report_tab()
+        _metrics_tab()
     with tabs[4]:
+        _report_tab()
+    with tabs[5]:
         _api_tests_tab()
 
 
@@ -120,6 +127,7 @@ def _init_state() -> None:
         "models_error": "",
         "ui_files": {},
         "ui_signatures": {},
+        "ui_prompts": {},
         "data": None,
     }
     for key, value in defaults.items():
@@ -360,7 +368,7 @@ def _requirements_tab() -> None:
     columns[1].metric("Символов", len(text))
     columns[2].metric("Файлов", len(files))
 
-    st.session_state["ui_requirements"] = {
+    new_config = {
         "files": dict(files),
         "url": url.strip() or None,
         "artifact_type": artifact_type,
@@ -369,6 +377,34 @@ def _requirements_tab() -> None:
         "normalize": bool(normalize),
         "presets": tuple(str(item) for item in selected_presets),
     }
+    previous = st.session_state.get("ui_requirements")
+    if previous is not None and _prompt_inputs(previous) != _prompt_inputs(new_config):
+        # A prompt built for an older type/count/presets must not leak into the
+        # next generation.
+        st.session_state["ui_prompts"] = {}
+    st.session_state["ui_requirements"] = new_config
+
+
+def _prompt_inputs(config: dict[str, Any]) -> tuple[Any, ...]:
+    """The fields that change the rendered prompt for every file."""
+    return (
+        tuple(sorted(config["files"].items())),
+        config["url"],
+        config["artifact_type"],
+        config["count"],
+        config["normalize"],
+        config["presets"],
+    )
+
+
+def _sync_inputs(config: dict[str, Any]) -> Path:
+    """Copy the edited requirements into ``output/ui-input/``."""
+    output_dir = Path(st.session_state["output_dir"])
+    input_dir = output_dir / "ui-input"
+    input_dir.mkdir(parents=True, exist_ok=True)
+    for name, text in config["files"].items():
+        (input_dir / name).write_text(text, encoding="utf-8")
+    return input_dir
 
 
 def _remember_uploads(uploaded: list[Any]) -> None:
@@ -395,7 +431,77 @@ def _load_presets() -> dict[str, Preset]:
 
 
 # --------------------------------------------------------------------------
-# Tab 2: generation
+# Tab 2: prompt (DZ7 templates and presets)
+# --------------------------------------------------------------------------
+
+
+def _prompt_tab() -> None:
+    config = st.session_state.get("ui_requirements")
+    if not config:
+        st.info("Сначала загрузите файл требований на вкладке 1.")
+        return
+
+    input_dir = _sync_inputs(config)
+    selected_value = st.session_state.get("ui_selected")
+    selected: str = (
+        str(selected_value)
+        if selected_value in config["files"]
+        else next(iter(config["files"]))
+    )
+
+    try:
+        docs = load_docs(
+            input_dir,
+            config["url"],
+            normalize=bool(config["normalize"]),
+        )
+        doc = next((item for item in docs if item.path.name == selected), None)
+        if doc is None:
+            st.warning(f"Файл {selected!r} не найден во входной папке.")
+            return
+        extras = select_extras(
+            _load_presets(),
+            list(config["presets"]),
+            config["artifact_type"],
+        )
+        handler = get_handler(config["artifact_type"])
+        rendered = handler.build_user(doc, int(config["count"]), extras)
+    except (InputError, PresetError, PromptError) as exc:
+        st.error(str(exc))
+        return
+
+    st.caption(
+        "DZ7: шаблон артефакта и выбранные пресеты. Промпт можно править — "
+        "правка применяется к выбранному файлу в текущей сессии."
+    )
+    signature = (
+        f"{selected}|{hashlib.sha256(doc.content.encode('utf-8')).hexdigest()}|"
+        f"{config['artifact_type']}|{config['count']}|"
+        f"{','.join(config['presets'])}|{bool(config['normalize'])}"
+    )
+    if st.session_state.get("ui_prompt_signature") != signature:
+        st.session_state["ui_prompt_signature"] = signature
+        st.session_state["ui_prompt_text"] = rendered
+    if st.button("Собрать промпт заново"):
+        st.session_state["ui_prompt_text"] = rendered
+
+    prompt = st.text_area(
+        "Промпт для модели",
+        key="ui_prompt_text",
+        height=360,
+    )
+    st.download_button(
+        "Скачать промпт",
+        data=prompt,
+        file_name=f"{Path(selected).stem}.{config['artifact_type'].value}.prompt.txt",
+        mime="text/plain",
+        key="download_prompt",
+    )
+    st.session_state["ui_prompts"][selected] = prompt
+
+
+# --------------------------------------------------------------------------
+# Tab 3: generation
 # --------------------------------------------------------------------------
 
 
@@ -420,10 +526,7 @@ def _generation_tab() -> None:
 
 def _run_generation(config: dict[str, Any]) -> None:
     output_dir = Path(st.session_state["output_dir"])
-    input_dir = output_dir / "ui-input"
-    input_dir.mkdir(parents=True, exist_ok=True)
-    for name, text in config["files"].items():
-        (input_dir / name).write_text(text, encoding="utf-8")
+    input_dir = _sync_inputs(config)
 
     request = GenerationRequest(
         input_dir=input_dir,
@@ -436,6 +539,7 @@ def _run_generation(config: dict[str, Any]) -> None:
         normalize=bool(config["normalize"]),
         presets=tuple(config["presets"]),
         output_dir=output_dir,
+        prompts=dict(st.session_state.get("ui_prompts") or {}),
     )
     client = _client()
     if client is None:
@@ -496,7 +600,7 @@ def _show_generation(data: PipelineData) -> None:
 
 
 # --------------------------------------------------------------------------
-# Tab 3: metrics
+# Tab 4: metrics
 # --------------------------------------------------------------------------
 
 
@@ -559,7 +663,7 @@ def _fmt(value: float | None) -> str:
 
 
 # --------------------------------------------------------------------------
-# Tab 4: report
+# Tab 5: report
 # --------------------------------------------------------------------------
 
 
@@ -598,7 +702,7 @@ def _report_tab() -> None:
 
 
 # --------------------------------------------------------------------------
-# Tab 5: API tests
+# Tab 6: API tests
 # --------------------------------------------------------------------------
 
 

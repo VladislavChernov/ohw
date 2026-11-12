@@ -15,7 +15,8 @@
 
 - [x] `src/workflow/stages.py` — общие стадии
 - [x] `src/workflow/main.py` — делегирование стадиям без изменения CLI
-- [x] `src/ui/app.py` — пять вкладок и боковая панель
+- [x] `src/ui/app.py` — шесть вкладок и боковая панель
+- [x] `src/generator/pipeline.py` — правка промпта на файл из UI
 - [x] `src/ui/launcher.py`, `src/ui/__main__.py` — запуск
 - [x] `pyproject.toml` / `uv.lock` — streamlit
 - [x] `Dockerfile` / `compose.yaml` — сервис `ui` на 8501
@@ -23,6 +24,7 @@
 ## Проверки
 
 - [x] `tests/test_ui_app.py` — AppTest без сети
+- [x] `tests/test_ui_app.py` — вкладка промпта и генерация с правкой
 - [x] `uv run pytest`
 - [ ] `ruff check src scripts tests`
 - [ ] `mypy src`
