@@ -91,8 +91,6 @@ docker compose up -d ui
    `output/ui-input/`, результаты — в `output/scenarios/`.
 5. На вкладке «Метрики» пересчитайте оценки и постройте графики.
 6. На вкладке «Отчёт» сформируйте `report.md` и скачайте артефакты.
-7. Вкладка «API-тесты» использует существующий шов; пока адаптер не подключён,
-   она показывает объяснение и не падает.
 
 CLI и UI можно запускать по очереди: они читают и пишут одни и те же файлы в
 `output/`.
@@ -200,7 +198,6 @@ output/
 ├── generation.json
 ├── quality-metrics.json
 ├── report.md
-├── api-tests.json      # только после фазы api-tests
 └── charts/
     ├── metrics_boxplot.png
     ├── radar_chart.png

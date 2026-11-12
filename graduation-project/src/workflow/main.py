@@ -7,23 +7,17 @@ The stages communicate through files inside the output directory:
 * ``quality-metrics.json`` is the source of truth for charts and the Markdown
   report;
 * ``scenarios/*.md`` are the generated artifacts;
-* ``charts/*.png`` are the visualizations;
-* ``api-tests.json`` keeps the optional API-test report.
+* ``charts/*.png`` are the visualizations.
 
 Any subset of stages can be executed, but later stages require the files of the
-earlier ones. Running the CLI without stage flags executes the four core stages;
-the ``api-tests`` stage runs only with an explicit ``--api-tests`` flag.
+earlier ones. Running the CLI without stage flags executes the four core stages.
 """
 
 import argparse
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from src.autotests.models import ApiTestRequest
-from src.autotests.ports import ApiTestError
-from src.autotests.service import resolve_runner
 from src.config import DEFAULT_MODEL, Settings
 from src.generator.input_doc import InputError
 from src.generator.models import ArtifactType
@@ -40,7 +34,7 @@ from src.models import PipelineData
 from src.reporting.report_generator import load_pipeline_data
 from src.workflow import stages
 
-PHASES: tuple[str, ...] = ("generate", "assess", "visualize", "api-tests", "report")
+PHASES: tuple[str, ...] = ("generate", "assess", "visualize", "report")
 CORE_PHASES: tuple[str, ...] = ("generate", "assess", "visualize", "report")
 
 EXIT_OK = 0
@@ -82,11 +76,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--report",
         action="store_true",
         help="записать report.md по quality-metrics.json",
-    )
-    stages.add_argument(
-        "--api-tests",
-        action="store_true",
-        help="выполнить фазу API-тестов (нужен подключённый адаптер)",
     )
 
     generation = parser.add_argument_group("генерация")
@@ -149,24 +138,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompt-dir",
         default=None,
         help="своя папка шаблонов промптов",
-    )
-
-    api_tests = parser.add_argument_group("API-тесты")
-    api_tests.add_argument(
-        "--api-base-url",
-        default=None,
-        help="базовый URL целевого API (по умолчанию: API_TEST_BASE_URL)",
-    )
-    api_tests.add_argument(
-        "--api-contract",
-        default=None,
-        help="файл описания/контракта API для генерации кейсов",
-    )
-    api_tests.add_argument(
-        "--api-cases",
-        type=int,
-        default=5,
-        help="сколько кейсов запросить у генератора (по умолчанию: 5)",
     )
 
     runtime = parser.add_argument_group("подключение и вывод")
@@ -297,45 +268,6 @@ def _run_visualize(data: PipelineData, output_dir: Path) -> PipelineData:
     return data
 
 
-def _run_api_tests(
-    args: argparse.Namespace,
-    settings: Settings,
-    output_dir: Path,
-    data: PipelineData | None,
-) -> PipelineData | None:
-    """Execute the API-test phase through the seam.
-
-    The seam returns a finished report; adapter-specific details never reach
-    this function. Without a registered adapter the runner raises
-    ``ApiTestError`` and the CLI returns a usage error.
-    """
-    base_url = args.api_base_url or os.environ.get("API_TEST_BASE_URL")
-    if not base_url:
-        raise ValueError(
-            "для --api-tests укажите --api-base-url или API_TEST_BASE_URL"
-        )
-    contract = Path(args.api_contract) if args.api_contract else None
-    if contract is not None and not contract.is_file():
-        raise FileNotFoundError(f"файл контракта не найден: {contract}")
-
-    request = ApiTestRequest(
-        base_url=base_url.rstrip("/"),
-        contract_path=contract,
-        cases=args.api_cases,
-        timeout=settings.timeout,
-        model=settings.model,
-    )
-    report, data = stages.api_tests(
-        request, resolve_runner(), output_dir, data
-    )
-    _log(
-        f"API-тесты: {report.passed}/{report.total} успешно "
-        f"(раннер={report.runner}, {report.duration_ms:.0f} мс)"
-    )
-    _log(f"данные: {output_dir / 'api-tests.json'}")
-    return data
-
-
 def _run_report(data: PipelineData, output_dir: Path) -> PipelineData:
     paths = stages.report(data, output_dir)
     _log(f"отчёт: {paths['markdown']}")
@@ -351,8 +283,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--runs должен быть >= 1")
     if args.count < 1:
         parser.error("--count должен быть >= 1")
-    if args.api_cases < 1:
-        parser.error("--api-cases должен быть >= 1")
 
     settings = Settings.from_env(
         base_url=args.base_url,
@@ -376,14 +306,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if data is None:
                     data = load_pipeline_data(output_dir)
                 data = _run_visualize(data, output_dir)
-            elif phase == "api-tests":
-                data = _run_api_tests(args, settings, output_dir, data)
             elif phase == "report":
                 if data is None:
                     data = load_pipeline_data(output_dir)
                 data = _run_report(data, output_dir)
     except (
-        ApiTestError,
         InputError,
         PromptError,
         PresetError,

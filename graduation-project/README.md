@@ -67,18 +67,15 @@ uv run --no-dev python -m src.workflow.main --input-dir input --output-dir outpu
 ## CLI
 
 ```text
-python -m src.workflow [--generate] [--assess] [--visualize] [--api-tests] [--report]
+python -m src.workflow [--generate] [--assess] [--visualize] [--report]
     --input-dir input --output-dir output --type testcases
     --count 10 --runs 1 --temperature 0.7 --max-retries 3
     --url URL --normalize --preset ID [--preset ID ...]
     --prompt-dir DIR --base-url URL --model NAME --timeout SEC
-    --api-base-url URL --api-contract FILE --api-cases 5
     --fail-under SCORE
 ```
 
-Без флагов фаз выполняются все четыре. Фаза `api-tests` выполняется только при
-явном `--api-tests`; пока адаптер не подключён, она возвращает код 2 с
-объяснением (контракт — `openspec/specs/autotests/spec.md`). Фазы можно запускать отдельно по
+Без флагов фаз выполняются все четыре. Фазы можно запускать отдельно по
 сохранённым файлам:
 
 ```bash
@@ -101,7 +98,7 @@ uv run python -m src.ui          # http://localhost:8501
 docker compose up -d ui          # тот же адрес, общий стенд ohw_net
 ```
 
-Шесть вкладок: требования, промпт, генерация, метрики, отчёт и API-тесты. На
+Пять вкладок: требования, промпт, генерация, метрики и отчёт. На
 вкладке требований загружаются `.md`/`.txt`, текст можно править; перед
 генерацией файлы копируются в `output/ui-input/`. На вкладке промпта видно, как
 шаблон DZ7 и пресеты собирают запрос к модели; промпт можно отредактировать, и
@@ -137,7 +134,6 @@ type: checklist
 | `output/quality-metrics.json` | метрики и реальные тест-кейсы |
 | `output/report.md` | Markdown-отчёт |
 | `output/charts/*.png` | графики |
-| `output/api-tests.json` | результаты API-тестов (только с `--api-tests`) |
 
 ## Метрики
 
@@ -200,7 +196,6 @@ graduation-project/
 │   ├── quality/        # 4 метрики
 │   ├── visualization/  # графики
 │   ├── reporting/      # JSON + Markdown
-│   ├── autotests/      # шов API-тестов (без сети)
 │   ├── ui/             # Streamlit-рабочее место
 │   └── workflow/       # CLI, общие стадии и фазы
 ├── tests/              # unit + e2e (источник — SDD)
@@ -224,10 +219,6 @@ graduation-project/
 
 ## Возможное развитие
 
-- **API-тесты.** Шов уже зафиксирован: порт `ApiTestRunner`, `api-tests.json` и
-  раздел отчёта. Следующий шаг — адаптер ДЗ3 advanced (JSON-план + HTTP-движок)
-  и целевой API. Пока сеть не используется. Контракт —
-  [`openspec/specs/autotests/spec.md`](openspec/specs/autotests/spec.md).
 - **ДЗ6.** Ревью автотестов не входит: он анализирует pytest-код, а advanced
   даёт JSON-план; вернёмся отдельным портом.
 - **Портативный запуск.** Вместо вендоринга embedded Python используется `uv
@@ -237,6 +228,7 @@ graduation-project/
 
 - UI не заменяет CLI: оба фронта работают поверх одних стадий.
 - Нет аутентификации и многопользовательского режима UI.
+- API-тесты не входят в проект.
 - DZ6 (проверка/оптимизация автотестов) не входит.
 - Модель не обучается, LLM-судья не используется как метрика.
 - Результат требует ревью человеком.

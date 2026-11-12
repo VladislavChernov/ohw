@@ -235,16 +235,6 @@ def test_metrics_charts_and_report_are_produced(
     assert any("Отчёт:" in item.value for item in at.success)
 
 
-def test_api_tests_report_the_seam_error(workbench: Path) -> None:
-    at = _app().run()
-    _text_input(at, "Базовый URL API").set_value("https://api.example.com").run()
-    _button(at, "Запустить API-тесты").click().run()
-
-    assert not at.exception
-    assert any("адаптер API-тестов не подключён" in item.value for item in at.error)
-    assert not (workbench / "output" / "api-tests.json").exists()
-
-
 def test_missing_model_blocks_generation(workbench: Path) -> None:
     at = _upload(_app(), ("login.md", REQUIREMENTS))
     _selectbox(at, "Модель из Ollama").set_value(

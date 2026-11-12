@@ -60,16 +60,10 @@
 - [x] Прогон e2e в Docker с `RUN_OLLAMA_INTEGRATION=1`: 1 passed, 53 deselected
 - [x] Живой прогон на `qwen2.5:7b-instruct`, пример сохранён в `examples/live-run/`
 
-## Фаза 8. Шов API-тестов и guard-тесты
+## Фаза 8. Guard-тесты
 
-- [x] `openspec/changes/add-api-tests-seam/` — предложение, дизайн, задачи
-- [x] `openspec/specs/autotests/spec.md` — EARS-требования шва
-- [x] `src/autotests/` — порт, модели, заглушка, сервис
-- [x] CLI-флаги `--api-tests`, `--api-base-url`, `--api-contract`, `--api-cases`
-- [x] `api-tests.json` и необязательный `api_tests` в JSON-отчёте
-- [x] Раздел `## API-тесты` в `report.md` только при наличии данных
 - [x] `openspec/changes/add-guard-tests/` — кодировка документации и лаунчеры
-- [x] `tests/test_autotests.py`, `tests/test_docs_encoding.py`, `tests/test_launchers.py`
+- [x] `tests/test_docs_encoding.py`, `tests/test_launchers.py`
 - [x] Коммит и push реализации
 
 ## Фаза 7. Документация и отдача

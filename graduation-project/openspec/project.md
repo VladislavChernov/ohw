@@ -42,11 +42,6 @@ src/
 ├── quality/assessor.py     # 4 метрики
 ├── visualization/charts.py # boxplot, radar, per-scenario
 ├── reporting/report_generator.py
-├── autotests/              # шов API-тестов (план, см. changes/add-api-tests-seam)
-│   ├── models.py
-│   ├── ports.py
-│   ├── disabled.py
-│   └── service.py
 ├── ui/                     # Streamlit-рабочее место (второй фронт)
 │   ├── app.py
 │   ├── launcher.py
@@ -71,8 +66,6 @@ src/
 - `GRADUATION_PROMPT_DIR` — своя папка шаблонов промптов.
 - `GRADUATION_PRESETS_DIR` — своя папка пресетов.
 - `GRADUATION_NORMALIZER_CONFIG` — свой `normalizer.toml`.
-- `API_TEST_BASE_URL` — базовый URL целевого API для будущей фазы API-тестов
-  (план, см. `changes/add-api-tests-seam`).
 - Устаревшие `DZ2_PROMPT_DIR`, `DZ2_PRESETS_DIR`, `AI_TESTGEN_NORMALIZER_CONFIG`
   принимаются как fallback.
 
@@ -88,7 +81,7 @@ src/
 
 - Проект не меняет `dz2/src`, `dz2/prompts`, `dz2/presets`, `dz2/normalizer.toml`.
 - Проект не включает DZ6 (проверка и оптимизация автотестов).
-- API-тесты — только шов (`src/autotests/`): сеть и ДЗ3 advanced не подключены.
+- API-тесты не входят в проект.
 - Streamlit-рабочее место (`src/ui/`) — второй фронт поверх тех же стадий;
   бизнес-логика генерации, метрик и отчёта не дублируется.
 - Модель не обучается; LLM-судья текста не используется как метрика.
@@ -103,13 +96,10 @@ src/
   в `src/generator/templates/`).
 - **DZ8**: идея оценки качества; метрики переработаны и реализованы заново в
   `src/quality/assessor.py`.
-- **DZ3 advanced**: будущий адаптер API-тестов (JSON-план + HTTP-движок); сейчас
-  зафиксирован только шов, код не вендорен.
 - **Infra**: общий `ohw-ollama`, образ `ohw-python:3.13`, сеть `ohw_net`.
-- **DZ6** в выпускной проект не входит.
+- **DZ3 advanced**, **DZ6** и API-тесты в выпускной проект не входят.
 
 ## Активные изменения
 
-- `openspec/changes/add-api-tests-seam/` — шов API-тестов.
 - `openspec/changes/add-guard-tests/` — guard-тесты документации и лаунчеров.
 - `openspec/changes/add-streamlit-workbench/` — Streamlit-рабочее место.

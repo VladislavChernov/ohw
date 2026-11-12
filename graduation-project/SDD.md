@@ -39,14 +39,11 @@
 - Визуализация: boxplot, radar, оценки по сценариям.
 - Отчётность: JSON (источник правды) + Markdown + PNG.
 - CLI-пайплайн с возможностью запускать фазы отдельно.
-- Streamlit-рабочее место: требования, промпт, генерация, метрики, отчёт и
-  API-тесты поверх тех же стадий, что и CLI.
-- Точка расширения API-тестов (шов): контракт фазы, `api-tests.json` и раздел
-  отчёта. Сеть и ДЗ3 advanced пока не подключены.
+- Streamlit-рабочее место: требования, промпт, генерация, метрики и отчёт
+  поверх тех же стадий, что и CLI.
 
 Вне области: DZ6, обучение модели, LLM-судья, собственный Ollama и собственные
-постоянные контейнеры. API-тесты реализованы только как шов; исполняемые
-HTTP-тесты появятся отдельным шагом.
+постоянные контейнеры. API-тесты в проект не входят.
 
 ### 1.3 Определения
 
@@ -113,7 +110,6 @@ HTTP-тесты появятся отдельным шагом.
 | `src/quality/assessor.py` | детерминированные метрики и агрегация |
 | `src/visualization/charts.py` | графики matplotlib (`Agg`) |
 | `src/reporting/report_generator.py` | JSON + Markdown |
-| `src/autotests/` | шов API-тестов: порт, модели, заглушка, `api-tests.json` |
 | `src/ui/` | Streamlit-рабочее место |
 | `src/workflow/stages.py` | общие стадии для CLI и UI |
 | `src/workflow/main.py` | CLI, фазы, проверка модели, коды возврата |
@@ -219,7 +215,6 @@ Markdown содержит обязательные разделы: общая и
 - `generate` — сценарии, `generation.json`;
 - `assess` — пересчёт метрик, `quality-metrics.json`;
 - `visualize` — графики;
-- `api_tests` — шов, `api-tests.json`;
 - `report` — `report.md` и JSON;
 - `write_snapshot` / `load_snapshot` — снимок генерации.
 
@@ -230,7 +225,6 @@ Markdown содержит обязательные разделы: общая и
 - `_run_generate` — проверка модели, вызов `stages.generate`;
 - `_run_assess` — `stages.assess`;
 - `_run_visualize` — `stages.visualize`;
-- `_run_api_tests` — `stages.api_tests`;
 - `_run_report` — `stages.report`;
 - `main` — обработка ошибок, коды возврата, `--fail-under`.
 
@@ -246,7 +240,7 @@ Markdown содержит обязательные разделы: общая и
 
 ### 3.7 `src/ui/`
 
-- `app.py` — Streamlit-рабочее место: шесть вкладок и боковая панель;
+- `app.py` — Streamlit-рабочее место: пять вкладок и боковая панель;
 - `launcher.py` — `streamlit run` с адресом `0.0.0.0:8501`;
 - `__main__.py` — `python -m src.ui`.
 
@@ -333,7 +327,7 @@ docker compose up -d ui                 # тот же адрес
 
 UI и CLI вызывают одни и те же функции `src.workflow.stages`; отдельного API
 между фронтами нет. Вкладки: требования DZ2, промпт DZ7, генерация DZ2,
-метрики DZ8, отчёт и шов API-тестов DZ3. DZ6 в проект не входит.
+метрики DZ8, отчёт. DZ6 и API-тесты в проект не входят.
 
 ---
 
@@ -676,7 +670,6 @@ uv run python -m src.workflow --input-dir input --output-dir output
 - `--runs 1` даёт лишь внутреннюю эвристику консистентности.
 - Качество текста ограничено моделью `qwen2.5:7b-instruct` и шаблонами промптов.
 - Проект не заменяет ревью тест-документации человеком.
-- API-тесты пока не выполняют HTTP-запросов: шов не создаёт сетевой активности.
 - Embedded Python не поставляется; переносимый запуск — через `uv python install`.
 
 ---
@@ -691,8 +684,6 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | `openspec/changes/tasks.md` | чек-лист реализации |
 | `openspec/specs/generation/spec.md` | EARS-требования к генерации |
 | `openspec/specs/quality/spec.md` | EARS-требования и формулы метрик |
-| `openspec/specs/autotests/spec.md` | EARS-требования к шву API-тестов |
-| `openspec/changes/add-api-tests-seam/` | шов API-тестов: предложение, дизайн, задачи |
 | `openspec/changes/add-guard-tests/` | guard-тесты документации и лаунчеров |
 
 Документы описывают реализованное поведение. Изменения поведения должны
@@ -700,68 +691,7 @@ uv run python -m src.workflow --input-dir input --output-dir output
 
 ---
 
-## 12. Точка расширения: API-тесты (запланировано)
-
-Шов для будущих исполняемых API-тестов. Сейчас не вызывает сеть и не меняет
-поведение без явного флага. Спецификация — `openspec/specs/autotests/spec.md`,
-решение — `openspec/changes/add-api-tests-seam/`.
-
-### 12.1 Граница
-
-```text
-workflow ──▶ ApiTestRunner (Protocol) ──▶ ApiTestReport
-                    ├── DisabledApiTestRunner  (сейчас)
-                    └── Dz3AdvancedRunner      (потом)
-```
-
-Порт возвращает готовый отчёт, а не JSON-план: типы ДЗ3 остаются в адаптере и
-не протекают в модели, отчёт и графики.
-
-### 12.2 Артефакты
-
-| Элемент | Назначение |
-|---|---|
-| `src/autotests/models.py` | `ApiTestRequest`, `ApiCaseResult`, `ApiTestReport` |
-| `src/autotests/ports.py` | `ApiTestRunner`, `ApiTestError` |
-| `src/autotests/disabled.py` | заглушка «адаптер не подключён» |
-| `src/autotests/service.py` | запуск и запись `api-tests.json` |
-| `output/api-tests.json` | источник правды раздела API-тестов |
-| `report.md` → `## API-тесты` | таблица кейсов и ошибки |
-
-`quality-metrics.json` получает необязательный ключ `api_tests`; без фазы ключа
-нет. `overall` и четыре метрики документации не меняются.
-
-### 12.3 CLI
-
-| Флаг | По умолчанию | Смысл |
-|---|---|---|
-| `--api-tests` | выкл. | выполнить фазу |
-| `--api-base-url` | env `API_TEST_BASE_URL` | базовый URL API |
-| `--api-contract` | — | описание/контракт API |
-| `--api-cases` | `5` | кейсов на прогон |
-
-Фаза встаёт после `visualize` и до `report`. Без `--api-tests` артефакты и коды
-возврата не меняются. При указанном флаге без URL или без адаптера — код 2.
-
-### 12.4 План подключения ДЗ3 advanced
-
-1. Вендорить `plan.py`, `core.py`, `docs.py`, `generator.py`, `report.py`
-   в `src/autotests/dz3_advanced/`.
-2. Использовать `src/generator/ollama_client.py` и наш validate/retry вместо
-   `ohw_kit.ollama_client` и `ohw_kit.jsonreply`.
-3. Перенести `ohw_kit.checks` (JSONPath + evaluate) локально.
-4. Реализовать `Dz3AdvancedRunner.run()` → `ApiTestReport`.
-5. Поднять целевой API (фасад проекта или заглушка) и добавить integration-тест.
-
-### 12.5 Ограничения
-
-- ДЗ6 не подключается: он анализирует pytest-код, а advanced даёт JSON-план.
-- Исполнительные результаты не входят в `overall`, `--fail-under` и графики.
-- Embedded Python не вендорится: переносимый запуск — через `uv python install`.
-
----
-
-## 13. История документа
+## 12. История документа
 
 | Версия | Дата | Изменение |
 |---|---|---|
@@ -771,3 +701,4 @@ workflow ──▶ ApiTestRunner (Protocol) ──▶ ApiTestReport
 | 0.4 | 11.11.2026 | Добавлен раздел о шве API-тестов, guard-тестах и решении по embedded Python |
 | 0.5 | 12.11.2026 | Добавлено Streamlit-рабочее место: общие стадии, сервис `ui`, тесты AppTest |
 | 0.6 | 12.11.2026 | Добавлена вкладка промпта (DZ7) с правкой и передачей в генерацию; вкладки отмечены по источникам ДЗ |
+| 0.7 | 12.11.2026 | Шов API-тестов удалён: API-тесты не входят в проект, UI оставлен с пятью вкладками |

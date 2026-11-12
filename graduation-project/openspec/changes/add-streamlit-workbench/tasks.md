@@ -15,7 +15,7 @@
 
 - [x] `src/workflow/stages.py` — общие стадии
 - [x] `src/workflow/main.py` — делегирование стадиям без изменения CLI
-- [x] `src/ui/app.py` — шесть вкладок и боковая панель
+- [x] `src/ui/app.py` — пять вкладок и боковая панель
 - [x] `src/generator/pipeline.py` — правка промпта на файл из UI
 - [x] `src/ui/launcher.py`, `src/ui/__main__.py` — запуск
 - [x] `pyproject.toml` / `uv.lock` — streamlit

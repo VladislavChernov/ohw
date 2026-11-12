@@ -190,45 +190,6 @@ def _chart_lines(data: PipelineData) -> list[str]:
     return lines
 
 
-def _api_test_lines(data: PipelineData) -> list[str]:
-    """Render the optional API-test section; nothing is printed without data."""
-    report = data.api_tests
-    if report is None:
-        return []
-    lines = [
-        "## API-тесты",
-        "",
-        f"- Раннер: `{report.runner}`",
-        f"- Базовый URL: `{report.base_url}`",
-        f"- Модель: `{report.model}`",
-        f"- Всего кейсов: {report.total}",
-        f"- Успешно: {report.passed}",
-        f"- Провалено: {report.failed}",
-        f"- Длительность: {report.duration_ms:.0f} мс",
-        "",
-    ]
-    if report.cases:
-        lines += [
-            "| Кейс | Метод | Путь | Статус | Время, мс | Результат |",
-            "|---|---|---|---:|---:|---|",
-        ]
-        for case in report.cases:
-            status = case.status_code if case.status_code is not None else "—"
-            result = "OK" if case.ok else (case.error or "FAILED")
-            lines.append(
-                f"| {case.name} | {case.method or '—'} | {case.path or '—'} | "
-                f"{status} | {case.duration_ms:.0f} | {result} |"
-            )
-        lines.append("")
-    else:
-        lines += ["Кейсы не сформированы.", ""]
-    if report.errors:
-        lines += ["Ошибки API-тестов:", ""]
-        lines += [f"- {error}" for error in report.errors]
-        lines.append("")
-    return lines
-
-
 def render_markdown(data: PipelineData) -> str:
     """Build the Markdown report from a :class:`PipelineData` instance."""
     generated_at = data.generated_at or _now()
@@ -251,8 +212,6 @@ def render_markdown(data: PipelineData) -> str:
         f"| Успешные (overall ≥ 0.5) | {data.successful} |",
         f"| Неуспешные | {data.unsuccessful} |",
     ]
-    if data.api_tests is not None:
-        lines.append("| API-тесты | да |")
     lines += [
         "",
         "## Распределение качества",
@@ -272,7 +231,6 @@ def render_markdown(data: PipelineData) -> str:
     lines += _scenario_details(data)
     lines += ["## Визуальный отчёт", ""]
     lines += _chart_lines(data)
-    lines += _api_test_lines(data)
     if data.errors:
         lines += ["## Ошибки", ""]
         lines += [f"- {error}" for error in data.errors]

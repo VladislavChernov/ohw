@@ -14,13 +14,6 @@ from typing import Any, cast
 
 import streamlit as st
 
-from src.autotests import (
-    ApiTestError,
-    ApiTestReport,
-    ApiTestRequest,
-    load_api_tests,
-    resolve_runner,
-)
 from src.config import DEFAULT_MODEL
 from src.generator.handlers import get_handler
 from src.generator.input_doc import InputError, load_docs
@@ -94,7 +87,6 @@ def main() -> None:
             "3. Генерация (DZ2)",
             "4. Метрики (DZ8)",
             "5. Отчёт",
-            "6. API-тесты (DZ3, шов)",
         ]
     )
     with tabs[0]:
@@ -107,8 +99,6 @@ def main() -> None:
         _metrics_tab()
     with tabs[4]:
         _report_tab()
-    with tabs[5]:
-        _api_tests_tab()
 
 
 # --------------------------------------------------------------------------
@@ -142,7 +132,7 @@ def _sidebar() -> None:
         st.text_input(
             "Папка результатов",
             key="output_dir",
-            help="Сюда пишутся scenarios, charts, отчёты и api-tests.json.",
+            help="Сюда пишутся scenarios, charts и отчёты.",
         )
         st.caption("Требования загружаются на вкладке 1.")
         st.caption("Сгенерированные файлы: `output/scenarios/`.")
@@ -699,103 +689,6 @@ def _report_tab() -> None:
         )
     st.divider()
     st.markdown(report_path.read_text(encoding="utf-8"))
-
-
-# --------------------------------------------------------------------------
-# Tab 6: API tests
-# --------------------------------------------------------------------------
-
-
-def _api_tests_tab() -> None:
-    st.caption(
-        "Шов API-тестов: контракт и результат уже определены, реальный адаптер "
-        "подключается отдельным шагом. Сейчас запуск вернёт понятное сообщение."
-    )
-    output_dir = Path(st.session_state["output_dir"])
-    base_url = st.text_input(
-        "Базовый URL API",
-        value=os.environ.get("API_TEST_BASE_URL", ""),
-        key="api_base_url",
-    )
-    contract = st.file_uploader(
-        "Контракт или описание API (необязательно)",
-        type=["md", "txt", "json", "yaml", "yml"],
-        key="api_contract_file",
-    )
-    cases = st.number_input(
-        "Кейсов на прогон", min_value=1, max_value=100, value=5, key="api_cases"
-    )
-    if st.button("Запустить API-тесты", type="primary"):
-        _run_api_tests(output_dir, base_url, contract, int(cases))
-
-    report = load_api_tests(output_dir)
-    if report is not None:
-        _show_api_report(report)
-    else:
-        st.caption("Файл `api-tests.json` пока отсутствует.")
-
-
-def _run_api_tests(
-    output_dir: Path,
-    base_url: str,
-    contract: Any,
-    cases: int,
-) -> None:
-    contract_path: Path | None = None
-    if contract is not None:
-        input_dir = output_dir / "ui-input"
-        input_dir.mkdir(parents=True, exist_ok=True)
-        contract_path = input_dir / contract.name
-        contract_path.write_bytes(contract.getvalue())
-
-    request = ApiTestRequest(
-        base_url=base_url.strip().rstrip("/"),
-        contract_path=contract_path,
-        cases=cases,
-        timeout=float(st.session_state.get("timeout", 600.0)),
-        model=str(st.session_state.get("model", "")),
-    )
-    try:
-        report, data = stages.api_tests(
-            request,
-            resolve_runner(),
-            output_dir,
-            st.session_state.get("data"),
-        )
-    except (ApiTestError, ValueError, OSError) as exc:
-        st.error(str(exc))
-        return
-    st.session_state["data"] = data
-    st.success(
-        f"API-тесты: {report.passed}/{report.total} успешно "
-        f"({report.runner})."
-    )
-
-
-def _show_api_report(report: ApiTestReport) -> None:
-    st.subheader("Результат API-тестов")
-    columns = st.columns(4)
-    columns[0].metric("Всего", report.total)
-    columns[1].metric("Успешно", report.passed)
-    columns[2].metric("Провалено", report.failed)
-    columns[3].metric("Время, мс", f"{report.duration_ms:.0f}")
-    if report.cases:
-        st.dataframe(
-            [
-                {
-                    "Кейс": case.name,
-                    "Метод": case.method,
-                    "Путь": case.path,
-                    "Статус": case.status_code,
-                    "Результат": "OK" if case.ok else (case.error or "FAILED"),
-                }
-                for case in report.cases
-            ],
-            hide_index=True,
-            width="stretch",
-        )
-    for error in report.errors:
-        st.warning(error)
 
 
 if __name__ == "__main__":
