@@ -53,6 +53,8 @@ class GenerationRequest:
     # Per-file prompt overrides from the workbench; the CLI leaves this empty
     # and prompts are rendered from the templates.
     prompts: Mapping[str, str] = field(default_factory=dict)
+    # Record a connection failure per file instead of aborting the whole run.
+    continue_on_error: bool = False
 
 
 @dataclass
@@ -91,9 +93,11 @@ def generate_scenarios(
 ) -> GenerationOutcome:
     """Generate one artifact per input file and attach quality metrics.
 
-    A connection failure aborts the run: every later request would fail too.
-    A single model failure (invalid answer after the retry budget) is recorded
-    and the remaining files are still processed.
+    A connection failure aborts the run by default: every later request would
+    fail too. With ``continue_on_error`` the failure is recorded for the current
+    file and the remaining files are still processed. A single model failure
+    (invalid answer after the retry budget) is recorded and the remaining files
+    are still processed.
     """
     if request.runs < 1:
         raise ValueError("runs must be at least 1")
@@ -205,8 +209,9 @@ def generate_scenarios(
             )
         except (GenerationError, OllamaResponseError) as exc:
             outcome.errors.append(f"{doc.path.name}: {exc}")
-        except OllamaConnectionError:
-            # Per-file error: record the error and continue with remaining files
-            outcome.errors.append(f"{doc.path.name}: Ollama connection unavailable")
+        except OllamaConnectionError as exc:
+            if not request.continue_on_error:
+                raise
+            outcome.errors.append(f"{doc.path.name}: Ollama недоступна: {exc}")
             continue
     return outcome

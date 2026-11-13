@@ -14,6 +14,7 @@ model, while the report stays small and human-readable.
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.config import PIPELINE_VERSION
 from src.generator.models import TestCase
 
 METRIC_KEYS: tuple[str, ...] = (
@@ -238,6 +239,7 @@ class PipelineData:
 
     def to_snapshot_dict(self) -> dict[str, Any]:
         return {
+            "pipeline_version": PIPELINE_VERSION,
             **self._metadata(),
             "scenarios": [
                 scenario.to_snapshot_dict() for scenario in self.scenarios
@@ -270,6 +272,7 @@ class PipelineData:
         payload: dict[str, Any] = {
             "project": "graduation-project",
             "version": "0.1.0",
+            "pipeline_version": PIPELINE_VERSION,
             **self._metadata(),
             "total_scenarios": len(self.scenarios),
             "successful": self.successful,

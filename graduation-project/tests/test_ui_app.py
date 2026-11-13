@@ -8,7 +8,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from src.generator.models import ArtifactType
-from src.generator.ollama_client import OllamaClient
+from src.generator.ollama_client import OllamaClient, OllamaConnectionError
 
 APP_PATH = Path(__file__).parent.parent / "src" / "ui" / "app.py"
 
@@ -94,6 +94,10 @@ def _button(at: AppTest, label: str) -> Any:
     return next(item for item in at.button if item.label == label)
 
 
+def _checkbox(at: AppTest, label: str) -> Any:
+    return next(item for item in at.checkbox if item.label == label)
+
+
 def _metrics(at: AppTest) -> dict[str, str]:
     return {item.label: item.value for item in at.metric}
 
@@ -172,6 +176,45 @@ def test_generation_uses_the_shared_stages(
     scenarios = list((output / "scenarios").glob("*.md"))
     assert len(scenarios) == 1
     assert "TC-01" in scenarios[0].read_text(encoding="utf-8")
+
+
+def test_continue_on_error_checkbox_keeps_successful_files(
+    workbench: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_chat(
+        self: OllamaClient,
+        system: str,
+        user: str,
+        temperature: float,
+        json_mode: bool = True,
+    ) -> str:
+        if "первого файла" in user:
+            raise OllamaConnectionError("ollama service is unreachable")
+        return _testcases(10)
+
+    monkeypatch.setattr(OllamaClient, "chat", fake_chat)
+    at = _upload(
+        _app(),
+        (
+            "a-first.md",
+            "# Первый\n\nBR-1. Проверка первого файла. Система должна работать.\n",
+        ),
+        (
+            "b-second.md",
+            "# Второй\n\nBR-2. Проверка второго файла. Система должна работать.\n",
+        ),
+    )
+    _checkbox(at, "Продолжать при ошибке Ollama").set_value(True).run()
+    _button(at, "Сгенерировать").click().run()
+
+    assert not at.exception
+    assert any("Готово" in item.value for item in at.success)
+    assert any("a-first.md" in item.value for item in at.warning)
+    snapshot = json.loads(
+        (workbench / "output" / "generation.json").read_text(encoding="utf-8")
+    )
+    assert [item["filename"] for item in snapshot["scenarios"]] == ["b-second.md"]
+    assert "a-first.md" in snapshot["errors"][0]
 
 
 def test_prompt_tab_builds_and_applies_edited_prompt(

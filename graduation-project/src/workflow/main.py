@@ -139,6 +139,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="своя папка шаблонов промптов",
     )
+    generation.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help=(
+            "продолжать генерацию, если Ollama недоступна для отдельного файла"
+        ),
+    )
 
     runtime = parser.add_argument_group("подключение и вывод")
     runtime.add_argument(
@@ -182,12 +189,21 @@ def selected_phases(args: argparse.Namespace) -> list[str]:
     return requested or list(CORE_PHASES)
 
 
-def _check_model(client: OllamaClient) -> None:
-    """Warn early when the configured model is not installed."""
+def _check_model(client: OllamaClient, *, strict: bool = True) -> None:
+    """Warn early when the configured model is not installed.
+
+    With ``strict=False`` an unreachable Ollama is only a warning: the caller
+    opted into per-file recovery, so connection errors are reported per file.
+    """
     try:
         models = client.list_models()
     except (OllamaConnectionError, OllamaResponseError) as exc:
-        raise OllamaConnectionError(str(exc)) from exc
+        if not strict:
+            _log(f"предупреждение: {exc}; продолжаю по файлам")
+            return
+        if isinstance(exc, OllamaConnectionError):
+            raise OllamaConnectionError(str(exc)) from exc
+        raise
     if client.model not in models:
         _log(
             f"предупреждение: модель {client.model!r} не найдена в Ollama. "
@@ -210,13 +226,14 @@ def _run_generate(
         presets=tuple(args.preset),
         prompt_dir=Path(args.prompt_dir) if args.prompt_dir else None,
         output_dir=output_dir,
+        continue_on_error=args.continue_on_error,
     )
     client = OllamaClient(
         base_url=settings.base_url,
         model=settings.model,
         timeout=settings.timeout,
     )
-    _check_model(client)
+    _check_model(client, strict=not args.continue_on_error)
     _log(
         f"генерация: {request.input_dir} -> {output_dir / 'scenarios'} "
         f"(тип={request.artifact_type.value}, кейсов={request.count}, "

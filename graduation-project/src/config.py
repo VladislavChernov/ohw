@@ -1,13 +1,36 @@
 """Runtime settings for the standalone project."""
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 DEFAULT_MODEL = "qwen2.5:7b-instruct"
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_TIMEOUT = 600.0
 DEFAULT_OUTPUT_DIR = Path("output")
+
+# Contract version of ``generation.json`` and ``quality-metrics.json``. Bump it
+# whenever a later pipeline stage would misread artifacts from an older run.
+PIPELINE_VERSION = "0.1.0"
+
+
+def check_pipeline_version(raw: Mapping[str, Any], path: Path) -> None:
+    """Reject artifacts written by an incompatible pipeline version.
+
+    Files without the key predate versioning. Their format is compatible with
+    ``PIPELINE_VERSION``, so they are still readable as legacy artifacts.
+    """
+    version = raw.get("pipeline_version")
+    if version is None:
+        return
+    if version != PIPELINE_VERSION:
+        raise ValueError(
+            f"несовместимая версия пайплайна: {path.name} записан версией "
+            f"{version}, текущая версия — {PIPELINE_VERSION}; "
+            f"перегенерируйте артефакты"
+        )
 
 
 @dataclass(frozen=True)

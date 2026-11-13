@@ -506,15 +506,22 @@ def _generation_tab() -> None:
         f"{TYPE_LABELS[config['artifact_type']]} · кейсов: {config['count']} · "
         f"повторов: {config['runs']}"
     )
+    continue_on_error = st.checkbox(
+        "Продолжать при ошибке Ollama",
+        help=(
+            "Записывать ошибку соединения для текущего файла и обрабатывать "
+            "остальные. Без флажка прогон прерывается."
+        ),
+    )
     if st.button("Сгенерировать", type="primary"):
-        _run_generation(config)
+        _run_generation(config, continue_on_error)
 
     data: PipelineData | None = st.session_state.get("data")
     if data is not None:
         _show_generation(data)
 
 
-def _run_generation(config: dict[str, Any]) -> None:
+def _run_generation(config: dict[str, Any], continue_on_error: bool) -> None:
     output_dir = Path(st.session_state["output_dir"])
     input_dir = _sync_inputs(config)
 
@@ -530,6 +537,7 @@ def _run_generation(config: dict[str, Any]) -> None:
         presets=tuple(config["presets"]),
         output_dir=output_dir,
         prompts=dict(st.session_state.get("ui_prompts") or {}),
+        continue_on_error=continue_on_error,
     )
     client = _client()
     if client is None:

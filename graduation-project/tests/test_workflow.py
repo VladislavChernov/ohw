@@ -5,9 +5,17 @@ from pathlib import Path
 
 import pytest
 
+from src.config import PIPELINE_VERSION
 from src.generator.models import CaseType, TestCase
+from src.generator.ollama_client import OllamaClient, OllamaConnectionError
 from src.models import PipelineData, QualityMetrics, ScenarioResult
-from src.workflow.main import EXIT_USAGE, build_parser, main, selected_phases
+from src.workflow.main import (
+    EXIT_GENERATION,
+    EXIT_USAGE,
+    build_parser,
+    main,
+    selected_phases,
+)
 
 
 def test_default_phases_are_all() -> None:
@@ -83,6 +91,142 @@ def test_assess_and_report_from_snapshot(tmp_path: Path) -> None:
     markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "TC-01" in markdown
     assert "req.md" in markdown
+
+
+def test_snapshot_contains_pipeline_version(tmp_path: Path) -> None:
+    _snapshot(tmp_path)
+    raw = json.loads(
+        (tmp_path / "generation.json").read_text(encoding="utf-8")
+    )
+    assert raw["pipeline_version"] == PIPELINE_VERSION
+
+
+def test_legacy_snapshot_without_version_is_accepted(tmp_path: Path) -> None:
+    _snapshot(tmp_path)
+    path = tmp_path / "generation.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.pop("pipeline_version")
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    assert main(["--assess", "--output-dir", str(tmp_path)]) == 0
+
+
+def test_snapshot_version_mismatch_returns_usage_error(tmp_path: Path) -> None:
+    _snapshot(tmp_path)
+    path = tmp_path / "generation.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["pipeline_version"] = "9.9.9"
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    assert main(["--assess", "--output-dir", str(tmp_path)]) == EXIT_USAGE
+
+
+def _write_inputs(tmp_path: Path) -> Path:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "first.md").write_text(
+        "BR-1. Проверка первого файла. Система должна работать.\n",
+        encoding="utf-8",
+    )
+    (input_dir / "second.md").write_text(
+        "BR-2. Проверка второго файла. Система должна работать.\n",
+        encoding="utf-8",
+    )
+    return input_dir
+
+
+def _patch_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        OllamaClient,
+        "list_models",
+        lambda self: ["qwen2.5:7b-instruct"],
+    )
+
+    def chat(
+        self: OllamaClient,
+        system: str,
+        user: str,
+        temperature: float,
+        json_mode: bool = True,
+    ) -> str:
+        if "первого файла" in user:
+            raise OllamaConnectionError("ollama service is unreachable")
+        return json.dumps(
+            {
+                "cases": [
+                    {
+                        "id": "TC-01",
+                        "type": "positive",
+                        "title": "Успех",
+                        "steps": ["Открыть форму"],
+                        "expected": "Форма открыта",
+                        "requirement": "BR-2",
+                    },
+                    {
+                        "id": "TC-02",
+                        "type": "negative",
+                        "title": "Ошибка",
+                        "steps": ["Открыть форму"],
+                        "expected": "Показана ошибка",
+                        "requirement": "BR-2",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+    monkeypatch.setattr(OllamaClient, "chat", chat)
+
+
+def test_continue_on_error_processes_remaining_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = _write_inputs(tmp_path)
+    _patch_ollama(monkeypatch)
+    output_dir = tmp_path / "output"
+
+    code = main(
+        [
+            "--generate",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+            "--count",
+            "2",
+            "--continue-on-error",
+        ]
+    )
+
+    assert code == 0
+    snapshot = json.loads(
+        (output_dir / "generation.json").read_text(encoding="utf-8")
+    )
+    assert snapshot["pipeline_version"] == PIPELINE_VERSION
+    assert [item["filename"] for item in snapshot["scenarios"]] == ["second.md"]
+    assert len(snapshot["errors"]) == 1
+    assert "first.md" in snapshot["errors"][0]
+
+
+def test_without_continue_on_error_generation_aborts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = _write_inputs(tmp_path)
+    _patch_ollama(monkeypatch)
+
+    code = main(
+        [
+            "--generate",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--count",
+            "2",
+        ]
+    )
+
+    assert code == EXIT_GENERATION
 
 
 def test_assess_without_snapshot_returns_usage_error(tmp_path: Path) -> None:

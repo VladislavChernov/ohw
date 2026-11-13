@@ -46,7 +46,9 @@ def test_snapshot_roundtrip() -> None:
         scenarios=[_scenario()],
         errors=["one error"],
     )
-    restored = PipelineData.from_snapshot_dict(data.to_snapshot_dict())
+    snapshot = data.to_snapshot_dict()
+    assert snapshot["pipeline_version"] == "0.1.0"
+    restored = PipelineData.from_snapshot_dict(snapshot)
     assert restored.model == "qwen2.5:7b-instruct"
     assert restored.scenarios[0].cases[0].title == "Успешный вход"
     assert restored.scenarios[0].generations == _scenario().generations
@@ -62,7 +64,9 @@ def test_report_roundtrip_keeps_real_cases() -> None:
         scenarios=[_scenario()],
     )
     data.refresh_averages()
-    restored = PipelineData.from_report_dict(data.to_report_dict())
+    report = data.to_report_dict()
+    assert report["pipeline_version"] == "0.1.0"
+    restored = PipelineData.from_report_dict(report)
     assert restored.scenarios[0].cases[0].id == "TC-01"
     assert restored.scenarios[0].covered_requirements == ["BR-1"]
     assert restored.averages == data.averages

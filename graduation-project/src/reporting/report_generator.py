@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from src.config import check_pipeline_version
 from src.models import METRIC_KEYS, PipelineData, QualityMetrics, ScenarioResult
 
 REPORT_JSON_NAME = "quality-metrics.json"
@@ -87,6 +88,7 @@ def load_pipeline_data(output_dir: Path) -> PipelineData:
             "phases first"
         )
     raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    check_pipeline_version(raw, path)
     return PipelineData.from_report_dict(raw)
 
 

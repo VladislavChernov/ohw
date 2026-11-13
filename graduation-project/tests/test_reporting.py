@@ -3,6 +3,9 @@
 import json
 from pathlib import Path
 
+import pytest
+
+from src.config import PIPELINE_VERSION
 from src.generator.models import CaseType, TestCase
 from src.models import PipelineData, QualityMetrics, ScenarioResult
 from src.reporting.report_generator import (
@@ -108,6 +111,7 @@ def test_reports_are_written_and_json_is_source_of_truth(tmp_path: Path) -> None
     assert json_path.is_file() and markdown_path.is_file()
 
     raw = json.loads(json_path.read_text(encoding="utf-8"))
+    assert raw["pipeline_version"] == PIPELINE_VERSION
     assert raw["total_scenarios"] == 2
     assert raw["scenarios"][0]["case_summaries"][0]["id"] == "TC-01"
     assert raw["scenarios"][1]["quality"]["scenario_coverage"] is None
@@ -118,8 +122,28 @@ def test_reports_are_written_and_json_is_source_of_truth(tmp_path: Path) -> None
     assert restored.averages == raw["averages"]
 
 
-def test_missing_report_file_raises(tmp_path: Path) -> None:
-    import pytest
+def test_legacy_report_without_version_is_accepted(tmp_path: Path) -> None:
+    generate_all_reports(_data(), tmp_path)
+    path = tmp_path / "quality-metrics.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw.pop("pipeline_version")
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
 
+    restored = load_pipeline_data(tmp_path)
+    assert restored.scenarios[0].cases[0].id == "TC-01"
+
+
+def test_report_version_mismatch_is_rejected(tmp_path: Path) -> None:
+    generate_all_reports(_data(), tmp_path)
+    path = tmp_path / "quality-metrics.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["pipeline_version"] = "9.9.9"
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="несовместимая версия"):
+        load_pipeline_data(tmp_path)
+
+
+def test_missing_report_file_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         load_pipeline_data(tmp_path)
