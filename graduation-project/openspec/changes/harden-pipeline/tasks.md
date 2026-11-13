@@ -30,4 +30,4 @@
 - [x] `uv run mypy src`
 - [x] Живой e2e на `qwen2.5:7b-instruct`, сверка с `examples/live-run/`
 - [x] Коммит и push кода
-- [ ] Тег `v0.1.0`
+- [x] Тег `v0.1.0`
