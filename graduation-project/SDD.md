@@ -536,7 +536,7 @@ uv run pytest
 ```
 
 Unit-тесты не требуют Ollama. Результат на момент документирования:
-`53 passed, 1 skipped`.
+`89 passed, 1 skipped`.
 
 ### 8.2 Integration / e2e
 
