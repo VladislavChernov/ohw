@@ -3,6 +3,10 @@
 Пример полного пайплайна на общей модели `qwen2.5:7b-instruct` из `ohw-ollama`.
 Исходники примера лежат в [`examples/live-run/`](../examples/live-run/).
 
+Снимок в `examples/live-run/` записан до введения `pipeline_version` и
+читается как legacy; новые прогоны добавляют ключ в `generation.json` и
+`quality-metrics.json`.
+
 ## Команда
 
 Внутри сети `ohw_net`:
@@ -86,7 +90,7 @@ uv run python -m src.workflow \
 RUN_OLLAMA_INTEGRATION=1 uv run pytest -m integration
 ```
 
-Результат прогона: `1 passed, 53 deselected in 147.99s`. Средний `overall`
+Результат прогона: `1 passed, 105 deselected`. Средний `overall`
 на плотных требованиях из SDD — `0.399`: текст требований длинный и
 формальный, поэтому читаемость ниже, чем на коротком примере регистрации.
 Структурно пайплайн отработал полностью: сценарий сгенерирован, метрики

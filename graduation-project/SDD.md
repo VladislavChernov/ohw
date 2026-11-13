@@ -586,7 +586,7 @@ docker run --rm --network ohw_net -v "$PWD:/repo" -w /repo \
   ghcr.io/astral-sh/uv:python3.13-bookworm-slim uv run pytest -m integration
 ```
 
-Результат прогона: `1 passed, 105 deselected in 147.99s`. Средний `overall` на
+Результат прогона: `1 passed, 105 deselected`. Средний `overall` на
 требованиях из SDD — `0.399`; это ожидаемо для плотного формального текста.
 Проверяется структура e2e: генерация, метрики, графики и отчёт созданы.
 

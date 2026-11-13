@@ -66,6 +66,17 @@
 - [x] `tests/test_docs_encoding.py`, `tests/test_launchers.py`
 - [x] Коммит и push реализации
 
+## Фаза 9. P0 ревью
+
+- [x] `openspec/changes/harden-pipeline/` — версионирование и recovery
+- [x] `openspec/specs/pipeline/spec.md` — EARS-требования к контракту
+- [x] `pipeline_version` в `generation.json` и `quality-metrics.json`
+- [x] Legacy-файлы и понятная ошибка при несовпадении версии
+- [x] `--continue-on-error` и чекбокс в UI
+- [x] Тесты версий, fail-fast и per-file recovery
+- [x] Живой e2e и сверка набора артефактов с `examples/live-run/`
+- [x] Коммит и push реализации
+
 ## Фаза 7. Документация и отдача
 
 - [x] `README.md` с быстрым стартом
