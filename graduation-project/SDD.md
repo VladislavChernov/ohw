@@ -184,8 +184,9 @@ input/*.md|*.txt
 - `assess_scenario_coverage` — покрытие требований;
 - `assess_consistency` — Jaccard повторных генераций;
 - `assess_internal_consistency` — эвристика для одного run;
-- `weighted_overall` — взвешенное среднее с перенормировкой;
-- `assess_quality` — все метрики одного сценария;
+- `weighted_overall` — взвешенное среднее с перенормировкой и необязательными
+  весами;
+- `assess_quality` — все метрики одного сценария с необязательными весами;
 - `aggregate_metrics` — средние по сценариям с сохранением `None`.
 
 ### 3.3 `src/visualization/charts.py`
@@ -218,8 +219,8 @@ Markdown содержит обязательные разделы: общая и
 
 `stages.py` — файловые стадии без `argparse` и Streamlit:
 
-- `generate` — сценарии, `generation.json`;
-- `assess` — пересчёт метрик, `quality-metrics.json`;
+- `generate` — сценарии, фактические веса, `generation.json`;
+- `assess` — пересчёт метрик с весами из снимка, `quality-metrics.json`;
 - `visualize` — графики;
 - `report` — `report.md` и JSON;
 - `write_snapshot` / `load_snapshot` — снимок генерации и проверка версии.
@@ -238,8 +239,8 @@ Markdown содержит обязательные разделы: общая и
 
 - `QualityMetrics` — четыре метрики + `overall`, `to_dict`/`from_dict`;
 - `ScenarioResult` — результат одного файла; snapshot/report сериализация;
-- `PipelineData` — метаданные, сценарии, ошибки, средние, графики;
-  `refresh_averages`, `to_snapshot_dict`/`from_snapshot_dict`,
+- `PipelineData` — метаданные, сценарии, ошибки, средние, графики,
+  `quality_weights`; `refresh_averages`, `to_snapshot_dict`/`from_snapshot_dict`,
   `to_report_dict`/`from_report_dict`.
 
 Порог успешности сценария: `overall ≥ 0.5`.
@@ -287,7 +288,13 @@ python -m src.workflow [фазы] [параметры]
 | `--timeout` | env/`600` | таймаут, секунды |
 | `--output-dir` | `output` | папка результатов |
 | `--continue-on-error` | выкл. | продолжать при недоступности Ollama для отдельного файла |
+| `--quality-weights` | env/значения по умолчанию | веса `overall` |
 | `--fail-under` | — | порог качества |
+
+`--quality-weights` принимает
+`readability=0.25,clarity_goals=0.25,scenario_coverage=0.30,consistency=0.20`:
+ровно четыре известные метрики, конечные значения `≥ 0`, сумма `1.0`
+(допуск `1e-6`). Ошибка формата — код `2`.
 
 Без флагов фаз выполняются все четыре фазы.
 
@@ -301,6 +308,7 @@ python -m src.workflow [фазы] [параметры]
 | `GRADUATION_PROMPT_DIR` | `src/generator/templates` |
 | `GRADUATION_PRESETS_DIR` | `src/generator/presets` |
 | `GRADUATION_NORMALIZER_CONFIG` | `src/generator/normalizer.toml` |
+| `GRADUATION_QUALITY_WEIGHTS` | веса по умолчанию (см. 5.5) |
 
 ### 4.3 Коды возврата
 
@@ -384,12 +392,20 @@ J(A, B) = |A ∩ B| / |A ∪ B|
 ### 5.5 Overall
 
 ```text
-weights = {readability: 0.25, clarity: 0.25, coverage: 0.30, consistency: 0.20}
+weights = {readability: 0.25, clarity_goals: 0.25,
+           scenario_coverage: 0.30, consistency: 0.20}   # по умолчанию
 overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные метрики
 ```
 
 Если известных метрик нет — `0.0`. `None` никогда не подменяется нулём.
 Сценарий успешен при `overall ≥ 0.5`.
+
+Веса можно переопределить флагом `--quality-weights` или переменной
+`GRADUATION_QUALITY_WEIGHTS` (приоритет CLI → env → значения по умолчанию).
+Формат — `metric=value` через запятую, ровно четыре известные метрики, сумма
+`1.0`. Фактические веса сохраняются в `generation.json` и
+`quality-metrics.json`; `assess` использует их из снимка, а legacy-файлы без
+ключа — значения по умолчанию.
 
 ---
 
@@ -409,6 +425,12 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
   "normalize": false,
   "presets": [],
   "generated_at": "2026-11-11T10:00:00+00:00",
+  "quality_weights": {
+    "readability": 0.25,
+    "clarity_goals": 0.25,
+    "scenario_coverage": 0.30,
+    "consistency": 0.20
+  },
   "scenarios": [
     {
       "filename": "requirements.md",
@@ -448,6 +470,12 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
   "normalize": false,
   "presets": [],
   "generated_at": "2026-11-11T10:00:00+00:00",
+  "quality_weights": {
+    "readability": 0.25,
+    "clarity_goals": 0.25,
+    "scenario_coverage": 0.30,
+    "consistency": 0.20
+  },
   "total_scenarios": 1,
   "successful": 1,
   "unsuccessful": 0,
@@ -498,6 +526,10 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 заменяет `pipeline_version`. Старые файлы не мигрируются автоматически: при
 следующем несовместимом изменении их нужно перегенерировать.
 
+`quality_weights` — необязательный ключ. Файл без него читается с весами по
+умолчанию; невалидные веса в файле — `ValueError` и код `2`. Поэтому
+`pipeline_version` не повышается: старые читатели просто игнорируют ключ.
+
 ### 6.4 `report.md`
 
 Обязательные разделы:
@@ -510,6 +542,9 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 6. `## Визуальный отчёт`
 7. `## Ошибки` (при наличии)
 8. `## Источник данных`
+
+В `## Общая информация` печатается строка
+`| Веса overall | readability=…, clarity_goals=…, scenario_coverage=…, consistency=… |`.
 
 ### 6.5 Графики
 
@@ -532,6 +567,7 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 | `OllamaResponseError` | ошибка сценария или код 3, если не сгенерирован ни один |
 | `GenerationError` | ошибка одного сценария, остальные продолжаются |
 | `ValueError` при несовпадении `pipeline_version` | код 2 с именем файла и версиями |
+| `ValueError` при невалидных весах | код 2 с причиной и допустимыми метриками |
 | `OSError` при записи | код 4 |
 | `KeyboardInterrupt` | код 130 |
 
@@ -546,8 +582,9 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 
 `tests/`:
 
-- `test_quality.py` — формулы, `None`-семантика, агрегация;
-- `test_models.py` — snapshot/report-сериализация;
+- `test_quality.py` — формулы, `None`-семантика, агрегация, веса `overall`;
+- `test_config.py` — парсинг, приоритет и валидация весов;
+- `test_models.py` — snapshot/report-сериализация и legacy без весов;
 - `test_reporting.py` — JSON как источник правды, `n/a`, реальные кейсы;
 - `test_generator.py` — шаблоны, промпты, валидатор, рендер, загрузка;
 - `test_workflow.py` — выбор фаз, assess/report по файлам, версии и коды возврата;

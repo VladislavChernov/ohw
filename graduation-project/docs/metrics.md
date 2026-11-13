@@ -82,12 +82,12 @@ consistency = mean(J(pair))
 
 Взвешенное среднее известных метрик:
 
-| Метрика | Вес |
-|---|---:|
-| Readability | 0.25 |
-| Clarity of goals | 0.25 |
-| Scenario coverage | 0.30 |
-| Consistency | 0.20 |
+| Метрика | Ключ | Вес по умолчанию |
+|---|---|---:|
+| Readability | `readability` | 0.25 |
+| Clarity of goals | `clarity_goals` | 0.25 |
+| Scenario coverage | `scenario_coverage` | 0.30 |
+| Consistency | `consistency` | 0.20 |
 
 ```text
 overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные метрики
@@ -97,6 +97,26 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 нет, `overall = 0.0`.
 
 Сценарий считается успешным при `overall ≥ 0.5`.
+
+### Переопределение весов
+
+```bash
+python -m src.workflow --quality-weights \
+  readability=0.20,clarity_goals=0.20,scenario_coverage=0.40,consistency=0.20
+```
+
+Тот же формат принимает `GRADUATION_QUALITY_WEIGHTS`. Приоритет: флаг → env →
+значения по умолчанию. Правила:
+
+- ровно четыре известные метрики, каждая один раз;
+- конечные числа `≥ 0`;
+- сумма `1.0` с допуском `1e-6`;
+- порядок ключей и пробелы вокруг `,` и `=` не важны.
+
+Нарушение — `ValueError`; CLI печатает сообщение и возвращает код `2`.
+Фактические веса сохраняются в `generation.json` и `quality-metrics.json`
+(ключ `quality_weights`) и печатаются в `report.md`. `--assess` берёт их из
+снимка; файлы без ключа читаются с весами по умолчанию.
 
 ## 6. Агрегация
 
@@ -114,7 +134,8 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 
 ## 8. Где менять
 
-- Формулы и веса: `src/quality/assessor.py`.
+- Формулы: `src/quality/assessor.py`.
+- Веса по умолчанию, парсинг и валидация: `src/config.py`.
 - Тексты отчёта и подписи: `src/reporting/report_generator.py`.
 - Данные: `quality-metrics.json` (источник правды).
 

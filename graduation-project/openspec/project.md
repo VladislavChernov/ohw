@@ -66,6 +66,9 @@ src/
 - `GRADUATION_PROMPT_DIR` — своя папка шаблонов промптов.
 - `GRADUATION_PRESETS_DIR` — своя папка пресетов.
 - `GRADUATION_NORMALIZER_CONFIG` — свой `normalizer.toml`.
+- `GRADUATION_QUALITY_WEIGHTS` — веса `overall` в формате
+  `readability=0.25,clarity_goals=0.25,scenario_coverage=0.30,consistency=0.20`;
+  флаг `--quality-weights` важнее env.
 - Устаревшие `DZ2_PROMPT_DIR`, `DZ2_PRESETS_DIR`, `AI_TESTGEN_NORMALIZER_CONFIG`
   принимаются как fallback.
 
@@ -104,3 +107,4 @@ src/
 - `openspec/changes/add-guard-tests/` — guard-тесты документации и лаунчеров.
 - `openspec/changes/add-streamlit-workbench/` — Streamlit-рабочее место.
 - `openspec/changes/harden-pipeline/` — версия контракта и per-file recovery.
+- `openspec/changes/quality-weights/` — настраиваемые веса `overall`.

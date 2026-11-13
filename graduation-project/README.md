@@ -73,6 +73,7 @@ python -m src.workflow [--generate] [--assess] [--visualize] [--report]
     --url URL --normalize --preset ID [--preset ID ...]
     --prompt-dir DIR --base-url URL --model NAME --timeout SEC
     --continue-on-error
+    --quality-weights WEIGHTS
     --fail-under SCORE
 ```
 
@@ -158,6 +159,18 @@ type: checklist
 (например, в требованиях нет `BR-N`), а не ноль. Подробности —
 [`docs/metrics.md`](docs/metrics.md).
 
+Веса можно переопределить:
+
+```bash
+python -m src.workflow --quality-weights \
+  readability=0.20,clarity_goals=0.20,scenario_coverage=0.40,consistency=0.20
+```
+
+Нужны ровно четыре известные метрики, сумма `1.0`; иначе код `2`. Приоритет:
+флаг → `GRADUATION_QUALITY_WEIGHTS` → значения по умолчанию. Фактические веса
+сохраняются в JSON и печатаются в `report.md`, а `--assess` использует их из
+снимка.
+
 ## Конфигурация
 
 | Переменная | По умолчанию |
@@ -168,6 +181,7 @@ type: checklist
 | `GRADUATION_PROMPT_DIR` | `src/generator/templates` |
 | `GRADUATION_PRESETS_DIR` | `src/generator/presets` |
 | `GRADUATION_NORMALIZER_CONFIG` | `src/generator/normalizer.toml` |
+| `GRADUATION_QUALITY_WEIGHTS` | сумма `1.0`, см. `docs/metrics.md` |
 
 Скопируйте `.env.example` в `.env` для локального запуска.
 

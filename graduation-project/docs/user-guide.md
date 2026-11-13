@@ -172,7 +172,25 @@ python -m src.workflow --visualize --report
 | `--model` | имя модели |
 | `--timeout` | таймаут запроса, секунды |
 | `--continue-on-error` | продолжать при недоступности Ollama для отдельного файла |
+| `--quality-weights` | веса `overall`, см. ниже |
 | `--fail-under` | порог `overall` для кода 5 |
+
+### Веса overall
+
+По умолчанию: readability `0.25`, clarity_goals `0.25`, scenario_coverage
+`0.30`, consistency `0.20`. Переопределение:
+
+```bash
+python -m src.workflow --quality-weights \
+  readability=0.20,clarity_goals=0.20,scenario_coverage=0.40,consistency=0.20
+```
+
+Или через `GRADUATION_QUALITY_WEIGHTS` в том же формате. Флаг важнее env.
+Нужны ровно четыре известные метрики, неотрицательные числа и сумма `1.0`;
+ошибка даёт код 2. Веса сохраняются в `generation.json` и
+`quality-metrics.json` и печатаются в отчёте, поэтому `--assess` пересчитывает
+метрики с теми же весами. Файлы без `quality_weights` используют значения по
+умолчанию.
 
 ### Ошибки Ollama
 
@@ -222,7 +240,7 @@ output/
 
 `report.md` содержит:
 
-- общую информацию о прогоне;
+- общую информацию о прогоне, включая использованные веса `overall`;
 - распределение метрик и `overall`;
 - таблицу сценариев и оценку «успешный / требует доработки»;
 - детализацию по каждому файлу с тест-кейсами;
