@@ -57,7 +57,7 @@
 - [x] `ruff check src scripts tests` без ошибок
 - [x] `mypy src` без ошибок
 - [x] Integration/e2e-тест с живой Ollama, источник — SDD проекта
-- [x] Прогон e2e в Docker с `RUN_OLLAMA_INTEGRATION=1`: 1 passed, 89 deselected
+- [x] Прогон e2e в Docker с `RUN_OLLAMA_INTEGRATION=1`: 1 passed, 105 deselected
 - [x] Живой прогон на `qwen2.5:7b-instruct`, пример сохранён в `examples/live-run/`
 
 ## Фаза 8. Guard-тесты

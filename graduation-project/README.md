@@ -72,6 +72,7 @@ python -m src.workflow [--generate] [--assess] [--visualize] [--report]
     --count 10 --runs 1 --temperature 0.7 --max-retries 3
     --url URL --normalize --preset ID [--preset ID ...]
     --prompt-dir DIR --base-url URL --model NAME --timeout SEC
+    --continue-on-error
     --fail-under SCORE
 ```
 
@@ -87,6 +88,11 @@ python -m src.workflow --report
 
 `--runs 2` и больше даёт честную консистентность (Jaccard повторных генераций).
 При `--runs 1` используется внутренняя эвристика, и отчёт это показывает.
+
+По умолчанию ошибка соединения с Ollama прерывает генерацию. С
+`--continue-on-error` ошибка записывается для текущего файла, а остальные файлы
+обрабатываются; если не сгенерирован ни один сценарий, CLI всё равно вернёт
+код `3`.
 
 ## UI (Streamlit)
 
@@ -130,10 +136,14 @@ type: checklist
 | Файл | Что внутри |
 |---|---|
 | `output/scenarios/<stem>.md` | сгенерированный артефакт |
-| `output/generation.json` | снимок генерации для `--assess` |
-| `output/quality-metrics.json` | метрики и реальные тест-кейсы |
+| `output/generation.json` | снимок генерации для `--assess` (`pipeline_version`) |
+| `output/quality-metrics.json` | метрики, реальные тест-кейсы и `pipeline_version` |
 | `output/report.md` | Markdown-отчёт |
 | `output/charts/*.png` | графики |
+
+`generation.json` и `quality-metrics.json` содержат `pipeline_version`. Файлы
+без этого ключа читаются как legacy; файл с другой версией отклоняется с
+понятной ошибкой, и его нужно перегенерировать.
 
 ## Метрики
 

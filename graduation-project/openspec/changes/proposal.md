@@ -16,7 +16,7 @@
 8. Три PNG-графика: boxplot, radar, оценки по сценариям.
 9. Docker-запуск на общем стенде `infra/` (`ohw-ollama`, `ohw-python:3.13`,
    сеть `ohw_net`), скрипты `run.ps1` / `run.sh` / `run.cmd`.
-10. Unit-тесты (90) и опциональный integration-тест с живой Ollama.
+10. Unit-тесты (106) и опциональный integration-тест с живой Ollama.
 11. OpenSpec-документы, единый SDD, README и docs.
 12. Streamlit-рабочее место: требования, промпт, генерация, метрики, отчёт.
 

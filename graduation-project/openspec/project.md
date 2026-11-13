@@ -103,3 +103,4 @@ src/
 
 - `openspec/changes/add-guard-tests/` — guard-тесты документации и лаунчеров.
 - `openspec/changes/add-streamlit-workbench/` — Streamlit-рабочее место.
+- `openspec/changes/harden-pipeline/` — версия контракта и per-file recovery.

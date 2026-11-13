@@ -127,9 +127,14 @@ input/*.md|*.txt
 ```
 
 `generation.json` хранит rendered-текст, все варианты генераций, тест-кейсы,
-промпт и метаданные. Это позволяет пересчитать метрики без повторного вызова
-модели. `quality-metrics.json` — источник правды для графиков и Markdown.
-Markdown никогда не парсится пайплайном.
+промпт, метаданные и `pipeline_version`. Это позволяет пересчитать метрики без
+повторного вызова модели. `quality-metrics.json` — источник правды для графиков
+и Markdown, он также содержит `pipeline_version`. Markdown никогда не парсится
+пайплайном.
+
+Версия контракта — единая константа `PIPELINE_VERSION` в `src/config.py`.
+Файлы без ключа читаются как legacy; несовпадение версии — ошибка входа с
+понятным сообщением.
 
 Фазы можно запускать отдельно. Без флагов выполняются все четыре в порядке
 `generate → assess → visualize → report`.
@@ -199,7 +204,8 @@ Backend `Agg` выбирается до импорта `pyplot`; графики 
 - `write_json_report` — `quality-metrics.json`;
 - `render_markdown` / `write_markdown_report` — `report.md`;
 - `generate_all_reports` — оба файла;
-- `load_pipeline_data` — чтение JSON для фаз `visualize`/`report`.
+- `load_pipeline_data` — чтение JSON для фаз `visualize`/`report` с проверкой
+  `pipeline_version`.
 
 JSON содержит реальные `case_summaries` (`id`, `type`, `title`, `steps`,
 `expected`, `requirement`), метаданные прогона, средние, ошибки и пути графиков.
@@ -216,13 +222,13 @@ Markdown содержит обязательные разделы: общая и
 - `assess` — пересчёт метрик, `quality-metrics.json`;
 - `visualize` — графики;
 - `report` — `report.md` и JSON;
-- `write_snapshot` / `load_snapshot` — снимок генерации.
+- `write_snapshot` / `load_snapshot` — снимок генерации и проверка версии.
 
 `main.py` добавляет CLI и логирование:
 
 - `build_parser` — CLI;
 - `selected_phases` — выбранные фазы в каноническом порядке;
-- `_run_generate` — проверка модели, вызов `stages.generate`;
+- `_run_generate` — проверка модели, `continue_on_error`, вызов `stages.generate`;
 - `_run_assess` — `stages.assess`;
 - `_run_visualize` — `stages.visualize`;
 - `_run_report` — `stages.report`;
@@ -280,6 +286,7 @@ python -m src.workflow [фазы] [параметры]
 | `--model` | env/`qwen2.5:7b-instruct` | модель |
 | `--timeout` | env/`600` | таймаут, секунды |
 | `--output-dir` | `output` | папка результатов |
+| `--continue-on-error` | выкл. | продолжать при недоступности Ollama для отдельного файла |
 | `--fail-under` | — | порог качества |
 
 Без флагов фаз выполняются все четыре фазы.
@@ -392,6 +399,7 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 
 ```json
 {
+  "pipeline_version": "0.1.0",
   "input_dir": "input",
   "artifact_type": "testcases",
   "model": "qwen2.5:7b-instruct",
@@ -430,6 +438,7 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 {
   "project": "graduation-project",
   "version": "0.1.0",
+  "pipeline_version": "0.1.0",
   "input_dir": "input",
   "artifact_type": "testcases",
   "model": "qwen2.5:7b-instruct",
@@ -475,7 +484,21 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 }
 ```
 
-### 6.3 `report.md`
+### 6.3 Версионирование и совместимость
+
+`pipeline_version` описывает совместимость файлов между фазами. Правила чтения:
+
+| Состояние | Поведение |
+|---|---|
+| ключа нет | legacy-файл, читается |
+| версия совпадает | файл читается |
+| версия отличается | `ValueError`, код 2, файл не читается |
+
+`version` в `quality-metrics.json` — версия проекта/схемы отчёта; она не
+заменяет `pipeline_version`. Старые файлы не мигрируются автоматически: при
+следующем несовместимом изменении их нужно перегенерировать.
+
+### 6.4 `report.md`
 
 Обязательные разделы:
 
@@ -488,7 +511,7 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 7. `## Ошибки` (при наличии)
 8. `## Источник данных`
 
-### 6.4 Графики
+### 6.5 Графики
 
 | Ключ | Файл | Условие |
 |---|---|---|
@@ -505,9 +528,10 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 | `InputError` | код 2, сообщение о файле/папке |
 | `PromptError` / `PresetError` | код 2 |
 | `FileNotFoundError` (нет снимка/отчёта) | код 2 с подсказкой запустить предыдущую фазу |
-| `OllamaConnectionError` | код 3, прогон прерывается |
+| `OllamaConnectionError` | без `--continue-on-error` — код 3 и прерывание; с флагом — ошибка файла, остальные продолжаются |
 | `OllamaResponseError` | ошибка сценария или код 3, если не сгенерирован ни один |
 | `GenerationError` | ошибка одного сценария, остальные продолжаются |
+| `ValueError` при несовпадении `pipeline_version` | код 2 с именем файла и версиями |
 | `OSError` при записи | код 4 |
 | `KeyboardInterrupt` | код 130 |
 
@@ -526,7 +550,8 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 - `test_models.py` — snapshot/report-сериализация;
 - `test_reporting.py` — JSON как источник правды, `n/a`, реальные кейсы;
 - `test_generator.py` — шаблоны, промпты, валидатор, рендер, загрузка;
-- `test_workflow.py` — выбор фаз, assess/report по файлам, коды возврата;
+- `test_workflow.py` — выбор фаз, assess/report по файлам, версии и коды возврата;
+- `test_pipeline.py` — fail-fast и per-file recovery при ошибке Ollama;
 - `test_charts.py` — создание графиков без дисплея.
 
 Команда:
@@ -536,7 +561,7 @@ uv run pytest
 ```
 
 Unit-тесты не требуют Ollama. Результат на момент документирования:
-`89 passed, 1 skipped`.
+`105 passed, 1 skipped`.
 
 ### 8.2 Integration / e2e
 
@@ -561,7 +586,7 @@ docker run --rm --network ohw_net -v "$PWD:/repo" -w /repo \
   ghcr.io/astral-sh/uv:python3.13-bookworm-slim uv run pytest -m integration
 ```
 
-Результат прогона: `1 passed, 53 deselected in 147.99s`. Средний `overall` на
+Результат прогона: `1 passed, 105 deselected in 147.99s`. Средний `overall` на
 требованиях из SDD — `0.399`; это ожидаемо для плотного формального текста.
 Проверяется структура e2e: генерация, метрики, графики и отчёт созданы.
 
@@ -670,6 +695,8 @@ uv run python -m src.workflow --input-dir input --output-dir output
 - `--runs 1` даёт лишь внутреннюю эвристику консистентности.
 - Качество текста ограничено моделью `qwen2.5:7b-instruct` и шаблонами промптов.
 - Проект не заменяет ревью тест-документации человеком.
+- Старые артефакты без `pipeline_version` читаются как legacy и не мигрируются
+  автоматически.
 - Embedded Python не поставляется; переносимый запуск — через `uv python install`.
 
 ---
@@ -683,8 +710,10 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | `openspec/changes/design.md` | архитектура, поток данных, CLI, ошибки |
 | `openspec/changes/tasks.md` | чек-лист реализации |
 | `openspec/specs/generation/spec.md` | EARS-требования к генерации |
+| `openspec/specs/pipeline/spec.md` | версия контракта и per-file recovery |
 | `openspec/specs/quality/spec.md` | EARS-требования и формулы метрик |
 | `openspec/changes/add-guard-tests/` | guard-тесты документации и лаунчеров |
+| `openspec/changes/harden-pipeline/` | P0: версионирование и обработка ошибок |
 
 Документы описывают реализованное поведение. Изменения поведения должны
 сопровождаться обновлением соответствующей спеки и этого SDD.
@@ -702,3 +731,4 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | 0.5 | 12.11.2026 | Добавлено Streamlit-рабочее место: общие стадии, сервис `ui`, тесты AppTest |
 | 0.6 | 12.11.2026 | Добавлена вкладка промпта (DZ7) с правкой и передачей в генерацию; вкладки отмечены по источникам ДЗ |
 | 0.7 | 12.11.2026 | Шов API-тестов удалён: API-тесты не входят в проект, UI оставлен с пятью вкладками |
+| 0.8 | 13.11.2026 | P0 ревью: `pipeline_version` в артефактах, legacy/mismatch, `--continue-on-error` и per-file recovery |
