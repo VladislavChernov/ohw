@@ -246,3 +246,95 @@ def test_fail_under_returns_quality_exit_code(tmp_path: Path) -> None:
         ]
     )
     assert code == 5
+
+
+def test_snapshot_contains_default_quality_weights(tmp_path: Path) -> None:
+    _snapshot(tmp_path)
+    raw = json.loads(
+        (tmp_path / "generation.json").read_text(encoding="utf-8")
+    )
+    assert raw["quality_weights"] == {
+        "readability": 0.25,
+        "clarity_goals": 0.25,
+        "scenario_coverage": 0.30,
+        "consistency": 0.20,
+    }
+
+
+def test_assess_reuses_weights_from_snapshot(tmp_path: Path) -> None:
+    _snapshot(tmp_path)
+    path = tmp_path / "generation.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["quality_weights"] = {
+        "readability": 1.0,
+        "clarity_goals": 0.0,
+        "scenario_coverage": 0.0,
+        "consistency": 0.0,
+    }
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    assert main(["--assess", "--output-dir", str(tmp_path)]) == 0
+    report = json.loads(
+        (tmp_path / "quality-metrics.json").read_text(encoding="utf-8")
+    )
+    quality = report["scenarios"][0]["quality"]
+    assert quality["overall"] == quality["readability"]
+
+
+def test_report_shows_quality_weights(tmp_path: Path) -> None:
+    _snapshot(tmp_path)
+    assert main(["--assess", "--report", "--output-dir", str(tmp_path)]) == 0
+    markdown = (tmp_path / "report.md").read_text(encoding="utf-8")
+    assert "| Веса overall | readability=0.25, clarity_goals=0.25, " in markdown
+
+
+@pytest.mark.parametrize(
+    "weights",
+    [
+        "readability=1.0",
+        "readability=0.5,readability=0.5,clarity_goals=0,"
+        "scenario_coverage=0,consistency=0",
+        "readability=0.5,clarity_goals=0.6,scenario_coverage=0,"
+        "consistency=0",
+    ],
+)
+def test_invalid_quality_weights_return_usage_error(weights: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--quality-weights", weights])
+    assert exc.value.code == EXIT_USAGE
+
+
+def test_generate_stores_cli_quality_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = _write_inputs(tmp_path)
+    _patch_ollama(monkeypatch)
+    output_dir = tmp_path / "output"
+    weights = {
+        "readability": 0.4,
+        "clarity_goals": 0.2,
+        "scenario_coverage": 0.2,
+        "consistency": 0.2,
+    }
+
+    code = main(
+        [
+            "--generate",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+            "--count",
+            "2",
+            "--continue-on-error",
+            "--quality-weights",
+            "readability=0.4,clarity_goals=0.2,"
+            "scenario_coverage=0.2,consistency=0.2",
+        ]
+    )
+
+    assert code == 0
+    snapshot = json.loads(
+        (output_dir / "generation.json").read_text(encoding="utf-8")
+    )
+    assert snapshot["quality_weights"] == weights

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from src.config import check_pipeline_version
+from src.config import check_pipeline_version, format_quality_weights
 from src.models import METRIC_KEYS, PipelineData, QualityMetrics, ScenarioResult
 
 REPORT_JSON_NAME = "quality-metrics.json"
@@ -210,6 +210,7 @@ def render_markdown(data: PipelineData) -> str:
         f"| Повторов на сценарий | {data.runs} |",
         f"| Нормализация требований | {'да' if data.normalize else 'нет'} |",
         f"| Пресеты | {', '.join(data.presets) or '—'} |",
+        f"| Веса overall | {format_quality_weights(data.quality_weights)} |",
         f"| Всего сценариев | {len(data.scenarios)} |",
         f"| Успешные (overall ≥ 0.5) | {data.successful} |",
         f"| Неуспешные | {data.unsuccessful} |",

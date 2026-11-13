@@ -1,7 +1,17 @@
 """Serialisation tests for the pipeline data models."""
 
+import pytest
+
+from src.config import DEFAULT_QUALITY_WEIGHTS
 from src.generator.models import CaseType, TestCase
 from src.models import PipelineData, QualityMetrics, ScenarioResult
+
+CUSTOM_WEIGHTS = {
+    "readability": 0.4,
+    "clarity_goals": 0.2,
+    "scenario_coverage": 0.2,
+    "consistency": 0.2,
+}
 
 
 def _scenario() -> ScenarioResult:
@@ -70,6 +80,44 @@ def test_report_roundtrip_keeps_real_cases() -> None:
     assert restored.scenarios[0].cases[0].id == "TC-01"
     assert restored.scenarios[0].covered_requirements == ["BR-1"]
     assert restored.averages == data.averages
+
+
+def test_quality_weights_roundtrip() -> None:
+    data = PipelineData(
+        input_dir="input",
+        quality_weights=CUSTOM_WEIGHTS,
+        scenarios=[_scenario()],
+    )
+    snapshot = data.to_snapshot_dict()
+    assert snapshot["quality_weights"] == CUSTOM_WEIGHTS
+    assert PipelineData.from_snapshot_dict(snapshot).quality_weights == CUSTOM_WEIGHTS
+
+    report = data.to_report_dict()
+    assert report["quality_weights"] == CUSTOM_WEIGHTS
+    assert PipelineData.from_report_dict(report).quality_weights == CUSTOM_WEIGHTS
+
+
+def test_legacy_files_without_weights_use_defaults() -> None:
+    data = PipelineData(input_dir="input", scenarios=[_scenario()])
+    snapshot = data.to_snapshot_dict()
+    snapshot.pop("quality_weights")
+    assert PipelineData.from_snapshot_dict(snapshot).quality_weights == (
+        DEFAULT_QUALITY_WEIGHTS
+    )
+
+    report = data.to_report_dict()
+    report.pop("quality_weights")
+    assert PipelineData.from_report_dict(report).quality_weights == (
+        DEFAULT_QUALITY_WEIGHTS
+    )
+
+
+def test_invalid_weights_in_file_are_rejected() -> None:
+    data = PipelineData(input_dir="input", scenarios=[_scenario()])
+    snapshot = data.to_snapshot_dict()
+    snapshot["quality_weights"] = {"readability": 1.0}
+    with pytest.raises(ValueError, match="не заданы веса"):
+        PipelineData.from_snapshot_dict(snapshot)
 
 
 def test_successful_threshold_and_missing_metric() -> None:

@@ -18,7 +18,12 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from src.config import DEFAULT_MODEL, Settings
+from src.config import (
+    DEFAULT_MODEL,
+    Settings,
+    format_quality_weights,
+    resolve_quality_weights,
+)
 from src.generator.input_doc import InputError
 from src.generator.models import ArtifactType
 from src.generator.ollama_client import (
@@ -146,6 +151,16 @@ def build_parser() -> argparse.ArgumentParser:
             "продолжать генерацию, если Ollama недоступна для отдельного файла"
         ),
     )
+    generation.add_argument(
+        "--quality-weights",
+        default=None,
+        metavar="WEIGHTS",
+        help=(
+            "веса overall: readability=0.25,clarity_goals=0.25,"
+            "scenario_coverage=0.30,consistency=0.20 (по умолчанию: "
+            "GRADUATION_QUALITY_WEIGHTS или эти значения)"
+        ),
+    )
 
     runtime = parser.add_argument_group("подключение и вывод")
     runtime.add_argument(
@@ -212,7 +227,10 @@ def _check_model(client: OllamaClient, *, strict: bool = True) -> None:
 
 
 def _run_generate(
-    args: argparse.Namespace, settings: Settings, output_dir: Path
+    args: argparse.Namespace,
+    settings: Settings,
+    output_dir: Path,
+    quality_weights: dict[str, float],
 ) -> PipelineData:
     request = GenerationRequest(
         input_dir=Path(args.input_dir),
@@ -227,6 +245,7 @@ def _run_generate(
         prompt_dir=Path(args.prompt_dir) if args.prompt_dir else None,
         output_dir=output_dir,
         continue_on_error=args.continue_on_error,
+        quality_weights=quality_weights,
     )
     client = OllamaClient(
         base_url=settings.base_url,
@@ -239,6 +258,7 @@ def _run_generate(
         f"(тип={request.artifact_type.value}, кейсов={request.count}, "
         f"повторов={request.runs}, модель={client.model})"
     )
+    _log(f"веса overall: {format_quality_weights(quality_weights)}")
 
     def on_retry(notice: RetryNotice) -> None:
         _log(
@@ -300,6 +320,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--runs должен быть >= 1")
     if args.count < 1:
         parser.error("--count должен быть >= 1")
+    try:
+        quality_weights = resolve_quality_weights(args.quality_weights)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     settings = Settings.from_env(
         base_url=args.base_url,
@@ -315,7 +339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         for phase in phases:
             if phase == "generate":
-                data = _run_generate(args, settings, output_dir)
+                data = _run_generate(args, settings, output_dir, quality_weights)
             elif phase == "assess":
                 data = data or stages.load_snapshot(output_dir)
                 data = _run_assess(data, output_dir)

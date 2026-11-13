@@ -79,6 +79,7 @@ def generate(
         generated_at=_now(),
         scenarios=outcome.scenarios,
         errors=outcome.errors,
+        quality_weights=dict(outcome.quality_weights),
     )
     data.refresh_averages()
     write_snapshot(data, request.output_dir)
@@ -93,6 +94,7 @@ def assess(data: PipelineData, output_dir: Path) -> PipelineData:
             scenario.rendered,
             scenario.requirement_ids,
             generations if len(generations) > 1 else None,
+            data.quality_weights or None,
         )
         scenario.covered_requirements = covered_requirement_ids(
             scenario.rendered, scenario.requirement_ids

@@ -14,15 +14,13 @@ model, while the report stays small and human-readable.
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.config import PIPELINE_VERSION
-from src.generator.models import TestCase
-
-METRIC_KEYS: tuple[str, ...] = (
-    "readability",
-    "clarity_goals",
-    "scenario_coverage",
-    "consistency",
+from src.config import (
+    DEFAULT_QUALITY_WEIGHTS,
+    METRIC_KEYS,
+    PIPELINE_VERSION,
+    validate_quality_weights,
 )
+from src.generator.models import TestCase
 
 QUALITY_THRESHOLD = 0.5
 
@@ -181,6 +179,16 @@ def _average(values: list[float]) -> float | None:
     return round(sum(values) / len(values), 3)
 
 
+def _quality_weights_from_json(raw: dict[str, Any]) -> dict[str, float]:
+    """Read optional weights; legacy files fall back to the defaults."""
+    value = raw.get("quality_weights")
+    if value is None:
+        return dict(DEFAULT_QUALITY_WEIGHTS)
+    if not isinstance(value, dict):
+        raise ValueError("quality_weights должен быть объектом")
+    return validate_quality_weights(value)
+
+
 @dataclass
 class PipelineData:
     """Everything the reporting phase needs, independent of the generator."""
@@ -198,6 +206,9 @@ class PipelineData:
     errors: list[str] = field(default_factory=list)
     averages: dict[str, float | None] = field(default_factory=dict)
     charts: dict[str, str] = field(default_factory=dict)
+    quality_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_QUALITY_WEIGHTS)
+    )
 
     @property
     def successful(self) -> int:
@@ -235,6 +246,7 @@ class PipelineData:
             "normalize": self.normalize,
             "presets": list(self.presets),
             "generated_at": self.generated_at,
+            "quality_weights": dict(self.quality_weights),
         }
 
     def to_snapshot_dict(self) -> dict[str, Any]:
@@ -264,6 +276,7 @@ class PipelineData:
                 for item in raw.get("scenarios") or []
             ],
             errors=list(raw.get("errors") or []),
+            quality_weights=_quality_weights_from_json(raw),
         )
         data.refresh_averages()
         return data
@@ -307,6 +320,7 @@ class PipelineData:
             errors=list(raw.get("errors") or []),
             averages=dict(raw.get("averages") or {}),
             charts=dict(raw.get("charts") or {}),
+            quality_weights=_quality_weights_from_json(raw),
         )
         if not data.averages:
             data.refresh_averages()

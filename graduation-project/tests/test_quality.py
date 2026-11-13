@@ -114,6 +114,36 @@ def test_weighted_overall_without_known_metrics() -> None:
     assert weighted_overall({"scenario_coverage": None}) == 0.0
 
 
+def test_weighted_overall_uses_custom_weights() -> None:
+    values = {
+        "readability": 1.0,
+        "clarity_goals": 0.0,
+        "scenario_coverage": 0.0,
+        "consistency": 0.0,
+    }
+    weights = {
+        "readability": 0.1,
+        "clarity_goals": 0.2,
+        "scenario_coverage": 0.3,
+        "consistency": 0.4,
+    }
+    assert weighted_overall(values, weights) == 0.1
+
+
+def test_assess_quality_uses_custom_weights() -> None:
+    metrics = assess_quality(
+        "BR-1 BR-2",
+        ["BR-1", "BR-2"],
+        weights={
+            "readability": 1.0,
+            "clarity_goals": 0.0,
+            "scenario_coverage": 0.0,
+            "consistency": 0.0,
+        },
+    )
+    assert metrics.overall == metrics.readability
+
+
 def test_assess_quality_prefers_repeat_runs() -> None:
     metrics = assess_quality(
         "BR-1: система должна работать.",

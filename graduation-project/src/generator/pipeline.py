@@ -5,6 +5,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from src.config import DEFAULT_QUALITY_WEIGHTS, validate_quality_weights
 from src.generator.handlers import ArtifactHandler, get_handler
 from src.generator.input_doc import RequirementDoc, load_docs
 from src.generator.models import ArtifactType
@@ -55,12 +56,18 @@ class GenerationRequest:
     prompts: Mapping[str, str] = field(default_factory=dict)
     # Record a connection failure per file instead of aborting the whole run.
     continue_on_error: bool = False
+    # Empty means the project defaults; the resolved weights are stored in the
+    # snapshot so the assessment phase reuses them.
+    quality_weights: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class GenerationOutcome:
     scenarios: list[ScenarioResult] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    quality_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_QUALITY_WEIGHTS)
+    )
 
 
 def _requirement_ids(doc: RequirementDoc) -> list[str]:
@@ -102,6 +109,12 @@ def generate_scenarios(
     if request.runs < 1:
         raise ValueError("runs must be at least 1")
 
+    weights = (
+        validate_quality_weights(request.quality_weights)
+        if request.quality_weights
+        else dict(DEFAULT_QUALITY_WEIGHTS)
+    )
+
     docs = load_docs(
         request.input_dir,
         request.url,
@@ -134,7 +147,7 @@ def generate_scenarios(
     scenarios_dir = request.output_dir / "scenarios"
     scenarios_dir.mkdir(parents=True, exist_ok=True)
 
-    outcome = GenerationOutcome()
+    outcome = GenerationOutcome(quality_weights=weights)
     for doc in docs:
         try:
             user_prompt = _extra_prompt(handler, doc, request.count, extras)
@@ -182,6 +195,7 @@ def generate_scenarios(
                 rendered,
                 requirement_ids,
                 generations if len(generations) > 1 else None,
+                weights,
             )
             output_path = scenarios_dir / f"{doc.path.stem}.md"
             output_path.write_text(rendered, encoding="utf-8")

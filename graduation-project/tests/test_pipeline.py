@@ -1,6 +1,7 @@
 """Tests for per-file recovery in the generation phase (no network calls)."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -77,6 +78,16 @@ def _request(tmp_path: Path, *, continue_on_error: bool) -> GenerationRequest:
         output_dir=tmp_path / "output",
         continue_on_error=continue_on_error,
     )
+
+
+def test_generate_rejects_incomplete_weights(tmp_path: Path) -> None:
+    request = replace(
+        _request(tmp_path, continue_on_error=True),
+        quality_weights={"readability": 1.0},
+    )
+
+    with pytest.raises(ValueError, match="не заданы веса"):
+        generate_scenarios(request, _FlakyClient(fail_marker="never"))
 
 
 def test_connection_error_aborts_by_default(tmp_path: Path) -> None:

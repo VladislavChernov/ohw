@@ -7,18 +7,14 @@ zero. The formulas and their limits are documented in ``docs/metrics.md``.
 
 import re
 import statistics
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
+from src.config import DEFAULT_QUALITY_WEIGHTS
 from src.models import METRIC_KEYS, QualityMetrics
 
-# Overall score weights from the project specification. Metrics that are not
-# measurable are dropped and the remaining weights are renormalised.
-WEIGHTS: dict[str, float] = {
-    "readability": 0.25,
-    "clarity_goals": 0.25,
-    "scenario_coverage": 0.30,
-    "consistency": 0.20,
-}
+# Default overall weights. Metrics that are not measurable are dropped and the
+# remaining weights are renormalised.
+WEIGHTS: dict[str, float] = dict(DEFAULT_QUALITY_WEIGHTS)
 
 OPTIMAL_WORDS_PER_SENTENCE = 17.0
 READABILITY_TOLERANCE = 30.0
@@ -163,17 +159,23 @@ def assess_internal_consistency(text: str) -> float:
     return 0.5
 
 
-def weighted_overall(values: dict[str, float | None]) -> float:
+def weighted_overall(
+    values: dict[str, float | None],
+    weights: Mapping[str, float] | None = None,
+) -> float:
     """Weighted mean over known metrics; weights are renormalised."""
+    effective = WEIGHTS if weights is None else weights
     known = {
         key: value
         for key, value in values.items()
-        if key in WEIGHTS and value is not None
+        if key in effective and value is not None
     }
-    total_weight = sum(WEIGHTS[key] for key in known)
+    total_weight = sum(effective[key] for key in known)
     if total_weight == 0:
         return 0.0
-    score = sum(WEIGHTS[key] * value for key, value in known.items()) / total_weight
+    score = (
+        sum(effective[key] * value for key, value in known.items()) / total_weight
+    )
     return round(score, 3)
 
 
@@ -181,6 +183,7 @@ def assess_quality(
     rendered: str,
     requirement_ids: Sequence[str],
     generations: Sequence[str] | None = None,
+    weights: Mapping[str, float] | None = None,
 ) -> QualityMetrics:
     """Compute all four metrics for one generated artifact."""
     readability = assess_readability(rendered)
@@ -196,7 +199,8 @@ def assess_quality(
             "clarity_goals": clarity,
             "scenario_coverage": coverage,
             "consistency": consistency,
-        }
+        },
+        weights,
     )
     return QualityMetrics(
         readability=readability,
