@@ -206,5 +206,7 @@ def generate_scenarios(
         except (GenerationError, OllamaResponseError) as exc:
             outcome.errors.append(f"{doc.path.name}: {exc}")
         except OllamaConnectionError:
-            raise
+            # Per-file error: record the error and continue with remaining files
+            outcome.errors.append(f"{doc.path.name}: Ollama connection unavailable")
+            continue
     return outcome

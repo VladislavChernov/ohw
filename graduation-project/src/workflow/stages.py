@@ -36,8 +36,13 @@ def write_snapshot(data: PipelineData, output_dir: Path) -> Path:
     """Write ``generation.json`` and return its path."""
     output_dir.mkdir(parents=True, exist_ok=True)
     path = snapshot_path(output_dir)
+    
+    # Add pipeline version for future compatibility
+    snapshot_data = data.to_snapshot_dict()
+    snapshot_data["pipeline_version"] = "0.1.0"
+    
     path.write_text(
-        json.dumps(data.to_snapshot_dict(), ensure_ascii=False, indent=2) + "\n",
+        json.dumps(snapshot_data, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     return path
@@ -51,6 +56,13 @@ def load_snapshot(output_dir: Path) -> PipelineData:
             f"generation snapshot not found: {path}; run the generate phase first"
         )
     raw = json.loads(path.read_text(encoding="utf-8"))
+    
+    # Validate pipeline version
+    if raw.get("pipeline_version") != "0.1.0":
+        raise ValueError(
+            f"Pipeline version mismatch: expected 0.1.0, got {raw.get('pipeline_version')}"
+        )
+    
     return PipelineData.from_snapshot_dict(raw)
 
 
