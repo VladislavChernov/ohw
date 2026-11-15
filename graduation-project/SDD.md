@@ -7,9 +7,9 @@
 |---|---|
 | Название | Software Design Document |
 | Проект | `graduation-project` |
-| Версия | 0.1.0 |
+| Версия | 0.2.0 |
 | Автор | Владислав Чернов |
-| Дата | 11.11.2026 |
+| Дата | 15.11.2026 |
 | Статус | Реализовано, документация актуализирована |
 | Связанные ДЗ | DZ2, DZ7, DZ8 (DZ6 не входит) |
 
@@ -104,7 +104,7 @@
 | Компонент | Ответственность |
 |---|---|
 | `src/cli.py` | тонкая обёртка для точки входа |
-| `src/config.py` | `Settings`, значения по умолчанию, env |
+| `src/config.py` | `Settings`, значения по умолчанию, env, веса, версии |
 | `src/models.py` | `QualityMetrics`, `ScenarioResult`, `PipelineData`, сериализация |
 | `src/generator/` | вендоренное ядро DZ2: загрузка, нормализация, промпты, пресеты, Ollama, валидация, retry, рендер |
 | `src/quality/assessor.py` | детерминированные метрики и агрегация |
@@ -132,9 +132,10 @@ input/*.md|*.txt
 и Markdown, он также содержит `pipeline_version`. Markdown никогда не парсится
 пайплайном.
 
-Версия контракта — единая константа `PIPELINE_VERSION` в `src/config.py`.
-Файлы без ключа читаются как legacy; несовпадение версии — ошибка входа с
-понятным сообщением.
+Версия проекта — `PROJECT_VERSION` в `src/config.py`; она попадает в
+`quality-metrics.json` как `version`. Версия контракта — отдельная константа
+`PIPELINE_VERSION`; она не обязана совпадать с версией проекта. Файлы без ключа
+читаются как legacy; несовпадение версии — ошибка входа с понятным сообщением.
 
 Фазы можно запускать отдельно. Без флагов выполняются все четыре в порядке
 `generate → assess → visualize → report`.
@@ -460,7 +461,7 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 ```json
 {
   "project": "graduation-project",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "pipeline_version": "0.1.0",
   "input_dir": "input",
   "artifact_type": "testcases",
@@ -770,3 +771,4 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | 0.6 | 12.11.2026 | Добавлена вкладка промпта (DZ7) с правкой и передачей в генерацию; вкладки отмечены по источникам ДЗ |
 | 0.7 | 12.11.2026 | Шов API-тестов удалён: API-тесты не входят в проект, UI оставлен с пятью вкладками |
 | 0.8 | 13.11.2026 | P0 ревью: `pipeline_version` в артефактах, legacy/mismatch, `--continue-on-error` и per-file recovery |
+| 0.9 | 15.11.2026 | P1 ревью: настраиваемые веса `overall` (`--quality-weights`, env, персистентность, legacy); релиз 0.2.0 |

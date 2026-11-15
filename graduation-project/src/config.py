@@ -12,6 +12,9 @@ DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_TIMEOUT = 600.0
 DEFAULT_OUTPUT_DIR = Path("output")
 
+# Release version of the project and the report schema.
+PROJECT_VERSION = "0.2.0"
+
 # Contract version of ``generation.json`` and ``quality-metrics.json``. Bump it
 # whenever a later pipeline stage would misread artifacts from an older run.
 PIPELINE_VERSION = "0.1.0"

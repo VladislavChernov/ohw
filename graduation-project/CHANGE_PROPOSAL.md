@@ -20,7 +20,7 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 
 ## P1 Улучшения качества (спринт 3-4)
 
-### 3. Configurable quality weights
+### 3. Configurable quality weights — реализовано в 0.2.0
 - `--quality-weights` CLI option
 - `GRADUATION_QUALITY_WEIGHTS` env var
 - Валидация: сумма = 1.0

@@ -18,6 +18,7 @@ from src.config import (
     DEFAULT_QUALITY_WEIGHTS,
     METRIC_KEYS,
     PIPELINE_VERSION,
+    PROJECT_VERSION,
     validate_quality_weights,
 )
 from src.generator.models import TestCase
@@ -284,7 +285,7 @@ class PipelineData:
     def to_report_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "project": "graduation-project",
-            "version": "0.1.0",
+            "version": PROJECT_VERSION,
             "pipeline_version": PIPELINE_VERSION,
             **self._metadata(),
             "total_scenarios": len(self.scenarios),

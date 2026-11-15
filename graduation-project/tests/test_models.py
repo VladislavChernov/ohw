@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.config import DEFAULT_QUALITY_WEIGHTS
+from src.config import DEFAULT_QUALITY_WEIGHTS, PROJECT_VERSION
 from src.generator.models import CaseType, TestCase
 from src.models import PipelineData, QualityMetrics, ScenarioResult
 
@@ -75,6 +75,7 @@ def test_report_roundtrip_keeps_real_cases() -> None:
     )
     data.refresh_averages()
     report = data.to_report_dict()
+    assert report["version"] == PROJECT_VERSION
     assert report["pipeline_version"] == "0.1.0"
     restored = PipelineData.from_report_dict(report)
     assert restored.scenarios[0].cases[0].id == "TC-01"
