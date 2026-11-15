@@ -320,10 +320,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("--runs должен быть >= 1")
     if args.count < 1:
         parser.error("--count должен быть >= 1")
-    try:
-        quality_weights = resolve_quality_weights(args.quality_weights)
-    except ValueError as exc:
-        parser.error(str(exc))
+
+    phases = selected_phases(args)
+    explicit_weights: dict[str, float] | None = None
+    if args.quality_weights is not None:
+        try:
+            explicit_weights = resolve_quality_weights(args.quality_weights)
+        except ValueError as exc:
+            parser.error(str(exc))
+    quality_weights: dict[str, float] = {}
+    if "generate" in phases:
+        try:
+            quality_weights = (
+                explicit_weights
+                if explicit_weights is not None
+                else resolve_quality_weights(None)
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+    elif explicit_weights is not None:
+        _log(
+            "предупреждение: --quality-weights применяется только на фазе "
+            "generate; остальные фазы используют сохранённые значения"
+        )
 
     settings = Settings.from_env(
         base_url=args.base_url,
@@ -332,7 +351,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=args.output_dir,
     )
     output_dir = Path(settings.output_dir)
-    phases = selected_phases(args)
     _log(f"фазы: {' -> '.join(phases)}")
 
     data: PipelineData | None = None

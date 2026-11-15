@@ -190,7 +190,8 @@ python -m src.workflow --quality-weights \
 ошибка даёт код 2. Веса сохраняются в `generation.json` и
 `quality-metrics.json` и печатаются в отчёте, поэтому `--assess` пересчитывает
 метрики с теми же весами. Файлы без `quality_weights` используют значения по
-умолчанию.
+умолчанию. Флаг и env действуют на фазу `generate`; Streamlit-рабочее место
+использует веса по умолчанию.
 
 ### Ошибки Ollama
 

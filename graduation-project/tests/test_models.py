@@ -119,6 +119,10 @@ def test_invalid_weights_in_file_are_rejected() -> None:
     with pytest.raises(ValueError, match="не заданы веса"):
         PipelineData.from_snapshot_dict(snapshot)
 
+    snapshot["quality_weights"] = None
+    with pytest.raises(ValueError, match="должен быть объектом"):
+        PipelineData.from_snapshot_dict(snapshot)
+
 
 def test_successful_threshold_and_missing_metric() -> None:
     scenario = _scenario()

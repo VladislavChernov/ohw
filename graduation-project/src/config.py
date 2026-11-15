@@ -36,11 +36,11 @@ WEIGHTS_SUM_TOLERANCE = 1e-6
 
 
 def _format_weight(value: float) -> str:
-    """Prefer two decimals, but do not hide extra precision."""
+    """Prefer two decimals, but keep the exact value otherwise."""
     rounded = f"{value:.2f}"
     if math.isclose(float(rounded), value, abs_tol=1e-9):
         return rounded
-    return f"{value:g}"
+    return repr(float(value))
 
 
 def format_quality_weights(weights: Mapping[str, float]) -> str:
@@ -116,9 +116,9 @@ def resolve_quality_weights(
     env: Mapping[str, str] | None = None,
 ) -> dict[str, float]:
     """Resolve weights with CLI > env > defaults precedence."""
-    source = cli_value
-    if source is None:
-        source = (os.environ if env is None else env).get(QUALITY_WEIGHTS_ENV)
+    if cli_value is not None:
+        return parse_quality_weights(cli_value)
+    source = (os.environ if env is None else env).get(QUALITY_WEIGHTS_ENV)
     if source is None or not source.strip():
         return dict(DEFAULT_QUALITY_WEIGHTS)
     return parse_quality_weights(source)

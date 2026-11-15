@@ -12,10 +12,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from src.config import DEFAULT_QUALITY_WEIGHTS
 from src.models import METRIC_KEYS, QualityMetrics
 
-# Default overall weights. Metrics that are not measurable are dropped and the
-# remaining weights are renormalised.
-WEIGHTS: dict[str, float] = dict(DEFAULT_QUALITY_WEIGHTS)
-
 OPTIMAL_WORDS_PER_SENTENCE = 17.0
 READABILITY_TOLERANCE = 30.0
 
@@ -162,9 +158,13 @@ def assess_internal_consistency(text: str) -> float:
 def weighted_overall(
     values: dict[str, float | None],
     weights: Mapping[str, float] | None = None,
-) -> float:
-    """Weighted mean over known metrics; weights are renormalised."""
-    effective = WEIGHTS if weights is None else weights
+) -> float | None:
+    """Weighted mean over known metrics; weights are renormalised.
+
+    Returns ``None`` when no measurable metric carries a positive weight, so
+    an unmeasurable score is not reported as a real zero.
+    """
+    effective = DEFAULT_QUALITY_WEIGHTS if weights is None else weights
     known = {
         key: value
         for key, value in values.items()
@@ -172,7 +172,7 @@ def weighted_overall(
     }
     total_weight = sum(effective[key] for key in known)
     if total_weight == 0:
-        return 0.0
+        return None
     score = (
         sum(effective[key] * value for key, value in known.items()) / total_weight
     )

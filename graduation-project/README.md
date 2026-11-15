@@ -169,7 +169,7 @@ python -m src.workflow --quality-weights \
 Нужны ровно четыре известные метрики, сумма `1.0`; иначе код `2`. Приоритет:
 флаг → `GRADUATION_QUALITY_WEIGHTS` → значения по умолчанию. Фактические веса
 сохраняются в JSON и печатаются в `report.md`, а `--assess` использует их из
-снимка.
+снимка. UI использует веса по умолчанию; флаг и env применяются в CLI.
 
 ## Конфигурация
 
@@ -181,7 +181,7 @@ python -m src.workflow --quality-weights \
 | `GRADUATION_PROMPT_DIR` | `src/generator/templates` |
 | `GRADUATION_PRESETS_DIR` | `src/generator/presets` |
 | `GRADUATION_NORMALIZER_CONFIG` | `src/generator/normalizer.toml` |
-| `GRADUATION_QUALITY_WEIGHTS` | сумма `1.0`, см. `docs/metrics.md` |
+| `GRADUATION_QUALITY_WEIGHTS` | `readability=0.25, clarity_goals=0.25, scenario_coverage=0.30, consistency=0.20` |
 
 Скопируйте `.env.example` в `.env` для локального запуска.
 

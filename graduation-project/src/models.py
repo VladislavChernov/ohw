@@ -181,9 +181,9 @@ def _average(values: list[float]) -> float | None:
 
 def _quality_weights_from_json(raw: dict[str, Any]) -> dict[str, float]:
     """Read optional weights; legacy files fall back to the defaults."""
-    value = raw.get("quality_weights")
-    if value is None:
+    if "quality_weights" not in raw:
         return dict(DEFAULT_QUALITY_WEIGHTS)
+    value = raw["quality_weights"]
     if not isinstance(value, dict):
         raise ValueError("quality_weights должен быть объектом")
     return validate_quality_weights(value)

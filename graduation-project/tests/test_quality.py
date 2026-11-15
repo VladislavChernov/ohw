@@ -111,7 +111,17 @@ def test_weighted_overall_renormalises_unknown_metric() -> None:
 
 
 def test_weighted_overall_without_known_metrics() -> None:
-    assert weighted_overall({"scenario_coverage": None}) == 0.0
+    assert weighted_overall({"scenario_coverage": None}) is None
+
+
+def test_weighted_overall_without_positive_weight() -> None:
+    weights = {
+        "readability": 0.0,
+        "clarity_goals": 0.0,
+        "scenario_coverage": 1.0,
+        "consistency": 0.0,
+    }
+    assert weighted_overall({"readability": 0.8}, weights) is None
 
 
 def test_weighted_overall_uses_custom_weights() -> None:

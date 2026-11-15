@@ -308,7 +308,7 @@ python -m src.workflow [фазы] [параметры]
 | `GRADUATION_PROMPT_DIR` | `src/generator/templates` |
 | `GRADUATION_PRESETS_DIR` | `src/generator/presets` |
 | `GRADUATION_NORMALIZER_CONFIG` | `src/generator/normalizer.toml` |
-| `GRADUATION_QUALITY_WEIGHTS` | веса по умолчанию (см. 5.5) |
+| `GRADUATION_QUALITY_WEIGHTS` | `readability=0.25, clarity_goals=0.25, scenario_coverage=0.30, consistency=0.20` |
 
 ### 4.3 Коды возврата
 
@@ -397,7 +397,8 @@ weights = {readability: 0.25, clarity_goals: 0.25,
 overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные метрики
 ```
 
-Если известных метрик нет — `0.0`. `None` никогда не подменяется нулём.
+Если ни одна измеримая метрика не имеет положительного веса — `None`
+(`n/a`). `None` никогда не подменяется нулём.
 Сценарий успешен при `overall ≥ 0.5`.
 
 Веса можно переопределить флагом `--quality-weights` или переменной

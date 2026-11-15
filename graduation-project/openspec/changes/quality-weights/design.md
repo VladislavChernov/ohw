@@ -25,7 +25,7 @@ GRADUATION_QUALITY_WEIGHTS=readability=0.25,clarity_goals=0.25,scenario_coverage
 
 | Источник | Когда используется |
 |---|---|
-| `--quality-weights` | всегда, если задан |
+| `--quality-weights` | если задан; применяется на фазе `generate` |
 | `GRADUATION_QUALITY_WEIGHTS` | если флаг не задан, а env непустая |
 | значения по умолчанию | если нет ни флага, ни env |
 

@@ -338,3 +338,91 @@ def test_generate_stores_cli_quality_weights(
         (output_dir / "generation.json").read_text(encoding="utf-8")
     )
     assert snapshot["quality_weights"] == weights
+
+
+def test_generate_uses_weights_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_dir = _write_inputs(tmp_path)
+    _patch_ollama(monkeypatch)
+    output_dir = tmp_path / "output"
+    monkeypatch.setenv(
+        "GRADUATION_QUALITY_WEIGHTS",
+        "readability=0.4,clarity_goals=0.2,"
+        "scenario_coverage=0.2,consistency=0.2",
+    )
+
+    code = main(
+        [
+            "--generate",
+            "--input-dir",
+            str(input_dir),
+            "--output-dir",
+            str(output_dir),
+            "--count",
+            "2",
+            "--continue-on-error",
+        ]
+    )
+
+    assert code == 0
+    snapshot = json.loads(
+        (output_dir / "generation.json").read_text(encoding="utf-8")
+    )
+    assert snapshot["quality_weights"] == {
+        "readability": 0.4,
+        "clarity_goals": 0.2,
+        "scenario_coverage": 0.2,
+        "consistency": 0.2,
+    }
+
+
+def test_invalid_env_does_not_break_assess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _snapshot(tmp_path)
+    monkeypatch.setenv("GRADUATION_QUALITY_WEIGHTS", "bogus")
+
+    assert main(["--assess", "--output-dir", str(tmp_path)]) == 0
+
+
+def test_valid_weights_flag_is_ignored_without_generate(
+    tmp_path: Path,
+) -> None:
+    _snapshot(tmp_path)
+
+    assert (
+        main(
+            [
+                "--assess",
+                "--quality-weights",
+                "readability=0.4,clarity_goals=0.2,"
+                "scenario_coverage=0.2,consistency=0.2",
+                "--output-dir",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+
+
+def test_invalid_weights_flag_fails_without_generate(tmp_path: Path) -> None:
+    _snapshot(tmp_path)
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--assess",
+                "--quality-weights",
+                "bogus",
+                "--output-dir",
+                str(tmp_path),
+            ]
+        )
+    assert exc.value.code == EXIT_USAGE
+
+
+def test_empty_weights_flag_returns_usage_error() -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["--generate", "--quality-weights", ""])
+    assert exc.value.code == EXIT_USAGE

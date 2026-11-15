@@ -89,9 +89,24 @@ def test_resolve_treats_empty_env_as_missing() -> None:
     )
 
 
+def test_resolve_rejects_explicit_empty_cli_value() -> None:
+    with pytest.raises(ValueError, match="пусты"):
+        resolve_quality_weights("", env={})
+
+
 def test_resolve_falls_back_to_defaults() -> None:
     assert resolve_quality_weights(None, env={}) == DEFAULT_QUALITY_WEIGHTS
 
 
 def test_format_quality_weights_is_canonical() -> None:
     assert format_quality_weights(DEFAULT_QUALITY_WEIGHTS) == CANONICAL
+
+
+def test_formatted_weights_roundtrip_high_precision() -> None:
+    weights = {
+        "readability": 1 / 3,
+        "clarity_goals": 1 / 3,
+        "scenario_coverage": 1 / 3,
+        "consistency": 0.0,
+    }
+    assert parse_quality_weights(format_quality_weights(weights)) == weights
