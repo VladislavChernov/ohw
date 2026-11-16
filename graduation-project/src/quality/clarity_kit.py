@@ -43,7 +43,7 @@ def fragment_id(
     *, source: str, scenario: str, run_index: int | None, text: str
 ) -> str:
     """Return a stable short id for an exported fragment."""
-    payload = f"{source}|{scenario}|{run_index}|{text}".encode("utf-8")
+    payload = f"{source}|{scenario}|{run_index}|{text}".encode()
     return hashlib.sha1(payload).hexdigest()[:12]
 
 
