@@ -204,6 +204,40 @@ def cohen_kappa(pairs: Sequence[tuple[bool, bool]]) -> float | None:
     return (observed - expected) / (1 - expected)
 
 
+def weighted_kappa(
+    pairs: Sequence[tuple[int, int]],
+    categories: Sequence[int] = (1, 2, 3, 4, 5),
+) -> float | None:
+    """Quadratic-weighted Cohen's kappa for ordinal ratings.
+
+    Unlike the binary kappa, this penalises a disagreement between 1 and 5 much
+    more than one between 3 and 4. Zero expected disagreement is handled the
+    same way as in ``cohen_kappa``.
+    """
+    if not pairs:
+        return None
+    levels = sorted(set(categories) | {value for pair in pairs for value in pair})
+    total = len(pairs)
+    rate_a = {level: 0.0 for level in levels}
+    rate_b = {level: 0.0 for level in levels}
+    observed = 0.0
+    for a, b in pairs:
+        rate_a[a] += 1.0
+        rate_b[b] += 1.0
+        observed += float((a - b) ** 2)
+    rate_a = {level: value / total for level, value in rate_a.items()}
+    rate_b = {level: value / total for level, value in rate_b.items()}
+    observed /= total
+    expected = sum(
+        rate_a[left] * rate_b[right] * float((left - right) ** 2)
+        for left in levels
+        for right in levels
+    )
+    if expected == 0.0:
+        return 1.0 if observed == 0.0 else 0.0
+    return 1.0 - observed / expected
+
+
 def pearson(xs: Sequence[float], ys: Sequence[float]) -> float | None:
     """Pearson correlation without third-party dependencies."""
     if len(xs) != len(ys) or len(xs) < 2:
@@ -329,6 +363,9 @@ def analyse(
         "annotator_a": annotator_a,
         "annotator_b": annotator_b,
         "kappa": cohen_kappa(pairs),
+        "weighted_kappa": weighted_kappa(
+            [(item["a"].rating, item["b"].rating) for item in items if "b" in item]
+        ),
         "agreement": (
             sum(1 for a, b in pairs if a == b) / len(pairs) if pairs else None
         ),
@@ -369,7 +406,8 @@ def render_report(analysis: dict[str, Any]) -> str:
         f"| Фрагментов | {analysis['total']} |",
         f"| Разметчик A | {analysis['annotator_a']} |",
         f"| Разметчик B | {analysis['annotator_b'] or '—'} |",
-        f"| Cohen's kappa | {_fmt(analysis['kappa'])} |",
+        f"| Cohen's kappa (measurable) | {_fmt(analysis['kappa'])} |",
+        f"| Взвешенный kappa (rating 1–5) | {_fmt(analysis['weighted_kappa'])} |",
         f"| Совпадение бинарной оценки | {_fmt(analysis['agreement'])} |",
         f"| Корреляция текущей метрики с оценкой | {_fmt(analysis['current_correlation'])} |",
         f"| Precision при пороге 0.5 | {_fmt(analysis['precision'])} |",

@@ -22,6 +22,7 @@ from src.quality.clarity_kit import (
     read_jsonl,
     render_report,
     split_fragments,
+    weighted_kappa,
     write_jsonl,
 )
 
@@ -118,6 +119,25 @@ def test_cohen_kappa_known_values() -> None:
     assert cohen_kappa([(True, True), (False, False)]) == 1.0
     assert cohen_kappa([(True, False), (False, True)]) == -1.0
     assert cohen_kappa([]) is None
+
+
+def test_weighted_kappa_known_values() -> None:
+    assert weighted_kappa([(1, 1), (5, 5)]) == 1.0
+    assert weighted_kappa([(1, 5), (5, 1)]) == -1.0
+    assert weighted_kappa([]) is None
+    assert weighted_kappa([(3, 3), (3, 3)]) == 1.0
+
+
+def test_analyse_reports_weighted_kappa() -> None:
+    items = [
+        _item("a1", ["modality"], 5, True),
+        _item("a2", ["modality"], 4, True),
+        _item("a3", ["verification"], 3, False),
+        _item("a4", [], 1, False),
+    ]
+    result = analyse(items, annotator_a="alice", annotator_b="bob")
+    assert result["weighted_kappa"] == 1.0
+    assert "Взвешенный kappa" in render_report(result)
 
 
 def test_pearson_known_values() -> None:
