@@ -70,6 +70,18 @@ class GenerationOutcome:
     )
 
 
+@dataclass(frozen=True)
+class PromptPreview:
+    """A prompt assembled without calling the model."""
+
+    filename: str
+    artifact_type: str
+    system_prompt: str
+    user_prompt: str
+    prompt_sha256: str
+    note: str | None = None
+
+
 def _requirement_ids(doc: RequirementDoc) -> list[str]:
     if doc.normalization is not None and doc.normalization.requirements:
         return [requirement.id for requirement in doc.normalization.requirements]
@@ -90,6 +102,63 @@ def _extra_prompt(
     if not extras and testcases is None:
         return None
     return handler.build_user(doc, count, extras, testcases)
+
+
+def _prepare_generation(
+    request: GenerationRequest,
+) -> tuple[list[RequirementDoc], ArtifactHandler, tuple[str, ...]]:
+    """Load inputs, handler and presets shared by real and dry runs."""
+    docs = load_docs(
+        request.input_dir,
+        request.url,
+        normalize=request.normalize,
+    )
+    handler = get_handler(request.artifact_type, request.prompt_dir)
+    extras: tuple[str, ...] = ()
+    if request.presets:
+        presets_dir = resolve_presets_dir()
+        if presets_dir is None:
+            raise PresetError("no presets directory found")
+        extras = tuple(
+            select_extras(
+                load_presets(presets_dir),
+                request.presets,
+                request.artifact_type,
+            )
+        )
+    return docs, handler, extras
+
+
+def build_prompt_previews(request: GenerationRequest) -> list[PromptPreview]:
+    """Assemble the prompts a real run would send, without calling Ollama."""
+    if request.runs < 1:
+        raise ValueError("runs must be at least 1")
+    docs, handler, extras = _prepare_generation(request)
+    previews: list[PromptPreview] = []
+    for doc in docs:
+        user_prompt = _extra_prompt(handler, doc, request.count, extras)
+        override = request.prompts.get(doc.path.name)
+        if override:
+            user_prompt = override
+        if user_prompt is None:
+            user_prompt = handler.build_user(doc, request.count)
+        note = None
+        if request.artifact_type is ArtifactType.COVERAGEMATRIX:
+            note = (
+                "The real run fills the {testcases} placeholder from generated "
+                "test cases; this preview keeps the empty-list wording."
+            )
+        previews.append(
+            PromptPreview(
+                filename=doc.path.name,
+                artifact_type=request.artifact_type.value,
+                system_prompt=handler.build_system(),
+                user_prompt=user_prompt,
+                prompt_sha256=hashlib.sha256(user_prompt.encode()).hexdigest(),
+                note=note,
+            )
+        )
+    return previews
 
 
 def generate_scenarios(
@@ -115,12 +184,7 @@ def generate_scenarios(
         else dict(DEFAULT_QUALITY_WEIGHTS)
     )
 
-    docs = load_docs(
-        request.input_dir,
-        request.url,
-        normalize=request.normalize,
-    )
-    handler = get_handler(request.artifact_type, request.prompt_dir)
+    docs, handler, extras = _prepare_generation(request)
     testcases_handler = None
     if request.artifact_type is ArtifactType.COVERAGEMATRIX:
         # The matrix may only reference real ids: generate test cases first and
@@ -131,18 +195,6 @@ def generate_scenarios(
         temperature=request.temperature,
         max_retries=request.max_retries,
     )
-    extras: tuple[str, ...] = ()
-    if request.presets:
-        presets_dir = resolve_presets_dir()
-        if presets_dir is None:
-            raise PresetError("no presets directory found")
-        extras = tuple(
-            select_extras(
-                load_presets(presets_dir),
-                request.presets,
-                request.artifact_type,
-            )
-        )
 
     scenarios_dir = request.output_dir / "scenarios"
     scenarios_dir.mkdir(parents=True, exist_ok=True)

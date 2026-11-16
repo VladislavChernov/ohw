@@ -172,6 +172,7 @@ python -m src.workflow --visualize --report
 | `--model` | имя модели |
 | `--timeout` | таймаут запроса, секунды |
 | `--continue-on-error` | продолжать при недоступности Ollama для отдельного файла |
+| `--dry-run` | собрать промпты без вызова Ollama |
 | `--quality-weights` | веса `overall`, см. ниже |
 | `--fail-under` | порог `overall` для кода 5 |
 
@@ -192,6 +193,23 @@ python -m src.workflow --quality-weights \
 метрики с теми же весами. Файлы без `quality_weights` используют значения по
 умолчанию. Флаг и env действуют на фазу `generate`; Streamlit-рабочее место
 использует веса по умолчанию.
+
+### Сухой прогон
+
+`--dry-run` собирает system- и user-промпты теми же функциями, что и обычная
+генерация, но не обращается к Ollama и не создаёт `generation.json`:
+
+```bash
+python -m src.workflow --dry-run --input-dir input --output-dir output/prompts
+```
+
+В `output/prompts/` появляются `<stem>.system.txt`, `<stem>.user.txt` и
+`manifest.json` с параметрами прогона и SHA-256 пользовательского промпта.
+Это удобно для проверки шаблонов, пресетов и нормализации без доступной модели.
+SHA-256 можно сверить с `prompt_sha256` в обычном снимке.
+
+Веса и `--fail-under` на промпты не влияют. Комбинация `--dry-run` с
+`--assess`, `--visualize` или `--report` даёт код `2`.
 
 ### Ошибки Ollama
 

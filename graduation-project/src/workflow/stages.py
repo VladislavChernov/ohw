@@ -9,11 +9,16 @@ import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
-from src.config import check_pipeline_version
+from src.config import PROJECT_VERSION, check_pipeline_version
 from src.contracts import SNAPSHOT_NAME, read_json_object
 from src.generator.ollama_client import OllamaClient
-from src.generator.pipeline import GenerationRequest, generate_scenarios
+from src.generator.pipeline import (
+    GenerationRequest,
+    build_prompt_previews,
+    generate_scenarios,
+)
 from src.generator.service import RetryNotice
 from src.models import PipelineData
 from src.quality.assessor import assess_quality, covered_requirement_ids
@@ -26,6 +31,51 @@ from src.visualization.charts import create_all_charts
 
 def _now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds")
+
+
+def dry_run(request: GenerationRequest, model: str) -> list[Path]:
+    """Write the prompts a real run would send; never contact the model."""
+    previews = build_prompt_previews(request)
+    prompts_dir = request.output_dir / "prompts"
+    prompts_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest: dict[str, Any] = {
+        "project": "graduation-project",
+        "version": PROJECT_VERSION,
+        "artifact_type": request.artifact_type.value,
+        "count": request.count,
+        "runs": request.runs,
+        "temperature": request.temperature,
+        "model": model,
+        "normalize": request.normalize,
+        "presets": list(request.presets),
+        "prompts": [],
+    }
+    written: list[Path] = []
+    for preview in previews:
+        stem = Path(preview.filename).stem
+        system_path = prompts_dir / f"{stem}.system.txt"
+        user_path = prompts_dir / f"{stem}.user.txt"
+        system_path.write_text(preview.system_prompt, encoding="utf-8")
+        user_path.write_text(preview.user_prompt, encoding="utf-8")
+        manifest["prompts"].append(
+            {
+                "filename": preview.filename,
+                "artifact_type": preview.artifact_type,
+                "system_file": f"prompts/{system_path.name}",
+                "user_file": f"prompts/{user_path.name}",
+                "prompt_sha256": preview.prompt_sha256,
+                "note": preview.note,
+            }
+        )
+        written.extend((system_path, user_path))
+
+    manifest_path = prompts_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return [*written, manifest_path]
 
 
 def snapshot_path(output_dir: Path) -> Path:

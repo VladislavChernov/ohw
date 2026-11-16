@@ -34,6 +34,9 @@
   (`OllamaConnectionError`).
 - **SHALL** при `--continue-on-error` записывать ошибку соединения для текущего
   файла в `errors` и продолжать обработку остальных файлов.
+- **SHALL** при `--dry-run` собирать те же system- и user-промпты, что и обычная
+  генерация, но без вызова Ollama, и записывать их в `<output>/prompts/`.
+- **SHALL** не создавать `generation.json` в режиме `--dry-run`.
 
 ### WHEN/THEN
 
@@ -59,3 +62,11 @@
 - **WHEN** Ollama недоступна для одного файла, а `--continue-on-error` задан
 - **THEN** ошибка файла попадает в `errors`, остальные файлы обрабатываются,
   успешные сценарии сохраняются.
+- **WHEN** задан `--dry-run`
+- **THEN** CLI возвращает `0`, пишет `<stem>.system.txt`, `<stem>.user.txt` и
+  `manifest.json` с SHA-256 промпта, но не вызывает Ollama и не пишет снимок.
+- **WHEN** `--dry-run` задан вместе с `--assess`, `--visualize` или `--report`
+- **THEN** CLI отклоняет комбинацию с кодом `2`.
+- **WHEN** в dry-run используется `coveragematrix`
+- **THEN** манифест содержит пояснение, что `{testcases}` подставляется только
+  при реальной генерации.

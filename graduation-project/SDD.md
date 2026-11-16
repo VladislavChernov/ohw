@@ -162,7 +162,7 @@ input/*.md|*.txt
 | `renderer.py` | итоговый Markdown |
 | `ollama_client.py` | `/api/chat`, `/api/tags`, ошибки |
 | `service.py` | один артефакт: prompt → chat → validate → retry → render |
-| `pipeline.py` | один файл требований → `ScenarioResult`, `--runs N` |
+| `pipeline.py` | один файл требований → `ScenarioResult`, `--runs N`; общая подготовка и `build_prompt_previews` для `--dry-run` |
 
 Порядок разрешения ресурсов:
 
@@ -230,6 +230,8 @@ Markdown содержит обязательные разделы: общая и
 `stages.py` — файловые стадии без `argparse` и Streamlit:
 
 - `generate` — сценарии, фактические веса, `generation.json`;
+- `dry_run` — `<stem>.system.txt`, `<stem>.user.txt` и `manifest.json` в
+  `output/prompts`, без вызова Ollama;
 - `assess` — пересчёт метрик с весами из снимка, `quality-metrics.json`;
 - `visualize` — графики;
 - `report` — `report.md` и JSON;
@@ -240,6 +242,7 @@ Markdown содержит обязательные разделы: общая и
 - `build_parser` — CLI;
 - `selected_phases` — выбранные фазы в каноническом порядке;
 - `_run_generate` — проверка модели, `continue_on_error`, вызов `stages.generate`;
+- `_run_dry_generate` — подготовка промптов без подключения к Ollama;
 - `_run_assess` — `stages.assess`;
 - `_run_visualize` — `stages.visualize`;
 - `_run_report` — `stages.report`;
@@ -298,6 +301,7 @@ python -m src.workflow [фазы] [параметры]
 | `--timeout` | env/`600` | таймаут, секунды |
 | `--output-dir` | `output` | папка результатов |
 | `--continue-on-error` | выкл. | продолжать при недоступности Ollama для отдельного файла |
+| `--dry-run` | выкл. | собрать промпты в `output/prompts` без вызова Ollama |
 | `--quality-weights` | env/значения по умолчанию | веса `overall` |
 | `--fail-under` | — | порог качества |
 
@@ -306,7 +310,10 @@ python -m src.workflow [фазы] [параметры]
 ровно четыре известные метрики, конечные значения `≥ 0`, сумма `1.0`
 (допуск `1e-6`). Ошибка формата — код `2`.
 
-Без флагов фаз выполняются все четыре фазы.
+Без флагов фаз выполняются все четыре фазы. `--dry-run` заменяет единственную
+фазу `generate`: он пишет `<output>/prompts/<stem>.system.txt`, `<stem>.user.txt`
+и `manifest.json`, но не создаёт `generation.json` и не обращается к Ollama.
+Комбинация с `--assess`, `--visualize` или `--report` — ошибка кода `2`.
 
 ### 4.2 Переменные окружения
 
@@ -598,6 +605,7 @@ CLI переводит эти `ValueError` в код `2` и печатает с�
 | `ValueError` при несовпадении `pipeline_version` | код 2 с именем файла и версиями |
 | `ValueError` при невалидных весах | код 2 с причиной и допустимыми метриками |
 | `ValueError` при повреждённом JSON или неверной структуре артефакта | код 2 с именем файла и путём до поля |
+| `parser.error` при `--dry-run` с фазами assess/visualize/report | код 2 |
 | `OSError` при записи | код 4 |
 | `KeyboardInterrupt` | код 130 |
 
@@ -615,6 +623,7 @@ CLI переводит эти `ValueError` в код `2` и печатает с�
 - `test_quality.py` — формулы, `None`-семантика, агрегация, веса `overall`;
 - `test_config.py` — парсинг, приоритет и валидация весов;
 - `test_contracts.py` — pydantic-схемы, повреждённый JSON, legacy-примеры;
+- `test_dry_run.py` — промпты без Ollama, совпадение с обычным прогоном;
 - `test_clarity_kit.py` — экспорт фрагментов, kappa, корреляции, CLI;
 - `test_models.py` — snapshot/report-сериализация и legacy без весов;
 - `test_reporting.py` — JSON как источник правды, `n/a`, реальные кейсы;
@@ -786,6 +795,7 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | `openspec/changes/harden-pipeline/` | P0: версионирование и обработка ошибок |
 | `openspec/changes/validate-artifacts/` | pydantic-валидация JSON-артефактов |
 | `openspec/changes/clarity-data-kit/` | данные для пересмотра clarity без смены формулы |
+| `openspec/changes/dry-run/` | промпты без вызова Ollama |
 
 Документы описывают реализованное поведение. Изменения поведения должны
 сопровождаться обновлением соответствующей спеки и этого SDD.
@@ -811,3 +821,4 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | 0.10 | 15.11.2026 | Pydantic-валидация `generation.json` и `quality-metrics.json`: контракты, ошибки с путём до поля, legacy-совместимость |
 | 0.11 | 16.11.2026 | Инструменты сбора данных по clarity: экспорт фрагментов, гайд разметки, kappa и train/holdout; формула метрики не изменена |
 | 0.12 | 16.11.2026 | Релиз 0.3.0: валидация артефактов, обновлённое демо, инструменты clarity, отдельный CHANGELOG |
+| 0.13 | 16.11.2026 | `--dry-run`: подготовка промптов без вызова Ollama |

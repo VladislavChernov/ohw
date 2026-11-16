@@ -152,6 +152,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     generation.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="собрать промпты в output/prompts без вызова Ollama",
+    )
+    generation.add_argument(
         "--quality-weights",
         default=None,
         metavar="WEIGHTS",
@@ -226,13 +231,12 @@ def _check_model(client: OllamaClient, *, strict: bool = True) -> None:
         )
 
 
-def _run_generate(
+def _build_request(
     args: argparse.Namespace,
-    settings: Settings,
     output_dir: Path,
     quality_weights: dict[str, float],
-) -> PipelineData:
-    request = GenerationRequest(
+) -> GenerationRequest:
+    return GenerationRequest(
         input_dir=Path(args.input_dir),
         artifact_type=ArtifactType(args.artifact_type),
         count=args.count,
@@ -247,6 +251,31 @@ def _run_generate(
         continue_on_error=args.continue_on_error,
         quality_weights=quality_weights,
     )
+
+
+def _run_dry_generate(
+    args: argparse.Namespace,
+    settings: Settings,
+    output_dir: Path,
+) -> None:
+    request = _build_request(args, output_dir, {})
+    paths = stages.dry_run(request, settings.model)
+    _log(
+        f"сухой прогон: промпты записаны в {output_dir / 'prompts'} "
+        f"(тип={request.artifact_type.value}, кейсов={request.count}, "
+        f"повторов={request.runs}, модель={settings.model})"
+    )
+    for path in paths:
+        _log(f"  {path}")
+
+
+def _run_generate(
+    args: argparse.Namespace,
+    settings: Settings,
+    output_dir: Path,
+    quality_weights: dict[str, float],
+) -> PipelineData:
+    request = _build_request(args, output_dir, quality_weights)
     client = OllamaClient(
         base_url=settings.base_url,
         model=settings.model,
@@ -321,7 +350,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.count < 1:
         parser.error("--count должен быть >= 1")
 
-    phases = selected_phases(args)
+    explicit_phases = (
+        selected_phases(args)
+        if any(getattr(args, phase, False) for phase in PHASES)
+        else []
+    )
+    if args.dry_run:
+        if explicit_phases and explicit_phases != ["generate"]:
+            parser.error("--dry-run несовместим с фазами assess, visualize и report")
+        phases = ["generate"]
+    else:
+        phases = explicit_phases or list(CORE_PHASES)
     explicit_weights: dict[str, float] | None = None
     if args.quality_weights is not None:
         try:
@@ -329,7 +368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         except ValueError as exc:
             parser.error(str(exc))
     quality_weights: dict[str, float] = {}
-    if "generate" in phases:
+    if "generate" in phases and not args.dry_run:
         try:
             quality_weights = (
                 explicit_weights
@@ -338,6 +377,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         except ValueError as exc:
             parser.error(str(exc))
+    elif args.dry_run and explicit_weights is not None:
+        _log(
+            "предупреждение: --quality-weights не влияет на промпты в режиме "
+            "--dry-run"
+        )
     elif explicit_weights is not None:
         _log(
             "предупреждение: --quality-weights применяется только на фазе "
@@ -357,7 +401,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         for phase in phases:
             if phase == "generate":
-                data = _run_generate(args, settings, output_dir, quality_weights)
+                if args.dry_run:
+                    _run_dry_generate(args, settings, output_dir)
+                else:
+                    data = _run_generate(
+                        args, settings, output_dir, quality_weights
+                    )
             elif phase == "assess":
                 data = data or stages.load_snapshot(output_dir)
                 data = _run_assess(data, output_dir)

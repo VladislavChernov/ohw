@@ -73,6 +73,7 @@ python -m src.workflow [--generate] [--assess] [--visualize] [--report]
     --url URL --normalize --preset ID [--preset ID ...]
     --prompt-dir DIR --base-url URL --model NAME --timeout SEC
     --continue-on-error
+    --dry-run
     --quality-weights WEIGHTS
     --fail-under SCORE
 ```
@@ -94,6 +95,18 @@ python -m src.workflow --report
 `--continue-on-error` ошибка записывается для текущего файла, а остальные файлы
 обрабатываются; если не сгенерирован ни один сценарий, CLI всё равно вернёт
 код `3`.
+
+Чтобы проверить шаблоны, пресеты и нормализацию без модели, используйте
+`--dry-run`. Он собирает те же промпты, что и обычная генерация, но не вызывает
+Ollama и не пишет `generation.json`:
+
+```bash
+python -m src.workflow --dry-run --input-dir input --output-dir output/prompts
+```
+
+Результат — `output/prompts/<stem>.system.txt`, `<stem>.user.txt` и
+`manifest.json` с параметрами и SHA-256 пользовательского промпта. Комбинация
+`--dry-run` с `--assess`/`--visualize`/`--report` даёт код `2`.
 
 ## UI (Streamlit)
 

@@ -110,3 +110,4 @@ src/
 - `openspec/changes/quality-weights/` — настраиваемые веса `overall`.
 - `openspec/changes/validate-artifacts/` — pydantic-валидация артефактов.
 - `openspec/changes/clarity-data-kit/` — данные для пересмотра clarity.
+- `openspec/changes/dry-run/` — промпты без вызова Ollama.

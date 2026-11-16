@@ -51,7 +51,7 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 - Кнопка "Clear cache"
 - LRU limit для session state
 
-### 9. Dry-run flag
+### 9. Dry-run flag — реализовано после 0.3.0
 - `--dry-run` в main.py
 - Генерировать промпты без Ollama
 - Локальная валидация
