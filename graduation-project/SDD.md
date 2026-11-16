@@ -105,6 +105,7 @@
 |---|---|
 | `src/cli.py` | тонкая обёртка для точки входа |
 | `src/config.py` | `Settings`, значения по умолчанию, env, веса, версии |
+| `src/contracts.py` | pydantic-схемы `generation.json`/`quality-metrics.json`, чтение и валидация |
 | `src/models.py` | `QualityMetrics`, `ScenarioResult`, `PipelineData`, сериализация |
 | `src/generator/` | вендоренное ядро DZ2: загрузка, нормализация, промпты, пресеты, Ollama, валидация, retry, рендер |
 | `src/quality/assessor.py` | детерминированные метрики и агрегация |
@@ -532,6 +533,24 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 умолчанию; невалидные веса в файле — `ValueError` и код `2`. Поэтому
 `pipeline_version` не повышается: старые читатели просто игнорируют ключ.
 
+Оба файла проходят структурную валидацию через pydantic-модели
+`SnapshotDocument` и `ReportDocument` (`src/contracts.py`) до построения
+dataclass-ов. Обязательное поле сценария — непустой `filename`; остальные поля
+имеют значения по умолчанию. Неизвестные ключи игнорируются
+(`extra="ignore"`), поэтому новый необязательный ключ не ломает текущую версию.
+
+| Состояние файла | Поведение |
+|---|---|
+| отсутствует `filename` у сценария | `ValueError`: `scenarios[N].filename: обязательное поле отсутствует` |
+| неверный тип поля | `ValueError`: путь до поля и ожидаемый тип |
+| повреждённый JSON | `ValueError` с именем файла, строкой и колонкой |
+| JSON верхнего уровня не объект | `ValueError` с именем файла |
+| файл не в UTF-8 | `ValueError` с именем файла |
+| лишние поля | игнорируются, файл читается |
+| нет необязательных полей | подставляются значения по умолчанию |
+
+CLI переводит эти `ValueError` в код `2` и печатает сообщение без traceback.
+
 ### 6.4 `report.md`
 
 Обязательные разделы:
@@ -570,6 +589,7 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 | `GenerationError` | ошибка одного сценария, остальные продолжаются |
 | `ValueError` при несовпадении `pipeline_version` | код 2 с именем файла и версиями |
 | `ValueError` при невалидных весах | код 2 с причиной и допустимыми метриками |
+| `ValueError` при повреждённом JSON или неверной структуре артефакта | код 2 с именем файла и путём до поля |
 | `OSError` при записи | код 4 |
 | `KeyboardInterrupt` | код 130 |
 
@@ -586,6 +606,7 @@ overall = Σ(w_i × metric_i) / Σ(w_i)   # только известные ме
 
 - `test_quality.py` — формулы, `None`-семантика, агрегация, веса `overall`;
 - `test_config.py` — парсинг, приоритет и валидация весов;
+- `test_contracts.py` — pydantic-схемы, повреждённый JSON, legacy-примеры;
 - `test_models.py` — snapshot/report-сериализация и legacy без весов;
 - `test_reporting.py` — JSON как источник правды, `n/a`, реальные кейсы;
 - `test_generator.py` — шаблоны, промпты, валидатор, рендер, загрузка;
@@ -600,7 +621,7 @@ uv run pytest
 ```
 
 Unit-тесты не требуют Ollama. Результат на момент документирования:
-`105 passed, 1 skipped`.
+`172 passed, 1 skipped`.
 
 ### 8.2 Integration / e2e
 
@@ -749,10 +770,11 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | `openspec/changes/design.md` | архитектура, поток данных, CLI, ошибки |
 | `openspec/changes/tasks.md` | чек-лист реализации |
 | `openspec/specs/generation/spec.md` | EARS-требования к генерации |
-| `openspec/specs/pipeline/spec.md` | версия контракта и per-file recovery |
+| `openspec/specs/pipeline/spec.md` | версия контракта, валидация артефактов и per-file recovery |
 | `openspec/specs/quality/spec.md` | EARS-требования и формулы метрик |
 | `openspec/changes/add-guard-tests/` | guard-тесты документации и лаунчеров |
 | `openspec/changes/harden-pipeline/` | P0: версионирование и обработка ошибок |
+| `openspec/changes/validate-artifacts/` | pydantic-валидация JSON-артефактов |
 
 Документы описывают реализованное поведение. Изменения поведения должны
 сопровождаться обновлением соответствующей спеки и этого SDD.
@@ -772,3 +794,4 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | 0.7 | 12.11.2026 | Шов API-тестов удалён: API-тесты не входят в проект, UI оставлен с пятью вкладками |
 | 0.8 | 13.11.2026 | P0 ревью: `pipeline_version` в артефактах, legacy/mismatch, `--continue-on-error` и per-file recovery |
 | 0.9 | 15.11.2026 | P1 ревью: настраиваемые веса `overall` (`--quality-weights`, env, персистентность, legacy); релиз 0.2.0 |
+| 0.10 | 15.11.2026 | Pydantic-валидация `generation.json` и `quality-metrics.json`: контракты, ошибки с путём до поля, legacy-совместимость |

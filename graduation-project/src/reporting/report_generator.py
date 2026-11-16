@@ -8,12 +8,12 @@ Markdown file is never parsed by the pipeline.
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from src.config import check_pipeline_version, format_quality_weights
+from src.contracts import REPORT_NAME, read_json_object
 from src.models import METRIC_KEYS, PipelineData, QualityMetrics, ScenarioResult
 
-REPORT_JSON_NAME = "quality-metrics.json"
+REPORT_JSON_NAME = REPORT_NAME
 REPORT_MARKDOWN_NAME = "report.md"
 
 METRIC_TITLES: dict[str, str] = {
@@ -87,9 +87,9 @@ def load_pipeline_data(output_dir: Path) -> PipelineData:
             f"report data not found: {path}; run the generation and assessment "
             "phases first"
         )
-    raw: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+    raw = read_json_object(path)
     check_pipeline_version(raw, path)
-    return PipelineData.from_report_dict(raw)
+    return PipelineData.from_report_dict(raw, source=path.name)
 
 
 def _metric_rows(data: PipelineData) -> list[str]:

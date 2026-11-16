@@ -31,10 +31,10 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 - Weight based on rarity или custom weight
 - Обновить документацию
 
-### 5. Schema validation
-- Добавить jsonschema зависимость
-- Schema файлы для generation.json и quality-metrics.json
-- Валидация при загрузке
+### 5. Schema validation — реализовано через pydantic
+- Валидация `generation.json` и `quality-metrics.json` при загрузке
+- Модели `SnapshotDocument`/`ReportDocument` вместо отдельной `jsonschema`
+- Ошибки с именем файла и путём до поля, код возврата 2
 
 ## P2 Удобство и документация (спринт 5-6)
 

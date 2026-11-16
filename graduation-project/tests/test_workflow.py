@@ -121,6 +121,47 @@ def test_snapshot_version_mismatch_returns_usage_error(tmp_path: Path) -> None:
     assert main(["--assess", "--output-dir", str(tmp_path)]) == EXIT_USAGE
 
 
+def test_assess_rejects_snapshot_without_filename(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _snapshot(tmp_path)
+    path = tmp_path / "generation.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["scenarios"][0].pop("filename")
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    assert main(["--assess", "--output-dir", str(tmp_path)]) == EXIT_USAGE
+    output = capsys.readouterr().out
+    assert "generation.json" in output
+    assert "scenarios[0].filename" in output
+    assert "Traceback" not in output
+
+
+def test_assess_rejects_broken_snapshot_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "generation.json").write_text("{", encoding="utf-8")
+
+    assert main(["--assess", "--output-dir", str(tmp_path)]) == EXIT_USAGE
+    output = capsys.readouterr().out
+    assert "generation.json" in output
+    assert "некорректный JSON" in output
+    assert "Traceback" not in output
+
+
+def test_report_rejects_broken_report_json(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _snapshot(tmp_path)
+    (tmp_path / "quality-metrics.json").write_text("{", encoding="utf-8")
+
+    assert main(["--report", "--output-dir", str(tmp_path)]) == EXIT_USAGE
+    output = capsys.readouterr().out
+    assert "quality-metrics.json" in output
+    assert "некорректный JSON" in output
+    assert "Traceback" not in output
+
+
 def _write_inputs(tmp_path: Path) -> Path:
     input_dir = tmp_path / "input"
     input_dir.mkdir()

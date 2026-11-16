@@ -108,3 +108,4 @@ src/
 - `openspec/changes/add-streamlit-workbench/` — Streamlit-рабочее место.
 - `openspec/changes/harden-pipeline/` — версия контракта и per-file recovery.
 - `openspec/changes/quality-weights/` — настраиваемые веса `overall`.
+- `openspec/changes/validate-artifacts/` — pydantic-валидация артефактов.

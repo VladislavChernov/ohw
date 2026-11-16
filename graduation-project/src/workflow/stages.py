@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from src.config import check_pipeline_version
+from src.contracts import SNAPSHOT_NAME, read_json_object
 from src.generator.ollama_client import OllamaClient
 from src.generator.pipeline import GenerationRequest, generate_scenarios
 from src.generator.service import RetryNotice
@@ -21,8 +22,6 @@ from src.reporting.report_generator import (
     write_json_report,
 )
 from src.visualization.charts import create_all_charts
-
-SNAPSHOT_NAME = "generation.json"
 
 
 def _now() -> str:
@@ -54,9 +53,9 @@ def load_snapshot(output_dir: Path) -> PipelineData:
         raise FileNotFoundError(
             f"generation snapshot not found: {path}; run the generate phase first"
         )
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = read_json_object(path)
     check_pipeline_version(raw, path)
-    return PipelineData.from_snapshot_dict(raw)
+    return PipelineData.from_snapshot_dict(raw, source=path.name)
 
 
 def generate(

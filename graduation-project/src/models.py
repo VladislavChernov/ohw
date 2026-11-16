@@ -21,6 +21,17 @@ from src.config import (
     PROJECT_VERSION,
     validate_quality_weights,
 )
+from src.contracts import (
+    REPORT_NAME,
+    SNAPSHOT_NAME,
+    QualityMetricsPayload,
+    ScenarioReport,
+    ScenarioSnapshot,
+    load_report_document,
+    load_scenario_report,
+    load_scenario_snapshot,
+    load_snapshot_document,
+)
 from src.generator.models import TestCase
 
 QUALITY_THRESHOLD = 0.5
@@ -61,12 +72,15 @@ class QualityMetrics:
         )
 
 
+def _metrics_from_payload(
+    payload: QualityMetricsPayload | None,
+) -> QualityMetrics:
+    metrics = payload if payload is not None else QualityMetricsPayload()
+    return QualityMetrics.from_dict(metrics.model_dump())
+
+
 def _cases_to_json(cases: list[TestCase]) -> list[dict[str, Any]]:
     return [case.model_dump(mode="json") for case in cases]
-
-
-def _cases_from_json(raw: list[dict[str, Any]] | None) -> list[TestCase]:
-    return [TestCase(**case) for case in raw or []]
 
 
 @dataclass
@@ -117,24 +131,30 @@ class ScenarioResult:
         }
 
     @classmethod
-    def from_snapshot_dict(cls, raw: dict[str, Any]) -> "ScenarioResult":
+    def from_snapshot_model(cls, raw: ScenarioSnapshot) -> "ScenarioResult":
         return cls(
-            filename=raw["filename"],
-            source_path=raw.get("source_path", ""),
-            artifact_type=raw.get("artifact_type", "testcases"),
-            output_file=raw.get("output_file"),
-            rendered=raw.get("rendered", ""),
-            generations=list(raw.get("generations") or []),
-            cases=_cases_from_json(raw.get("cases")),
-            prompt=raw.get("prompt", ""),
-            attempts=int(raw.get("attempts", 1)),
-            quality=QualityMetrics.from_dict(raw.get("quality") or {}),
-            requirement_ids=list(raw.get("requirement_ids") or []),
-            covered_requirements=list(raw.get("covered_requirements") or []),
-            prompt_sha256=raw.get("prompt_sha256", ""),
-            runs=int(raw.get("runs", 1)),
-            error=raw.get("error"),
+            filename=raw.filename,
+            source_path=raw.source_path,
+            artifact_type=raw.artifact_type,
+            output_file=raw.output_file,
+            rendered=raw.rendered,
+            generations=list(raw.generations or []),
+            cases=list(raw.cases or []),
+            prompt=raw.prompt,
+            attempts=raw.attempts,
+            quality=_metrics_from_payload(raw.quality),
+            requirement_ids=list(raw.requirement_ids or []),
+            covered_requirements=list(raw.covered_requirements or []),
+            prompt_sha256=raw.prompt_sha256,
+            runs=raw.runs,
+            error=raw.error,
         )
+
+    @classmethod
+    def from_snapshot_dict(
+        cls, raw: dict[str, Any], *, source: str = SNAPSHOT_NAME
+    ) -> "ScenarioResult":
+        return cls.from_snapshot_model(load_scenario_snapshot(raw, source))
 
     def to_report_dict(self, index: int) -> dict[str, Any]:
         """Compact representation used by ``quality-metrics.json``."""
@@ -154,24 +174,30 @@ class ScenarioResult:
         }
 
     @classmethod
-    def from_report_dict(cls, raw: dict[str, Any]) -> "ScenarioResult":
+    def from_report_model(cls, raw: ScenarioReport) -> "ScenarioResult":
         return cls(
-            filename=raw.get("filename", "unknown"),
+            filename=raw.filename,
             source_path="",
-            artifact_type=raw.get("artifact_type", "testcases"),
-            output_file=raw.get("output_file"),
+            artifact_type=raw.artifact_type,
+            output_file=raw.output_file,
             rendered="",
             generations=[],
-            cases=_cases_from_json(raw.get("case_summaries")),
+            cases=list(raw.case_summaries or []),
             prompt="",
-            attempts=int(raw.get("attempts", 1)),
-            quality=QualityMetrics.from_dict(raw.get("quality") or {}),
-            requirement_ids=list(raw.get("requirement_ids") or []),
-            covered_requirements=list(raw.get("cases_with_requirements") or []),
-            prompt_sha256=raw.get("prompt_sha256", ""),
-            runs=int(raw.get("runs", 1)),
-            error=raw.get("error"),
+            attempts=raw.attempts,
+            quality=_metrics_from_payload(raw.quality),
+            requirement_ids=list(raw.requirement_ids or []),
+            covered_requirements=list(raw.cases_with_requirements or []),
+            prompt_sha256=raw.prompt_sha256,
+            runs=raw.runs,
+            error=raw.error,
         )
+
+    @classmethod
+    def from_report_dict(
+        cls, raw: dict[str, Any], *, source: str = REPORT_NAME
+    ) -> "ScenarioResult":
+        return cls.from_report_model(load_scenario_report(raw, source))
 
 
 def _average(values: list[float]) -> float | None:
@@ -180,14 +206,18 @@ def _average(values: list[float]) -> float | None:
     return round(sum(values) / len(values), 3)
 
 
-def _quality_weights_from_json(raw: dict[str, Any]) -> dict[str, float]:
+def _weights_from_document(
+    value: dict[str, Any] | None, *, provided: bool, source: str
+) -> dict[str, float]:
     """Read optional weights; legacy files fall back to the defaults."""
-    if "quality_weights" not in raw:
+    if not provided:
         return dict(DEFAULT_QUALITY_WEIGHTS)
-    value = raw["quality_weights"]
     if not isinstance(value, dict):
-        raise ValueError("quality_weights должен быть объектом")
-    return validate_quality_weights(value)
+        raise ValueError(f"{source}: quality_weights должен быть объектом")
+    try:
+        return validate_quality_weights(value)
+    except ValueError as exc:
+        raise ValueError(f"{source}: {exc}") from None
 
 
 @dataclass
@@ -261,23 +291,30 @@ class PipelineData:
         }
 
     @classmethod
-    def from_snapshot_dict(cls, raw: dict[str, Any]) -> "PipelineData":
+    def from_snapshot_dict(
+        cls, raw: dict[str, Any], *, source: str = SNAPSHOT_NAME
+    ) -> "PipelineData":
+        document = load_snapshot_document(raw, source)
         data = cls(
-            input_dir=raw.get("input_dir", ""),
-            artifact_type=raw.get("artifact_type", "testcases"),
-            model=raw.get("model", ""),
-            runs=int(raw.get("runs", 1)),
-            count=int(raw.get("count", 10)),
-            temperature=float(raw.get("temperature", 0.7)),
-            normalize=bool(raw.get("normalize", False)),
-            presets=list(raw.get("presets") or []),
-            generated_at=raw.get("generated_at", ""),
+            input_dir=document.input_dir,
+            artifact_type=document.artifact_type,
+            model=document.model,
+            runs=document.runs,
+            count=document.count,
+            temperature=document.temperature,
+            normalize=document.normalize,
+            presets=list(document.presets or []),
+            generated_at=document.generated_at,
             scenarios=[
-                ScenarioResult.from_snapshot_dict(item)
-                for item in raw.get("scenarios") or []
+                ScenarioResult.from_snapshot_model(item)
+                for item in document.scenarios or []
             ],
-            errors=list(raw.get("errors") or []),
-            quality_weights=_quality_weights_from_json(raw),
+            errors=list(document.errors or []),
+            quality_weights=_weights_from_document(
+                document.quality_weights,
+                provided="quality_weights" in document.model_fields_set,
+                source=source,
+            ),
         )
         data.refresh_averages()
         return data
@@ -303,25 +340,32 @@ class PipelineData:
         return payload
 
     @classmethod
-    def from_report_dict(cls, raw: dict[str, Any]) -> "PipelineData":
+    def from_report_dict(
+        cls, raw: dict[str, Any], *, source: str = REPORT_NAME
+    ) -> "PipelineData":
+        document = load_report_document(raw, source)
         data = cls(
-            input_dir=raw.get("input_dir", ""),
-            artifact_type=raw.get("artifact_type", "testcases"),
-            model=raw.get("model", ""),
-            runs=int(raw.get("runs", 1)),
-            count=int(raw.get("count", 10)),
-            temperature=float(raw.get("temperature", 0.7)),
-            normalize=bool(raw.get("normalize", False)),
-            presets=list(raw.get("presets") or []),
-            generated_at=raw.get("generated_at", ""),
+            input_dir=document.input_dir,
+            artifact_type=document.artifact_type,
+            model=document.model,
+            runs=document.runs,
+            count=document.count,
+            temperature=document.temperature,
+            normalize=document.normalize,
+            presets=list(document.presets or []),
+            generated_at=document.generated_at,
             scenarios=[
-                ScenarioResult.from_report_dict(item)
-                for item in raw.get("scenarios") or []
+                ScenarioResult.from_report_model(item)
+                for item in document.scenarios or []
             ],
-            errors=list(raw.get("errors") or []),
-            averages=dict(raw.get("averages") or {}),
-            charts=dict(raw.get("charts") or {}),
-            quality_weights=_quality_weights_from_json(raw),
+            errors=list(document.errors or []),
+            averages=dict(document.averages or {}),
+            charts=dict(document.charts or {}),
+            quality_weights=_weights_from_document(
+                document.quality_weights,
+                provided="quality_weights" in document.model_fields_set,
+                source=source,
+            ),
         )
         if not data.averages:
             data.refresh_averages()
