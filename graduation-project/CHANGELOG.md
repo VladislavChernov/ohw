@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-16
+
 ### Добавлено
 
 - `.\run.ps1 -Gpu` — NVIDIA CUDA-режим по образцу ДЗ: проверка nvidia-рантайма,
@@ -15,6 +17,8 @@
 ### Изменено
 
 - `run.sh` остаётся CPU-only и делегирует старт инфраструктуры в `infra/up.sh`.
+- `docs/demo.md` и SDD: цифры живого e2e-прогона на GPU обновлены до
+  `1 passed, 208 deselected`, `overall = 0.382`, `consistency = 0.618`.
 
 ## [0.4.0] — 2026-11-16
 
@@ -115,6 +119,7 @@
 - DZ6, DZ3 advanced и API-тесты в выпускной проект не входят.
 - Модель по умолчанию — `qwen2.5:7b-instruct`.
 
+[0.5.0]: https://github.com/VladislavChernov/ohw/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/VladislavChernov/ohw/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/VladislavChernov/ohw/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/VladislavChernov/ohw/compare/v0.1.0...v0.2.0
