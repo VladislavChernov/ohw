@@ -6,6 +6,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-17
+
 ### Добавлено
 
 - `scripts/annotate_with_models.py` — подготовка промптов и валидация ответов
@@ -16,6 +18,8 @@
 
 - Анализ clarity печатает взвешенный kappa для оценок 1–5; гайд уточняет,
   что подпись «Проверяет требование» — трассируемость, а не `verification`.
+- `CHANGE_PROPOSAL.md`: пересмотр clarity отложен до human-разметки, зафиксирован
+  триггер возврата и критерии решения.
 
 ## [0.5.0] — 2026-11-16
 
@@ -130,6 +134,7 @@
 - DZ6, DZ3 advanced и API-тесты в выпускной проект не входят.
 - Модель по умолчанию — `qwen2.5:7b-instruct`.
 
+[0.6.0]: https://github.com/VladislavChernov/ohw/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/VladislavChernov/ohw/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/VladislavChernov/ohw/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/VladislavChernov/ohw/compare/v0.2.0...v0.3.0

@@ -52,7 +52,7 @@ def _snapshot_dict() -> dict:
 def _report_dict() -> dict:
     return {
         "project": "graduation-project",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "pipeline_version": PIPELINE_VERSION,
         "input_dir": "input",
         "artifact_type": "testcases",
