@@ -283,6 +283,7 @@ graduation-project/
 - [`docs/user-guide.md`](docs/user-guide.md) — подробное руководство.
 - [`docs/metrics.md`](docs/metrics.md) — формулы и ограничения метрик.
 - [`docs/demo.md`](docs/demo.md) — пример живого прогона.
+- [`docs/defense-checklist.md`](docs/defense-checklist.md) — памятка к защите.
 - [`CONCEPT.md`](CONCEPT.md) — описание проекта и глоссарий.
 - [`CHANGELOG.md`](CHANGELOG.md) — история версий.
 - [`SDD.md`](SDD.md) — архитектура и дизайн.

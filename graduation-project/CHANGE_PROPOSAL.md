@@ -8,13 +8,13 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 
 ## P0 Критические улучшения (спринт 1-2)
 
-### 1. Pipeline versioning
+### 1. Pipeline versioning — реализовано в 0.1.0
 - Добавить `pipeline_version` в generation.json
 - Валидировать в load_snapshot/load_pipeline_data
 - Fallback при mismatch версии
 
-### 2. Error recovery (per-file handling)
-- Изменить generate_scenarios:continuе при OllamaError, а не fail-fast
+### 2. Error recovery (per-file handling) — реализовано в 0.1.0
+- Изменить generate_scenarios: continue при OllamaError, а не fail-fast
 - CLI флаг `--continue-on-error`
 - Обновить отчет об ошибках
 
@@ -38,24 +38,28 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
   `openspec/specs/quality/spec.md`, `docs/metrics.md`, SDD и CONCEPT
 - Если выигрыша на holdout нет — оставить `0.2 × 5` и записать это решение
 
-### 5. Schema validation — реализовано через pydantic
+### 5. Schema validation — реализовано в 0.3.0 через pydantic
 - Валидация `generation.json` и `quality-metrics.json` при загрузке
 - Модели `SnapshotDocument`/`ReportDocument` вместо отдельной `jsonschema`
 - Ошибки с именем файла и путём до поля, код возврата 2
 
 ## P2 Удобство и документация (спринт 5-6)
 
-### 6. Readability tolerance
+### 6. Readability tolerance — ОТЛОЖЕНО
 - `--readability-tolerance` CLI
 - `GRADUATION_READABILITY_TOLERANCE` env var
+- Причина: нет данных о связи длины предложения с читаемостью для русского
+  и английского; без них это кручение ручки, а не настройка метрики
 
 ### 7. BR-N numbering docs — реализовано в 0.4.0
 - Документировать в README
 - Обновить assess_internal_consistency
 
-### 8. Streamlit state management
+### 8. Streamlit state management — ОТЛОЖЕНО
 - Кнопка "Clear cache"
 - LRU limit для session state
+- Причина: состояние маленькое (один `PipelineData` и несколько файлов);
+  LRU станет актуальным только при десятках крупных прогонов
 
 ### 9. Dry-run flag — реализовано в 0.4.0
 - `--dry-run` в main.py
@@ -70,7 +74,7 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 5. Тестовость: лучшее покрытие unit tests
 6. Документированность: четкие конвенции
 
-## Пример кода (пipeline versioning)
+## Пример кода (pipeline versioning)
 
 ```python
 # write_snapshot: добавить pipeline_version
