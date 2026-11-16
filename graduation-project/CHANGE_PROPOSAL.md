@@ -26,11 +26,17 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 - Валидация: сумма = 1.0
 - Обновить assessor.py
 
-### 4. Clarity metric review
+### 4. Clarity metric review — ОТЛОЖЕНО до данных разметчиков
 - Пересмотреть 5_patterns × 0.2
 - Weight based on rarity или custom weight
 - Обновить документацию
 - Подготовлены инструменты разметки (`docs/clarity-annotation.md`); без данных метрика не меняется
+- Сухой прогон на двух моделях завершён: это проверка контура, а не human ground truth
+- **Триггер возврата:** получены файлы разметки от двух людей (100–150 фрагментов)
+- **При возврате:** проверить Cohen κ ≥ 0.6 → разобрать расхождения → вывести веса
+  на train → сравнить с равными на holdout → только потом менять формулу, тесты,
+  `openspec/specs/quality/spec.md`, `docs/metrics.md`, SDD и CONCEPT
+- Если выигрыша на holdout нет — оставить `0.2 × 5` и записать это решение
 
 ### 5. Schema validation — реализовано через pydantic
 - Валидация `generation.json` и `quality-metrics.json` при загрузке
