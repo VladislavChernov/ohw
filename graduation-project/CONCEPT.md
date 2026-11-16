@@ -108,7 +108,7 @@ input/*.md|.txt
 |---|---|---|
 | `generation.json` | Снимок генерации для `assess` | `pipeline_version`, rendered-текст, все `generations`, `quality_weights` |
 | `quality-metrics.json` | Источник правды для графиков и отчёта | реальные кейсы в `case_summaries`, метрики, `version` проекта |
-| `report.md` | Человекочитаемое представление | never парсится пайплайном |
+| `report.md` | Человекочитаемое представление | не парсится пайплайном |
 | `scenarios/*.md` | Сгенерированные артефакты | по одному файлу на входной документ |
 | `charts/*.png` | Визуализация метрик | boxplot, radar, per_scenario |
 | `prompts/*.txt` | Только для `--dry-run` | system/user prompt и `manifest.json` с SHA-256 |

@@ -111,12 +111,23 @@ def prepare(sample: Path, guide: str, annotator: str, output: Path) -> int:
     return 0
 
 
-def collect(responses: Path, annotator: str, output: Path) -> int:
-    checked: list[dict[str, Any]] = []
+def collect(
+    responses: Path, sample: Path, annotator: str, output: Path
+) -> int:
+    expected = [record["id"] for record in read_jsonl(sample)]
+    if len(set(expected)) != len(expected):
+        raise ValueError(f"{sample.name}: дубликаты id в выборке")
+    by_id: dict[str, dict[str, Any]] = {}
     for index, raw in enumerate(read_jsonl(responses), start=1):
         identifier = raw.get("id")
         if not isinstance(identifier, str) or not identifier:
             raise ValueError(f"{responses.name}:{index}: нет поля id")
+        if identifier not in expected:
+            raise ValueError(
+                f"{responses.name}:{index}: неизвестный id {identifier!r}"
+            )
+        if identifier in by_id:
+            raise ValueError(f"{responses.name}:{index}: дубликат id {identifier!r}")
         annotation = parse_annotation(
             raw.get("annotation"), source=f"{responses.name}:{index}"
         )
@@ -125,9 +136,18 @@ def collect(responses: Path, annotator: str, output: Path) -> int:
                 f"{responses.name}:{index}: annotator={annotation.annotator!r}, "
                 f"ожидалось {annotator!r}"
             )
-        checked.append(
-            {"id": identifier, "annotation": annotation_from_model(annotation)}
+        by_id[identifier] = annotation_from_model(annotation)
+
+    missing = [identifier for identifier in expected if identifier not in by_id]
+    if missing:
+        raise ValueError(
+            f"{responses.name}: нет ответов для {len(missing)} фрагментов: "
+            + ", ".join(missing[:5])
         )
+    checked = [
+        {"id": identifier, "annotation": by_id[identifier]}
+        for identifier in expected
+    ]
     write_jsonl(output, checked)
     print(f"annotations validated: {len(checked)} -> {output}", flush=True)
     return 0
@@ -156,7 +176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return prepare(sample, args.guide, args.annotator, output)
         if not args.responses:
             parser.error("для collect нужен --responses")
-        return collect(Path(args.responses), args.annotator, output)
+        return collect(Path(args.responses), sample, args.annotator, output)
     except (OSError, ValueError) as exc:
         print(f"ошибка: {exc}", file=sys.stderr, flush=True)
         return 2
