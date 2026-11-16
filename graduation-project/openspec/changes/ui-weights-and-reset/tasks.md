@@ -26,4 +26,4 @@
 - [x] `uv run pytest` — `217 passed, 2 skipped`
 - [x] `uv run ruff check src tests scripts`
 - [x] `uv run mypy src`
-- [ ] CI на `master` зелёный
+- [x] CI на `master` зелёный (run #123)

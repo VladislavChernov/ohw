@@ -13,7 +13,7 @@ DEFAULT_TIMEOUT = 600.0
 DEFAULT_OUTPUT_DIR = Path("output")
 
 # Release version of the project and the report schema.
-PROJECT_VERSION = "0.6.0"
+PROJECT_VERSION = "0.7.0"
 
 # Contract version of ``generation.json`` and ``quality-metrics.json``. Bump it
 # whenever a later pipeline stage would misread artifacts from an older run.
