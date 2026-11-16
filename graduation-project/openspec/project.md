@@ -111,4 +111,5 @@ src/
 - `openspec/changes/validate-artifacts/` — pydantic-валидация артефактов.
 - `openspec/changes/clarity-data-kit/` — данные для пересмотра clarity.
 - `openspec/changes/dry-run/` — промпты без вызова Ollama.
+- `openspec/changes/ui-weights-and-reset/` — веса и сброс состояния в UI.
 - `openspec/changes/br-n-docs/` — правила `BR-N` и эвристика консистентности.

@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from src.config import DEFAULT_QUALITY_WEIGHTS
 from src.generator.models import ArtifactType
 from src.generator.ollama_client import OllamaClient, OllamaConnectionError
 
@@ -289,3 +290,64 @@ def test_missing_model_blocks_generation(workbench: Path) -> None:
     assert not at.exception
     assert any("Модель не задана" in item.value for item in at.error)
     assert not (workbench / "output" / "generation.json").exists()
+
+
+def test_custom_weights_reach_snapshot(
+    workbench: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        OllamaClient,
+        "chat",
+        lambda self, system, user, temperature, json_mode=True: _testcases(10),
+    )
+    at = _upload(_app(), ("login.md", REQUIREMENTS))
+    weights = {
+        "Readability": 0.4,
+        "Clarity of goals": 0.2,
+        "Scenario coverage": 0.2,
+        "Consistency": 0.2,
+    }
+    for label, value in weights.items():
+        _number_input(at, f"Вес: {label}").set_value(value).run()
+
+    _button(at, "Сгенерировать").click().run()
+
+    assert not at.exception
+    snapshot = json.loads(
+        (workbench / "output" / "generation.json").read_text(encoding="utf-8")
+    )
+    assert snapshot["quality_weights"] == {
+        "readability": 0.4,
+        "clarity_goals": 0.2,
+        "scenario_coverage": 0.2,
+        "consistency": 0.2,
+    }
+
+
+def test_invalid_weights_block_generation(
+    workbench: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        OllamaClient,
+        "chat",
+        lambda self, system, user, temperature, json_mode=True: _testcases(10),
+    )
+    at = _upload(_app(), ("login.md", REQUIREMENTS))
+    _number_input(at, "Вес: Readability").set_value(0.9).run()
+    _button(at, "Сгенерировать").click().run()
+
+    assert not at.exception
+    assert any("Неверные веса overall" in item.value for item in at.error)
+    assert not (workbench / "output" / "generation.json").exists()
+
+
+def test_clear_state_button_resets_defaults(workbench: Path) -> None:
+    at = _upload(_app(), ("login.md", REQUIREMENTS))
+    assert at.session_state["ui_files"]
+
+    _button(at, "Очистить состояние").click().run()
+
+    assert not at.exception
+    assert at.session_state["ui_files"] == {}
+    assert at.session_state["data"] is None
+    assert at.session_state["quality_weights"] == DEFAULT_QUALITY_WEIGHTS

@@ -272,6 +272,11 @@ UI вызывает `src.workflow.stages`, поэтому результаты �
 промпт передаётся в `GenerationRequest.prompts` и применяется к выбранному
 файлу.
 
+В сайдбаре расположены редактор весов `overall` (валидация через
+`validate_quality_weights`, неверные веса блокируют генерацию) и кнопка
+«Очистить состояние». Веса передаются в `GenerationRequest.quality_weights`,
+попадают в артефакты и печатаются на вкладке «Метрики». LRU не используется.
+
 ---
 
 ## 4. Интерфейсы
@@ -805,6 +810,7 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | `openspec/changes/validate-artifacts/` | pydantic-валидация JSON-артефактов |
 | `openspec/changes/clarity-data-kit/` | данные для пересмотра clarity без смены формулы |
 | `openspec/changes/dry-run/` | промпты без вызова Ollama |
+| `openspec/changes/ui-weights-and-reset/` | веса и сброс состояния в UI |
 | `openspec/changes/br-n-docs/` | правила `BR-N` и эвристика консистентности |
 
 Документы описывают реализованное поведение. Изменения поведения должны
@@ -838,3 +844,4 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | 0.17 | 16.11.2026 | Релиз 0.5.0: GPU-лаунчер и обновлённые результаты живого прогона |
 | 0.18 | 17.11.2026 | Сухой прогон clarity-разметки через две модели; скрипт подготовки и проверки аннотаций |
 | 0.19 | 17.11.2026 | Концепция и глоссарий проекта, взвешенный kappa, уточнение правила `verification`; релиз 0.6.0 |
+| 0.20 | 17.11.2026 | UI: редактор весов `overall`, кнопка «Очистить состояние», исправление подсказок вкладок |

@@ -14,7 +14,12 @@ from typing import Any, cast
 
 import streamlit as st
 
-from src.config import DEFAULT_MODEL
+from src.config import (
+    DEFAULT_MODEL,
+    DEFAULT_QUALITY_WEIGHTS,
+    format_quality_weights,
+    validate_quality_weights,
+)
 from src.generator.handlers import get_handler
 from src.generator.input_doc import InputError, load_docs
 from src.generator.models import ArtifactType
@@ -65,6 +70,21 @@ CONNECTION_PRESETS: tuple[tuple[str, str], ...] = (
     ("Свой адрес", ""),
 )
 
+STATE_DEFAULTS: dict[str, Any] = {
+    "base_url": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+    "model": os.environ.get("OLLAMA_MODEL", DEFAULT_MODEL),
+    "timeout": float(os.environ.get("OLLAMA_TIMEOUT", "600")),
+    "temperature": 0.7,
+    "output_dir": os.environ.get("GRADUATION_OUTPUT_DIR", "output"),
+    "models": [],
+    "models_error": "",
+    "ui_files": {},
+    "ui_signatures": {},
+    "ui_prompts": {},
+    "quality_weights": dict(DEFAULT_QUALITY_WEIGHTS),
+    "data": None,
+}
+
 
 def main() -> None:
     st.set_page_config(
@@ -107,21 +127,18 @@ def main() -> None:
 
 
 def _init_state() -> None:
-    defaults: dict[str, Any] = {
-        "base_url": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-        "model": os.environ.get("OLLAMA_MODEL", DEFAULT_MODEL),
-        "timeout": float(os.environ.get("OLLAMA_TIMEOUT", "600")),
-        "temperature": 0.7,
-        "output_dir": os.environ.get("GRADUATION_OUTPUT_DIR", "output"),
-        "models": [],
-        "models_error": "",
-        "ui_files": {},
-        "ui_signatures": {},
-        "ui_prompts": {},
-        "data": None,
-    }
-    for key, value in defaults.items():
+    for key, default in STATE_DEFAULTS.items():
+        value = dict(default) if isinstance(default, dict) else default
         st.session_state.setdefault(key, value)
+
+
+def _reset_state() -> None:
+    """Reset UI state to defaults without touching files on disk."""
+    for key in STATE_DEFAULTS:
+        st.session_state.pop(key, None)
+    st.session_state.pop("ui_uploader", None)
+    st.session_state.pop("ui_selected", None)
+    _init_state()
 
 
 def _sidebar() -> None:
@@ -136,6 +153,34 @@ def _sidebar() -> None:
         )
         st.caption("Требования загружаются на вкладке 1.")
         st.caption("Сгенерированные файлы: `output/scenarios/`.")
+        st.divider()
+        _weights_panel()
+        st.divider()
+        if st.button("Очистить состояние"):
+            _reset_state()
+            st.rerun()
+
+
+def _weights_panel() -> None:
+    """Render the overall-weight editor in the sidebar."""
+    st.header("Веса overall")
+    current = st.session_state["quality_weights"]
+    updated: dict[str, float] = {}
+    for key in METRIC_KEYS:
+        updated[key] = float(
+            st.number_input(
+                f"Вес: {METRIC_LABELS[key]}",
+                min_value=0.0,
+                step=0.01,
+                value=float(current[key]),
+                format="%.2f",
+            )
+        )
+    st.session_state["quality_weights"] = updated
+    try:
+        st.caption(format_quality_weights(validate_quality_weights(updated)))
+    except ValueError as exc:
+        st.error(f"Неверные веса overall: {exc}")
 
 
 def _connection_panel() -> None:
@@ -284,6 +329,7 @@ def _requirements_tab() -> None:
         type=["md", "txt"],
         accept_multiple_files=True,
         label_visibility="collapsed",
+        key="ui_uploader",
     )
     if uploaded:
         _remember_uploads(uploaded)
@@ -522,6 +568,11 @@ def _generation_tab() -> None:
 
 
 def _run_generation(config: dict[str, Any], continue_on_error: bool) -> None:
+    try:
+        weights = validate_quality_weights(st.session_state["quality_weights"])
+    except ValueError as exc:
+        st.error(f"Неверные веса overall: {exc}")
+        return
     output_dir = Path(st.session_state["output_dir"])
     input_dir = _sync_inputs(config)
 
@@ -538,6 +589,7 @@ def _run_generation(config: dict[str, Any], continue_on_error: bool) -> None:
         output_dir=output_dir,
         prompts=dict(st.session_state.get("ui_prompts") or {}),
         continue_on_error=continue_on_error,
+        quality_weights=weights,
     )
     client = _client()
     if client is None:
@@ -605,10 +657,11 @@ def _show_generation(data: PipelineData) -> None:
 def _metrics_tab() -> None:
     data: PipelineData | None = st.session_state.get("data")
     if data is None:
-        st.info("Сначала выполните генерацию на вкладке 2.")
+        st.info("Сначала выполните генерацию на вкладке 3.")
         return
 
     output_dir = Path(st.session_state["output_dir"])
+    st.caption(f"Веса overall: {format_quality_weights(data.quality_weights)}")
     columns = st.columns(2)
     if columns[0].button("Пересчитать метрики"):
         data = stages.assess(data, output_dir)
@@ -668,7 +721,7 @@ def _fmt(value: float | None) -> str:
 def _report_tab() -> None:
     data: PipelineData | None = st.session_state.get("data")
     if data is None:
-        st.info("Сначала выполните генерацию на вкладке 2.")
+        st.info("Сначала выполните генерацию на вкладке 3.")
         return
 
     output_dir = Path(st.session_state["output_dir"])

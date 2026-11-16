@@ -55,11 +55,10 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 - Документировать в README
 - Обновить assess_internal_consistency
 
-### 8. Streamlit state management — ОТЛОЖЕНО
-- Кнопка "Clear cache"
-- LRU limit для session state
-- Причина: состояние маленькое (один `PipelineData` и несколько файлов);
-  LRU станет актуальным только при десятках крупных прогонов
+### 8. Streamlit state management — частично реализовано в 0.7.0 (clear)
+- Кнопка "Clear cache" → «Очистить состояние» — реализована
+- LRU limit для session state — не реализован: состояние маленькое, явного
+  сброса достаточно; вернёмся при десятках крупных прогонов
 
 ### 9. Dry-run flag — реализовано в 0.4.0
 - `--dry-run` в main.py
