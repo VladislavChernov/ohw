@@ -160,16 +160,17 @@ def assess_consistency(texts: Sequence[str]) -> float | None:
     return round(statistics.mean(similarities), 3)
 
 
-def assess_internal_consistency(text: str) -> float:
+def assess_internal_consistency(text: str) -> float | None:
     """Heuristic used when only one generation is available.
 
-    Sequential ``BR-N`` numbering without gaps scores ``0.8``; anything else
-    gets the neutral ``0.5``. This is not reproducibility and the report says
-    so explicitly.
+    Two or more ``BR-N`` ids in an unbroken numeric run score ``0.8``; a gap
+    scores the neutral ``0.5``. Fewer than two ids means there is nothing to
+    judge, so the metric is ``None`` rather than a fabricated score. This is
+    not reproducibility and the report says so explicitly.
     """
     ids = extract_requirement_ids(text)
     if len(ids) < 2:
-        return 0.5
+        return None
     numbers = sorted(int(value.split("-")[1]) for value in ids)
     if numbers == list(range(numbers[0], numbers[-1] + 1)):
         return 0.8

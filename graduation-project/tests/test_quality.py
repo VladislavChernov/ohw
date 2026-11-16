@@ -97,6 +97,20 @@ def test_internal_consistency_gap() -> None:
     assert assess_internal_consistency("BR-1 BR-3") == 0.5
 
 
+def test_internal_consistency_single_id_is_unmeasurable() -> None:
+    assert assess_internal_consistency("BR-1") is None
+    assert assess_internal_consistency("no references") is None
+
+
+def test_assess_quality_runs_one_with_single_id() -> None:
+    metrics = assess_quality(
+        "BR-1. Система должна проверять форму. Ожидаем результат.",
+        ["BR-1"],
+    )
+    assert metrics.consistency is None
+    assert metrics.overall is not None
+
+
 def test_weighted_overall_renormalises_unknown_metric() -> None:
     score = weighted_overall(
         {

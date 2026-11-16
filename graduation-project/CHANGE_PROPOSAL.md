@@ -43,7 +43,7 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 - `--readability-tolerance` CLI
 - `GRADUATION_READABILITY_TOLERANCE` env var
 
-### 7. BR-N numbering docs
+### 7. BR-N numbering docs — реализовано после 0.3.0
 - Документировать в README
 - Обновить assess_internal_consistency
 
