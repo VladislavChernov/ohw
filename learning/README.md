@@ -15,6 +15,7 @@
 | [HybridRag/](HybridRag/) | RAG, кэширование, свежесть данных, консистентность, LLM-as-judge, испытания прототипа, личный harness |
 | [Security/](Security/) | встраивание security wall в агентские среды, red-team агентских сред |
 | [TestOptimization/](TestOptimization/) | ревью автотестов: процедура, чек-лист, метрики, LLM-ассистированное ревью |
+| [QualityMetrics/](QualityMetrics/) | метрики качества генерации: clarity и подготовка данных для её пересмотра |
 
 В проектных врезках используются статусы **Target**, **Runtime**, **Planned**,
 **Experiment**, **Superseded** и **Reference**: учебная теория не считается
@@ -54,6 +55,12 @@
 | Файл | Область | Что разбирает |
 |---|---|---|
 | [llm_autotest_optimization_learning.md](TestOptimization/llm_autotest_optimization_learning.md) | **Ревью автотестов** | Процедура из 7 шагов, чек-лист, метрики с знаменателями, разбор примера из ДЗ, LLM-ассистированное ревью, ограничения локальных моделей, процесс в команде |
+
+## QualityMetrics
+
+| Файл | Область | Что разбирает |
+|---|---|---|
+| [clarity_learning.md](QualityMetrics/clarity_learning.md) | **Clarity of goals как измеритель** | Что считает метрика, почему равные веса не проверены данными, статусы Runtime/Target/Experiment, инструменты разметки, Cohen κ, ограничения пилота на двух моделях |
 
 ---
 
