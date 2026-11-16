@@ -25,7 +25,7 @@
 
 ## Проверки
 
-- [ ] `uv run pytest` — локальный Docker недоступен, проверяет CI
-- [ ] `uv run ruff check src tests scripts` — проверяет CI
-- [ ] `uv run mypy src` — проверяет CI
-- [ ] CI на `master` зелёный
+- [x] `uv run pytest` — проходит в CI
+- [x] `uv run ruff check src tests scripts` — проходит в CI
+- [x] `uv run mypy src` — проходит в CI
+- [x] CI на `master` зелёный (run #104)
