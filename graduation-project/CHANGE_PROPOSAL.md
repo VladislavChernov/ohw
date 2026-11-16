@@ -43,7 +43,7 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 - `--readability-tolerance` CLI
 - `GRADUATION_READABILITY_TOLERANCE` env var
 
-### 7. BR-N numbering docs — реализовано после 0.3.0
+### 7. BR-N numbering docs — реализовано в 0.4.0
 - Документировать в README
 - Обновить assess_internal_consistency
 
@@ -51,7 +51,7 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 - Кнопка "Clear cache"
 - LRU limit для session state
 
-### 9. Dry-run flag — реализовано после 0.3.0
+### 9. Dry-run flag — реализовано в 0.4.0
 - `--dry-run` в main.py
 - Генерировать промпты без Ollama
 - Локальная валидация
