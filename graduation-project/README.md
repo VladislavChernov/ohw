@@ -175,6 +175,11 @@ python -m src.workflow --quality-weights \
 сохраняются в JSON и печатаются в `report.md`, а `--assess` использует их из
 снимка. UI использует веса по умолчанию; флаг и env применяются в CLI.
 
+Для будущего пересмотра `clarity` подготовлены инструменты разметки:
+[`docs/clarity-annotation.md`](docs/clarity-annotation.md),
+`scripts/export_clarity_sample.py` и `scripts/analyze_clarity.py`. Сама формула
+`clarity` до появления размеченных данных не меняется.
+
 ## Конфигурация
 
 | Переменная | По умолчанию |

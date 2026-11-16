@@ -109,3 +109,4 @@ src/
 - `openspec/changes/harden-pipeline/` — версия контракта и per-file recovery.
 - `openspec/changes/quality-weights/` — настраиваемые веса `overall`.
 - `openspec/changes/validate-artifacts/` — pydantic-валидация артефактов.
+- `openspec/changes/clarity-data-kit/` — данные для пересмотра clarity.

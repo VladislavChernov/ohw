@@ -39,6 +39,27 @@ _CLARITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+# Names are kept in the same order as the patterns above. They are exposed for
+# the annotation toolkit; the scoring formula itself is unchanged.
+CLARITY_SIGNAL_NAMES: tuple[str, ...] = (
+    "modality",
+    "expectation",
+    "verification",
+    "prohibition",
+    "result",
+)
+
+
+def clarity_signals(text: str) -> tuple[str, ...]:
+    """Return the names of clarity signal categories found in ``text``."""
+    return tuple(
+        name
+        for name, pattern in zip(
+            CLARITY_SIGNAL_NAMES, _CLARITY_PATTERNS, strict=True
+        )
+        if pattern.search(text)
+    )
+
 
 def strip_markdown(text: str) -> str:
     """Drop code fences, table rules and markup so metrics see plain words."""
@@ -72,7 +93,7 @@ def assess_readability(text: str) -> float:
 
 def assess_clarity_goals(text: str) -> float:
     """Share of measurable-objective signal categories present in the text."""
-    score = sum(0.2 for pattern in _CLARITY_PATTERNS if pattern.search(text))
+    score = sum(0.2 for _ in clarity_signals(text))
     return round(min(1.0, score), 3)
 
 

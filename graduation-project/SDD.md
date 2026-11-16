@@ -109,6 +109,7 @@
 | `src/models.py` | `QualityMetrics`, `ScenarioResult`, `PipelineData`, сериализация |
 | `src/generator/` | вендоренное ядро DZ2: загрузка, нормализация, промпты, пресеты, Ollama, валидация, retry, рендер |
 | `src/quality/assessor.py` | детерминированные метрики и агрегация |
+| `src/quality/clarity_kit.py` | экспорт фрагментов и разведочный анализ разметки clarity |
 | `src/visualization/charts.py` | графики matplotlib (`Agg`) |
 | `src/reporting/report_generator.py` | JSON + Markdown |
 | `src/ui/` | Streamlit-рабочее место |
@@ -182,6 +183,8 @@ input/*.md|*.txt
 - `strip_markdown` — удаляет code fences, разделители таблиц, разметку;
 - `assess_readability` — средняя длина предложения;
 - `assess_clarity_goals` — пять категорий измеримых формулировок;
+- `clarity_signals` / `CLARITY_SIGNAL_NAMES` — имена сработавших категорий
+  для инструментов разметки, без изменения формулы;
 - `extract_requirement_ids` / `covered_requirement_ids` — `BR-N`;
 - `assess_scenario_coverage` — покрытие требований;
 - `assess_consistency` — Jaccard повторных генераций;
@@ -190,6 +193,11 @@ input/*.md|*.txt
   весами;
 - `assess_quality` — все метрики одного сценария с необязательными весами;
 - `aggregate_metrics` — средние по сценариям с сохранением `None`.
+
+`src/quality/clarity_kit.py` — не метрика, а инструмент подготовки данных:
+выгружает фрагменты снимка, разбирает разметку, считает согласие разметчиков
+и разведочные связи категорий с человеческой оценкой. Production-формула
+`clarity` им не меняется.
 
 ### 3.3 `src/visualization/charts.py`
 
@@ -607,6 +615,7 @@ CLI переводит эти `ValueError` в код `2` и печатает с�
 - `test_quality.py` — формулы, `None`-семантика, агрегация, веса `overall`;
 - `test_config.py` — парсинг, приоритет и валидация весов;
 - `test_contracts.py` — pydantic-схемы, повреждённый JSON, legacy-примеры;
+- `test_clarity_kit.py` — экспорт фрагментов, kappa, корреляции, CLI;
 - `test_models.py` — snapshot/report-сериализация и legacy без весов;
 - `test_reporting.py` — JSON как источник правды, `n/a`, реальные кейсы;
 - `test_generator.py` — шаблоны, промпты, валидатор, рендер, загрузка;
@@ -620,8 +629,9 @@ CLI переводит эти `ValueError` в код `2` и печатает с�
 uv run pytest
 ```
 
-Unit-тесты не требуют Ollama. Результат на момент документирования:
-`172 passed, 1 skipped`.
+Unit-тесты не требуют Ollama. На момент валидации артефактов результат был
+`172 passed, 1 skipped`; после добавления clarity-kit актуальное число
+публикует CI.
 
 ### 8.2 Integration / e2e
 
@@ -646,7 +656,7 @@ docker run --rm --network ohw_net -v "$PWD:/repo" -w /repo \
   ghcr.io/astral-sh/uv:python3.13-bookworm-slim uv run pytest -m integration
 ```
 
-Результат прогона: `1 passed, 105 deselected`. Средний `overall` на
+Результат прогона: `1 passed, 172 deselected`. Средний `overall` на
 требованиях из SDD — `0.399`; это ожидаемо для плотного формального текста.
 Проверяется структура e2e: генерация, метрики, графики и отчёт созданы.
 
@@ -775,6 +785,7 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | `openspec/changes/add-guard-tests/` | guard-тесты документации и лаунчеров |
 | `openspec/changes/harden-pipeline/` | P0: версионирование и обработка ошибок |
 | `openspec/changes/validate-artifacts/` | pydantic-валидация JSON-артефактов |
+| `openspec/changes/clarity-data-kit/` | данные для пересмотра clarity без смены формулы |
 
 Документы описывают реализованное поведение. Изменения поведения должны
 сопровождаться обновлением соответствующей спеки и этого SDD.
@@ -795,3 +806,4 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | 0.8 | 13.11.2026 | P0 ревью: `pipeline_version` в артефактах, legacy/mismatch, `--continue-on-error` и per-file recovery |
 | 0.9 | 15.11.2026 | P1 ревью: настраиваемые веса `overall` (`--quality-weights`, env, персистентность, legacy); релиз 0.2.0 |
 | 0.10 | 15.11.2026 | Pydantic-валидация `generation.json` и `quality-metrics.json`: контракты, ошибки с путём до поля, legacy-совместимость |
+| 0.11 | 16.11.2026 | Инструменты сбора данных по clarity: экспорт фрагментов, гайд разметки, kappa и train/holdout; формула метрики не изменена |

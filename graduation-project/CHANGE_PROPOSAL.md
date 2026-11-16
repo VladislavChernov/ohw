@@ -30,6 +30,7 @@ CLI + Streamlit интерфейсы. 5 типов артефактов (testcas
 - Пересмотреть 5_patterns × 0.2
 - Weight based on rarity или custom weight
 - Обновить документацию
+- Подготовлены инструменты разметки (`docs/clarity-annotation.md`); без данных метрика не меняется
 
 ### 5. Schema validation — реализовано через pydantic
 - Валидация `generation.json` и `quality-metrics.json` при загрузке
