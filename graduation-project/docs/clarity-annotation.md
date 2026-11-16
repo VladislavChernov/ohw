@@ -130,6 +130,25 @@ uv run python scripts/analyze_clarity.py \
 Если разметка встроена прямо в выборку, `--annotator-a` и `--annotator-b` можно
 не указывать: тогда анализируется один разметчик и kappa будет `n/a`.
 
+### Пилотная выборка
+
+Из одного legacy-снимка `examples/live-run/generation.json` получается 21
+фрагмент при `--min-words 0`. Для пилота на 30 фрагментов добавьте свежий снимок
+из integration-прогона (путь зависит от временной папки pytest):
+
+```bash
+uv run python scripts/export_clarity_sample.py \
+  --input examples/live-run/generation.json \
+  --input <tmp_path>/test_full_pipeline_from_sdd_re0/generation.json \
+  --min-words 0 \
+  --output output/clarity/all.jsonl
+```
+
+Затем отсортируйте записи по `id`, возьмите первые 30 и запишите в
+`output/clarity/pilot-sample.jsonl`. Файлы в `output/` не коммитятся: это
+рабочие материалы разметчиков. Получившийся пилот содержит по 15 фрагментов
+из каждого снимка.
+
 ## 7. Что делать с результатом
 
 1. Если `Cohen's kappa < 0.6`, уточните гайд и повторите разметку. Проблема в
