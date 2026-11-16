@@ -34,4 +34,4 @@
 - [x] `uv run ruff check src tests scripts`
 - [x] `uv run mypy src`
 - [x] Повреждённые снимки дают код `2` без traceback (ручная проверка CLI)
-- [ ] CI на `master` зелёный
+- [x] CI на `master` зелёный (run #100)
