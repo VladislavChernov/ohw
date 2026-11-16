@@ -247,6 +247,7 @@ graduation-project/
 - [`docs/user-guide.md`](docs/user-guide.md) — подробное руководство.
 - [`docs/metrics.md`](docs/metrics.md) — формулы и ограничения метрик.
 - [`docs/demo.md`](docs/demo.md) — пример живого прогона.
+- [`CHANGELOG.md`](CHANGELOG.md) — история версий.
 - [`SDD.md`](SDD.md) — архитектура и дизайн.
 - [`openspec/`](openspec/) — требования и изменения.
 
