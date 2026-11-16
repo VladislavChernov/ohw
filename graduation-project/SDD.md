@@ -712,6 +712,12 @@ components:
 ./infra/up.sh graduation-project --amd    # AMD ROCm
 ```
 
+Windows-лаунчер `run.ps1` предлагает те же режимы: `.\run.ps1` (CPU) и
+`.\run.ps1 -Gpu` (NVIDIA). Переключатель проверяет nvidia-рантайм и подключает
+`compose.gpu.yaml` только при `-Gpu`; `run.sh` остаётся CPU-only и делегирует
+старт инфраструктуры в `infra/up.sh`. Guard-тесты `tests/test_launchers.py`
+не дают оверлею закрепиться в CPU-пути.
+
 `ohw-ollama` слушает `localhost:11434` на хосте и `ohw-ollama:11434` в `ohw_net`.
 Модель `qwen2.5:7b-instruct` скачивается один раз в volume `ohw_ollama_models`.
 
@@ -826,3 +832,4 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | 0.13 | 16.11.2026 | `--dry-run`: подготовка промптов без вызова Ollama |
 | 0.14 | 16.11.2026 | Правила `BR-N` в документации; эвристика консистентности возвращает `n/a` без двух ссылок |
 | 0.15 | 16.11.2026 | Релиз 0.4.0: `--dry-run`, правила `BR-N` и уточнённая эвристика |
+| 0.16 | 16.11.2026 | GPU-режим в Windows-лаунчере `run.ps1 -Gpu`; CPU-путь через `infra/up.sh` |

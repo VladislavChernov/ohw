@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 # Runs the graduation project against the shared infra containers
 # (ohw-ollama + ohw-python:3.13, network ohw_net).
+# CPU only: GPU/AMD modes are selected on Windows with .\run.ps1 -Gpu or in
+# infra/ with up.sh --gpu|--amd.
 set -eu
 cd "$(dirname "$0")"
 
@@ -9,9 +11,14 @@ if [ ! -f ../infra/compose.yaml ]; then
     exit 1
 fi
 
+if [ ! -f ../infra/up.sh ]; then
+    echo "error: ../infra/up.sh not found; this project uses the shared ohw infra" >&2
+    exit 1
+fi
+
 if ! docker inspect --format '{{.State.Running}}' ohw-ollama 2>/dev/null | grep -q true; then
-    echo "starting shared infra (profile ollama)..."
-    docker compose -f ../infra/compose.yaml --profile ollama up -d
+    echo "starting shared infra (ollama, CPU) via infra/up.sh..."
+    bash ../infra/up.sh .
 fi
 
 i=0

@@ -161,7 +161,8 @@ docker run --rm --network ohw_net -v "$PWD:/repo" -w /repo \
 
 ## Как воспроизвести
 
-1. Запустить общий стенд: `./infra/up.sh graduation-project` (или `.\run.ps1`).
+1. Запустить общий стенд: `./infra/up.sh graduation-project` (или `.\run.ps1`;
+   для NVIDIA — `.\run.ps1 -Gpu`).
 2. Убедиться, что модель доступна: `docker exec ohw-ollama ollama list`.
 3. Выполнить команду из раздела «Команда».
 4. Открыть `output/live/report.md` и `output/live/charts/*.png`.

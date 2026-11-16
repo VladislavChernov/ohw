@@ -32,7 +32,8 @@ input/*.md ──▶ generate ──▶ scenarios/*.md + generation.json
 
 ```powershell
 cd graduation-project
-.\run.ps1
+.\run.ps1              # CPU
+.\run.ps1 -Gpu         # NVIDIA CUDA, нужны драйвер и NVIDIA Container Toolkit
 ```
 
 Скрипт сам поднимет общий `ohw-ollama`, соберёт приложение и выполнит полный
@@ -233,6 +234,9 @@ python -m src.workflow --quality-weights \
 ./infra/up.sh graduation-project --gpu    # NVIDIA
 ./infra/up.sh graduation-project --amd    # AMD ROCm
 ```
+
+Тот же выбор есть в Windows-лаунчере: `.\run.ps1` (CPU) и `.\run.ps1 -Gpu`
+(NVIDIA). `run.sh` остаётся CPU-only и вызывает `infra/up.sh`.
 
 `compose.yaml` проекта содержит сервисы `app` (CLI) и `ui` (Streamlit),
 подключает внешнюю сеть `ohw_net` и обращается к Ollama по

@@ -3,10 +3,12 @@
 The contract has three parts:
 
 * ``run.ps1`` stays ASCII-only (Windows PowerShell 5.1 misparses UTF-8 without
-  a BOM) and starts ``ohw-ollama`` from ``../infra`` when it is not running;
+  a BOM), starts ``ohw-ollama`` from ``../infra`` when it is not running, and
+  offers an opt-in ``-Gpu`` mode with the shared CUDA overlay;
 * with CLI arguments the launcher uses ``compose run``, without arguments it
   uses ``compose up --abort-on-container-exit``;
-* ``run.cmd`` delegates to ``run.ps1`` and ``run.sh`` stays POSIX-shell valid.
+* ``run.cmd`` delegates to ``run.ps1`` and ``run.sh`` stays POSIX-shell valid
+  and CPU-only, delegating infra startup to ``../infra/up.sh``.
 
 The tests read the files as bytes and never start Docker.
 """
@@ -29,6 +31,13 @@ def _text(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _code_lines(text: str) -> str:
+    """Strip comments: an overlay mentioned in a comment is not connected."""
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
 def test_run_ps1_is_ascii_only() -> None:
     raw = RUN_PS1.read_bytes()
     non_ascii = [(index, byte) for index, byte in enumerate(raw) if byte > 127]
@@ -41,7 +50,7 @@ def test_run_ps1_is_ascii_only() -> None:
 def test_run_ps1_starts_shared_infra_and_waits_for_health() -> None:
     text = _text(RUN_PS1)
     assert "..\\infra\\compose.yaml" in text
-    assert "--profile ollama" in text
+    assert "'--profile', 'ollama'" in text
     assert "ohw-ollama" in text
     assert "State.Health" in text
     assert "healthy" in text
@@ -61,13 +70,37 @@ def test_run_cmd_delegates_to_powershell_launcher() -> None:
     assert "%ERRORLEVEL%" in text
 
 
+def test_run_ps1_offers_gpu_mode() -> None:
+    text = _text(RUN_PS1)
+    assert "[switch]$Gpu" in text, "нет переключателя GPU-режима"
+    assert "compose.gpu.yaml" in text, "GPU-режим не подключает CUDA-оверлей"
+    assert '"nvidia"' in text, "нет проверки nvidia-рантайма"
+    assert "NVIDIA GPU" in text and "CPU" in text, "режим не печатается"
+
+
+def test_run_ps1_uses_gpu_overlay_only_in_gpu_mode() -> None:
+    overlay_lines = [
+        line
+        for line in _code_lines(_text(RUN_PS1)).splitlines()
+        if "compose.gpu.yaml" in line
+    ]
+    assert len(overlay_lines) == 1, "оверлей должен подключаться в одном месте"
+    assert "if ($Gpu)" in overlay_lines[0], "оверлей подключается безусловно"
+
+
 def test_run_sh_starts_shared_infra_and_passes_arguments() -> None:
-    text = _text(RUN_SH)
-    assert "../infra/compose.yaml" in text
-    assert "--profile ollama" in text
+    text = _code_lines(_text(RUN_SH))
+    assert "bash ../infra/up.sh ." in text
     assert "ohw-ollama" in text
     assert "docker compose run" in text
     assert "docker compose up" in text
+
+
+def test_run_sh_is_cpu_only() -> None:
+    text = _code_lines(_text(RUN_SH))
+    assert "compose.gpu.yaml" not in text
+    assert "--gpu" not in text
+    assert "--amd" not in text
 
 
 @pytest.mark.skipif(shutil.which("sh") is None, reason="POSIX shell is not available")

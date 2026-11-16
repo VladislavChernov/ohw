@@ -18,18 +18,19 @@ Invoke-RestMethod http://localhost:11434/api/tags
 ### Docker (общий стенд)
 
 ```powershell
-.\run.ps1
+.\run.ps1              # CPU
+.\run.ps1 -Gpu         # NVIDIA CUDA
 ```
 
 Скрипт:
 
-1. проверяет сеть `ohw_net`;
-2. при необходимости выполняет
-   `docker compose -f ../infra/compose.yaml --profile ollama up -d`;
+1. проверяет сеть `ohw_net` и, для `-Gpu`, nvidia-рантайм Docker;
+2. при необходимости поднимает `ohw-ollama` из `../infra`, добавляя оверлей
+   `..\infra\compose.gpu.yaml` только в режиме `-Gpu`;
 3. собирает образ приложения из `ohw-python:3.13`;
 4. запускает `app` с фазами `generate → assess → visualize → report`.
 
-Linux/macOS — `./run.sh`. Для cmd — `run.cmd`.
+Linux/macOS — `./run.sh` (CPU, через `infra/up.sh`). Для cmd — `run.cmd`.
 
 Передать свои аргументы CLI:
 

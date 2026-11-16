@@ -5,9 +5,14 @@
 .DESCRIPTION
   Uses ohw-ollama and the ohw-python:3.13 base image from ..\infra.
   Generated files appear in .\output.
+
+  .\run.ps1              CPU ollama
+  .\run.ps1 -Gpu         NVIDIA CUDA ollama (requires NVIDIA runtime)
+  .\run.ps1 --count 5    arguments are passed to the compose app service
 #>
 [CmdletBinding()]
 param(
+    [switch]$Gpu,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $Arguments
 )
@@ -30,9 +35,26 @@ if ($networkExists) {
     $ollamaRunning = ($state -eq "true")
 }
 
-if (-not $ollamaRunning) {
-    Write-Host "Starting shared infra (profile ollama)..."
-    docker compose -f ..\infra\compose.yaml --profile ollama up -d
+$infraMode = if ($Gpu) { 'NVIDIA GPU' } else { 'CPU' }
+Write-Host "Infra mode: $infraMode"
+
+if ($Gpu) {
+    $runtimes = & docker info --format '{{json .Runtimes}}' 2>$null
+    if ($LASTEXITCODE -ne 0 -or "$runtimes" -notmatch '"nvidia"') {
+        Write-Error "Docker has no NVIDIA runtime. Install NVIDIA Container Toolkit and enable GPU support in Docker Desktop, or run without -Gpu."
+        exit 1
+    }
+}
+
+$needStart = -not $ollamaRunning
+if ($Gpu) { $needStart = $true }
+if ($needStart) {
+    $infraArgs = @('compose', '-f', '..\infra\compose.yaml')
+    if ($Gpu) { $infraArgs += @('-f', '..\infra\compose.gpu.yaml') }
+    $infraArgs += @('--profile', 'ollama', 'up', '-d')
+    if ($Gpu -and $ollamaRunning) { $infraArgs += '--force-recreate' }
+    Write-Host ("Starting shared infra: docker " + ($infraArgs -join ' '))
+    & docker @infraArgs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
