@@ -183,8 +183,9 @@ def collect_annotations(path: Path) -> dict[str, Annotation]:
         identifier = raw.get("id")
         if not isinstance(identifier, str) or not identifier:
             raise ValueError(f"{path.name}:{index}: нет поля id")
+        annotation = raw["annotation"] if "annotation" in raw else raw
         result[identifier] = parse_annotation(
-            raw, source=f"{path.name}:{index} ({identifier})"
+            annotation, source=f"{path.name}:{index} ({identifier})"
         )
     return result
 
