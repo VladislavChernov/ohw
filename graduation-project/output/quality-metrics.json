@@ -1,0 +1,138 @@
+{
+  "project": "graduation-project",
+  "version": "0.7.0",
+  "pipeline_version": "0.1.0",
+  "input_dir": "input",
+  "artifact_type": "testcases",
+  "model": "qwen2.5:7b-instruct",
+  "runs": 2,
+  "count": 4,
+  "temperature": 0.2,
+  "normalize": false,
+  "presets": [],
+  "generated_at": "2026-11-17T12:11:15+00:00",
+  "quality_weights": {
+    "readability": 0.25,
+    "clarity_goals": 0.25,
+    "scenario_coverage": 0.3,
+    "consistency": 0.2
+  },
+  "total_scenarios": 1,
+  "successful": 0,
+  "unsuccessful": 1,
+  "quality_threshold": 0.5,
+  "averages": {
+    "readability": 0.0,
+    "clarity_goals": 0.6,
+    "scenario_coverage": 0.6,
+    "consistency": 0.607,
+    "overall": 0.451
+  },
+  "charts": {
+    "boxplot": "charts/metrics_boxplot.png",
+    "radar": "charts/radar_chart.png",
+    "per_scenario": "charts/per_scenario_scores.png"
+  },
+  "errors": [],
+  "scenarios": [
+    {
+      "id": 1,
+      "filename": "registration-requirements.md",
+      "artifact_type": "testcases",
+      "output_file": "output/scenarios/registration-requirements.md",
+      "quality": {
+        "readability": 0.0,
+        "clarity_goals": 0.6,
+        "scenario_coverage": 0.6,
+        "consistency": 0.607,
+        "overall": 0.451
+      },
+      "requirement_ids": [
+        "BR-1",
+        "BR-2",
+        "BR-3",
+        "BR-4",
+        "BR-5"
+      ],
+      "cases_with_requirements": [
+        "BR-2",
+        "BR-3",
+        "BR-5"
+      ],
+      "prompt_sha256": "7058245ae191d02aab1187e5c477834ac29d7bda32f01e2566670ea4168e160a",
+      "attempts": 1,
+      "runs": 2,
+      "case_summaries": [
+        {
+          "id": "TC-01",
+          "type": "positive",
+          "title": "Успешная регистрация с корректными данными",
+          "preconditions": [
+            "Пользователь на странице регистрации"
+          ],
+          "steps": [
+            "Открыть страницу регистрации",
+            "Заполнить поле 'Email' корректным email-адресом",
+            "Заполнить поле 'Пароль' паролем, содержащим не менее 8 символов, одну цифру и одну заглавную букву",
+            "Заполнить поле 'Повтор пароля' тем же паролем",
+            "Нажать кнопку 'Зарегистрироваться'"
+          ],
+          "expected": "Появляется сообщение об успешной регистрации, пользователь перенаправляется на страницу личного кабинета",
+          "requirement": "BR-5"
+        },
+        {
+          "id": "TC-02",
+          "type": "positive",
+          "title": "Успешная регистрация с минимальными требованиями",
+          "preconditions": [
+            "Пользователь на странице регистрации"
+          ],
+          "steps": [
+            "Открыть страницу регистрации",
+            "Заполнить поле 'Email' корректным email-адресом",
+            "Заполнить поле 'Пароль' паролем, содержащим не менее 8 символов, одну цифру и одну заглавную букву",
+            "Заполнить поле 'Повтор пароля' тем же паролем",
+            "Нажать кнопку 'Зарегистрироваться'"
+          ],
+          "expected": "Появляется сообщение об успешной регистрации, пользователь перенаправляется на страницу личного кабинета",
+          "requirement": "BR-5"
+        },
+        {
+          "id": "TC-03",
+          "type": "negative",
+          "title": "Ошибка валидации email",
+          "preconditions": [
+            "Пользователь на странице регистрации"
+          ],
+          "steps": [
+            "Открыть страницу регистрации",
+            "Заполнить поле 'Email' некорректным email-адресом",
+            "Заполнить поле 'Пароль' паролем, содержащим не менее 8 символов, одну цифру и одну заглавную букву",
+            "Заполнить поле 'Повтор пароля' тем же паролем",
+            "Нажать кнопку 'Зарегистрироваться'"
+          ],
+          "expected": "Появляется сообщение «Введите корректный email»",
+          "requirement": "BR-2"
+        },
+        {
+          "id": "TC-04",
+          "type": "negative",
+          "title": "Ошибка валидации пароля",
+          "preconditions": [
+            "Пользователь на странице регистрации"
+          ],
+          "steps": [
+            "Открыть страницу регистрации",
+            "Заполнить поле 'Email' корректным email-адресом",
+            "Заполнить поле 'Пароль' паролем, содержащим менее 8 символов",
+            "Заполнить поле 'Повтор пароля' тем же паролем",
+            "Нажать кнопку 'Зарегистрироваться'"
+          ],
+          "expected": "Появляется сообщение «Пароль слишком простой»",
+          "requirement": "BR-3"
+        }
+      ],
+      "error": null
+    }
+  ]
+}
