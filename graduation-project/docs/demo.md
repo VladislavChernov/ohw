@@ -179,3 +179,31 @@ docker run --rm --network ohw_net -v "$PWD:/repo" -w /repo \
 3. Выполнить команду из раздела «Команда».
 4. Открыть `output/live/report.md` и `output/live/charts/*.png`.
    Зафиксированные артефакты находятся в `output/`.
+
+## Запуск Streamlit-рабочего места
+
+Отдельных скриптов `run-ui.ps1` / `run-ui.sh` нет. Launcher'ы `run-cpu.ps1`,
+`run-gpu.ps1` и `run.sh` запускают **CLI-пайплайн**. UI стартует как Python-модуль
+`src.ui`: внутри он выполняет `streamlit run src/ui/app.py` на `0.0.0.0:8501`.
+
+Локально, при уже доступной Ollama:
+
+```bash
+uv run python -m src.ui
+# открыть http://localhost:8501
+```
+
+Через Docker, если поднять сервис `ui` из `compose.yaml`:
+
+```bash
+docker compose up -d ui
+# открыть http://localhost:8501
+```
+
+Сервис `ui` подключается к `ohw-ollama` внутри сети `ohw_net`, поэтому общий
+стенд должен быть поднят — например, `.\run-gpu.ps1` или `./infra/up.sh . --gpu`.
+При старте UI сетевых запросов не делает: кнопка «Загрузить модели» в сайдбаре
+выполняет опрос Ollama явно.
+
+В UI пять вкладок: требования, промпт, генерация, метрики и отчёт. Веса `overall`
+и кнопка «Очистить состояние» находятся в сайдбаре.
