@@ -11,6 +11,7 @@
 - `scripts/annotation_worksheet.py` — читаемый Markdown-лист разметки для
   одного человека и сборка заполненных ответов обратно в JSONL.
 - `docs/defense-demo.md` — пошаговый сценарий демонстрации проекта на защите.
+- Тонкие Windows-обёртки `run-cpu.ps1` и `run-gpu.ps1` над `run.ps1`.
 
 ### Изменено
 

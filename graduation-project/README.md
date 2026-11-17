@@ -32,9 +32,13 @@ input/*.md ──▶ generate ──▶ scenarios/*.md + generation.json
 
 ```powershell
 cd graduation-project
-.\run.ps1              # CPU
-.\run.ps1 -Gpu         # NVIDIA CUDA, нужны драйвер и NVIDIA Container Toolkit
+.\run-cpu.ps1        # CPU-режим
+.\run-gpu.ps1        # NVIDIA GPU
 ```
+
+Оба файла — тонкие обёртки над `run.ps1`; аргументы CLI передаются дальше,
+например `.\run-gpu.ps1 --count 5 --runs 2`. Раньше использовался один
+`run.ps1 -Gpu` — он по-прежнему работает.
 
 Скрипт сам поднимет общий `ohw-ollama`, соберёт приложение и выполнит полный
 пайплайн. Первый запуск скачивает модель и Python-зависимости, это может занять

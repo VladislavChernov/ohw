@@ -647,7 +647,7 @@ uv run pytest
 ```
 
 Unit-тесты не требуют Ollama. Актуальный результат на момент релиза 0.7.0 —
-`223 passed, 1 skipped`.
+`224 passed, 1 skipped`.
 
 ### 8.2 Integration / e2e
 
@@ -720,10 +720,9 @@ components:
 ./infra/up.sh graduation-project --amd    # AMD ROCm
 ```
 
-Windows-лаунчер `run.ps1` предлагает те же режимы: `.\run.ps1` (CPU) и
-`.\run.ps1 -Gpu` (NVIDIA). Переключатель проверяет nvidia-рантайм и подключает
-`compose.gpu.yaml` только при `-Gpu`; `run.sh` остаётся CPU-only и делегирует
-старт инфраструктуры в `infra/up.sh`. Guard-тесты `tests/test_launchers.py`
+Три лаунчера на Windows PowerShell: `run-cpu.ps1`, `run-gpu.ps1` и базовый
+`run.ps1` с флагом `-Gpu`. Обёртки не дублируют логику, а вызывают базовый
+скрипт; `run.cmd` остаётся точкой входа для cmd. Guard-тесты `tests/test_launchers.py`
 не дают оверлею закрепиться в CPU-пути.
 
 `ohw-ollama` слушает `localhost:11434` на хосте и `ohw-ollama:11434` в `ohw_net`.
@@ -761,7 +760,8 @@ ENTRYPOINT ["uv", "run", "--no-dev", "python", "-m", "src.workflow.main"]
 
 ### 9.4 Скрипты запуска
 
-- `run.ps1` (Windows PowerShell), `run.cmd` (cmd), `run.sh` (Linux/macOS);
+- `run-cpu.ps1`, `run-gpu.ps1` и базовый `run.ps1` (Windows PowerShell),
+  `run.cmd` (cmd), `run.sh` (Linux/macOS, CPU);
 - если сети `ohw_net` нет, скрипт поднимает `infra/compose.yaml --profile ollama`;
 - затем `docker compose up --build --abort-on-container-exit
   --exit-code-from app`;
@@ -849,3 +849,4 @@ uv run python -m src.workflow --input-dir input --output-dir output
 | 0.21 | 17.11.2026 | Релиз 0.7.0: доделанное рабочее место UI |
 | 0.22 | 17.11.2026 | Читаемый Markdown-лист для одного разметчика clarity и сборка ответов в JSONL |
 | 0.23 | 17.11.2026 | Финальная проверка UI и clarity-листа; решение оставить формулу clarity без изменений |
+| 0.24 | 17.11.2026 | Тонкие Windows-обёртки `run-cpu.ps1` и `run-gpu.ps1` над `run.ps1` |

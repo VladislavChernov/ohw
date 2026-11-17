@@ -23,7 +23,7 @@
 
 ## Проверки
 
-- [x] `uv run pytest` — `223 passed, 1 skipped` (финальная проверка)
+- [x] `uv run pytest` — `224 passed, 1 skipped` (финальная проверка)
 - [x] `uv run ruff check src tests scripts`
 - [x] `uv run mypy src`
 - [x] `uv lock --check`

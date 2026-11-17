@@ -23,6 +23,8 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PS1 = ROOT / "run.ps1"
+RUN_CPU_PS1 = ROOT / "run-cpu.ps1"
+RUN_GPU_PS1 = ROOT / "run-gpu.ps1"
 RUN_CMD = ROOT / "run.cmd"
 RUN_SH = ROOT / "run.sh"
 
@@ -61,6 +63,20 @@ def test_run_ps1_passes_arguments_via_compose_run() -> None:
     assert '"run", "--rm", "--build", "app"' in text
     assert '"--abort-on-container-exit"' in text
     assert '"--exit-code-from", "app"' in text
+
+
+def test_windows_wrappers_delegate_to_run_ps1() -> None:
+    cpu = _code_lines(_text(RUN_CPU_PS1))
+    gpu = _code_lines(_text(RUN_GPU_PS1))
+    assert "run.ps1" in cpu and "run.ps1" in gpu
+    assert "@args" in cpu and "@args" in gpu
+    assert "-Gpu" not in cpu, "CPU wrapper must not enable GPU mode"
+    assert "-Gpu" in gpu, "GPU wrapper must enable GPU mode"
+    for path in (RUN_CPU_PS1, RUN_GPU_PS1):
+        raw = path.read_bytes()
+        assert not [byte for byte in raw if byte > 127], f"{path.name} must be ASCII"
+        body = _text(path).split("#>", maxsplit=1)[-1]
+        assert _code_lines(body).count("run.ps1") == 1
 
 
 def test_run_cmd_delegates_to_powershell_launcher() -> None:

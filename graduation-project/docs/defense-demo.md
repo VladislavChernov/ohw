@@ -36,14 +36,17 @@ input/ → generate → scenarios/*.md + generation.json
 
 ```powershell
 cd D:\Otus\ohw\graduation-project
-.\run.ps1 -Gpu          # NVIDIA; .\run.ps1 — CPU
+.\run-cpu.ps1           # CPU
+.\run-gpu.ps1           # NVIDIA CUDA
 ```
 
+Это тонкие обёртки над `run.ps1`; базовый скрипт с флагом `-Gpu` тоже работает.
 Что сказать:
 
 - общий стенд живёт в `infra/`: `ohw-ollama`, образ `ohw-python:3.13`, сеть `ohw_net`;
 - модель уже лежит в volume `ohw_ollama_models`, повторной загрузки нет;
-- `run.ps1 -Gpu` проверяет nvidia-рантайм и подключает `compose.gpu.yaml`;
+- `run-gpu.ps1` (через `run.ps1 -Gpu`) проверяет nvidia-рантайм и подключает
+  `compose.gpu.yaml`;
 - после проверки стенд выключается, volume сохраняется.
 
 Если Docker поднимать нельзя — показать офлайн-часть из раздела 4.
