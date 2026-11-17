@@ -283,7 +283,8 @@ graduation-project/
 ├── Dockerfile
 ├── compose.yaml
 ├── infra.yaml
-└── run.ps1 / run.sh / run.cmd
+├── run-cpu.ps1 / run-gpu.ps1 / run.ps1   # Windows
+└── run.sh / run.cmd                      # Linux/macOS and cmd
 ```
 
 ## Документация

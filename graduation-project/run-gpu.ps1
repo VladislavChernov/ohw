@@ -7,5 +7,6 @@
   Example: .\run-gpu.ps1 --count 5 --runs 2
 #>
 $ErrorActionPreference = "Stop"
-& (Join-Path $PSScriptRoot "run.ps1") -Gpu @args
+$forward = @($args | Where-Object { $_ -notmatch '^(?i)-gpu$' })
+& (Join-Path $PSScriptRoot "run.ps1") -Gpu @forward
 exit $LASTEXITCODE

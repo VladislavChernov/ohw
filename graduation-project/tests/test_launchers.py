@@ -66,17 +66,29 @@ def test_run_ps1_passes_arguments_via_compose_run() -> None:
 
 
 def test_windows_wrappers_delegate_to_run_ps1() -> None:
-    cpu = _code_lines(_text(RUN_CPU_PS1))
-    gpu = _code_lines(_text(RUN_GPU_PS1))
+    cpu_text = _text(RUN_CPU_PS1)
+    gpu_text = _text(RUN_GPU_PS1)
+    cpu = _code_lines(cpu_text.split("#>", maxsplit=1)[-1])
+    gpu = _code_lines(gpu_text.split("#>", maxsplit=1)[-1])
     assert "run.ps1" in cpu and "run.ps1" in gpu
-    assert "@args" in cpu and "@args" in gpu
-    assert "-Gpu" not in cpu, "CPU wrapper must not enable GPU mode"
-    assert "-Gpu" in gpu, "GPU wrapper must enable GPU mode"
+    assert "@args" in cpu or "run.ps1" in cpu
+    assert "run.ps1" in gpu
+    assert "Where-Object" in gpu, "GPU wrapper must de-duplicate -Gpu"
+    assert "does not accept -Gpu" in cpu, "CPU wrapper must reject -Gpu"
     for path in (RUN_CPU_PS1, RUN_GPU_PS1):
         raw = path.read_bytes()
         assert not [byte for byte in raw if byte > 127], f"{path.name} must be ASCII"
         body = _text(path).split("#>", maxsplit=1)[-1]
         assert _code_lines(body).count("run.ps1") == 1
+        assert "compose.gpu.yaml" not in body, "overlays belong to run.ps1 only"
+
+
+def test_gpu_wrapper_forwards_explicit_flags() -> None:
+    body = _code_lines(_text(RUN_GPU_PS1).split("#>", maxsplit=1)[-1])
+    assert "-Gpu @forward" in body, "GPU mode must be passed to run.ps1"
+
+    cpu_body = _code_lines(_text(RUN_CPU_PS1).split("#>", maxsplit=1)[-1])
+    assert "-Gpu @args" not in cpu_body, "CPU wrapper must not enable GPU mode"
 
 
 def test_run_cmd_delegates_to_powershell_launcher() -> None:

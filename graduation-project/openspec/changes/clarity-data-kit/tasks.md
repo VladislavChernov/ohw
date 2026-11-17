@@ -32,7 +32,7 @@
 
 ## Проверки
 
-- [x] `uv run pytest` — `224 passed, 1 skipped`
+- [x] `uv run pytest` — `225 passed, 1 skipped`
 - [x] `uv run ruff check src tests scripts` — проходит в CI
 - [x] `uv run mypy src` — проходит в CI
 - [x] CI на `master` зелёный (run #104)

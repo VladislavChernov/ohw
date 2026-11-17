@@ -646,8 +646,8 @@ CLI переводит эти `ValueError` в код `2` и печатает с�
 uv run pytest
 ```
 
-Unit-тесты не требуют Ollama. Актуальный результат на момент релиза 0.7.0 —
-`224 passed, 1 skipped`.
+Unit-тесты не требуют Ollama. Актуальный результат после релиза 0.7.0 —
+`225 passed, 1 skipped`.
 
 ### 8.2 Integration / e2e
 
@@ -763,8 +763,9 @@ ENTRYPOINT ["uv", "run", "--no-dev", "python", "-m", "src.workflow.main"]
 - `run-cpu.ps1`, `run-gpu.ps1` и базовый `run.ps1` (Windows PowerShell),
   `run.cmd` (cmd), `run.sh` (Linux/macOS, CPU);
 - если сети `ohw_net` нет, скрипт поднимает `infra/compose.yaml --profile ollama`;
-- затем `docker compose up --build --abort-on-container-exit
-  --exit-code-from app`;
+- если вызов без аргументов — `docker compose up --build
+  --abort-on-container-exit --exit-code-from app`; с аргументами CLI —
+  `docker compose run --rm --build app <аргументы>`;
 - результаты монтируются в `./output`, требования — из `./input`.
 
 ### 9.5 Локальный запуск без Docker
