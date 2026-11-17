@@ -18,9 +18,11 @@ from src.quality.clarity_kit import (
     fragment_id,
     is_train,
     parse_annotation,
+    parse_worksheet,
     pearson,
     read_jsonl,
     render_report,
+    render_worksheet,
     split_fragments,
     weighted_kappa,
     write_jsonl,
@@ -235,3 +237,60 @@ def test_export_and_analyze_scripts(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "Корреляция текущей метрики" in result.stdout
+
+
+def test_annotation_worksheet_roundtrip() -> None:
+    records = [
+        {
+            "id": "a1b2c3d4e5f6",
+            "text": "### TC-01\nBR-1. Система должна проверять форму.",
+            "scenario": "req.md",
+            "run_index": 1,
+        },
+        {
+            "id": "f6e5d4c3b2a1",
+            "text": "## Позитивные сценарии",
+            "scenario": "req.md",
+            "run_index": None,
+        },
+    ]
+    worksheet = render_worksheet(records, "human-1")
+    assert "Разметчик: **human-1**" in worksheet
+    assert worksheet.count("- [ ] measurable: true") == 2
+
+    first, second = worksheet.split("## 2.")
+    first = (
+        first.replace("- [ ] measurable: true", "- [x] measurable: true", 1)
+        .replace("- [ ] signal: modality", "- [x] signal: modality", 1)
+        .replace("- [ ] signal: result", "- [x] signal: result", 1)
+        .replace("- [ ] rating: 4", "- [x] rating: 4", 1)
+    )
+    second = (
+        second.replace("- [ ] measurable: false", "- [x] measurable: false", 1)
+        .replace("- [ ] rating: 1", "- [x] rating: 1", 1)
+    )
+    parsed = parse_worksheet(first + "## 2." + second, "human-1")
+
+    assert len(parsed) == 2
+    assert parsed[0]["annotation"]["measurable"] is True
+    assert parsed[0]["annotation"]["signals"] == ["modality", "result"]
+    assert parsed[0]["annotation"]["rating"] == 4
+    assert parsed[0]["text"] == records[0]["text"] + "\n"
+    assert parsed[1]["annotation"]["measurable"] is False
+    assert parsed[1]["run_index"] is None
+
+
+def test_worksheet_requires_measurable_and_rating() -> None:
+    worksheet = render_worksheet(
+        [
+            {
+                "id": "a1b2c3d4e5f6",
+                "text": "BR-1",
+                "scenario": "req.md",
+                "run_index": None,
+            }
+        ],
+        "human-1",
+    )
+    with pytest.raises(ValueError, match="measurable"):
+        parse_worksheet(worksheet, "human-1")

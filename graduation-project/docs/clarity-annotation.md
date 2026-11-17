@@ -114,6 +114,31 @@
 Поле `id` копируется из выгрузки и не меняется. Один разметчик — один файл
 `annotations-alice.jsonl`, `annotations-bob.jsonl`.
 
+### Читаемый рабочий лист
+
+Для одного разметчика удобнее Markdown-лист `output/clarity/human-annotations.md`.
+В нём текст каждого фрагмента приведён в цитате, а ниже — чекбоксы:
+
+```text
+- [ ] measurable: true / false
+- [ ] signal: modality / expectation / verification / prohibition / result
+- [ ] rating: 1 … 5
+```
+
+Отмечайте нужные строки как `[x]`; ID и текст менять нельзя. После заполнения
+соберите JSONL:
+
+```bash
+uv run python scripts/annotation_worksheet.py parse \
+  --worksheet output/clarity/human-annotations.md \
+  --annotator annotator-1 \
+  --output output/clarity/human-annotations.jsonl
+```
+
+Скрипт проверит, что отмечены ровно одно `measurable` и один `rating`, и что
+сигналы относятся к пяти допустимым именам. Затем используйте этот JSONL в
+`analyze_clarity.py`.
+
 ## 6. Порядок работы
 
 ```bash
