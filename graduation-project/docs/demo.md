@@ -190,6 +190,7 @@ docker run --rm --network ohw_net -v "$PWD:/repo" -w /repo \
 
 ```bash
 uv run python -m src.ui
+# или: .\run-ui.ps1 (Windows), ./run-ui.sh (Linux/macOS)
 # открыть http://localhost:8501
 ```
 

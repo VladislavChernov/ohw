@@ -25,6 +25,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUN_PS1 = ROOT / "run.ps1"
 RUN_CPU_PS1 = ROOT / "run-cpu.ps1"
 RUN_GPU_PS1 = ROOT / "run-gpu.ps1"
+RUN_UI_PS1 = ROOT / "run-ui.ps1"
+RUN_UI_SH = ROOT / "run-ui.sh"
 RUN_CMD = ROOT / "run.cmd"
 RUN_SH = ROOT / "run.sh"
 
@@ -89,6 +91,15 @@ def test_gpu_wrapper_forwards_explicit_flags() -> None:
 
     cpu_body = _code_lines(_text(RUN_CPU_PS1).split("#>", maxsplit=1)[-1])
     assert "-Gpu @args" not in cpu_body, "CPU wrapper must not enable GPU mode"
+
+
+def test_ui_wrappers_start_streamlit_module() -> None:
+    ps1 = _code_lines(_text(RUN_UI_PS1).split("#>", maxsplit=1)[-1])
+    sh = _code_lines(_text(RUN_UI_SH))
+    assert "uv run python -m src.ui" in ps1
+    assert "uv run python -m src.ui" in sh
+    assert not [byte for byte in RUN_UI_PS1.read_bytes() if byte > 127]
+    assert "compose.gpu.yaml" not in ps1 + sh
 
 
 def test_run_cmd_delegates_to_powershell_launcher() -> None:

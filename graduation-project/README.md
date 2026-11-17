@@ -120,6 +120,8 @@ python -m src.workflow --dry-run --input-dir input --output-dir output/prompts
 
 ```bash
 uv run python -m src.ui          # http://localhost:8501
+.\run-ui.ps1                     # Windows: тонкая обертка
+./run-ui.sh                      # Linux/macOS: тонкая обертка
 docker compose up -d ui          # тот же адрес, общий стенд ohw_net
 ```
 

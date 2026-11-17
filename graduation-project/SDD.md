@@ -647,7 +647,7 @@ uv run pytest
 ```
 
 Unit-тесты не требуют Ollama. Актуальный результат после релиза 0.7.0 —
-`225 passed, 1 skipped`.
+`225 passed, 2 skipped` (окружение с `sh`).
 
 ### 8.2 Integration / e2e
 
@@ -760,8 +760,8 @@ ENTRYPOINT ["uv", "run", "--no-dev", "python", "-m", "src.workflow.main"]
 
 ### 9.4 Скрипты запуска
 
-- `run-cpu.ps1`, `run-gpu.ps1` и базовый `run.ps1` (Windows PowerShell),
-  `run.cmd` (cmd), `run.sh` (Linux/macOS, CPU);
+- `run-cpu.ps1`, `run-gpu.ps1`, `run-ui.ps1` (Windows PowerShell),
+  `run.cmd` (cmd), `run.sh`, `run-ui.sh` (Linux/macOS, CPU);
 - если сети `ohw_net` нет, скрипт поднимает `infra/compose.yaml --profile ollama`;
 - если вызов без аргументов — `docker compose up --build
   --abort-on-container-exit --exit-code-from app`; с аргументами CLI —
