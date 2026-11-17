@@ -128,8 +128,9 @@ python -m src.workflow --assess --output-dir output/live
 RUN_OLLAMA_INTEGRATION=1 uv run pytest -m integration
 ```
 
-Зафиксированный результат integration: `1 passed, 208 deselected in 13.86s`,
-`overall = 0.382`, `consistency = 0.618` при `runs = 2`.
+Зафиксированный результат integration на хосте: `1 passed, 208 deselected in 13.86s`,
+`overall = 0.382`, `consistency = 0.618` при `runs = 2`. Последняя проверка
+стенда в Docker: `1 passed, 223 deselected in 166.56s`.
 
 `output/prompts/` содержит `<stem>.system.txt`, `<stem>.user.txt` и `manifest.json`
 с SHA-256 пользовательского промпта. Это удобно показывать как «инженерный

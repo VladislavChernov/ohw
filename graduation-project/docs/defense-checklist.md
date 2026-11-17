@@ -42,7 +42,8 @@ RUN_OLLAMA_INTEGRATION=1 uv run pytest -m integration
 ```
 
 Результат того прогона: `1 passed, 208 deselected in 13.86s`,
-`overall = 0.382`, `consistency = 0.618` при `runs = 2`.
+`overall = 0.382`, `consistency = 0.618` при `runs = 2`. Стенд затем был
+проверен повторно в Docker: `1 passed, 223 deselected in 166.56s`.
 
 ---
 

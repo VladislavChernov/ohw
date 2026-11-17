@@ -672,9 +672,10 @@ docker run --rm --network ohw_net -v "$PWD:/repo" -w /repo \
   ghcr.io/astral-sh/uv:python3.13-bookworm-slim uv run pytest -m integration
 ```
 
-Результат живого прогона на GPU: `1 passed, 208 deselected in 13.86s`. Средний
-`overall` на требованиях из SDD — `0.382`, `consistency = 0.618` при `runs = 2`;
-это ожидаемо для плотного формального текста. Проверяется структура e2e:
+Результат живого прогона на GPU: `1 passed, 223 deselected in 166.56s`
+(последняя проверка в Docker; на хосте ранее `1 passed, 208 deselected in 13.86s`).
+Средний `overall` на требованиях из SDD — `0.382`, `consistency = 0.618` при
+`runs = 2`; это ожидаемо для плотного формального текста. Проверяется структура e2e:
 генерация, метрики, графики и отчёт созданы.
 
 ### 8.3 Статический анализ

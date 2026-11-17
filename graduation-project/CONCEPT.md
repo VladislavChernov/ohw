@@ -170,7 +170,7 @@ input/*.md|.txt
 | NVIDIA GPU | `.\run.ps1 -Gpu` / `./infra/up.sh graduation-project --gpu` |
 | AMD ROCm | `./infra/up.sh graduation-project --amd` |
 
-Проверенный живой прогон на SDD-требованиях: `1 passed, 208 deselected`,
+Проверенный живой прогон на SDD-требованиях: `1 passed, 223 deselected`,
 `overall = 0.382`, `consistency = 0.618` при `runs = 2`; пик VRAM около 5.3 ГБ
 из 8 ГБ на RTX 2070 SUPER.
 
