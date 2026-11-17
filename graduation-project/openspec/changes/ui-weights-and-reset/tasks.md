@@ -27,4 +27,4 @@
 - [x] `uv run ruff check src tests scripts`
 - [x] `uv run mypy src`
 - [x] `uv lock --check`
-- [x] CI на `master` зелёный (run #126)
+- [x] CI на `master` зелёный (run #129, `5da4643`)
