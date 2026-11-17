@@ -109,13 +109,37 @@ def test_workbench_renders_without_network(
     def fail(self: OllamaClient) -> list[str]:
         raise AssertionError("Ollama must not be queried on startup")
 
+    def fail_chat(
+        self: OllamaClient,
+        system: str,
+        user: str,
+        temperature: float,
+        json_mode: bool = True,
+    ) -> str:
+        raise AssertionError("Ollama must not be queried on startup")
+
     monkeypatch.setattr(OllamaClient, "list_models", fail)
+    monkeypatch.setattr(OllamaClient, "chat", fail_chat)
     at = _app().run()
 
     assert not at.exception
     assert at.title[0].value == "Рабочее место: тестовая документация и её качество"
+    assert [tab.label for tab in at.tabs] == [
+        "1. Требования (DZ2)",
+        "2. Промпт (DZ7)",
+        "3. Генерация (DZ2)",
+        "4. Метрики (DZ8)",
+        "5. Отчёт",
+    ]
     assert any("Файлы не загружены" in item.value for item in at.info)
     assert any("Сначала загрузите файл требований" in item.value for item in at.info)
+    assert sum(
+        item.value == "Сначала загрузите файл требований на вкладке 1."
+        for item in at.info
+    ) == 2
+    assert sum(
+        item.value == "Сначала выполните генерацию на вкладке 3." for item in at.info
+    ) == 2
     assert not at.text_area
 
 
@@ -322,9 +346,48 @@ def test_custom_weights_reach_snapshot(
         "scenario_coverage": 0.2,
         "consistency": 0.2,
     }
+    assert any(
+        item.value
+        == (
+            "Веса overall: readability=0.40, clarity_goals=0.20, "
+            "scenario_coverage=0.20, consistency=0.20"
+        )
+        for item in at.caption
+    )
 
 
 def test_invalid_weights_block_generation(
+    workbench: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chat_calls = 0
+
+    def fake_chat(
+        self: OllamaClient,
+        system: str,
+        user: str,
+        temperature: float,
+        json_mode: bool = True,
+    ) -> str:
+        nonlocal chat_calls
+        chat_calls += 1
+        return _testcases(10)
+
+    monkeypatch.setattr(
+        OllamaClient,
+        "chat",
+        fake_chat,
+    )
+    at = _upload(_app(), ("login.md", REQUIREMENTS))
+    _number_input(at, "Вес: Readability").set_value(0.9).run()
+    _button(at, "Сгенерировать").click().run()
+
+    assert not at.exception
+    assert any("Неверные веса overall" in item.value for item in at.error)
+    assert chat_calls == 0
+    assert not (workbench / "output" / "generation.json").exists()
+
+
+def test_clear_state_button_resets_defaults(
     workbench: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
@@ -333,21 +396,40 @@ def test_invalid_weights_block_generation(
         lambda self, system, user, temperature, json_mode=True: _testcases(10),
     )
     at = _upload(_app(), ("login.md", REQUIREMENTS))
-    _number_input(at, "Вес: Readability").set_value(0.9).run()
+    weights = {
+        "Readability": 0.4,
+        "Clarity of goals": 0.2,
+        "Scenario coverage": 0.2,
+        "Consistency": 0.2,
+    }
+    for label, value in weights.items():
+        _number_input(at, f"Вес: {label}").set_value(value).run()
+    _checkbox(at, "Продолжать при ошибке Ollama").set_value(True).run()
+
     _button(at, "Сгенерировать").click().run()
-
-    assert not at.exception
-    assert any("Неверные веса overall" in item.value for item in at.error)
-    assert not (workbench / "output" / "generation.json").exists()
-
-
-def test_clear_state_button_resets_defaults(workbench: Path) -> None:
-    at = _upload(_app(), ("login.md", REQUIREMENTS))
+    assert at.session_state["data"] is not None
     assert at.session_state["ui_files"]
+    assert at.session_state["ui_prompts"]
+
+    generation_path = workbench / "output" / "generation.json"
+    input_path = workbench / "output" / "ui-input" / "login.md"
+    assert generation_path.is_file()
+    assert input_path.is_file()
 
     _button(at, "Очистить состояние").click().run()
 
     assert not at.exception
     assert at.session_state["ui_files"] == {}
+    assert at.session_state["ui_signatures"] == {}
+    assert at.session_state["ui_prompts"] == {}
+    assert not any(key.startswith("ui_text_") for key in at.session_state.keys())
     assert at.session_state["data"] is None
     assert at.session_state["quality_weights"] == DEFAULT_QUALITY_WEIGHTS
+    assert "continue_on_error" not in at.session_state
+    assert not at.file_uploader[0].value
+    assert not any(item.label == "Файл требований" for item in at.selectbox)
+    assert _number_input(at, "Вес: Readability").value == DEFAULT_QUALITY_WEIGHTS[
+        "readability"
+    ]
+    assert generation_path.is_file()
+    assert input_path.read_text(encoding="utf-8") == REQUIREMENTS

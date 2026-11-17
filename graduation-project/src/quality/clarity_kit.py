@@ -483,7 +483,7 @@ WORKSHEET_HEADER = re.compile(
     r"(?P<scenario>.+?)\s+\((?:run\s+(?P<run>\d+)|(?P<rendered>rendered))\)$"
 )
 WORKSHEET_CHECK = re.compile(
-    r"^-\s+\[([ xX])\]\s+(measurable|signal|rating):\s*(.+)$"
+    r"^\s*-\s+\[([^\]]*)\]\s+(measurable|signal|rating):\s*(.+)$"
 )
 WORKSHEET_SIGNALS = (
     "modality",
@@ -492,6 +492,119 @@ WORKSHEET_SIGNALS = (
     "prohibition",
     "result",
 )
+
+
+def _normalise_fragment(text: str) -> str:
+    """Collapse whitespace for duplicate detection in a worksheet."""
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _worksheet_blocks(text: str) -> list[dict[str, Any]]:
+    """Split a worksheet into blocks and collect checkbox decisions."""
+    blocks: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+
+    for line in text.splitlines():
+        header = WORKSHEET_HEADER.match(line)
+        if header:
+            run = header.group("run")
+            current = {
+                "id": header.group("id"),
+                "scenario": header.group("scenario").strip(),
+                "run_index": int(run) if run else None,
+                "text_lines": [],
+                "measurable": None,
+                "signals": [],
+                "rating": None,
+            }
+            blocks.append(current)
+            continue
+        if current is None:
+            continue
+        if line.startswith("> "):
+            current["text_lines"].append(line[2:])
+            continue
+        if line == ">":
+            current["text_lines"].append("")
+            continue
+        checkbox = WORKSHEET_CHECK.match(line)
+        if not checkbox or "x" not in checkbox.group(1).lower():
+            continue
+        kind, value = checkbox.group(2), checkbox.group(3).strip()
+        if kind == "measurable":
+            if value not in ("true", "false"):
+                raise ValueError(f"{current['id']}: неверный measurable {value!r}")
+            parsed = value == "true"
+            if current["measurable"] is not None and current["measurable"] != parsed:
+                raise ValueError(f"{current['id']}: два разных measurable")
+            current["measurable"] = parsed
+        elif kind == "signal":
+            if value not in WORKSHEET_SIGNALS:
+                raise ValueError(f"{current['id']}: неизвестный сигнал {value!r}")
+            if value not in current["signals"]:
+                current["signals"].append(value)
+        elif kind == "rating":
+            if not value.isdigit() or not 1 <= int(value) <= 5:
+                raise ValueError(f"{current['id']}: неверный rating {value!r}")
+            rating = int(value)
+            if current["rating"] is not None and current["rating"] != rating:
+                raise ValueError(f"{current['id']}: два разных rating")
+            current["rating"] = rating
+
+    for block in blocks:
+        block["text"] = "\n".join(block.pop("text_lines")) + "\n"
+    return blocks
+
+
+def worksheet_stats(text: str) -> dict[str, int]:
+    """Count blocks, completed annotations and exact text duplicates."""
+    blocks = _worksheet_blocks(text)
+    filled = [
+        block
+        for block in blocks
+        if block["measurable"] is not None and block["rating"] is not None
+    ]
+    keys = [_normalise_fragment(block["text"]) for block in filled]
+    return {
+        "blocks": len(blocks),
+        "filled": len(filled),
+        "unfilled": len(blocks) - len(filled),
+        "duplicates": len(keys) - len(set(keys)),
+        "unique": len(set(keys)),
+    }
+
+
+def parse_worksheet(
+    text: str, annotator: str, *, dedupe: bool = True
+) -> list[dict[str, Any]]:
+    """Read a worksheet, skipping unfilled blocks and optional duplicates."""
+    records: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for block in _worksheet_blocks(text):
+        if block["measurable"] is None or block["rating"] is None:
+            continue
+        key = _normalise_fragment(block["text"])
+        if dedupe:
+            if key in seen:
+                continue
+            seen.add(key)
+        record = {
+            "id": block["id"],
+            "scenario": block["scenario"],
+            "run_index": block["run_index"],
+            "text": block["text"],
+            "annotation": {
+                "annotator": annotator,
+                "measurable": block["measurable"],
+                "signals": block["signals"],
+                "rating": block["rating"],
+            },
+        }
+        parse_annotation(record["annotation"], source=f"worksheet ({record['id']})")
+        records.append(record)
+    if not records and not worksheet_stats(text)["blocks"]:
+        raise ValueError("в рабочем листе нет фрагментов")
+    return records
 
 
 def render_worksheet(
@@ -528,83 +641,6 @@ def render_worksheet(
     return "\n".join(lines) + "\n"
 
 
-def parse_worksheet(text: str, annotator: str) -> list[dict[str, Any]]:
-    """Read a filled Markdown worksheet back into annotation records."""
-    records: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
-
-    def finish(item: dict[str, Any] | None) -> None:
-        if item is None:
-            return
-        if item["measurable"] is None:
-            raise ValueError(f"{item['id']}: не отмечен measurable")
-        if item["rating"] is None:
-            raise ValueError(f"{item['id']}: не отмечен rating")
-        records.append(
-            {
-                "id": item["id"],
-                "scenario": item["scenario"],
-                "run_index": item["run_index"],
-                "text": "\n".join(item["text_lines"]) + "\n",
-                "annotation": {
-                    "annotator": annotator,
-                    "measurable": item["measurable"],
-                    "signals": item["signals"],
-                    "rating": item["rating"],
-                },
-            }
-        )
-
-    for line in text.splitlines():
-        header = WORKSHEET_HEADER.match(line)
-        if header:
-            finish(current)
-            run = header.group("run")
-            current = {
-                "id": header.group("id"),
-                "scenario": header.group("scenario").strip(),
-                "run_index": int(run) if run else None,
-                "text_lines": [],
-                "measurable": None,
-                "signals": [],
-                "rating": None,
-            }
-            continue
-        if current is None:
-            continue
-        if line.startswith("> "):
-            current["text_lines"].append(line[2:])
-            continue
-        if line == ">":
-            current["text_lines"].append("")
-            continue
-        checkbox = WORKSHEET_CHECK.match(line)
-        if not checkbox or checkbox.group(1).lower() != "x":
-            continue
-        kind, value = checkbox.group(2), checkbox.group(3).strip()
-        if kind == "measurable":
-            if value not in ("true", "false"):
-                raise ValueError(f"{current['id']}: неверный measurable {value!r}")
-            parsed = value == "true"
-            if current["measurable"] is not None and current["measurable"] != parsed:
-                raise ValueError(f"{current['id']}: два разных measurable")
-            current["measurable"] = parsed
-        elif kind == "signal":
-            if value not in WORKSHEET_SIGNALS:
-                raise ValueError(f"{current['id']}: неизвестный сигнал {value!r}")
-            if value not in current["signals"]:
-                current["signals"].append(value)
-        elif kind == "rating":
-            if not value.isdigit() or not 1 <= int(value) <= 5:
-                raise ValueError(f"{current['id']}: неверный rating {value!r}")
-            rating = int(value)
-            if current["rating"] is not None and current["rating"] != rating:
-                raise ValueError(f"{current['id']}: два разных rating")
-            current["rating"] = rating
-
-    finish(current)
-    if not records:
-        raise ValueError("в рабочем листе нет фрагментов")
     for record in records:
         parse_annotation(record["annotation"], source=f"worksheet ({record['id']})")
     return records

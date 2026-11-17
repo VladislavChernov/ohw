@@ -23,7 +23,8 @@
 
 ## Проверки
 
-- [x] `uv run pytest` — `217 passed, 2 skipped`
+- [x] `uv run pytest` — `223 passed, 1 skipped` (финальная проверка)
 - [x] `uv run ruff check src tests scripts`
 - [x] `uv run mypy src`
-- [x] CI на `master` зелёный (run #123)
+- [x] `uv lock --check`
+- [x] CI на `master` зелёный (run #123; финальные правки уйдут отдельным коммитом)

@@ -210,7 +210,7 @@ python -m src.workflow --quality-weights \
 Нужны ровно четыре известные метрики, сумма `1.0`; иначе код `2`. Приоритет:
 флаг → `GRADUATION_QUALITY_WEIGHTS` → значения по умолчанию. Фактические веса
 сохраняются в JSON и печатаются в `report.md`, а `--assess` использует их из
-снимка. UI использует веса по умолчанию; флаг и env применяются в CLI.
+снимка. В UI веса задаются в сайдбаре; флаг и env применяются в CLI.
 
 Для будущего пересмотра `clarity` подготовлены инструменты разметки:
 [`docs/clarity-annotation.md`](docs/clarity-annotation.md),
@@ -288,6 +288,7 @@ graduation-project/
 - [`docs/metrics.md`](docs/metrics.md) — формулы и ограничения метрик.
 - [`docs/demo.md`](docs/demo.md) — пример живого прогона.
 - [`docs/defense-checklist.md`](docs/defense-checklist.md) — памятка к защите.
+- [`docs/defense-demo.md`](docs/defense-demo.md) — готовый сценарий показа.
 - [`CONCEPT.md`](CONCEPT.md) — описание проекта и глоссарий.
 - [`CHANGELOG.md`](CHANGELOG.md) — история версий.
 - [`SDD.md`](SDD.md) — архитектура и дизайн.

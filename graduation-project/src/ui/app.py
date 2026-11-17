@@ -134,10 +134,8 @@ def _init_state() -> None:
 
 def _reset_state() -> None:
     """Reset UI state to defaults without touching files on disk."""
-    for key in STATE_DEFAULTS:
+    for key in list(st.session_state.keys()):
         st.session_state.pop(key, None)
-    st.session_state.pop("ui_uploader", None)
-    st.session_state.pop("ui_selected", None)
     _init_state()
 
 
@@ -156,9 +154,7 @@ def _sidebar() -> None:
         st.divider()
         _weights_panel()
         st.divider()
-        if st.button("Очистить состояние"):
-            _reset_state()
-            st.rerun()
+        st.button("Очистить состояние", on_click=_reset_state)
 
 
 def _weights_panel() -> None:
@@ -167,13 +163,15 @@ def _weights_panel() -> None:
     current = st.session_state["quality_weights"]
     updated: dict[str, float] = {}
     for key in METRIC_KEYS:
+        weight_key = f"ui_weight_{key}"
+        st.session_state.setdefault(weight_key, float(current[key]))
         updated[key] = float(
             st.number_input(
                 f"Вес: {METRIC_LABELS[key]}",
                 min_value=0.0,
                 step=0.01,
-                value=float(current[key]),
                 format="%.2f",
+                key=weight_key,
             )
         )
     st.session_state["quality_weights"] = updated
@@ -558,6 +556,7 @@ def _generation_tab() -> None:
             "Записывать ошибку соединения для текущего файла и обрабатывать "
             "остальные. Без флажка прогон прерывается."
         ),
+        key="continue_on_error",
     )
     if st.button("Сгенерировать", type="primary"):
         _run_generation(config, continue_on_error)

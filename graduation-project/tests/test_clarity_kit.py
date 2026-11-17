@@ -25,6 +25,7 @@ from src.quality.clarity_kit import (
     render_worksheet,
     split_fragments,
     weighted_kappa,
+    worksheet_stats,
     write_jsonl,
 )
 
@@ -280,7 +281,7 @@ def test_annotation_worksheet_roundtrip() -> None:
     assert parsed[1]["run_index"] is None
 
 
-def test_worksheet_requires_measurable_and_rating() -> None:
+def test_worksheet_skips_unfilled_blocks() -> None:
     worksheet = render_worksheet(
         [
             {
@@ -292,5 +293,42 @@ def test_worksheet_requires_measurable_and_rating() -> None:
         ],
         "human-1",
     )
-    with pytest.raises(ValueError, match="measurable"):
-        parse_worksheet(worksheet, "human-1")
+    stats = worksheet_stats(worksheet)
+    assert stats["blocks"] == 1
+    assert stats["filled"] == 0
+    assert stats["unfilled"] == 1
+    assert parse_worksheet(worksheet, "human-1") == []
+
+
+def test_worksheet_accepts_spaced_checkboxes_and_deduplicates() -> None:
+    def block(identifier: str, label: str) -> str:
+        return (
+            f"## 1. `{identifier}` — req.md (rendered)\n\n"
+            f"> {label}\n\n"
+            "- [ x] measurable: true\n"
+            "- [ ] measurable: false\n"
+            "- [x ] signal: modality\n"
+            "- [ x] rating: 4\n"
+        )
+
+    worksheet = (
+        "# Разметка clarity — рабочий лист\n\n"
+        + block("a1b2c3d4e5f6", "BR-1. Система должна проверять форму.")
+        + "\n"
+        + block("f6e5d4c3b2a1", "BR-1. Система должна проверять форму.")
+    )
+    stats = worksheet_stats(worksheet)
+    assert stats["blocks"] == 2
+    assert stats["filled"] == 2
+    assert stats["duplicates"] == 1
+    assert stats["unique"] == 1
+
+    records = parse_worksheet(worksheet, "human-1")
+    assert len(records) == 1
+    assert records[0]["annotation"] == {
+        "annotator": "human-1",
+        "measurable": True,
+        "signals": ["modality"],
+        "rating": 4,
+    }
+

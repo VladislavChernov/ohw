@@ -13,6 +13,7 @@ from src.quality.clarity_kit import (  # noqa: E402
     parse_worksheet,
     read_jsonl,
     render_worksheet,
+    worksheet_stats,
     write_jsonl,
 )
 
@@ -56,9 +57,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"worksheet prepared: {len(records)} -> {output}", flush=True)
         else:
             text = Path(args.worksheet).read_text(encoding="utf-8")
+            stats = worksheet_stats(text)
             records = parse_worksheet(text, args.annotator)
             write_jsonl(Path(args.output), records)
-            print(f"annotations collected: {len(records)} -> {args.output}", flush=True)
+            print(
+                f"annotations collected: {len(records)} "
+                f"(blocks={stats['blocks']}, filled={stats['filled']}, "
+                f"unfilled={stats['unfilled']}, duplicates={stats['duplicates']}) "
+                f"-> {args.output}",
+                flush=True,
+            )
     except (OSError, ValueError) as exc:
         print(f"ошибка: {exc}", file=sys.stderr, flush=True)
         return 2
