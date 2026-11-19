@@ -22,44 +22,61 @@ The reason for the split is that the harness is configuration, not an artifact:
 what belongs in a public repository is the *description* of the process, so that
 it is reviewable in a diff, while the machine-local copy that opencode actually
 loads stays out of the repository. A reader of this repo gets the conventions
-and can reconstruct the harness; an installed copy is one `Copy-Item` away.
+and can reconstruct the harness; installation is a few global junctions away.
 
 ## Local-only
 
 The harness is a **local working tool for the AI assistant**. It is not part of
 any homework's deliverable. The canonical copy lives at
-`D:\Otus\harness\.opencode`; each homework project keeps its own copy.
+`D:\Otus\harness\.opencode`.
 
-Changing the harness = update `D:\Otus\harness\.opencode`. Projects should not
-keep stale copies: a local helper creates a directory junction
-`<project>\.opencode -> D:\Otus\harness\.opencode`, so the canon is always live.
-If a convention changes, change it in the canon and republish this document —
-otherwise the description in the repository goes stale, which is exactly the
-failure this split was made to stop.
+Changing the harness = update `D:\Otus\harness\.opencode`. Projects do not keep
+stale copies: the canon is linked once into the user-level OpenCode config, so
+every project sees the same live definitions. If a convention changes, change it
+in the canon and republish this document — otherwise the description in the
+repository goes stale, which is exactly the failure this split was made to stop.
 
-## Install into a new homework (e.g. the future `dz4`)
+## Install globally (primary path)
 
-The sync script is local (not published), at `D:\Otus\harness\sync-opencode.ps1`.
+OpenCode V2 discovers user-level agents, commands and skills under
+`~/.config/opencode/`. Create three directory junctions there, pointing at the
+existing canon folders (no renaming of the canon is needed):
 
-One project:
+```powershell
+$global = 'C:\Users\Vlad\.config\opencode'
+$canon  = 'D:\Otus\harness\.opencode'
+
+New-Item -ItemType Junction -Path "$global\agents"   -Target "$canon\agent"
+New-Item -ItemType Junction -Path "$global\commands" -Target "$canon\command"
+New-Item -ItemType Junction -Path "$global\skills"   -Target "$canon\skills"
+```
+
+The junction names are plural because those are the paths OpenCode searches;
+the target folders keep their Claude-Code-era names (`agent`, `command`). V2
+still discovers both singular and plural folder layouts, so the canon itself is
+unchanged.
+
+After creating the junctions, no project-local `.opencode` is needed. If old
+project copies or junctions exist, remove them so they do not override the
+global definitions.
+
+Config changes are picked up automatically; use `/reload` to force a full
+reload. Skills appear by name, `/review` runs the adversarial self-review on the
+current diff.
+
+## Fallback: per-project sync
+
+`D:\Otus\harness\sync-opencode.ps1` can still link the whole canon into one
+project or all projects under `D:\Otus\ohw`:
 
 ```powershell
 D:\Otus\harness\sync-opencode.ps1 -ProjectPath D:\Otus\ohw\dz4
-```
-
-Every project under `D:\Otus\ohw` plus the root itself:
-
-```powershell
 D:\Otus\harness\sync-opencode.ps1 -AllProjects
 ```
 
-The script backs up differing local harness files to
-`D:\Otus\harness\backups\<project>\`, removes old copies (including stale
-`node_modules`), and creates the junction. It is idempotent: already-linked
-projects are skipped.
-
-Restart opencode in that folder. Skills appear by name, `/review` runs the
-adversarial self-review on the current diff.
+This is now a fallback for machines where the user-level config cannot be used.
+It backs up differing local harness files to
+`D:\Otus\harness\backups\<project>\` and is idempotent.
 
 > No `openspec` CLI is required: the skills build `openspec/changes/<name>/`
 > files by hand, mirroring the existing `dz2/openspec/changes/*`.
