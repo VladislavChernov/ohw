@@ -30,20 +30,33 @@ The harness is a **local working tool for the AI assistant**. It is not part of
 any homework's deliverable. The canonical copy lives at
 `D:\Otus\harness\.opencode`; each homework project keeps its own copy.
 
-Changing the harness = update `D:\Otus\harness\.opencode`, then re-copy into
-each homework project. If a convention here changes, change it in the canon and
-republish this document — otherwise the description in the repository goes stale,
-which is exactly the failure this split was made to stop.
+Changing the harness = update `D:\Otus\harness\.opencode`. Projects should not
+keep stale copies: a local helper creates a directory junction
+`<project>\.opencode -> D:\Otus\harness\.opencode`, so the canon is always live.
+If a convention changes, change it in the canon and republish this document —
+otherwise the description in the repository goes stale, which is exactly the
+failure this split was made to stop.
 
 ## Install into a new homework (e.g. the future `dz4`)
 
-From the new homework dir (NOT the harness root — opencode resolves config from
-the opened project folder):
+The sync script is local (not published), at `D:\Otus\harness\sync-opencode.ps1`.
+
+One project:
 
 ```powershell
-# from the homework dir, e.g. D:\Otus\Dz4
-Copy-Item D:\Otus\harness\.opencode .opencode -Recurse
+D:\Otus\harness\sync-opencode.ps1 -ProjectPath D:\Otus\ohw\dz4
 ```
+
+Every project under `D:\Otus\ohw` plus the root itself:
+
+```powershell
+D:\Otus\harness\sync-opencode.ps1 -AllProjects
+```
+
+The script backs up differing local harness files to
+`D:\Otus\harness\backups\<project>\`, removes old copies (including stale
+`node_modules`), and creates the junction. It is idempotent: already-linked
+projects are skipped.
 
 Restart opencode in that folder. Skills appear by name, `/review` runs the
 adversarial self-review on the current diff.
